@@ -48,7 +48,7 @@ async def track_query(conn):
 
 @APP.post("/query", status_code=200, response_model=ReasonerResponse)
 async def query(
-    query: Query,
+    query: Dict,
 ) -> dict:
     """Handle synchronous TRAPI queries."""
     # expand query to multiple subqueries, options
@@ -81,7 +81,7 @@ async def query(
 
 @APP.post("/asyncquery", status_code=200, response_model=ReasonerResponse)
 async def async_query(
-    query: AsyncQuery,
+    query: Dict,
 ) -> dict:
     """Handle asynchronous TRAPI queries."""
     # expand query to multiple subqueries, options
