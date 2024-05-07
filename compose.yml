@@ -1,0 +1,32 @@
+version: '3.7'
+
+services:
+  # shepherd:
+  #   image: shepherd
+  #   container_name: shepherd
+  #   build:
+  #     context: .
+  #   volumes:
+  #     - ./logs:/app/logs
+  #   ports:
+  #     - '5439:5439'
+  #   networks:
+  #     - shepherd
+  #   environment:
+  #     POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
+  postgres:
+    image: postgres:bookworm
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shepherd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
+    networks:
+      - shepherd
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+networks:
+  shepherd:

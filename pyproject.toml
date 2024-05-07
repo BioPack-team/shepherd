@@ -1,0 +1,13 @@
+[project]
+name = "shepherd"
+version = "0.1.0"
+authors = [
+  { name = "Max Wang", email = "max@covar.com" }
+]
+description = "A Translator ARA that aims to be modular in its query expansion and ranking, among other TRAPI workflow operations."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi==0.110.1",
+  "uvicorn==0.29.0"
+]
