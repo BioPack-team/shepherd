@@ -1,0 +1,5 @@
+- The input/output types are not specified, but should be
+  - Output should just be pure query graphs, no extra workflow/etc information?
+- Have the input nodes been resolved?
+- Is there a biolink module for hierarchy traversal?
+- Is there a standardized mechanism/return value to signal that the query could not be expanded?

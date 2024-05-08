@@ -1,0 +1,21 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "creativeQuerySubject": {
+                    "categories":["biolink:ChemicalEntity"]
+                },
+                "creativeQueryObject": {
+                    "categories":["biolink:Gene", "biolink:Protein"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "creativeQuerySubject",
+                    "object": "creativeQueryObject",
+                    "predicates": ["biolink:positively_correlated_with"]
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,54 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "creativeQuerySubject": {
+                    "categories":["biolink:ChemicalEntity"]
+                },
+                "nA": {
+                    "categories":["biolink:Gene", "biolink:Protein"],
+                    "is_set": true
+               },
+                "creativeQueryObject": {
+                    "categories":["biolink:Gene", "biolink:Protein"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "creativeQuerySubject",
+                    "object": "nA",
+                    "predicates": ["biolink:affects"],
+                    "qualifier_constraints": [
+                        {
+                            "qualifier_set": [
+                                {
+                                    "qualifier_type_id": "biolink:object_direction_qualifier",
+                                    "qualifier_value": "decreased"
+                                },
+                                {
+                                    "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                    "qualifier_value": "activity_or_abundance"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "eB": {
+                    "subject": "nA",
+                    "object": "creativeQueryObject",
+                    "predicates": ["biolink:regulates"],
+                    "qualifier_constraints": [
+                        {
+                            "qualifier_set": [
+                                {
+                                    "qualifier_type_id": "biolink:object_direction_qualifier",
+                                    "qualifier_value": "upregulated"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

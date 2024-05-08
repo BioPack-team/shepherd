@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional, Union
 
 from shepherd.query_expansion.aragorn.aragorn import expand_aragorn_query
+from shepherd.query_expansion.bte.expansion import expand_bte_query
 
 
 def expand_query(
@@ -16,7 +17,7 @@ def expand_query(
         queries = expand_aragorn_query(query)
         concurrency = 1_000_000
     elif target == "bte":
-        queries = get_bte_queries(query)
-        concurrency = 1
+        queries = expand_bte_query(query)
+        concurrency = 1_000_000
 
     return queries, {"concurrency": concurrency}

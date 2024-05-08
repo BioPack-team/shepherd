@@ -1,0 +1,33 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "creativeQuerySubject": {
+                    "categories":["biolink:ChemicalEntity"]
+                },
+                "nA": {
+                    "categories":["biolink:Gene"],
+                    "is_set": true
+                },
+                "creativeQueryObject": {
+                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "creativeQuerySubject",
+                    "object": "nA",
+                    "predicates": ["biolink:physically_interacts_with", "biolink:correlated_with", "biolink:associated_with"]
+                },
+                "eB": {
+                    "subject": "nA",
+                    "object": "creativeQueryObject",
+                    "predicates": [
+                        "biolink:gene_associated_with_condition",
+                        "biolink:biomarker_for"
+                    ]
+                }
+            }
+        }
+    }
+}

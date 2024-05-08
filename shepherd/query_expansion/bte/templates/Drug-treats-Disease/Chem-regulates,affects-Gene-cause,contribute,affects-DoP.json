@@ -1,0 +1,34 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "creativeQuerySubject": {
+                    "categories":["biolink:ChemicalEntity"]
+                },
+                "nA": {
+                    "categories":["biolink:Gene"],
+                    "is_set": true
+                },
+                "creativeQueryObject": {
+                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "creativeQuerySubject",
+                    "object": "nA",
+                    "predicates": ["biolink:regulates", "biolink:affects"]
+                },
+                "eB": {
+                    "subject": "nA",
+                    "object": "creativeQueryObject",
+                    "predicates": [
+                        "biolink:affects",
+                        "biolink:causes",
+                        "biolink:contributes_to"
+                    ]
+                }
+            }
+        }
+    }
+}
