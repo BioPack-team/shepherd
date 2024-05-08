@@ -1,10 +1,13 @@
 """Query Expansion."""
+
 from typing import Any, Dict, List, Optional, Union
 
 from shepherd.query_expansion.aragorn.aragorn import expand_aragorn_query
 
 
-def expand_query(query: Dict[str, Any], options: Dict[str, Any]) -> tuple[List[Any], Dict[str, Any]]:
+def expand_query(
+    query: Dict[str, Any], options: Dict[str, Any]
+) -> tuple[List[Any], Dict[str, Any]]:
     """Get expanded queries."""
     queries = []
     concurrency = 1
@@ -16,4 +19,4 @@ def expand_query(query: Dict[str, Any], options: Dict[str, Any]) -> tuple[List[A
         queries = get_bte_queries(query)
         concurrency = 1
 
-    return queries, { "concurrency": concurrency }
+    return queries, {"concurrency": concurrency}
