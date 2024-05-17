@@ -1,5 +1,6 @@
 """Postgres DB Manager."""
 import asyncio
+import copy
 import gzip
 import json
 from psycopg import Connection, sql
@@ -13,10 +14,11 @@ from reasoner_pydantic import (
 from typing import Dict, Any
 import uuid
 
+from shepherd.merge_messages import merge_messages
+
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "supersecretpassw0rd")
-POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 pool = AsyncConnectionPool(
-    conninfo=f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@localhost:5432",
+    conninfo=f"postgresql://postgres:{POSTGRES_PASSWORD}@localhost:5432",
     timeout=5,
     max_size=20,
     max_idle=300,
@@ -81,22 +83,41 @@ async def merge_message(
     response: ReasonerResponse,
 ) -> None:
     """Merge an incoming message with the existing full message."""
-    print(query_id)
+    # retrieve query from db
+    # put a lock on the row
+    # message merge
+    # put merged message back into db
     async with pool.connection(timeout=10) as conn:
         # FOR UPDATE puts a lock on the row until the transaction is completed
         cursor = await conn.execute("""
-SELECT merged_message, num_queries FROM shepherd_brain WHERE query_id = %s FOR UPDATE;
+SELECT query, merged_message, num_queries FROM shepherd_brain WHERE query_id = %s FOR UPDATE;
 """, (query_id,))
-        print("got the message")
         row = await cursor.fetchone()
-        await asyncio.sleep(2)
-        merged_message = response
+        merged_message = json.loads(gzip.decompress(row[1]))
+        original_qgraph: Dict = json.loads(gzip.decompress(row[0]))["message"]["query_graph"]
+        lookup_qgraph = copy.deepcopy(original_qgraph)
+        for qedge_id in lookup_qgraph["edges"]:
+            del lookup_qgraph["edges"][qedge_id]["knowledge_type"]
+        merged_message = merge_messages("sn", original_qgraph, lookup_qgraph, [merged_message, response])
         # do message merging
         await conn.execute("""
 UPDATE shepherd_brain SET merged_message = %s, num_queries = %s WHERE query_id = %s;
-""", (gzip.compress(json.dumps(merged_message).encode()), row[1] - 1, query_id,))
-        await conn.execute(sql.SQL("NOTIFY {}, {};").format(sql.Identifier(query_id), 'done' if row[1] - 1 == 0 else 'not done'))
+""", (gzip.compress(json.dumps(merged_message).encode()), row[2] - 1, query_id,))
+        await conn.execute(sql.SQL("NOTIFY {}, {};").format(sql.Identifier(query_id), 'done' if row[2] - 1 == 0 else 'not done'))
         await conn.commit()
+
+
+async def get_message(
+    query_id: str,
+) -> Dict:
+    """Get the final merged message from db."""
+    async with pool.connection(timeout=10) as conn:
+        cursor = await conn.execute("""
+SELECT merged_message FROM shepherd_brain WHERE query_id = %s;
+""", (query_id,))
+        row = await cursor.fetchone()
+        await conn.commit()
+        return json.loads(gzip.decompress(row[0]))
 
 
 async def clear_db() -> None:

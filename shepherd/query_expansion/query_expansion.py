@@ -1,7 +1,7 @@
 """Query Expansion."""
 from typing import Any, Dict, List, Optional, Union
 
-from shepherd.modules.aragorn import expand_aragorn_query
+from shepherd.query_expansion.aragorn.aragorn import expand_aragorn_query
 
 
 def expand_query(query: Dict[str, Any], options: Dict[str, Any]) -> tuple[List[Any], Dict[str, Any]]:

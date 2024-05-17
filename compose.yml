@@ -13,7 +13,6 @@ services:
   #   networks:
   #     - shepherd
   #   environment:
-  #     POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
   #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
   postgres:
     image: postgres:bookworm
@@ -22,7 +21,6 @@ services:
       - "5432:5432"
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-shepherd}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
     networks:
       - shepherd

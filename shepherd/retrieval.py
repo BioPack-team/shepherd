@@ -19,7 +19,6 @@ async def send_query(query_id: str, query, semaphore):
             callback_url = f"{callback_host}/callback/{query_id}"
             query["callback"] = callback_url
             async with httpx.AsyncClient() as client:
-                print("Sending query to Retriever!")
                 response = await client.post(
                     retriever_url,
                     json=query,

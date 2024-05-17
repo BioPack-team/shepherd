@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import pydantic
 from reasoner_pydantic import (
     Query,
     AsyncQuery,
@@ -10,11 +11,20 @@ from reasoner_pydantic import (
 )
 from typing import Dict
 
-from shepherd.db import initialize_db, shutdown_db, add_query, merge_message
+from shepherd.db import initialize_db, shutdown_db, add_query, merge_message, get_message
 from shepherd.openapi import construct_open_api_schema
 
 from shepherd.query_expansion.query_expansion import expand_query
 from shepherd.retrieval import retrieve
+from shepherd.scoring.score import score_query
+
+from shepherd.operations import (
+    sort_results_score,
+    filter_results_top_n,
+    filter_kgraph_orphans,
+)
+
+import json
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,22 +50,22 @@ APP.add_middleware(
 async def track_query(conn):
     notifications = conn.notifies()
     async for notification in notifications:
-        print("got notification")
-        print(notification)
         if notification.payload == "done":
             break
 
 
-@APP.post("/query", status_code=200, response_model=ReasonerResponse)
+@APP.post("/{target}/query", status_code=200, response_model=ReasonerResponse)
 async def query(
-    query: Dict,
-) -> dict:
+    target: str,
+    query: Query,
+) -> ReasonerResponse:
     """Handle synchronous TRAPI queries."""
+    query = query.dict()
     # expand query to multiple subqueries, options
-    queries, options = expand_query(query, {"target": "aragorn"})
+    queries, options = expand_query(query, {"target": target})
+    print(json.dumps(queries))
     # save query to db
     query_id, conn, pool = await add_query(query, len(queries))
-    print(query_id)
     # retrieve answers
     await retrieve(query_id, queries, options)
     # poll the db for doneness?
@@ -71,21 +81,30 @@ async def query(
 
     if not track_task.done():
         track_task.cancel()
+    merged_message = await get_message(query_id)
     # score/rank
+    scored_message = await score_query(merged_message, {"target": target})
+    # sort results
+    sorted_message = sort_results_score(scored_message, query_id)
     # filter results top n
+    trimmed_message = filter_results_top_n(sorted_message, query_id)
     # filter kgraph orphans
+    filtered_message = filter_kgraph_orphans(trimmed_message, query_id)
     # put the connection back into the pool. Don't want a dry pool.
     await pool.putconn(conn)
-    return query
+    print(f"Returning {len(filtered_message['message']['results'])} results.")
+    return filtered_message
 
 
-@APP.post("/asyncquery", status_code=200, response_model=ReasonerResponse)
+@APP.post("/{target}/asyncquery", status_code=200, response_model=ReasonerResponse)
 async def async_query(
-    query: Dict,
-) -> dict:
+    target: str,
+    query: AsyncQuery,
+) -> ReasonerResponse:
     """Handle asynchronous TRAPI queries."""
+    query = query.dict()
     # expand query to multiple subqueries, options
-    queries, options = expand_query(query, {"target": "aragorn"})
+    queries, options = expand_query(query, {"target": target})
     print(queries, options)
     # save query to db
     query_id, conn = await add_query(query, len(queries))
@@ -95,13 +114,27 @@ async def async_query(
 @APP.post("/callback/{query_id}", status_code=200, include_in_schema=False)
 async def callback(
     query_id: str,
-    response: ReasonerResponse,
+    response: dict,
 ) -> None:
     """Handle asynchronous callback queries from subservices."""
-    # retrieve query from db
-    # put a lock on the row
-    # message merge
-    # put merged message back into db
+    # print(json.dumps(response))
+    try:
+        ReasonerResponse.parse_obj(response)
+    except pydantic.ValidationError:
+        print("Received a non TRAPI-compliant callback response.")
+        response = {
+            "message": {
+                "query_graph": {
+                    "nodes": {},
+                    "edges": {},
+                },
+                "knowledge_graph": None,
+                "results": None,
+                "auxiliary_graphs": None,
+            }
+        }
+    print(f"Got back {len(response['message']['results'])} results.")
+    # TODO: make this a background task
     await merge_message(query_id, response)
     return 200
 
