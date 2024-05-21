@@ -41,8 +41,11 @@ def get_rule_key(predicate, qualifiers):
 
 
 def expand_aragorn_query(input_message):
-    #Contract: 1. there is a single edge in the query graph 2. The edge is marked inferred.   3. Either the source
-    #          or the target has IDs, but not both. 4. The number of ids on the query node is 1.
+    # Contract: 
+    # 1. there is a single edge in the query graph 
+    # 2. The edge is marked inferred.
+    # 3. Either the source or the target has IDs, but not both.
+    # 4. The number of ids on the query node is 1.
     input_id, predicate, qualifiers, source, source_input, target, qedge_id = get_infer_parameters(input_message)
     key = get_rule_key(predicate, qualifiers)
     #We want to run the non-inferred version of the query as well

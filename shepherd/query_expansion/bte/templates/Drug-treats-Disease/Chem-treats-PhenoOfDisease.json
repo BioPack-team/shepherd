@@ -1,0 +1,30 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "creativeQuerySubject": {
+                    "categories":["biolink:ChemicalEntity"]
+                },
+                "nA": {
+                    "categories":["biolink:PhenotypicFeature"],
+                    "is_set": true
+                },
+                "creativeQueryObject": {
+                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "creativeQuerySubject",
+                    "object": "nA",
+                    "predicates": ["biolink:treats_or_applied_or_studied_to_treat"]
+                },
+                "eB": {
+                    "subject": "creativeQueryObject",
+                    "object": "nA",
+                    "predicates": ["biolink:has_phenotype"]
+                }
+            }
+        }
+    }
+}

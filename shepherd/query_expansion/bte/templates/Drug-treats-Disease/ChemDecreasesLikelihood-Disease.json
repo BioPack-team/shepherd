@@ -1,0 +1,35 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "creativeQuerySubject": {
+                    "categories":
+                    ["ChemicalEntity"]
+                },
+                "creativeQueryObject": {
+                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "creativeQuerySubject",
+                    "object": "creativeQueryObject",
+                    "qualifier_constraints": [
+                        {
+                            "qualifier_set": [
+                                {
+                                    "qualifier_type_id": "biolink:object_direction_qualifier",
+                                    "qualifier_value": "decreased"
+                                },
+                                {
+                                    "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                    "qualifier_value": "likelihood"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

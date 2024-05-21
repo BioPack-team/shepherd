@@ -1,0 +1,21 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "creativeQuerySubject": {
+                    "categories":["biolink:Treatment"]
+                },
+                "creativeQueryObject": {
+                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "creativeQuerySubject",
+                    "object": "creativeQueryObject",
+                    "predicates": ["biolink:related_to"]
+                }
+            }
+        }
+    }
+}
