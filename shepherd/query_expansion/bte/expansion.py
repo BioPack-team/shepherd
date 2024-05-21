@@ -136,13 +136,14 @@ def fill_templates(
     return filled_templates
 
 
-def expand_bte_query(query_body: Query) -> list[Any]:
+def expand_bte_query(query_dict: dict[str, Any]) -> list[Any]:
     """Expand a given query into the appropriate templates."""
     # Contract:
     # 1. there is a single edge in the query graph
     # 2. The edge is marked inferred.
     # 3. Either the source or the target has IDs, but not both.
     # 4. The number of ids on the query node is 1.
+    query_body = Query.parse_obj(query_dict)
 
     query_graph = query_body.message.query_graph
     if query_graph is None:
@@ -155,4 +156,5 @@ def expand_bte_query(query_body: Query) -> list[Any]:
         subject_type, object_type, predicate, qualifiers
     )
 
-    return fill_templates(matched_template_paths, subject_curie, object_curie)
+    queries = fill_templates(matched_template_paths, subject_curie, object_curie)
+    return [query.dict() for query in queries]
