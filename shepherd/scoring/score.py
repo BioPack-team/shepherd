@@ -8,9 +8,12 @@ async def score_query(message: Dict[str, Any], options: Dict[str, Any]) -> tuple
     """Score the response."""
     response = None
     target = options.get("target")
-    if target == "aragorn":
-        response = await send_to_aragorn_ranker(message)
-    elif target == "bte":
-        response = do_bte_scoring(message)
+    match target:
+        case "example":
+            response = message
+        case "aragorn":
+            response = await send_to_aragorn_ranker(message)
+        case "bte":
+            response = do_bte_scoring(message)
 
     return response
