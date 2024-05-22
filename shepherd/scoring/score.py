@@ -15,5 +15,7 @@ async def score_query(message: Dict[str, Any], options: Dict[str, Any]) -> tuple
             response = await send_to_aragorn_ranker(message)
         case "bte":
             response = do_bte_scoring(message)
+        case _:
+            response = message
 
     return response
