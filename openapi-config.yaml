@@ -6,9 +6,9 @@ contact:
 description: 'Shepherd: A Translator ARA that aims to be modular in its query expansion and ranking, among other TRAPI workflow operations.'
 servers:
 - description: Default server
-  url: https://shepherd.renci.org
+  url: https://shepherd.apps.renci.org
 title: Shepherd
-version: 0.1.0
+version: 0.0.1
 tags:
 - name: translator
 - name: ARA
@@ -24,8 +24,6 @@ x-trapi:
   version: 1.4.0
   operations:
   - lookup
-  - enrich_results
-  - overlay_connect_knodes
   - score
   - sort_results_score
   - filter_results_top_n

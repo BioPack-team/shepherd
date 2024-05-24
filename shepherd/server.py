@@ -1,20 +1,18 @@
 """Shepherd ARA."""
-import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 import pydantic
 from reasoner_pydantic import (
     Query,
     AsyncQuery,
     Response as ReasonerResponse,
 )
-from typing import Dict
 
-from shepherd.db import initialize_db, shutdown_db, add_query, merge_message, get_message
+from shepherd.db import initialize_db, shutdown_db, add_query, merge_message
 from shepherd.openapi import construct_open_api_schema
 
-from shepherd.query_expansion.query_expansion import expand_query
 from shepherd.retrieval import retrieve
 from shepherd.scoring.score import score_query
 
@@ -24,7 +22,6 @@ from shepherd.operations import (
     filter_kgraph_orphans,
 )
 
-import json
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,11 +44,49 @@ APP.add_middleware(
 )
 
 
-async def track_query(conn):
-    notifications = conn.notifies()
-    async for notification in notifications:
-        if notification.payload == "done":
-            break
+supported_operations = {
+    "lookup": retrieve,
+    "score": score_query,
+    "sort_results_score": sort_results_score,
+    "filter_results_top_n": filter_results_top_n,
+    "filter_kgraph_orphans": filter_kgraph_orphans,
+}
+
+default_workflow = [
+    {"id": "lookup"},
+    {"id": "score"},
+    {"id": "sort_results_score"},
+    {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
+    {"id": "filter_kgraph_orphans"},
+]
+
+
+async def run_query(
+    target: str,
+    query: dict,
+) -> ReasonerResponse:
+    """Run a single query."""
+    # save query to db
+    query_id, conn, pool = await add_query(query)
+
+    shepherd_options = {"target": target, "conn": conn}
+    final_message = query
+    workflow = query.get("workflow")
+    if workflow is None:
+        workflow = default_workflow
+    for operation in workflow:
+        if operation["id"] in supported_operations:
+            try:
+                final_message = await supported_operations[operation["id"]](query_id, final_message, operation.get("parameters", {}), shepherd_options)
+                print(final_message)
+            except Exception as e:
+                print(f"Operation {operation['id']} failed! {e}")
+        else:
+            print(f"Operation {id} is not supported by Shepherd.")
+    # put the connection back into the pool. Don't want a dry pool.
+    await pool.putconn(conn)
+    print(f"Returning {len(final_message['message']['results'])} results.")
+    return final_message
 
 
 @APP.post("/{target}/query", status_code=200, response_model=ReasonerResponse)
@@ -60,62 +95,43 @@ async def query(
     query: Query,
 ) -> ReasonerResponse:
     """Handle synchronous TRAPI queries."""
-    # expand query to multiple subqueries, options
     query_dict = query.dict()
-    queries, options = await expand_query(query_dict, {"target": target})
-    print(json.dumps(queries))
-    # save query to db
-    query_id, conn, pool = await add_query(query_dict, len(queries))
-    # retrieve answers
-    await retrieve(query_id, queries, options)
-    # poll the db for doneness?
-    # track task by postgres notification
-    # also have timeout to continue if not all queries are done.
-    # https://stackoverflow.com/a/65242071
-    query_timeout = 300
-    track_task = asyncio.create_task(track_query(conn))
-    timeout_task = asyncio.create_task(asyncio.sleep(query_timeout))
-    await asyncio.wait(
-        [track_task, timeout_task],
-        return_when=asyncio.FIRST_COMPLETED)
+    return_message = await run_query(target, query_dict)
+    return return_message
 
-    if not track_task.done():
-        track_task.cancel()
-    merged_message = await get_message(query_id)
-    # score/rank
-    scored_message = await score_query(merged_message, {"target": target})
-    # sort results
-    sorted_message = sort_results_score(scored_message, query_id)
-    # filter results top n
-    trimmed_message = filter_results_top_n(sorted_message, query_id)
-    # filter kgraph orphans
-    filtered_message = filter_kgraph_orphans(trimmed_message, query_id)
-    # put the connection back into the pool. Don't want a dry pool.
-    await pool.putconn(conn)
-    print(f"Returning {len(filtered_message['message']['results'])} results.")
-    return filtered_message
+
+async def async_run_query(
+    target: str,
+    query_dict: dict,
+    callback_url: str,
+) -> None:
+    """Run a single async query."""
+    return_message = await run_query(target, query_dict)
+    async with httpx.AsyncClient(timeout=600) as client:
+        await client.post(callback_url, json=return_message)
 
 
 @APP.post("/{target}/asyncquery", status_code=200, response_model=ReasonerResponse)
 async def async_query(
+    background_tasks: BackgroundTasks,
     target: str,
     query: AsyncQuery,
-) -> ReasonerResponse:
+) -> Response:
     """Handle asynchronous TRAPI queries."""
-    query = query.dict()
-    # expand query to multiple subqueries, options
-    queries, options = expand_query(query, {"target": target})
-    print(queries, options)
-    # save query to db
-    query_id, conn = await add_query(query, len(queries))
-    return
+    query_dict = query.dict()
+    callback_url = query_dict.get("callback")
+    if callback_url is None:
+        return Response("Missing callback url.", 422)
+    background_tasks.add_task(async_run_query, target, query_dict, callback_url)
+    return Response("Query received.", 200)
 
 
 @APP.post("/callback/{query_id}", status_code=200, include_in_schema=False)
 async def callback(
+    background_tasks: BackgroundTasks,
     query_id: str,
     response: dict,
-) -> None:
+) -> Response:
     """Handle asynchronous callback queries from subservices."""
     # print(json.dumps(response))
     try:
@@ -135,8 +151,8 @@ async def callback(
         }
     print(f"Got back {len(response['message']['results'])} results.")
     # TODO: make this a background task
-    await merge_message(query_id, response)
-    return 200
+    background_tasks.add_task(merge_message, query_id, response)
+    return Response("Callback received.", 200)
 
 
 @APP.get("/asyncquery_status/{qid}", status_code=200)
@@ -144,6 +160,7 @@ async def query_status(
     qid: str,
 ) -> dict:
     """Handle query status requests."""
+    # get query status from db
     return {
         "status": "Queued",
         "description": "Query is currently waiting to be run.",

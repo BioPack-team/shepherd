@@ -1,6 +1,7 @@
 """Merge messages."""
 from collections import defaultdict
 import json
+from typing import Union, Dict, Any, List
 import uuid
 
 from reasoner_pydantic import (
@@ -23,20 +24,20 @@ def create_aux_graph(analysis):
     Look through the analysis edge bindings, get all the knowledge edges, and put them in an aux graph.
     Give it a random uuid as an id."""
     aux_graph_id = str(uuid.uuid4())
-    aux_graph = { "edges": [] , "attributes": []}
+    aux_graph = {"edges": [], "attributes": []}
     for edge_id, edgelist in analysis["edge_bindings"].items():
         for edge in edgelist:
             aux_graph["edges"].append(edge["id"])
     return aux_graph_id, aux_graph
 
 
-def add_knowledge_edge(result_message, aux_graph_ids, answer, robokop):
+def add_knowledge_edge(result_message, aux_graph_ids, answer):
     """Create a new knowledge edge in the result message, with the aux graph ids as support."""
     # Find the subject, object, and predicate of the original query
     query_graph = result_message["message"]["query_graph"]
-    #get the first key and value from the edges
+    # get the first key and value from the edges
     qedge_id, qedge = next(iter(query_graph["edges"].items()))
-    #For the nodes, if there is an id, then use it in the knowledge edge. If there is not, then use the answer
+    # For the nodes, if there is an id, then use it in the knowledge edge. If there is not, then use the answer
     qnode_subject_id = qedge["subject"]
     qnode_object_id = qedge["object"]
     if "ids" in query_graph["nodes"][qnode_subject_id] and query_graph["nodes"][qnode_subject_id]["ids"] is not None:
@@ -52,10 +53,7 @@ def add_knowledge_edge(result_message, aux_graph_ids, answer, robokop):
         qualifiers = None
     # Create a new knowledge edge
     new_edge_id = str(uuid.uuid4())
-    if robokop:
-        source = "infores:robokop"
-    else:
-        source = "infores:aragorn"
+    source = "infores:shepherd"
     new_edge = {
         "subject": qnode_subject,
         "object": qnode_object,
@@ -76,8 +74,8 @@ def add_knowledge_edge(result_message, aux_graph_ids, answer, robokop):
                 "attribute_source": source
             }
         ],
-        # Aragorn is the primary ks because aragorn inferred the existence of this edge.
-        "sources": [{"resource_id":source, "resource_role":"primary_knowledge_source"}]
+        # Shepherd is the primary ks because shepherd inferred the existence of this edge.
+        "sources": [{"resource_id": source, "resource_role": "primary_knowledge_source"}]
     }
     if qualifiers is not None:
         new_edge["qualifiers"] = qualifiers
@@ -85,7 +83,7 @@ def add_knowledge_edge(result_message, aux_graph_ids, answer, robokop):
     return new_edge_id
 
 
-def merge_answer(result_message, answer, results, qnode_ids, robokop=False):
+def merge_answer(result_message, answer, results, qnode_ids):
     """Given a set of results and the node identifiers of the original qgraph,
     create a single message.
     result_message has to contain the original query graph
@@ -134,7 +132,7 @@ def merge_answer(result_message, answer, results, qnode_ids, robokop=False):
         mergedresult["node_bindings"][q] = []
         for result in results["creative"] + results["lookup"]:
             for nb in result["node_bindings"][q]:
-                serialized_binding = json.dumps(nb,sort_keys=True)
+                serialized_binding = json.dumps(nb, sort_keys=True)
                 if serialized_binding not in serkeys[q]:
                     mergedresult["node_bindings"][q].append(nb)
                     serkeys[q].add(serialized_binding)
@@ -153,17 +151,22 @@ def merge_answer(result_message, answer, results, qnode_ids, robokop=False):
     # 4. and add the aux graphs as support for this knowledge edge
     knowledge_edge_ids = []
     if len(aux_graph_ids) > 0:
-        #only do this if there are creative results.  There could just be a lookup
+        # only do this if there are creative results.  There could just be a lookup
         for nid in answer:
-            knowledge_edge_id = add_knowledge_edge(result_message, aux_graph_ids, nid, robokop)
+            knowledge_edge_id = add_knowledge_edge(result_message, aux_graph_ids, nid)
             knowledge_edge_ids.append(knowledge_edge_id)
 
     # 5. create an analysis with an edge binding from the original creative query edge to the new knowledge edge
     qedge_id = list(result_message["message"]["query_graph"]["edges"].keys())[0]
     analysis = {
         "resource_id": "infores:shepherd",
-        "edge_bindings": {qedge_id:[ { "id":kid, "attributes": [] } for kid in knowledge_edge_ids ] }
-                }
+        "edge_bindings": {
+            qedge_id: [
+                {"id": kid, "attributes": []}
+                for kid in knowledge_edge_ids
+            ]
+        }
+    }
     mergedresult["analyses"].append(analysis)
 
     # 6. add any lookup edges to the analysis directly
@@ -174,17 +177,17 @@ def merge_answer(result_message, answer, results, qnode_ids, robokop=False):
                     mergedresult["analyses"][0]["edge_bindings"][qedge] = []
                 mergedresult["analyses"][0]["edge_bindings"][qedge].extend(analysis["edge_bindings"][qedge])
 
-    #result_message["message"]["results"].append(mergedresult)
+    # result_message["message"]["results"].append(mergedresult)
     return mergedresult
 
 
-def queries_equivalent(query1,query2):
+def queries_equivalent(query1, query2):
     """Compare 2 query graphs.  The nuisance is that there is flexiblity in e.g. whether there is a qualifier constraint
     as none or it's not in there or its an empty list.  And similar for is_set and is_set is False.
     """
     q1 = query1.copy()
     q2 = query2.copy()
-    for q in [q1,q2]:
+    for q in [q1, q2]:
         for node in q["nodes"].values():
             if "is_set" in node and node["is_set"] is False:
                 del node["is_set"]
@@ -205,7 +208,7 @@ def group_results_by_qnode(merge_qnode, result_message, lookup_results):
     """
     original_results = result_message["message"].get("results", [])
     # group results
-    grouped_results = defaultdict( lambda: {"creative": [], "lookup": []})
+    grouped_results = defaultdict(lambda: {"creative": [], "lookup": []})
     # Group results by the merge_qnode
     for result_set, result_key in [(original_results, "creative"), (lookup_results, "lookup")]:
         for result in result_set:
@@ -215,7 +218,7 @@ def group_results_by_qnode(merge_qnode, result_message, lookup_results):
     return grouped_results
 
 
-def merge_results_by_node(result_message, merge_qnode, lookup_results, robokop=False):
+def merge_results_by_node(result_message, merge_qnode, lookup_results):
     """This assumes a single result message, with a single merged KG.  The goal is to take all results that share a
     binding for merge_qnode and combine them into a single result.
     Assumes that the results are not scored."""
@@ -224,13 +227,27 @@ def merge_results_by_node(result_message, merge_qnode, lookup_results, robokop=F
     # TODO : I'm sure there's a better way to handle this with asyncio
     new_results = []
     for r in grouped_results:
-        new_result = merge_answer(result_message, r, grouped_results[r], original_qnodes, robokop)
+        new_result = merge_answer(result_message, r, grouped_results[r], original_qnodes)
         new_results.append(new_result)
     result_message["message"]["results"] = new_results
     return result_message
 
 
-def merge_messages(answer_qnode, original_query_graph, lookup_query_graph, result_messages, robokop=False):
+def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
+    """From the original query graph, get the answer node id."""
+    answer_node = None
+    qnodes = query_graph.get("nodes", {})
+    for qnode_id, qnode in qnodes.items():
+        if qnode.get("ids") is None:
+            answer_node = qnode_id
+    return answer_node
+
+
+def merge_messages(
+    original_query_graph: Dict[str, Any],
+    lookup_query_graph: Dict[str, Any],
+    result_messages: List[Dict[str, Any]]
+):
     pydantic_kgraph = KnowledgeGraph.parse_obj({"nodes": {}, "edges": {}})
     for rm in result_messages:
         pydantic_kgraph.update(
@@ -262,9 +279,11 @@ def merge_messages(answer_qnode, original_query_graph, lookup_query_graph, resul
     # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
     lookup_results = []  # in case we don't have any
     for result_message in result_messages:
-        if queries_equivalent(result_message["message"]["query_graph"],lookup_query_graph):
+        if queries_equivalent(result_message["message"]["query_graph"], lookup_query_graph):
             lookup_results = result_message["message"]["results"] if result_message["message"]["results"] is not None else []
         else:
             result["message"]["results"].extend(result_message["message"]["results"] if result_message["message"]["results"] is not None else [])
-    mergedresults = merge_results_by_node(result, answer_qnode, lookup_results, robokop)
+
+    answer_node_id = get_answer_node(original_query_graph)
+    mergedresults = merge_results_by_node(result, answer_node_id, lookup_results)
     return mergedresults

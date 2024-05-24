@@ -1,14 +1,15 @@
 """Query Expansion."""
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List
 
 from shepherd.query_expansion.example.expansion import expand_example_query
 from shepherd.query_expansion.aragorn.aragorn import expand_aragorn_query
 from shepherd.query_expansion.bte.expansion import expand_bte_query
 
 
-async def expand_query(
-    query: Dict[str, Any], options: Dict[str, Any]
+def expand_query(
+    query: Dict[str, Any],
+    options: Dict[str, Any]
 ) -> tuple[List[Any], Dict[str, Any]]:
     """Get expanded queries."""
     queries = []

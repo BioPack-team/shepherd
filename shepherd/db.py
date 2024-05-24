@@ -1,5 +1,4 @@
 """Postgres DB Manager."""
-import asyncio
 import copy
 import gzip
 import json
@@ -7,8 +6,6 @@ from psycopg import Connection, sql
 from psycopg_pool import AsyncConnectionPool
 import os
 from reasoner_pydantic import (
-    Query,
-    AsyncQuery,
     Response as ReasonerResponse,
 )
 from typing import Dict, Any
@@ -48,15 +45,13 @@ async def shutdown_db() -> None:
 
 
 async def add_query(
-    query: Query,
-    num_queries: int,
+    query: dict[str, Any],
 ) -> tuple[str, Connection, AsyncConnectionPool]:
     """
     Add an initial query to the db.
 
     Args:
         query (Dict): TRAPI query graph
-        num_queries (int): how many expected result callbacks there are
     
     Returns:
         query_id: str
@@ -65,22 +60,39 @@ async def add_query(
     conn = await pool.getconn(timeout=10)
     await conn.execute("""
 INSERT INTO shepherd_brain VALUES (
-    %s, %s, %s, %s
+    %s, %s, %s
 )
 """, (
     query_id,
     gzip.compress(json.dumps(query).encode()),
     gzip.compress(json.dumps(query).encode()),
-    num_queries,
 ))
     await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
     await conn.commit()
     return query_id, conn, pool
 
 
+async def update_query(
+    query_id: str,
+    num_queries: int,
+) -> None:
+    """
+    Update num_queries of query.
+
+    Args:
+        query_id (str): Unique query id
+        num_queries (int): how many expected result callbacks there are
+    """
+    conn = await pool.getconn(timeout=10)
+    await conn.execute("""
+UPDATE shepherd_brain SET num_queries = %s WHERE query_id = %s;
+""", (num_queries, query_id,))
+    await conn.commit()
+
+
 async def merge_message(
     query_id: str,
-    response: ReasonerResponse,
+    response: Dict[str, Any],
 ) -> None:
     """Merge an incoming message with the existing full message."""
     # retrieve query from db
@@ -98,7 +110,7 @@ SELECT query, merged_message, num_queries FROM shepherd_brain WHERE query_id = %
         lookup_qgraph = copy.deepcopy(original_qgraph)
         for qedge_id in lookup_qgraph["edges"]:
             del lookup_qgraph["edges"][qedge_id]["knowledge_type"]
-        merged_message = merge_messages("sn", original_qgraph, lookup_qgraph, [merged_message, response])
+        merged_message = merge_messages(original_qgraph, lookup_qgraph, [merged_message, response])
         # do message merging
         await conn.execute("""
 UPDATE shepherd_brain SET merged_message = %s, num_queries = %s WHERE query_id = %s;
@@ -120,7 +132,7 @@ SELECT merged_message FROM shepherd_brain WHERE query_id = %s;
         return json.loads(gzip.decompress(row[0]))
 
 
-async def clear_db() -> None:
-    """Clear whole db."""
-    async with pool.connection() as conn:
-        await conn.execute()
+# async def clear_db() -> None:
+#     """Clear whole db."""
+#     async with pool.connection() as conn:
+#         await conn.execute()
