@@ -117,7 +117,10 @@ def match_templates(
 
 
 def fill_templates(
-    paths: list[Path], subject_curie: Optional[CURIE], object_curie: Optional[CURIE]
+    paths: list[Path],
+    query_body: Query,
+    subject_curie: Optional[CURIE],
+    object_curie: Optional[CURIE],
 ) -> list[Query]:
     filled_templates: list[Query] = []
     for path in paths:
@@ -132,6 +135,8 @@ def fill_templates(
                 "creativeQueryObject"
             ].ids = HashableSequence(__root__=[object_curie])
         filled_templates.append(template)
+        if query_body.log_level is not None:
+            template.log_level = query_body.log_level
 
     return filled_templates
 
@@ -156,5 +161,7 @@ def expand_bte_query(query_dict: dict[str, Any]) -> list[Any]:
         subject_type, object_type, predicate, qualifiers
     )
 
-    queries = fill_templates(matched_template_paths, subject_curie, object_curie)
+    queries = fill_templates(
+        matched_template_paths, query_body, subject_curie, object_curie
+    )
     return [query.dict() for query in queries]
