@@ -12,7 +12,6 @@ async def expand_query(
 ) -> tuple[List[Any], Dict[str, Any]]:
     """Get expanded queries."""
     queries = []
-    concurrency = 1
     target = options.get("target")
     concurrency = 1_000_000
     match target:
