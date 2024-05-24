@@ -1,5 +1,5 @@
 # Use RENCI python base image
-FROM renciorg/renci-python-image:v3.11.5
+FROM renciorg/renci-python-image:v0.3.0
 
 # Add image info
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
@@ -17,7 +17,7 @@ ADD requirements.txt .
 RUN pip install -r requirements.txt
 
 # switch to the non-root user (nru). defined in the base image
-# USER nru
+USER nru
 
 # Copy in files
 ADD . .
