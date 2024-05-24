@@ -1,4 +1,5 @@
 from typing import Any
+import random
 
 
 # function can be async or not
@@ -20,8 +21,8 @@ async def example_scoring(response_body: dict[str, Any]) -> dict[str, Any]:
     # Scoring must return a valid TRAPI response with all results scored.
     # Don't do other transformations (such as trimming results/etc.), these are
     # handled after ARA scoring.
-    # Let's pretend every result analysis was maximally good.
+    # For an example, let's make every score random.
     for result in response_body["message"]["results"]:
         for analysis in result["analyses"]:
-            analysis["score"] = 1.0
+            analysis["score"] = random.uniform(0, 1)
     return response_body
