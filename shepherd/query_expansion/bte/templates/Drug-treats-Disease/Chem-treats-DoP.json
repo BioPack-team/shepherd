@@ -2,17 +2,17 @@
     "message": {
         "query_graph": {
             "nodes": {
-                "creativeQuerySubject": {
+                "sn": {
                     "categories":["biolink:ChemicalEntity"]
                 },
-                "creativeQueryObject": {
+                "on": {
                     "categories":["biolink:DiseaseOrPhenotypicFeature"]
                }
             },
             "edges": {
                 "eA": {
-                    "subject": "creativeQuerySubject",
-                    "object": "creativeQueryObject",
+                    "subject": "sn",
+                    "object": "on",
                     "predicates": ["biolink:treats_or_applied_or_studied_to_treat"]
                 }
             }

@@ -2,17 +2,17 @@
     "message": {
         "query_graph": {
             "nodes": {
-                "creativeQuerySubject": {
+                "sn": {
                     "categories":["biolink:ChemicalEntity"]
                 },
-                "creativeQueryObject": {
+                "on": {
                     "categories":["biolink:Gene", "biolink:Protein"]
                }
             },
             "edges": {
                 "eA": {
-                    "subject": "creativeQuerySubject",
-                    "object": "creativeQueryObject",
+                    "subject": "sn",
+                    "object": "on",
                     "predicates": ["biolink:affects"],
                     "qualifier_constraints": [
                         {

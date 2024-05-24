@@ -2,26 +2,26 @@
     "message": {
         "query_graph": {
             "nodes": {
-                "creativeQuerySubject": {
+                "sn": {
                     "categories":["biolink:ChemicalEntity"]
                 },
                 "nA": {
                     "categories":["biolink:Gene", "biolink:Protein"],
                     "is_set": true
                },
-                "creativeQueryObject": {
+                "on": {
                     "categories":["biolink:Gene", "biolink:Protein"]
                }
             },
             "edges": {
                 "eA": {
-                    "subject": "creativeQuerySubject",
+                    "subject": "sn",
                     "object": "nA",
                     "predicates": ["biolink:physically_interacts_with"]
                 },
                 "eB": {
                     "subject": "nA",
-                    "object": "creativeQueryObject",
+                    "object": "on",
                     "predicates": ["biolink:regulates"],
                     "qualifier_constraints": [
                         {

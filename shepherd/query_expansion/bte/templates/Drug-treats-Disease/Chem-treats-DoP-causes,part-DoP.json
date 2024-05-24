@@ -2,26 +2,26 @@
     "message": {
         "query_graph": {
             "nodes": {
-                "creativeQuerySubject": {
+                "sn": {
                     "categories":["biolink:ChemicalEntity"]
                 },
                 "nA": {
                     "categories":["biolink:DiseaseOrPhenotypicFeature"],
                     "is_set": true
                 },
-                "creativeQueryObject": {
+                "on": {
                     "categories":["biolink:DiseaseOrPhenotypicFeature"]
                }
             },
             "edges": {
                 "eA": {
-                    "subject": "creativeQuerySubject",
+                    "subject": "sn",
                     "object": "nA",
                     "predicates": ["biolink:treats"]
                 },
                 "eB": {
                     "subject": "nA",
-                    "object": "creativeQueryObject",
+                    "object": "on",
                     "predicates": [
                         "biolink:part_of", 
                         "biolink:causes"

@@ -2,18 +2,18 @@
     "message": {
         "query_graph": {
             "nodes": {
-                "creativeQuerySubject": {
+                "sn": {
                     "categories":
                     ["Procedure"]
                 },
-                "creativeQueryObject": {
+                "on": {
                     "categories":["biolink:DiseaseOrPhenotypicFeature"]
                }
             },
             "edges": {
                 "eA": {
-                    "subject": "creativeQuerySubject",
-                    "object": "creativeQueryObject",
+                    "subject": "sn",
+                    "object": "on",
                     "qualifier_constraints": [
                         {
                             "qualifier_set": [

@@ -60,12 +60,12 @@ async def query(
     query: Query,
 ) -> ReasonerResponse:
     """Handle synchronous TRAPI queries."""
-    query = query.dict()
     # expand query to multiple subqueries, options
-    queries, options = await expand_query(query, {"target": target})
+    query_dict = query.dict()
+    queries, options = await expand_query(query_dict, {"target": target})
     print(json.dumps(queries))
     # save query to db
-    query_id, conn, pool = await add_query(query, len(queries))
+    query_id, conn, pool = await add_query(query_dict, len(queries))
     # retrieve answers
     await retrieve(query_id, queries, options)
     # poll the db for doneness?
