@@ -128,11 +128,11 @@ def fill_templates(
             template = Query.parse_obj(json.load(file))
         if subject_curie is not None:
             cast(QueryGraph, template.message.query_graph).nodes[
-                "creativeQuerySubject"
+                "sn"
             ].ids = HashableSequence(__root__=[subject_curie])
         if object_curie is not None:
             cast(QueryGraph, template.message.query_graph).nodes[
-                "creativeQueryObject"
+                "on"
             ].ids = HashableSequence(__root__=[object_curie])
         filled_templates.append(template)
         if query_body.log_level is not None:
