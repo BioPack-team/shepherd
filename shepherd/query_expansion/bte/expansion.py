@@ -161,7 +161,16 @@ def expand_bte_query(query_dict: dict[str, Any]) -> list[Any]:
         subject_type, object_type, predicate, qualifiers
     )
 
-    queries = fill_templates(
+    templates = fill_templates(
         matched_template_paths, query_body, subject_curie, object_curie
     )
-    return [query.dict() for query in queries]
+
+    final_templates = []
+
+    for template in templates:
+        template = template.dict()
+        del template["message"]["knowledge_graph"]
+        template["workflow"] = [{"id": "lookup"}]
+        final_templates.append(template)
+
+    return final_templates
