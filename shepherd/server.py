@@ -62,7 +62,7 @@ async def query(
     """Handle synchronous TRAPI queries."""
     query = query.dict()
     # expand query to multiple subqueries, options
-    queries, options = expand_query(query, {"target": target})
+    queries, options = await expand_query(query, {"target": target})
     print(json.dumps(queries))
     # save query to db
     query_id, conn, pool = await add_query(query, len(queries))
