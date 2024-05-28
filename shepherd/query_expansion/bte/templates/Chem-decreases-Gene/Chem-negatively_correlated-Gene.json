@@ -2,17 +2,17 @@
     "message": {
         "query_graph": {
             "nodes": {
-                "sn": {
+                "creativeQuerySubject": {
                     "categories":["biolink:ChemicalEntity"]
                 },
-                "on": {
+                "creativeQueryObject": {
                     "categories":["biolink:Gene", "biolink:Protein"]
                }
             },
             "edges": {
                 "eA": {
-                    "subject": "sn",
-                    "object": "on",
+                    "subject": "creativeQuerySubject",
+                    "object": "creativeQueryObject",
                     "predicates": ["biolink:negatively_correlated_with"]
                 }
             }
