@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     postgres_host: str = "localhost"
     postgres_port: int = 5432
+    postgres_password: str = "supersecretpassw0rd"
 
     lookup_timeout: int = 240
     callback_host: AnyUrl = "http://127.0.0.1:5439"
