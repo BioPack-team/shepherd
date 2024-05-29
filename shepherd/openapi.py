@@ -4,14 +4,14 @@ import os
 import yaml
 
 
-def construct_open_api_schema(APP, description, prefix="", infores=None):
+def construct_open_api_schema(app, description, prefix="", infores=None):
     """
     This creates the Open api schema object
 
     :return:
     """
 
-    open_api_schema = get_openapi(title=APP.title, version=APP.version, routes=APP.routes)
+    open_api_schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
 
     open_api_extended_file_path = os.path.join(Path(os.path.dirname(__file__)).parent, "openapi-config.yaml")
 
@@ -48,7 +48,7 @@ def construct_open_api_schema(APP, description, prefix="", infores=None):
     if description:
         open_api_schema["info"]["description"] = description
 
-    open_api_schema["info"]["title"] = APP.title
+    open_api_schema["info"]["title"] = app.title
 
     if app_version:
         open_api_schema["info"]["version"] = app_version

@@ -31,9 +31,13 @@ async def lifespan(app: FastAPI):
     await shutdown_db()
 
 
-APP = FastAPI(title="BioPack Shepherd", lifespan=lifespan)
+APP = FastAPI(title="BioPack Shepherd", version="0.0.1", lifespan=lifespan)
 
-APP.openapi_schema = construct_open_api_schema(APP, description="Sheperd: Fully modular ARA.")
+APP.openapi_schema = construct_open_api_schema(
+    APP,
+    description="Sheperd: Fully modular ARA.",
+    infores="infores:shepherd",
+)
 
 APP.add_middleware(
     CORSMiddleware,

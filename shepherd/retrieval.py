@@ -6,11 +6,9 @@ import os
 from psycopg import Connection
 from typing import Dict, Any
 
+from shepherd.config import settings
 from shepherd.db import get_message, update_query
 from shepherd.query_expansion.query_expansion import expand_query
-
-default_retriever_url = "http://localhost:3000/v1/asyncquery"
-retriever_url = os.environ.get("RETRIEVER_URL", default_retriever_url)
 
 
 async def send_query(query_id: str, query, semaphore):
@@ -19,15 +17,11 @@ async def send_query(query_id: str, query, semaphore):
     try:
         async with semaphore:
             # had an open spot in the queue
-            callback_host = os.environ.get("CALLBACK_HOST", "http://127.0.0.1:5439")
-            # callback_host = "http://localhost:3000"
-
-            # callback_url = f"{callback_host}/query"
-            callback_url = f"{callback_host}/callback/{query_id}"
+            callback_url = f"{settings.callback_host}/callback/{query_id}"
             query["callback"] = callback_url
             async with httpx.AsyncClient(timeout=async_timeout) as client:
                 response = await client.post(
-                    retriever_url,
+                    settings.retriever_url,
                     json=query,
                 )
                 response.raise_for_status()
@@ -101,7 +95,6 @@ async def retrieve(
     # track task by postgres notification
     # also have timeout to continue if not all queries are done.
     # https://stackoverflow.com/a/65242071
-    query_timeout = 300
     try:
         db_conn: Connection = shepherd_options["conn"]
     except KeyError:
@@ -110,7 +103,7 @@ async def retrieve(
     try:
         await asyncio.wait_for(
             track_task,
-            query_timeout,
+            settings.lookup_timeout,
         )
     except asyncio.TimeoutError:
         print("Timing out lookups.")
