@@ -2,7 +2,7 @@
 import asyncio
 import httpx
 import json
-import os
+import logging
 from psycopg import Connection
 from typing import Dict, Any
 
@@ -11,7 +11,7 @@ from shepherd.db import get_message, update_query
 from shepherd.query_expansion.query_expansion import expand_query
 
 
-async def send_query(query_id: str, query, semaphore):
+async def send_query(query_id: str, query, semaphore, logger: logging.Logger):
     """Send a single query to Retriever."""
     async_timeout = 30
     try:
@@ -26,13 +26,13 @@ async def send_query(query_id: str, query, semaphore):
                 )
                 response.raise_for_status()
     except httpx.ReadTimeout:
-        print(f"Retriever took longer than {async_timeout} seconds to response.")
+        logger.error(f"Retriever took longer than {async_timeout} seconds to response.")
     except httpx.RequestError:
-        print("Request error contacting Retriever.")
+        logger.error("Request error contacting Retriever.")
     except httpx.HTTPStatusError as e:
-        print(e.response.text)
+        logger.error(e.response.text)
     except Exception as e:
-        print(e)
+        logger.error(e)
 
 
 async def track_query(db_conn: Connection):
@@ -72,6 +72,7 @@ async def retrieve(
     query: Dict[str, Any],
     operation: Dict[str, Any],
     shepherd_options: Dict[str, Any],
+    logger: logging.Logger,
 ):
     """Send all queries to Retriever."""
     retrieval_options = {}
@@ -79,16 +80,16 @@ async def retrieve(
     if inferred:
         # expand query to multiple subqueries, options
         queries, retrieval_options = expand_query(query, shepherd_options)
-        print(json.dumps(queries))
     else:
         queries = [query]
     
     # update query in db
     await update_query(query_id, len(queries))
+    logger.info(f"""Running {"inferred" if inferred else "lookup"} query{f" with {len(queries)} sub-queries" if inferred else ""}""")
 
     semaphore = asyncio.Semaphore(retrieval_options.get("concurrency", 1))
     queries = [
-        asyncio.create_task(send_query(query_id, query, semaphore))
+        asyncio.create_task(send_query(query_id, query, semaphore, logger))
         for query in queries
     ]
     await asyncio.gather(*queries)
@@ -106,7 +107,7 @@ async def retrieve(
             settings.lookup_timeout,
         )
     except asyncio.TimeoutError:
-        print("Timing out lookups.")
+        logger.warning("Timing out lookups.")
 
     if not track_task.done():
         track_task.cancel()

@@ -3,13 +3,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+import logging
 import pydantic
 from reasoner_pydantic import (
     Query,
     AsyncQuery,
     Response as ReasonerResponse,
 )
+import uuid
 
+from shepherd.logger import QueryLogger, setup_logging
 from shepherd.db import initialize_db, shutdown_db, add_query, merge_message
 from shepherd.openapi import construct_open_api_schema
 
@@ -21,6 +24,9 @@ from shepherd.operations import (
     filter_results_top_n,
     filter_kgraph_orphans,
 )
+
+setup_logging()
+
 
 
 @asynccontextmanager
@@ -70,9 +76,19 @@ async def run_query(
     query: dict,
 ) -> ReasonerResponse:
     """Run a single query."""
-    # save query to db
-    query_id, conn, pool = await add_query(query)
+    query_id = str(uuid.uuid4())[:8]
+    # Set up logger
+    log_level = query.get("log_level") or "INFO"
+    level_number = logging._nameToLevel[log_level]
+    log_handler = QueryLogger().log_handler
+    logger = logging.getLogger(f"shepherd.{query_id}")
+    logger.setLevel(level_number)
+    logger.addHandler(log_handler)
 
+    # save query to db
+    conn, pool = await add_query(query_id, query, logger)
+
+    logger.info(f"Running query through {target}")
     shepherd_options = {"target": target, "conn": conn}
     final_message = query
     workflow = query.get("workflow")
@@ -81,15 +97,22 @@ async def run_query(
     for operation in workflow:
         if operation["id"] in supported_operations:
             try:
-                final_message = await supported_operations[operation["id"]](query_id, final_message, operation.get("parameters", {}), shepherd_options)
-                print(final_message)
+                logger.info(f"Running {operation['id']} operation...")
+                final_message = await supported_operations[operation["id"]](
+                    query_id,
+                    final_message,
+                    operation.get("parameters", {}),
+                    shepherd_options,
+                    logger,
+                )
+                logger.debug(f"Operation {operation['id']} gave back {len(final_message['message']['results'])} results")
             except Exception as e:
-                print(f"Operation {operation['id']} failed! {e}")
+                logger.warning(f"Operation {operation['id']} failed! {e}")
         else:
-            print(f"Operation {id} is not supported by Shepherd.")
+            logger.warning(f"Operation {id} is not supported by Shepherd.")
     # put the connection back into the pool. Don't want a dry pool.
     await pool.putconn(conn)
-    print(f"Returning {len(final_message['message']['results'])} results.")
+    logger.info(f"Returning {len(final_message['message']['results'])} results.")
     return final_message
 
 
@@ -137,11 +160,17 @@ async def callback(
     response: dict,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
-    # print(json.dumps(response))
+    # Set up logger
+    log_level = response.get("log_level") or "INFO"
+    level_number = logging._nameToLevel[log_level]
+    log_handler = QueryLogger().log_handler
+    logger = logging.getLogger(f"shepherd.{query_id}")
+    logger.setLevel(level_number)
+    logger.addHandler(log_handler)
     try:
         ReasonerResponse.parse_obj(response)
     except pydantic.ValidationError:
-        print("Received a non TRAPI-compliant callback response.")
+        logger.error("Received a non TRAPI-compliant callback response.")
         response = {
             "message": {
                 "query_graph": {
@@ -153,9 +182,9 @@ async def callback(
                 "auxiliary_graphs": None,
             }
         }
-    print(f"Got back {len(response['message']['results'])} results.")
+    logger.debug(f"Got back {len(response['message']['results'])} results.")
     # TODO: make this a background task
-    background_tasks.add_task(merge_message, query_id, response)
+    background_tasks.add_task(merge_message, query_id, response, logger)
     return Response("Callback received.", 200)
 
 

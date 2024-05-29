@@ -1,4 +1,5 @@
 """Scoring."""
+import logging
 from typing import Any, Dict, List
 
 from shepherd.scoring.aragorn.score import send_to_aragorn_ranker
@@ -9,6 +10,7 @@ async def score_query(
     message: Dict[str, Any],
     options: Dict[str, Any],
     shepherd_options: Dict[str, Any],
+    logger: logging.Logger,
 ) -> tuple[List[Any], Dict[str, Any]]:
     """Score the response."""
     response = None

@@ -1,4 +1,5 @@
 """General workflow operations across ARAs."""
+import logging
 from typing import Dict, Any
 
 
@@ -7,6 +8,7 @@ async def sort_results_score(
     message: Dict[str, Any],
     operation: Dict[str, Any],
     shepherd_options: Dict[str, Any],
+    logger: logging.Logger,
 ) -> Dict[str, Any]:
     # logger.info(f'{guid}: sorting results.')
     results = message["message"].get("results", [])
@@ -33,17 +35,16 @@ async def filter_results_top_n(
     message: Dict[str, Any],
     operation: Dict[str, Any],
     shepherd_options: Dict[str, Any],
+    logger: logging.Logger,
 ) -> Dict[str, Any]:
     # It's a validation error to not include max_results as a parameter, but let's have a default
-    # logger.info(f'{guid}: filtering results.')
     n = operation.get('max_results', 20000)
     try:
         message['message']['results'] = message['message'].get("results", [])[:n]
-    except KeyError:
+    except KeyError as e:
         # not a 'mesage' or 'results'
-        # logger.error(f'{guid}: error filtering results.')
+        logger.error(f"Error filtering results: {e}")
         return message
-    # logger.info(f'{guid}: returning filtered results.')
     return message
 
 
@@ -52,6 +53,7 @@ async def filter_kgraph_orphans(
     message: Dict[str, Any],
     operation: Dict[str, Any],
     shepherd_options: Dict[str, Any],
+    logger: logging.Logger,
 ) -> Dict[str, Any]:
     """Remove from the knowledge graph any nodes and edges not references by a result, as well as any aux_graphs.
     We do this by starting at results, marking reachable nodes & edges, then remove anything that isn't marked
@@ -98,7 +100,7 @@ async def filter_kgraph_orphans(
             aux_edges = message.get('message', {}).get('auxiliary_graphs', {}).get(auxgraph, {}).get('edges', [])
             for aux_edge in aux_edges:
                 if aux_edge not in message["message"]["knowledge_graph"]["edges"]:
-                    # logger.warning(f"{guid}: aux_edge {aux_edge} not in knowledge_graph.edges")
+                    logger.warning(f"aux_edge {aux_edge} not in knowledge_graph.edges")
                     continue
                 edges.add(aux_edge)
                 nodes.add(message["message"]["knowledge_graph"]["edges"][aux_edge]["subject"])
@@ -119,6 +121,5 @@ async def filter_kgraph_orphans(
         # logger.info(f'{guid}: returning filtered kgraph.')
         return message
     except Exception as e:
-        print(e)
-        # logger.error(e)
+        logger.error(e)
         return message

@@ -2,14 +2,15 @@
 import copy
 import gzip
 import json
+import logging
 from psycopg import Connection, sql
 from psycopg_pool import AsyncConnectionPool
 import os
 from reasoner_pydantic import (
     Response as ReasonerResponse,
 )
+import time
 from typing import Dict, Any
-import uuid
 
 from shepherd.merge_messages import merge_messages
 
@@ -45,8 +46,10 @@ async def shutdown_db() -> None:
 
 
 async def add_query(
+    query_id: str,
     query: dict[str, Any],
-) -> tuple[str, Connection, AsyncConnectionPool]:
+    logger: logging.Logger,
+) -> tuple[Connection, AsyncConnectionPool]:
     """
     Add an initial query to the db.
 
@@ -56,7 +59,6 @@ async def add_query(
     Returns:
         query_id: str
     """
-    query_id = str(uuid.uuid4())[:8]
     conn = await pool.getconn(timeout=10)
     await conn.execute("""
 INSERT INTO shepherd_brain VALUES (
@@ -69,7 +71,8 @@ INSERT INTO shepherd_brain VALUES (
 ))
     await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
     await conn.commit()
-    return query_id, conn, pool
+    logger.info("Query saved successfully.")
+    return conn, pool
 
 
 async def update_query(
@@ -93,6 +96,7 @@ UPDATE shepherd_brain SET num_queries = %s WHERE query_id = %s;
 async def merge_message(
     query_id: str,
     response: Dict[str, Any],
+    logger: logging.Logger,
 ) -> None:
     """Merge an incoming message with the existing full message."""
     # retrieve query from db
@@ -105,13 +109,19 @@ async def merge_message(
 SELECT query, merged_message, num_queries FROM shepherd_brain WHERE query_id = %s FOR UPDATE;
 """, (query_id,))
         row = await cursor.fetchone()
+        if row is None:
+            raise Exception(f"Query with id {query_id} not found in database.")
         merged_message = json.loads(gzip.decompress(row[1]))
         original_qgraph: Dict = json.loads(gzip.decompress(row[0]))["message"]["query_graph"]
         lookup_qgraph = copy.deepcopy(original_qgraph)
         for qedge_id in lookup_qgraph["edges"]:
             del lookup_qgraph["edges"][qedge_id]["knowledge_type"]
-        merged_message = merge_messages(original_qgraph, lookup_qgraph, [merged_message, response])
+        start = time.time()
+        logger.debug(f"Merging new response message")
         # do message merging
+        merged_message = merge_messages(original_qgraph, lookup_qgraph, [merged_message, response])
+        stop = time.time()
+        logger.debug(f"Message merging took {stop - start} seconds")
         await conn.execute("""
 UPDATE shepherd_brain SET merged_message = %s, num_queries = %s WHERE query_id = %s;
 """, (gzip.compress(json.dumps(merged_message).encode()), row[2] - 1, query_id,))
@@ -128,6 +138,8 @@ async def get_message(
 SELECT merged_message FROM shepherd_brain WHERE query_id = %s;
 """, (query_id,))
         row = await cursor.fetchone()
+        if row is None:
+            raise Exception(f"Query with id {query_id} was not found in the database.")
         await conn.commit()
         return json.loads(gzip.decompress(row[0]))
 
