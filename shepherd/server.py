@@ -28,7 +28,6 @@ from shepherd.operations import (
 setup_logging()
 
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle db connection."""
@@ -37,7 +36,7 @@ async def lifespan(app: FastAPI):
     await shutdown_db()
 
 
-APP = FastAPI(title="BioPack Shepherd", version="0.0.1", lifespan=lifespan)
+APP = FastAPI(title="BioPack Shepherd", version="0.0.2", lifespan=lifespan)
 
 APP.openapi_schema = construct_open_api_schema(
     APP,
