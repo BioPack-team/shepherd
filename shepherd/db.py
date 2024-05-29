@@ -12,11 +12,12 @@ from reasoner_pydantic import (
 import time
 from typing import Dict, Any
 
+from shepherd.config import settings
 from shepherd.merge_messages import merge_messages
 
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "supersecretpassw0rd")
 pool = AsyncConnectionPool(
-    conninfo=f"postgresql://postgres:{POSTGRES_PASSWORD}@localhost:5432",
+    conninfo=f"postgresql://postgres:{POSTGRES_PASSWORD}@{settings.postgres_host}:{settings.postgres_port}",
     timeout=5,
     max_size=20,
     max_idle=300,

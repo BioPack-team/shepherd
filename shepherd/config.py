@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     server_maturity: str = "development"
     server_location: str = "RENCI"
 
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+
     lookup_timeout: int = 240
     callback_host: AnyUrl = "http://127.0.0.1:5439"
     retriever_url: AnyUrl = "http://localhost:3000/v1/asyncquery"
