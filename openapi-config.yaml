@@ -20,7 +20,7 @@ x-translator:
   - Biothings Explorer
   infores: infores:shepherd
 x-trapi:
-  version: 1.4.0
+  version: 1.5.0
   operations:
   - lookup
   - score

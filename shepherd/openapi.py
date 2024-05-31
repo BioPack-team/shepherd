@@ -3,8 +3,10 @@ from pathlib import Path
 import os
 import yaml
 
+from shepherd.config import settings
 
-def construct_open_api_schema(app, description, prefix="", infores=None):
+
+def construct_open_api_schema(app, description, infores=None):
     """
     This creates the Open api schema object
 
@@ -54,17 +56,14 @@ def construct_open_api_schema(app, description, prefix="", infores=None):
         open_api_schema["info"]["version"] = app_version
 
     # adds support to override server root path
-    server_root = os.environ.get("SERVER_ROOT", "/")
-
-    # make sure not to add double slash at the end.
-    server_root = server_root.rstrip("/") + "/"
+    server_root = settings.server_url
 
     if servers_conf:
         for s in servers_conf:
             if s["description"].startswith("Default"):
-                s["url"] = server_root + prefix
-                s["x-maturity"] = os.environ.get("MATURITY_VALUE", "maturity")
-                s["x-location"] = os.environ.get("LOCATION_VALUE", "location")
+                s["url"] = server_root
+                s["x-maturity"] = settings.server_maturity
+                s["x-location"] = settings.server_location
 
         open_api_schema["servers"] = servers_conf
 

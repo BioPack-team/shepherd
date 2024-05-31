@@ -4,7 +4,7 @@ from pydantic import BaseSettings, AnyUrl
 
 
 class Settings(BaseSettings):
-    server_url: Optional[AnyUrl]
+    server_url: AnyUrl = "http://localhost:5439"
     server_maturity: str = "development"
     server_location: str = "RENCI"
 

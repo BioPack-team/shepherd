@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     await shutdown_db()
 
 
-APP = FastAPI(title="BioPack Shepherd", version="0.0.2", lifespan=lifespan)
+APP = FastAPI(title="BioPack Shepherd", version="0.0.3", lifespan=lifespan)
 
 APP.openapi_schema = construct_open_api_schema(
     APP,
@@ -64,7 +64,7 @@ supported_operations = {
 default_workflow = [
     {"id": "lookup"},
     {"id": "score"},
-    {"id": "sort_results_score"},
+    {"id": "sort_results_score", "parameters": {"ascending_or_descending": "descending"}},
     {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
     {"id": "filter_kgraph_orphans"},
 ]
@@ -73,7 +73,7 @@ default_workflow = [
 async def run_query(
     target: str,
     query: dict,
-) -> ReasonerResponse:
+) -> dict:
     """Run a single query."""
     query_id = str(uuid.uuid4())[:8]
     # Set up logger
@@ -111,15 +111,17 @@ async def run_query(
             logger.warning(f"Operation {id} is not supported by Shepherd.")
     # put the connection back into the pool. Don't want a dry pool.
     await pool.putconn(conn)
+    final_message["logs"] = list(log_handler.contents())
+    final_message["workflow"] = workflow
     logger.info(f"Returning {len(final_message['message']['results'])} results.")
     return final_message
 
 
-@APP.post("/{target}/query", status_code=200, response_model=ReasonerResponse)
+@APP.post("/{target}/query", response_model=ReasonerResponse)
 async def query(
     target: str,
     query: Query,
-) -> ReasonerResponse:
+) -> dict:
     """Handle synchronous TRAPI queries."""
     query_dict = query.dict()
     return_message = await run_query(target, query_dict)
@@ -137,7 +139,7 @@ async def async_run_query(
         await client.post(callback_url, json=return_message)
 
 
-@APP.post("/{target}/asyncquery", status_code=200, response_model=ReasonerResponse)
+@APP.post("/{target}/asyncquery", response_model=ReasonerResponse)
 async def async_query(
     background_tasks: BackgroundTasks,
     target: str,
@@ -181,7 +183,7 @@ async def callback(
                 "auxiliary_graphs": None,
             }
         }
-    logger.debug(f"Got back {len(response['message']['results'])} results.")
+    logger.info(f"Got back {len(response['message']['results'])} results.")
     # TODO: make this a background task
     background_tasks.add_task(merge_message, query_id, response, logger)
     return Response("Callback received.", 200)

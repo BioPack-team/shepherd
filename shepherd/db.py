@@ -15,9 +15,8 @@ from typing import Dict, Any
 from shepherd.config import settings
 from shepherd.merge_messages import merge_messages
 
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "supersecretpassw0rd")
 pool = AsyncConnectionPool(
-    conninfo=f"postgresql://postgres:{POSTGRES_PASSWORD}@{settings.postgres_host}:{settings.postgres_port}",
+    conninfo=f"postgresql://postgres:{settings.postgres_password}@{settings.postgres_host}:{settings.postgres_port}",
     timeout=5,
     max_size=20,
     max_idle=300,

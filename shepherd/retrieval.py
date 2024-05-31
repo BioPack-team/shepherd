@@ -26,13 +26,13 @@ async def send_query(query_id: str, query, semaphore, logger: logging.Logger):
                 )
                 response.raise_for_status()
     except httpx.ReadTimeout:
-        logger.error(f"Retriever took longer than {async_timeout} seconds to response.")
+        logger.error(f"Retriever ({settings.retriever_url}) took longer than {async_timeout} seconds to response.")
     except httpx.RequestError:
-        logger.error("Request error contacting Retriever.")
+        logger.error(f"Request error contacting Retriever ({settings.retriever_url}).")
     except httpx.HTTPStatusError as e:
-        logger.error(e.response.text)
+        logger.error(f"HTTP error contacting Retriever ({settings.retriever_url}): {e.response.text}")
     except Exception as e:
-        logger.error(e)
+        logger.error(f"Exception during retrieval: {e}")
 
 
 async def track_query(db_conn: Connection):
