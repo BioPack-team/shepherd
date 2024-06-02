@@ -122,21 +122,49 @@ def fill_templates(
     subject_curie: Optional[CURIE],
     object_curie: Optional[CURIE],
 ) -> list[Query]:
+    original_qedge = next(
+        iter(cast(QueryGraph, query_body.message.query_graph).edges.values())
+    )
     filled_templates: list[Query] = []
+
     for path in paths:
+
+        # Parse template
         with open(path, "r") as file:
             template = Query.parse_obj(json.load(file))
+
+        template_qgraph = cast(QueryGraph, template.message.query_graph)
+        # Fill in query nodes
         if subject_curie is not None:
-            cast(QueryGraph, template.message.query_graph).nodes[
-                "sn"
-            ].ids = HashableSequence(__root__=[subject_curie])
+            template_qgraph.nodes["creativeQuerySubject"].ids = HashableSequence(
+                __root__=[subject_curie]
+            )
         if object_curie is not None:
-            cast(QueryGraph, template.message.query_graph).nodes[
-                "on"
-            ].ids = HashableSequence(__root__=[object_curie])
+            template_qgraph.nodes["creativeQueryObject"].ids = HashableSequence(
+                __root__=[object_curie]
+            )
+
+        # Use original subject/object IDs
+        template_qgraph.nodes[original_qedge.subject] = template_qgraph.nodes.pop(
+            "creativeQuerySubject"
+        )
+        template_qgraph.nodes[original_qedge.object] = template_qgraph.nodes.pop(
+            "creativeQueryObject"
+        )
+        template.log_level = query_body.log_level
+
+        mapping = {
+            "creativeQuerySubject": original_qedge.subject,
+            "creativeQueryObject": original_qedge.object,
+        }
+
+        for edge in template_qgraph.edges.values():
+            if edge.subject in mapping:
+                edge.subject = mapping[edge.subject]
+            if edge.object in mapping:
+                edge.object = mapping[edge.object]
+
         filled_templates.append(template)
-        if query_body.log_level is not None:
-            template.log_level = query_body.log_level
 
     return filled_templates
 
@@ -172,5 +200,11 @@ def expand_bte_query(query_dict: dict[str, Any]) -> list[Any]:
         del template["message"]["knowledge_graph"]
         template["workflow"] = [{"id": "lookup"}]
         final_templates.append(template)
+
+    return final_templates
+    final_templates.append(template)
+
+    return final_templates
+    final_templates.append(template)
 
     return final_templates

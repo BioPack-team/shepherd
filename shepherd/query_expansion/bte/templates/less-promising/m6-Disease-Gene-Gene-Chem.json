@@ -2,7 +2,7 @@
     "message": {
         "query_graph": {
             "nodes": {
-                "on": {
+                "creativeQueryObject": {
                     "categories":["biolink:Disease"]
                },
                 "nA": {
@@ -13,13 +13,13 @@
                     "categories":["biolink:Gene"],
                     "is_set": true
                 },
-                "sn": {
+                "creativeQuerySubject": {
                     "categories":["biolink:ChemicalEntity"]
                 }
             },
             "edges": {
                 "eA": {
-                    "subject": "on",
+                    "subject": "creativeQueryObject",
                     "object": "nA",
                     "predicates": ["biolink:caused_by"]
                 },
@@ -30,7 +30,7 @@
                 },
                 "eC": {
                     "subject": "nB",
-                    "object": "sn",
+                    "object": "creativeQuerySubject",
                     "predicates": ["biolink:regulated_by", "biolink:affected_by"]
                 }
             }
