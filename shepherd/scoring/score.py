@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict, List
 
 from shepherd.scoring.aragorn.score import send_to_aragorn_ranker
+from shepherd.scoring.example.score import example_scoring
 
 
 async def score_query(
@@ -17,7 +18,7 @@ async def score_query(
     target = shepherd_options.get("target")
     match target:
         case "example":
-            response = message
+            response = await example_scoring(message)
         case "aragorn":
             response = await send_to_aragorn_ranker(message)
         case "bte":
