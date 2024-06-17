@@ -11,7 +11,7 @@ async def score_query(
     options: Dict[str, Any],
     shepherd_options: Dict[str, Any],
     logger: logging.Logger,
-) -> tuple[List[Any], Dict[str, Any]]:
+) -> dict[str, Any]:
     """Score the response."""
     response = None
     target = shepherd_options.get("target")
