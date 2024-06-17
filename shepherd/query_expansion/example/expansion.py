@@ -22,6 +22,9 @@ async def expand_example_query(query_body: dict[str, Any]) -> list[Any]:
     # Query expansion must return a list of valid TRAPI queries.
     # If no expansion could be done, an empty list may be returned.
     # Let's just turn the given query into a lookup for now:
-    q_edge = next(iter(query_body["message"]["query_graph"]["edges"]))
+    q_edge = next(iter(query_body["message"]["query_graph"]["edges"].values()))
     q_edge.pop('knowledge_type', None)
+    # These two are temporary because of retriever validator problems
+    del query_body["message"]["knowledge_graph"]
+    del query_body["workflow"]
     return [query_body]
