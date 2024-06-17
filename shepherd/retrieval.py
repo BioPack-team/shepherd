@@ -79,7 +79,7 @@ async def retrieve(
     inferred = examine_query(query)
     if inferred:
         # expand query to multiple subqueries, options
-        queries, retrieval_options = expand_query(query, shepherd_options)
+        queries, retrieval_options = await expand_query(query, shepherd_options)
     else:
         queries = [query]
     
