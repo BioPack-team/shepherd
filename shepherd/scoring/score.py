@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict, List
 
 from shepherd.scoring.aragorn.score import send_to_aragorn_ranker
+from shepherd.scoring.bte.score import score_bte
 
 
 async def score_query(
@@ -21,9 +22,7 @@ async def score_query(
         case "aragorn":
             response = await send_to_aragorn_ranker(message)
         case "bte":
-            # response = do_bte_scoring(message)
-            # TODO: revert back to BTE
-            response = await send_to_aragorn_ranker(message)
+            response = await score_bte(message)
         case _:
             response = message
 
