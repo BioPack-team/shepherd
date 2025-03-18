@@ -6,14 +6,14 @@ import logging
 from psycopg import Connection, sql
 from psycopg_pool import AsyncConnectionPool
 import os
-from reasoner_pydantic import (
-    Response as ReasonerResponse,
-)
+# from reasoner_pydantic import (
+#     Response as ReasonerResponse,
+# )
 import time
 from typing import Dict, Any
 
-from shepherd.config import settings
-from shepherd.merge_messages import merge_messages
+from shepherd_utils.config import settings
+# from shepherd.merge_messages import merge_messages
 
 pool = AsyncConnectionPool(
     conninfo=f"postgresql://postgres:{settings.postgres_password}@{settings.postgres_host}:{settings.postgres_port}",
@@ -28,16 +28,17 @@ pool = AsyncConnectionPool(
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
-    async with pool.connection() as conn:
-        await conn.execute("""
-CREATE TABLE IF NOT EXISTS shepherd_brain (
-    query_id varchar(255) PRIMARY KEY,
-    query bytea,
-    merged_message bytea,
-    num_queries int
-);
-""")
-        await conn.commit()
+#     async with pool.connection() as conn:
+#         await conn.execute("""
+# CREATE TABLE IF NOT EXISTS shepherd_brain (
+#     pk varchar(255) PRIMARY KEY,
+#     initial_message bytea,
+#     final_message bytea,
+#     ara_data TEXT,
+#     pipeline TEXT
+# );
+# """)
+#         await conn.commit()
 
 
 async def shutdown_db() -> None:
@@ -69,7 +70,7 @@ INSERT INTO shepherd_brain VALUES (
     gzip.compress(json.dumps(query).encode()),
     gzip.compress(json.dumps(query).encode()),
 ))
-    await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
+    # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
     await conn.commit()
     logger.info("Query saved successfully.")
     return conn, pool
@@ -133,9 +134,10 @@ async def get_message(
     query_id: str,
 ) -> Dict:
     """Get the final merged message from db."""
+    print(query_id)
     async with pool.connection(timeout=10) as conn:
         cursor = await conn.execute("""
-SELECT merged_message FROM shepherd_brain WHERE query_id = %s;
+SELECT final_message FROM shepherd_brain WHERE pk = %s;
 """, (query_id,))
         row = await cursor.fetchone()
         if row is None:

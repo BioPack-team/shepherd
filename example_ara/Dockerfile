@@ -1,3 +1,7 @@
+FROM ubuntu:latest AS utils
+
+COPY ./shepherd_utils ./shepherd_utils
+
 # Use RENCI python base image
 FROM ghcr.io/translatorsri/renci-python-image:3.11.5
 
@@ -5,6 +9,8 @@ FROM ghcr.io/translatorsri/renci-python-image:3.11.5
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
+ARG POSTGRES_PASSWORD=supersecretpassw0rd
+ENV POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 
 # set up requirements
 WORKDIR /app
@@ -13,18 +19,17 @@ WORKDIR /app
 RUN chmod -R 777 .
 
 # Install requirements
-ADD requirements.txt .
+COPY --from=utils ./shepherd_utils ./shepherd_utils
+RUN pip install ./shepherd_utils/
+
+COPY ./example_ara/requirements.txt .
 RUN pip install -r requirements.txt
 
 # switch to the non-root user (nru). defined in the base image
 USER nru
 
 # Copy in files
-ADD . .
-
-# Set up base for command and any variables
-# that shouldn't be modified
-ENTRYPOINT ["gunicorn", "shepherd.server:APP", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "0"]
+COPY ./example_ara ./
 
 # Variables that can be overriden
-CMD [ "--bind", "0.0.0.0:5439", "--workers", "4", "--threads", "3"]
+CMD ["python", "worker.py"]

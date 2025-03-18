@@ -6,8 +6,8 @@ import logging
 from psycopg import Connection
 from typing import Dict, Any
 
-from shepherd.config import settings
-from shepherd.db import get_message, update_query
+from shepherd_utils.config import settings
+from shepherd.server.db import get_message, update_query
 from shepherd.query_expansion.query_expansion import expand_query
 
 

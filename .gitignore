@@ -1,5 +1,5 @@
 # Project specific
-curls/
+scripts/
 pgdata/
 
 # Byte-compiled / optimized / DLL files

@@ -1,18 +1,24 @@
 [project]
-name = "shepherd"
+name = "shepherd_server"
 version = "0.0.1"
 authors = [
   { name = "Max Wang", email = "max@covar.com" }
 ]
 description = "A Translator ARA that aims to be modular in its query expansion and ranking, among other TRAPI workflow operations."
-readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
   "fastapi==0.110.1",
+  "gunicorn==22.0.0",
+  "httpx==0.27.0",
+  "python-dotenv==1.0.1",
+  "reasoner_pydantic==5.0.3",
   "uvicorn==0.29.0"
 ]
 
 [tool.setuptools]
 packages = [
-  "shepherd"
+  "shepherd_server"
 ]
+
+[tool.setuptools.package-data]
+shepherd_server = ["*.yaml"]

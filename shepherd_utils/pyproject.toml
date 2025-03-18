@@ -1,0 +1,24 @@
+[project]
+name = "shepherd_utils"
+version = "0.0.1"
+authors = [
+  { name = "Max Wang", email = "max@covar.com" }
+]
+description = "Utility functions for Shepherd modules."
+requires-python = ">=3.9"
+dependencies = [
+  "redis==5.2.1",
+  "reasoner_pydantic==5.0.3",
+  "psycopg[binary]==3.1.19",
+  "psycopg_pool==3.2.1",
+  "python-dotenv==1.0.1",
+  "pyyaml==6.0.1"
+]
+
+[tool.setuptools]
+packages = [
+  "shepherd_utils"
+]
+
+[tool.setuptools.package-data]
+shepherd_utils = ["*.yml"]

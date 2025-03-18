@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_password: str = "supersecretpassw0rd"
 
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str = "supersecretpassword"
+
     lookup_timeout: int = 240
     callback_host: AnyUrl = "http://127.0.0.1:5439"
     retriever_url: AnyUrl = "http://localhost:3000/v1/asyncquery"

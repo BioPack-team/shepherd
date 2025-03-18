@@ -12,18 +12,24 @@ from reasoner_pydantic import (
 )
 import uuid
 
-from shepherd.logger import QueryLogger, setup_logging
-from shepherd.db import initialize_db, shutdown_db, add_query, merge_message
-from shepherd.openapi import construct_open_api_schema
-
-from shepherd.retrieval import retrieve
-from shepherd.scoring.score import score_query
-
-from shepherd.operations import (
-    sort_results_score,
-    filter_results_top_n,
-    filter_kgraph_orphans,
+from shepherd_utils.logger import QueryLogger, setup_logging
+from shepherd_utils.db import (
+  initialize_db,
+  shutdown_db,
+  add_query,
+#   merge_message,
 )
+from shepherd_utils.broker import ara_queue
+from shepherd_server.shepherd_server.openapi import construct_open_api_schema
+
+# from shepherd.retrieval import retrieve
+# from shepherd.scoring.score import score_query
+
+# from shepherd.operations import (
+#     sort_results_score,
+#     filter_results_top_n,
+#     filter_kgraph_orphans,
+# )
 
 setup_logging()
 
@@ -53,21 +59,21 @@ APP.add_middleware(
 )
 
 
-supported_operations = {
-    "lookup": retrieve,
-    "score": score_query,
-    "sort_results_score": sort_results_score,
-    "filter_results_top_n": filter_results_top_n,
-    "filter_kgraph_orphans": filter_kgraph_orphans,
-}
+# supported_operations = {
+#     "lookup": retrieve,
+#     "score": score_query,
+#     "sort_results_score": sort_results_score,
+#     "filter_results_top_n": filter_results_top_n,
+#     "filter_kgraph_orphans": filter_kgraph_orphans,
+# }
 
-default_workflow = [
-    {"id": "lookup"},
-    {"id": "score"},
-    {"id": "sort_results_score", "parameters": {"ascending_or_descending": "descending"}},
-    {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
-    {"id": "filter_kgraph_orphans"},
-]
+# default_workflow = [
+#     {"id": "lookup"},
+#     {"id": "score"},
+#     {"id": "sort_results_score", "parameters": {"ascending_or_descending": "descending"}},
+#     {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
+#     {"id": "filter_kgraph_orphans"},
+# ]
 
 
 async def run_query(
@@ -86,46 +92,51 @@ async def run_query(
 
     # save query to db
     conn, pool = await add_query(query_id, query, logger)
+    await ara_queue(target, query_id)
 
     logger.info(f"Running query through {target}")
-    shepherd_options = {"target": target, "conn": conn}
+    # shepherd_options = {"target": target, "conn": conn}
     final_message = query
     workflow = query.get("workflow")
-    if workflow is None:
-        workflow = default_workflow
-    for operation in workflow:
-        if operation["id"] in supported_operations:
-            try:
-                logger.info(f"Running {operation['id']} operation...")
-                final_message = await supported_operations[operation["id"]](
-                    query_id,
-                    final_message,
-                    operation.get("parameters", {}),
-                    shepherd_options,
-                    logger,
-                )
-                logger.debug(f"Operation {operation['id']} gave back {len(final_message['message']['results'])} results")
-            except Exception as e:
-                logger.warning(f"Operation {operation['id']} failed! {e}")
-        else:
-            logger.warning(f"Operation {id} is not supported by Shepherd.")
+    # if workflow is None:
+    #     workflow = default_workflow
+    # for operation in workflow:
+    #     if operation["id"] in supported_operations:
+    #         try:
+    #             logger.info(f"Running {operation['id']} operation...")
+    #             final_message = await supported_operations[operation["id"]](
+    #                 query_id,
+    #                 final_message,
+    #                 operation.get("parameters", {}),
+    #                 shepherd_options,
+    #                 logger,
+    #             )
+    #             logger.debug(f"Operation {operation['id']} gave back {len(final_message['message']['results'])} results")
+    #         except Exception as e:
+    #             logger.warning(f"Operation {operation['id']} failed! {e}")
+    #     else:
+    #         logger.warning(f"Operation {id} is not supported by Shepherd.")
     # put the connection back into the pool. Don't want a dry pool.
     await pool.putconn(conn)
     final_message["logs"] = list(log_handler.contents())
     final_message["workflow"] = workflow
-    logger.info(f"Returning {len(final_message['message']['results'])} results.")
+    # logger.info(f"Returning {len(final_message['message']['results'])} results.")
     return final_message
 
 
-@APP.post("/{target}/query", response_model=ReasonerResponse)
+# @APP.post("/{target}/query", response_model=ReasonerResponse)
+@APP.post("/{target}/query")
 async def query(
     target: str,
-    query: Query,
+    # query: Query,
+    query: dict,
 ) -> dict:
     """Handle synchronous TRAPI queries."""
-    query_dict = query.dict()
+    # query_dict = query.dict()
+    query_dict = query
     return_message = await run_query(target, query_dict)
-    return return_message
+    # return return_message
+    return {}
 
 
 async def async_run_query(

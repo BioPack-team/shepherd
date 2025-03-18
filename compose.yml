@@ -1,30 +1,67 @@
 version: '3.7'
 
 services:
-  # shepherd:
-  #   image: shepherd
-  #   container_name: shepherd
-  #   build:
-  #     context: .
-  #   volumes:
-  #     - ./logs:/app/logs
-  #   ports:
-  #     - '5439:5439'
-  #   networks:
-  #     - shepherd
-  #   environment:
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-  postgres:
+  shepherd_server:
+    container_name: shepherd_server
+    build:
+      context: .
+      dockerfile: shepherd_server/Dockerfile
+      args:
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    ports:
+      - '5439:5439'
+    networks:
+      - shepherd
+  shepherd_db:
     image: postgres:bookworm
-    container_name: postgres
+    container_name: shepherd_db
+    build:
+      context: .
+      dockerfile: shepherd_db/Dockerfile
+      args:
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
     ports:
       - "5432:5432"
     restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
     networks:
       - shepherd
     volumes:
       - ./pgdata:/var/lib/postgresql/data
+  shepherd_broker:
+    container_name: shepherd_broker
+    build:
+      context: .
+      dockerfile: shepherd_broker/Dockerfile
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - shepherd
+    volumes:
+      - ./data:/data
+  shepherd_broker_insight:
+    image: redislabs/redisinsight:latest
+    container_name: redis-insight
+    ports:
+      - '8001:8001'
+    networks:
+      - shepherd
+    volumes:
+      - ./data:/data
+  
+
+  aragorn_worker:
+    container_name: aragorn_worker
+    build:
+      context: .
+      dockerfile: aragorn/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env
+    networks:
+      - shepherd
 networks:
   shepherd:

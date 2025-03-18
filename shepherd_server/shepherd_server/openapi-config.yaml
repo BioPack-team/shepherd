@@ -16,8 +16,7 @@ x-translator:
   biolink-version: 4.1.6
   component: ARA
   team:
-  - Ranking Agent
-  - Biothings Explorer
+  - DOGSLED
   infores: infores:shepherd
 x-trapi:
   version: 1.5.0

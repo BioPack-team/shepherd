@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import yaml
 
-from shepherd.config import settings
+from shepherd_utils.config import settings
 
 
 def construct_open_api_schema(app, description, infores=None):
@@ -12,10 +12,9 @@ def construct_open_api_schema(app, description, infores=None):
 
     :return:
     """
-
     open_api_schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
 
-    open_api_extended_file_path = os.path.join(Path(os.path.dirname(__file__)).parent, "openapi-config.yaml")
+    open_api_extended_file_path = os.path.join(Path(os.path.dirname(__file__)), "openapi-config.yaml")
 
     with open(open_api_extended_file_path) as open_api_file:
         open_api_extended_spec = yaml.load(open_api_file, Loader=yaml.SafeLoader)
@@ -66,5 +65,5 @@ def construct_open_api_schema(app, description, infores=None):
                 s["x-location"] = settings.server_location
 
         open_api_schema["servers"] = servers_conf
-
+    
     return open_api_schema
