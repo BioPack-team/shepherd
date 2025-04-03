@@ -15,11 +15,12 @@ WORKDIR /app
 RUN chmod -R 777 .
 
 # Install requirements
+ADD shepherd_utils/ ./shepherd_utils
+RUN pip install ./shepherd_utils/
+
 ADD shepherd_server/ ./shepherd_server
 RUN pip install -e ./shepherd_server
 
-ADD shepherd_utils/ ./shepherd_utils
-RUN pip install ./shepherd_utils/
 
 # switch to the non-root user (nru). defined in the base image
 USER nru

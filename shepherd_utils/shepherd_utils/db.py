@@ -5,40 +5,39 @@ import json
 import logging
 from psycopg import Connection, sql
 from psycopg_pool import AsyncConnectionPool
+import redis.asyncio as aioredis
 import os
 # from reasoner_pydantic import (
 #     Response as ReasonerResponse,
 # )
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List, Union
 
 from shepherd_utils.config import settings
 # from shepherd.merge_messages import merge_messages
 
 pool = AsyncConnectionPool(
     conninfo=f"postgresql://postgres:{settings.postgres_password}@{settings.postgres_host}:{settings.postgres_port}",
-    timeout=5,
+    timeout=60,
     max_size=20,
     max_idle=300,
     # initialize with the connection closed
     open=False,
 )
 
+data_db_pool = aioredis.BlockingConnectionPool(
+    host=settings.redis_host,
+    port=settings.redis_port,
+    db=1,
+    password=settings.redis_password,
+    max_connections=10,
+    timeout=600,
+)
+
 
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
-#     async with pool.connection() as conn:
-#         await conn.execute("""
-# CREATE TABLE IF NOT EXISTS shepherd_brain (
-#     pk varchar(255) PRIMARY KEY,
-#     initial_message bytea,
-#     final_message bytea,
-#     ara_data TEXT,
-#     pipeline TEXT
-# );
-# """)
-#         await conn.commit()
 
 
 async def shutdown_db() -> None:
@@ -48,9 +47,11 @@ async def shutdown_db() -> None:
 
 async def add_query(
     query_id: str,
+    response_id: str,
     query: dict[str, Any],
+    callback_url: Union[str, None],
     logger: logging.Logger,
-) -> tuple[Connection, AsyncConnectionPool]:
+):
     """
     Add an initial query to the db.
 
@@ -60,93 +61,198 @@ async def add_query(
     Returns:
         query_id: str
     """
-    conn = await pool.getconn(timeout=10)
-    await conn.execute("""
-INSERT INTO shepherd_brain VALUES (
-    %s, %s, %s
-)
-""", (
-    query_id,
-    gzip.compress(json.dumps(query).encode()),
-    gzip.compress(json.dumps(query).encode()),
-))
-    # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
-    await conn.commit()
-    logger.info("Query saved successfully.")
-    return conn, pool
+    try:
+        client = await aioredis.Redis(
+            connection_pool=data_db_pool,
+        )
+        # print(f"Putting {query_id} on {ara_target} stream")
+        await client.set(query_id, gzip.compress(json.dumps(query).encode()))
+        await client.set(response_id, gzip.compress(json.dumps(query).encode()))
+        await client.close()
+    except Exception as e:
+        # failed to put message in db
+        # TODO: do something more severe
+        logger.error(f"Failed to save initial query or response: {e}")
+        pass
+    try:
+        async with pool.connection(60) as conn:
+            await conn.execute("""
+            INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status) VALUES (
+                %s, NOW(), %s, %s, %s, %s
+            )
+            """, (
+                query_id,
+                response_id,
+                callback_url,
+                "Queued",
+                "OK"
+            ))
+            # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
+            await conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to save initial query state to db: {e}")
 
 
-async def update_query(
-    query_id: str,
-    num_queries: int,
-) -> None:
+async def save_callback_response(
+    callback_id: str,
+    response: dict[str, Any],
+    logger: logging.Logger,
+):
     """
-    Update num_queries of query.
+    Add a callback response to the db.
 
     Args:
-        query_id (str): Unique query id
-        num_queries (int): how many expected result callbacks there are
+        callback_id (str): UID for a callback response
+        response (dict[str, Any]): A TRAPI message
     """
-    conn = await pool.getconn(timeout=10)
-    await conn.execute("""
-UPDATE shepherd_brain SET num_queries = %s WHERE query_id = %s;
-""", (num_queries, query_id,))
-    await conn.commit()
+    try:
+        client = await aioredis.Redis(
+            connection_pool=data_db_pool,
+        )
+        # print(f"Putting {query_id} on {ara_target} stream")
+        await client.set(callback_id, gzip.compress(json.dumps(response).encode()))
+        await client.close()
+    except Exception as e:
+        # failed to put message in db
+        # TODO: do something more severe
+        logger.error(f"Failed to put it on there {e}")
+        pass
 
 
-async def merge_message(
+async def add_callback_id(
     query_id: str,
-    response: Dict[str, Any],
+    callback_id: str,
     logger: logging.Logger,
-) -> None:
-    """Merge an incoming message with the existing full message."""
-    # retrieve query from db
-    # put a lock on the row
-    # message merge
-    # put merged message back into db
-    async with pool.connection(timeout=10) as conn:
-        # FOR UPDATE puts a lock on the row until the transaction is completed
-        cursor = await conn.execute("""
-SELECT query, merged_message, num_queries FROM shepherd_brain WHERE query_id = %s FOR UPDATE;
-""", (query_id,))
-        row = await cursor.fetchone()
-        if row is None:
-            raise Exception(f"Query with id {query_id} not found in database.")
-        merged_message = json.loads(gzip.decompress(row[1]))
-        original_qgraph: Dict = json.loads(gzip.decompress(row[0]))["message"]["query_graph"]
-        lookup_qgraph = copy.deepcopy(original_qgraph)
-        for qedge_id in lookup_qgraph["edges"]:
-            del lookup_qgraph["edges"][qedge_id]["knowledge_type"]
-        start = time.time()
-        logger.debug(f"Merging new response message")
-        # do message merging
-        merged_message = merge_messages(original_qgraph, lookup_qgraph, [merged_message, response])
-        stop = time.time()
-        logger.debug(f"Message merging took {stop - start} seconds")
-        await conn.execute("""
-UPDATE shepherd_brain SET merged_message = %s, num_queries = %s WHERE query_id = %s;
-""", (gzip.compress(json.dumps(merged_message).encode()), row[2] - 1, query_id,))
-        await conn.execute(sql.SQL("NOTIFY {}, {};").format(sql.Identifier(query_id), 'done' if row[2] - 1 == 0 else 'not done'))
-        await conn.commit()
+):
+    """Add a callback->query mapping."""
+    try:
+        async with pool.connection(60) as conn:
+            await conn.execute("""
+            INSERT INTO callbacks (query_id, callback_id) VALUES (
+                %s, %s
+            )
+            """, (
+                query_id,
+                callback_id,
+            ))
+            await conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to save callback: {e}")
+
+
+async def remove_callback_id(
+    callback_id: str,
+    logger: logging.Logger,
+):
+    """Once a callback has been processed, remove it."""
+    try:
+        async with pool.connection(60) as conn:
+            await conn.execute("""
+            DELETE FROM callbacks WHERE callback_id = %s
+            """, (
+                callback_id,
+            ))
+            await conn.commit()
+    except Exception as e:
+        logger.error("Failed to remove callback after processing.")
+
+
+async def get_running_callbacks(
+    query_id: str,
+    logger: logging.Logger,
+) -> List[str]:
+    """Get all currently running callbacks for a single query."""
+    running_lookups = []
+    try:
+        async with pool.connection(60) as conn:
+            cursor = await conn.execute("""
+            SELECT callback_id FROM callbacks WHERE query_id = %s
+            """, (
+                query_id,
+            ))
+            rows = await cursor.fetchall()
+            running_lookups = rows
+    except Exception as e:
+        logger.error(f"Failed to get running lookups: {e}")
+    return running_lookups
+
+
+async def get_callback_query_id(
+    callback_id: str,
+    logger: logging.Logger,
+) -> Union[str, None]:
+    """Given a callback id, get the associated query id."""
+    query_id = None
+    try:
+        async with pool.connection(60) as conn:
+            cursor = await conn.execute("""
+            SELECT query_id FROM callbacks WHERE callback_id = %s            
+            """, (
+                callback_id,
+            ))
+            row = await cursor.fetchone()
+            if row is not None:
+                query_id = row[0]
+    except Exception as e:
+        logger.error(f"Failed to get a query id from callback: {e}")
+    return query_id
 
 
 async def get_message(
-    query_id: str,
+    message_id: str,
 ) -> Dict:
-    """Get the final merged message from db."""
-    print(query_id)
-    async with pool.connection(timeout=10) as conn:
-        cursor = await conn.execute("""
-SELECT final_message FROM shepherd_brain WHERE pk = %s;
-""", (query_id,))
-        row = await cursor.fetchone()
-        if row is None:
-            raise Exception(f"Query with id {query_id} was not found in the database.")
-        await conn.commit()
-        return json.loads(gzip.decompress(row[0]))
+    """Get the message from db."""
+    message = {}
+    try:
+        client = await aioredis.Redis(
+            connection_pool=data_db_pool,
+        )
+        # print(f"Putting {query_id} on {ara_target} stream")
+        message = await client.get(message_id)
+        await client.close()
+        if message is not None:
+            message = json.loads(gzip.decompress(message))
+    except Exception as e:
+        # failed to put message in db
+        # TODO: do something more severe
+        pass
+    return message
 
 
-# async def clear_db() -> None:
-#     """Clear whole db."""
-#     async with pool.connection() as conn:
-#         await conn.execute()
+async def get_query_state(
+    query_id: str,
+    logger: logging.Logger,
+):
+    """Get the query state."""
+    query_state = None
+    try:
+        async with pool.connection(60) as conn:
+            cursor = await conn.execute("""
+            SELECT * FROM shepherd_brain WHERE qid = %s
+            """, (
+                query_id,
+            ))
+            row = await cursor.fetchone()
+            query_state = row
+    except Exception as e:
+        logger.error(f"Failed to get query state: {e}")
+    return query_state
+
+
+async def set_query_completed(
+    query_id: str,
+    status: str,
+    logger: logging.Logger,
+):
+    """This query is done."""
+    try:
+        async with pool.connection(60) as conn:
+            await conn.execute("""
+            UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s
+            """, (
+                status,
+                query_id,
+            ))
+            await conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to successfully complete query in db: {e}")

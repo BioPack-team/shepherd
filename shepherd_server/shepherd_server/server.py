@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import logging
 import pydantic
+from typing import Tuple, Optional
 from reasoner_pydantic import (
     Query,
     AsyncQuery,
@@ -17,9 +18,12 @@ from shepherd_utils.db import (
   initialize_db,
   shutdown_db,
   add_query,
+  save_callback_response,
+  get_callback_query_id,
+  get_message,
 #   merge_message,
 )
-from shepherd_utils.broker import ara_queue
+from shepherd_utils.broker import add_task
 from shepherd_server.shepherd_server.openapi import construct_open_api_schema
 
 # from shepherd.retrieval import retrieve
@@ -79,9 +83,11 @@ APP.add_middleware(
 async def run_query(
     target: str,
     query: dict,
-) -> dict:
+    callback_url: Optional[str] = None,
+) -> Tuple[str, str, logging.Logger]:
     """Run a single query."""
     query_id = str(uuid.uuid4())[:8]
+    response_id = str(uuid.uuid4())[:8]
     # Set up logger
     log_level = query.get("log_level") or "INFO"
     level_number = logging._nameToLevel[log_level]
@@ -91,37 +97,14 @@ async def run_query(
     logger.addHandler(log_handler)
 
     # save query to db
-    conn, pool = await add_query(query_id, query, logger)
-    await ara_queue(target, query_id)
+    try:
+        await add_query(query_id, response_id, query, callback_url, logger)
+        await add_task(target, {"query_id": query_id})
+    except Exception as e:
+        logger.error(f"Failed to save query: {e}")
+        # TODO: set query to failed state
 
-    logger.info(f"Running query through {target}")
-    # shepherd_options = {"target": target, "conn": conn}
-    final_message = query
-    workflow = query.get("workflow")
-    # if workflow is None:
-    #     workflow = default_workflow
-    # for operation in workflow:
-    #     if operation["id"] in supported_operations:
-    #         try:
-    #             logger.info(f"Running {operation['id']} operation...")
-    #             final_message = await supported_operations[operation["id"]](
-    #                 query_id,
-    #                 final_message,
-    #                 operation.get("parameters", {}),
-    #                 shepherd_options,
-    #                 logger,
-    #             )
-    #             logger.debug(f"Operation {operation['id']} gave back {len(final_message['message']['results'])} results")
-    #         except Exception as e:
-    #             logger.warning(f"Operation {operation['id']} failed! {e}")
-    #     else:
-    #         logger.warning(f"Operation {id} is not supported by Shepherd.")
-    # put the connection back into the pool. Don't want a dry pool.
-    await pool.putconn(conn)
-    final_message["logs"] = list(log_handler.contents())
-    final_message["workflow"] = workflow
-    # logger.info(f"Returning {len(final_message['message']['results'])} results.")
-    return final_message
+    return query_id, response_id, logger
 
 
 # @APP.post("/{target}/query", response_model=ReasonerResponse)
@@ -134,25 +117,14 @@ async def query(
     """Handle synchronous TRAPI queries."""
     # query_dict = query.dict()
     query_dict = query
-    return_message = await run_query(target, query_dict)
-    # return return_message
+    query_id, target_id, logger = await run_query(target, query_dict)
+    # TODO: poll for completed status
+    # TODO: grab final response
     return {}
-
-
-async def async_run_query(
-    target: str,
-    query_dict: dict,
-    callback_url: str,
-) -> None:
-    """Run a single async query."""
-    return_message = await run_query(target, query_dict)
-    async with httpx.AsyncClient(timeout=600) as client:
-        await client.post(callback_url, json=return_message)
 
 
 @APP.post("/{target}/asyncquery", response_model=ReasonerResponse)
 async def async_query(
-    background_tasks: BackgroundTasks,
     target: str,
     query: AsyncQuery,
 ) -> Response:
@@ -161,14 +133,13 @@ async def async_query(
     callback_url = query_dict.get("callback")
     if callback_url is None:
         return Response("Missing callback url.", 422)
-    background_tasks.add_task(async_run_query, target, query_dict, callback_url)
-    return Response("Query received.", 200)
+    query_id, _, _ = await run_query(target, query_dict, callback_url)
+    return Response(f"Query {query_id} received.", 200)
 
 
-@APP.post("/callback/{query_id}", status_code=200, include_in_schema=False)
+@APP.post("/callback/{callback_id}", status_code=200, include_in_schema=False)
 async def callback(
-    background_tasks: BackgroundTasks,
-    query_id: str,
+    callback_id: str,
     response: dict,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
@@ -176,27 +147,37 @@ async def callback(
     log_level = response.get("log_level") or "INFO"
     level_number = logging._nameToLevel[log_level]
     log_handler = QueryLogger().log_handler
-    logger = logging.getLogger(f"shepherd.{query_id}")
+    logger = logging.getLogger(f"shepherd.{callback_id}")
     logger.setLevel(level_number)
     logger.addHandler(log_handler)
-    try:
-        ReasonerResponse.parse_obj(response)
-    except pydantic.ValidationError:
-        logger.error("Received a non TRAPI-compliant callback response.")
-        response = {
-            "message": {
-                "query_graph": {
-                    "nodes": {},
-                    "edges": {},
-                },
-                "knowledge_graph": None,
-                "results": None,
-                "auxiliary_graphs": None,
-            }
-        }
+    # try:
+    #     ReasonerResponse.parse_obj(response)
+    # except pydantic.ValidationError as e:
+    #     logger.error(f"Received a non TRAPI-compliant callback response: {e}")
+    #     response = {
+    #         "message": {
+    #             "query_graph": {
+    #                 "nodes": {},
+    #                 "edges": {},
+    #             },
+    #             "knowledge_graph": {
+    #                 "nodes": {},
+    #                 "edges": {},
+    #             },
+    #             "results": [],
+    #             "auxiliary_graphs": {},
+    #         }
+    #     }
     logger.info(f"Got back {len(response['message']['results'])} results.")
-    # TODO: make this a background task
-    background_tasks.add_task(merge_message, query_id, response, logger)
+    # get associated query id for this callback
+    query_id = await get_callback_query_id(callback_id, logger)
+    logger.info(f"Got original query id: {query_id}")
+    # save callback to redis
+    logger.info(f"Saving callback {callback_id} to redis")
+    await save_callback_response(callback_id, response, logger)
+    logger.info(f"Saved callback {callback_id} to redis")
+    # add new task to merge callback response into original message
+    await add_task("merge_message", {"query_id": query_id, "callback_id": callback_id})
     return Response("Callback received.", 200)
 
 
@@ -211,3 +192,14 @@ async def query_status(
         "description": "Query is currently waiting to be run.",
         "logs": [],
     }
+
+
+@APP.get("/response/{query_id}", status_code=200)
+async def get_query_response(
+    query_id: str,
+):
+    """Get a query response."""
+    response = await get_message(query_id)
+    if response is None:
+        return 404
+    return response

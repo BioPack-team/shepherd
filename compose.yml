@@ -53,15 +53,82 @@ services:
       - ./data:/data
   
 
-  aragorn_worker:
-    container_name: aragorn_worker
+  example_worker:
+    container_name: example_ara
     build:
       context: .
-      dockerfile: aragorn/Dockerfile
+      dockerfile: example_ara/Dockerfile
     restart: unless-stopped
     volumes:
+      - ./logs:/app/logs
       - ./.env:/app/.env
     networks:
       - shepherd
+  example_lookup:
+    container_name: example_lookup
+    build:
+      context: .
+      dockerfile: example_lookup/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  example_score:
+    container_name: example_score
+    build:
+      context: .
+      dockerfile: example_score/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  merge_message:
+    container_name: merge_message
+    build:
+      context: .
+      dockerfile: merge_message/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  sort_results_score:
+    container_name: sort_results_score
+    build:
+      context: .
+      dockerfile: sort_results_score/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  finish_query:
+    container_name: finish_query
+    build:
+      context: .
+      dockerfile: finish_query/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  # aragorn_worker:
+  #   container_name: aragorn_worker
+  #   build:
+  #     context: .
+  #     dockerfile: aragorn/Dockerfile
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./logs:/app/logs
+  #     - ./.env:/app/.env
+  #   networks:
+  #     - shepherd
 networks:
   shepherd:
