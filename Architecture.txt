@@ -1,0 +1,20 @@
+# Shepherd Workflow
+
+- The ARS sends queries to Shepherd, one query for each ARA, and the endpoint is /{ara_target}/asyncquery (or /{ara_target}/query for synchronous queries)
+- These queries go to the FastAPI server
+  - Each query will be received, unique query and response ids are created
+  - Query state is saved in PostgreSQL
+  - The original query graph and response (that will be modified during querying) are saved in Redis
+  - A message is published to Redis Streams (of the form {ara}_{worker_type/operation}) for other workers to pick up and actually run the query
+- All the workers are sitting there, polling for new tasks on the Redis Streams
+  - Once a new task is retrieved, the task has the query/response id and the worker grabs the necessary messages from Redis (potentially putting a LOCK on the key so other duplicate workers can't modify it at the same time)
+  - The worker processes its task
+  - The worker updates the response in Redis when necessary (and releases the LOCK)
+  - The worker publishes a message to Redis Streams (of the form {ara}_{worker_type/operation}) for other workers to pick up
+- When the query has gone through all the requested workflow operations, a final wrap-up worker will pick up the task
+  - Query state is updated in PostgreSQL
+  - If an async_query, this worker will send the query to the specified callback
+- If a synchronous query, the server will poll PostgreSQL while holding open the HTTP connection
+  - It will wait for a completed query status in PostgreSQL
+  - It will grab the final response from Redis
+  - It will send the response back over the open HTTP connection

@@ -25,16 +25,16 @@ lock_redis_pool = aioredis.BlockingConnectionPool(
 )
 
 
-async def create_consumer_group(redis_client: aioredis.Redis, stream, group, logger):
+async def create_consumer_group(redis_client: aioredis.Redis, stream, group, logger: logging.Logger):
     """Ensure a redis consumer group exists."""
     try:
-        await redis_client.xgroup_create(stream, group, "$", mkstream=True)
+        await redis_client.xgroup_create(stream, group, "0", mkstream=True)
     except Exception as e:
-        # logger.info(f"Failed to create consumer group: {e}")
+        logger.warning(f"Failed to create consumer group: {e}")
         pass
 
 
-async def add_task(queue, payload):
+async def add_task(queue, payload, logger: logging.Logger):
     """Put a payload on the queue for a worker to pick up."""
     try:
         client = await aioredis.Redis(
@@ -46,11 +46,11 @@ async def add_task(queue, payload):
     except Exception as e:
         # failed to put message on ara stream
         # TODO: do something more severe
-        print(f"Failed to put new task on the queue: {e}, inputs: {queue}, {payload}")
+        logger.error(f"Failed to put new task on the queue: {e}, inputs: {queue}, {payload}")
         pass
 
 
-async def get_task(stream, group, consumer, logger):
+async def get_task(stream, group, consumer, logger: logging.Logger):
     """Get an ara task from the queue."""
     try:
         client = await aioredis.Redis(
@@ -70,9 +70,10 @@ async def get_task(stream, group, consumer, logger):
     except Exception as e:
         logger.info(f"Failed to get task for {stream}, {e}")
         pass
+    return None
 
 
-async def mark_task_as_complete(stream, group, msg_id, logger, retries=0):
+async def mark_task_as_complete(stream, group, msg_id, logger: logging.Logger, retries=0):
     """Send ACK message back to queue."""
     try:
         client = await aioredis.Redis(

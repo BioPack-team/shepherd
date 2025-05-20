@@ -1,17 +1,14 @@
 """Postgres DB Manager."""
-import copy
-import gzip
-import json
 import logging
-from psycopg import Connection, sql
 from psycopg_pool import AsyncConnectionPool
 import redis.asyncio as aioredis
-import os
+import orjson
 # from reasoner_pydantic import (
 #     Response as ReasonerResponse,
 # )
 import time
 from typing import Dict, Any, List, Union
+import zstandard
 
 from shepherd_utils.config import settings
 # from shepherd.merge_messages import merge_messages
@@ -61,13 +58,14 @@ async def add_query(
     Returns:
         query_id: str
     """
+    start = time.time()
     try:
         client = await aioredis.Redis(
             connection_pool=data_db_pool,
         )
         # print(f"Putting {query_id} on {ara_target} stream")
-        await client.set(query_id, gzip.compress(json.dumps(query).encode()))
-        await client.set(response_id, gzip.compress(json.dumps(query).encode()))
+        await client.set(query_id, zstandard.compress(orjson.dumps(query)))
+        await client.set(response_id, zstandard.compress(orjson.dumps(query)))
         await client.close()
     except Exception as e:
         # failed to put message in db
@@ -84,13 +82,14 @@ async def add_query(
                 query_id,
                 response_id,
                 callback_url,
-                "Queued",
+                "QUEUED",
                 "OK"
             ))
             # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
             await conn.commit()
     except Exception as e:
         logger.error(f"Failed to save initial query state to db: {e}")
+    logger.debug(f"Adding query took {time.time() - start} seconds")
 
 
 async def save_callback_response(
@@ -105,18 +104,23 @@ async def save_callback_response(
         callback_id (str): UID for a callback response
         response (dict[str, Any]): A TRAPI message
     """
+    start = time.time()
     try:
+        start_comp = time.time()
+        compressed = zstandard.compress(orjson.dumps(response))
+        logger.info(f"Compression took {time.time() - start_comp}")
         client = await aioredis.Redis(
             connection_pool=data_db_pool,
         )
         # print(f"Putting {query_id} on {ara_target} stream")
-        await client.set(callback_id, gzip.compress(json.dumps(response).encode()))
-        await client.close()
+        await client.set(callback_id, compressed)
+        await client.aclose()
     except Exception as e:
         # failed to put message in db
         # TODO: do something more severe
         logger.error(f"Failed to put it on there {e}")
         pass
+    logger.debug(f"Saving message took {time.time() - start} seconds")
 
 
 async def add_callback_id(
@@ -200,9 +204,11 @@ async def get_callback_query_id(
 
 async def get_message(
     message_id: str,
+    logger: logging.Logger,
 ) -> Dict:
     """Get the message from db."""
     message = {}
+    start = time.time()
     try:
         client = await aioredis.Redis(
             connection_pool=data_db_pool,
@@ -211,11 +217,14 @@ async def get_message(
         message = await client.get(message_id)
         await client.close()
         if message is not None:
-            message = json.loads(gzip.decompress(message))
+            start_decomp = time.time()
+            message = orjson.loads(zstandard.decompress(message))
+            logger.debug(f"Decompression took {time.time() - start_decomp}")
     except Exception as e:
-        # failed to put message in db
+        # failed to get message from db
         # TODO: do something more severe
         pass
+    logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
 
 

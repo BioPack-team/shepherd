@@ -4,17 +4,16 @@ import logging
 import uuid
 from collections import defaultdict
 import json
+import time
 from typing import Union, Dict, Any, List
 
 from reasoner_pydantic import (
     KnowledgeGraph,
     Response as PDResponse
 )
-from shepherd_utils.broker import get_task, mark_task_as_complete, acquire_lock, remove_lock
-from shepherd_utils.logger import QueryLogger, setup_logging
-from shepherd_utils.db import get_message, initialize_db, get_query_state, save_callback_response, remove_callback_id
-
-setup_logging()
+from shepherd_utils.broker import mark_task_as_complete, acquire_lock, remove_lock
+from shepherd_utils.db import get_message, get_query_state, save_callback_response, remove_callback_id
+from shepherd_utils.shared import task_decorator
 
 # Queue name
 STREAM = "merge_message"
@@ -261,11 +260,11 @@ def merge_messages(
     result_messages: List[Dict[str, Any]]
 ):
     pydantic_kgraph = KnowledgeGraph.parse_obj({"nodes": {}, "edges": {}})
-    for rm in result_messages:
+    for result_message in result_messages:
         pydantic_kgraph.update(
             KnowledgeGraph.parse_obj(
-                rm["message"]["knowledge_graph"]
-                if rm["message"]["knowledge_graph"] is not None
+                result_message["message"]["knowledge_graph"]
+                if result_message["message"]["knowledge_graph"] is not None
                 else {"nodes": {}, "edges": {}}
             )
         )
@@ -281,11 +280,11 @@ def merge_messages(
     }).dict(exclude_none=True)
     result["message"]["query_graph"] = original_query_graph
     result["message"]["knowledge_graph"] = pydantic_kgraph.dict()
-    for rm in result_messages:
-        if "auxiliary_graphs" in rm["message"]:
+    for result_message in result_messages:
+        if "auxiliary_graphs" in result_message["message"]:
             result["message"]["auxiliary_graphs"].update(
-                rm["message"]["auxiliary_graphs"]
-                if rm["message"]["auxiliary_graphs"] is not None
+                result_message["message"]["auxiliary_graphs"]
+                if result_message["message"]["auxiliary_graphs"] is not None
                 else {}
             )
     # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
@@ -301,22 +300,25 @@ def merge_messages(
     return mergedresults
 
 
-async def merge_message(task, logger):
+@task_decorator(STREAM, GROUP, CONSUMER)
+async def merge_message(task, logger: logging.Logger):
+    start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     callback_id = task[1]["callback_id"]
 
-    original_query = await get_message(query_id)
+    original_query = await get_message(query_id, logger)
     if original_query is None:
         raise Exception("Failed to get original query")
     original_query_graph = original_query["message"]["query_graph"]
-    lookup_query_graph = await get_message(f"{callback_id}_query_graph")
-    callback_response = await get_message(callback_id)
+    lookup_query_graph = await get_message(f"{callback_id}_query_graph", logger)
+    callback_response = await get_message(callback_id, logger)
     query_state = await get_query_state(query_id, logger)
     response_id = query_state[7]
     locked = await acquire_lock(response_id, CONSUMER, logger)
     if locked:
-        original_response = await get_message(response_id)
+        lock_time = time.time()
+        original_response = await get_message(response_id, logger)
         # do message merging
         # gonna stub this for now
         # merged_message = callback_response
@@ -324,6 +326,7 @@ async def merge_message(task, logger):
         merged_message = merge_messages(original_query_graph, lookup_query_graph, [original_response, callback_response])
         # save merged message back to db
         await save_callback_response(response_id, merged_message, logger)
+        logger.info(f"Kept the lock for {time.time() - lock_time} seconds")
         # remove lock so others can now modify message
         await remove_lock(response_id, CONSUMER, logger)
         await remove_callback_id(callback_id, logger)
@@ -331,31 +334,8 @@ async def merge_message(task, logger):
         logger.error("We're in some sort of hung state and couldn't get a lock on the response.")
 
     await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-    # logger.info(f"Finished task {task[0]}")
-
-
-async def poll_for_tasks():
-    """Continually monitor the ara queue for tasks."""
-    # Set up logger
-    level_number = logging._nameToLevel["INFO"]
-    log_handler = QueryLogger().log_handler
-    logger = logging.getLogger(f"shepherd.{STREAM}.{CONSUMER}")
-    logger.setLevel(level_number)
-    logger.addHandler(log_handler)
-    # initialize opens the db connection
-    await initialize_db()
-    # continuously poll the broker for new tasks
-    while True:
-        # get a new task for the given target
-        ara_task = await get_task(STREAM, GROUP, CONSUMER, logger)
-        if ara_task is not None:
-            logger.info(f"Doing task {ara_task}")
-            # send the task to a async background task
-            # this could be async, multi-threaded, etc.
-            asyncio.create_task(merge_message(ara_task, logger))
-        else:
-            await asyncio.sleep(5)
+    logger.info(f"[{task[0]}] Finished task {task[0]} in {time.time() - start}")
 
 
 if __name__ == "__main__":
-    asyncio.run(poll_for_tasks())
+    asyncio.run(merge_message())

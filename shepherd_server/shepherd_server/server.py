@@ -1,10 +1,10 @@
 """Shepherd ARA."""
+import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, Response
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
 import logging
-import pydantic
+import time
 from typing import Tuple, Optional
 from reasoner_pydantic import (
     Query,
@@ -15,25 +15,16 @@ import uuid
 
 from shepherd_utils.logger import QueryLogger, setup_logging
 from shepherd_utils.db import (
-  initialize_db,
-  shutdown_db,
-  add_query,
-  save_callback_response,
-  get_callback_query_id,
-  get_message,
-#   merge_message,
+    initialize_db,
+    shutdown_db,
+    add_query,
+    save_callback_response,
+    get_callback_query_id,
+    get_message,
+    get_query_state,
 )
 from shepherd_utils.broker import add_task
 from shepherd_server.shepherd_server.openapi import construct_open_api_schema
-
-# from shepherd.retrieval import retrieve
-# from shepherd.scoring.score import score_query
-
-# from shepherd.operations import (
-#     sort_results_score,
-#     filter_results_top_n,
-#     filter_kgraph_orphans,
-# )
 
 setup_logging()
 
@@ -99,7 +90,7 @@ async def run_query(
     # save query to db
     try:
         await add_query(query_id, response_id, query, callback_url, logger)
-        await add_task(target, {"query_id": query_id})
+        await add_task(target, {"query_id": query_id}, logger)
     except Exception as e:
         logger.error(f"Failed to save query: {e}")
         # TODO: set query to failed state
@@ -117,10 +108,34 @@ async def query(
     """Handle synchronous TRAPI queries."""
     # query_dict = query.dict()
     query_dict = query
-    query_id, target_id, logger = await run_query(target, query_dict)
-    # TODO: poll for completed status
-    # TODO: grab final response
-    return {}
+    query_id, response_id, logger = await run_query(target, query_dict)
+    start = time.time()
+    now = start
+    while now <= start + 360:
+        now = time.time()
+        # poll for completed status
+        query_state = await get_query_state(query_id, logger)
+        # logger.info(query_state)
+        state = query_state[9]
+        if state == "COMPLETED":
+            # grab final response
+            response_id = query_state[7]
+            response = await get_message(response_id, logger)
+            if response is None:
+                return {
+                    "status": "ERROR",
+                    "description": "Unable to get response"
+                }
+            return response
+        else:
+            await asyncio.sleep(5)
+    
+    logger.error("Query timed out")
+    return {
+        "status": "TIMEOUT",
+        "description": "Query timeout",
+    }
+    
 
 
 @APP.post("/{target}/asyncquery", response_model=ReasonerResponse)
@@ -150,6 +165,16 @@ async def callback(
     logger = logging.getLogger(f"shepherd.{callback_id}")
     logger.setLevel(level_number)
     logger.addHandler(log_handler)
+    # logger.info(response)
+    results = response["message"].get("results")
+    if results is None:
+        response["message"]["results"] = []
+    kgraph = response["message"].get("knowledge_graph")
+    if kgraph is None:
+        response["message"]["knowledge_graph"] = {
+            "nodes": {},
+            "edges": {},
+        }
     # try:
     #     ReasonerResponse.parse_obj(response)
     # except pydantic.ValidationError as e:
@@ -168,6 +193,7 @@ async def callback(
     #             "auxiliary_graphs": {},
     #         }
     #     }
+
     logger.info(f"Got back {len(response['message']['results'])} results.")
     # get associated query id for this callback
     query_id = await get_callback_query_id(callback_id, logger)
@@ -177,7 +203,7 @@ async def callback(
     await save_callback_response(callback_id, response, logger)
     logger.info(f"Saved callback {callback_id} to redis")
     # add new task to merge callback response into original message
-    await add_task("merge_message", {"query_id": query_id, "callback_id": callback_id})
+    await add_task("merge_message", {"query_id": query_id, "callback_id": callback_id}, logger)
     return Response("Callback received.", 200)
 
 
@@ -199,7 +225,12 @@ async def get_query_response(
     query_id: str,
 ):
     """Get a query response."""
-    response = await get_message(query_id)
+    level_number = logging._nameToLevel["INFO"]
+    log_handler = QueryLogger().log_handler
+    logger = logging.getLogger("shepherd.get_query")
+    logger.setLevel(level_number)
+    logger.addHandler(log_handler)
+    response = await get_message(query_id, logger)
     if response is None:
         return 404
     return response

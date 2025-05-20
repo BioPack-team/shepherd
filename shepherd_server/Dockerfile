@@ -5,8 +5,6 @@ FROM ghcr.io/translatorsri/renci-python-image:3.11.5
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
-ARG POSTGRES_PASSWORD=supersecretpassw0rd
-ENV POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 
 # set up requirements
 WORKDIR /app
