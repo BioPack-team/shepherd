@@ -1,17 +1,12 @@
 """Aragorn ARA module."""
 import asyncio
-import copy
 import json
 import logging
-from pathlib import Path
-from string import Template
 import time
 import uuid
-from shepherd_utils.broker import get_task, mark_task_as_complete, add_task
-from shepherd_utils.logger import QueryLogger, setup_logging
-from shepherd_utils.db import get_message, initialize_db
-
-setup_logging()
+from shepherd_utils.broker import mark_task_as_complete, add_task
+from shepherd_utils.db import get_message
+from shepherd_utils.shared import task_decorator
 
 # Queue name
 STREAM = "aragorn"
@@ -61,6 +56,7 @@ def examine_query(message):
     return infer, question_node, answer_node, pathfinder
 
 
+@task_decorator(STREAM, GROUP, CONSUMER)
 async def aragorn(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
@@ -113,27 +109,5 @@ async def aragorn(task, logger: logging.Logger):
     logger.info(f"Sending task to {next_op} and took {time.time() - start}")
 
 
-async def poll_for_tasks():
-    """Continually monitor the ara queue for tasks."""
-    # Set up logger
-    level_number = logging._nameToLevel["INFO"]
-    log_handler = QueryLogger().log_handler
-    logger = logging.getLogger(f"shepherd.{STREAM}.{CONSUMER}")
-    logger.setLevel(level_number)
-    logger.addHandler(log_handler)
-    # initialize opens the db connection
-    await initialize_db()
-    # continuously poll the broker for new tasks
-    while True:
-        # logger.info("trying to get aragorn tasks")
-        # get a new task for the given target
-        ara_task = await get_task(STREAM, GROUP, CONSUMER, logger)
-        if ara_task is not None:
-            logger.info(f"Doing task {ara_task}")
-            # send the task to a async background task
-            # this could be async, multi-threaded, etc.
-            asyncio.create_task(aragorn(ara_task, logger))
-
-
 if __name__ == "__main__":
-    asyncio.run(poll_for_tasks())
+    asyncio.run(aragorn())
