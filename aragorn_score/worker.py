@@ -1,19 +1,12 @@
-"""Aragorn ARA module."""
+"""Aragorn ARA scoring module."""
 import asyncio
-import copy
 import httpx
 import json
 import logging
-from pathlib import Path
-from string import Template
-import time
 import uuid
-from shepherd_utils.broker import get_task, mark_task_as_complete, add_task
-from shepherd_utils.logger import QueryLogger, setup_logging
-from shepherd_utils.db import get_message, initialize_db, get_running_callbacks, add_callback_id, save_callback_response
-from shepherd_utils.shared import get_next_operation
-
-setup_logging()
+from shepherd_utils.broker import mark_task_as_complete, add_task
+from shepherd_utils.db import get_message, save_callback_response
+from shepherd_utils.shared import task_decorator, get_next_operation
 
 # Queue name
 STREAM = "aragorn.score"
@@ -22,7 +15,8 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 
 
-async def aragorn_score(task, logger):
+@task_decorator(STREAM, GROUP, CONSUMER)
+async def aragorn_score(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     workflow = json.loads(task[1]["workflow"])
@@ -49,27 +43,5 @@ async def aragorn_score(task, logger):
     await mark_task_as_complete(STREAM, GROUP, task[0], logger)
 
 
-async def poll_for_tasks():
-    """Continually monitor the ara queue for tasks."""
-    # Set up logger
-    level_number = logging._nameToLevel["INFO"]
-    log_handler = QueryLogger().log_handler
-    logger = logging.getLogger(f"shepherd.{STREAM}.{CONSUMER}")
-    logger.setLevel(level_number)
-    logger.addHandler(log_handler)
-    # initialize opens the db connection
-    await initialize_db()
-    # continuously poll the broker for new tasks
-    while True:
-        # logger.info("trying to get aragorn tasks")
-        # get a new task for the given target
-        ara_task = await get_task(STREAM, GROUP, CONSUMER, logger)
-        if ara_task is not None:
-            logger.info(f"Doing task {ara_task}")
-            # send the task to a async background task
-            # this could be async, multi-threaded, etc.
-            asyncio.create_task(aragorn_score(ara_task, logger))
-
-
 if __name__ == "__main__":
-    asyncio.run(poll_for_tasks())
+    asyncio.run(aragorn_score())
