@@ -1,6 +1,7 @@
 """Shepherd Broker Manager."""
 import asyncio
 import logging
+from redis.exceptions import ResponseError
 import redis.asyncio as aioredis
 from shepherd_utils.config import settings
 
@@ -29,6 +30,9 @@ async def create_consumer_group(redis_client: aioredis.Redis, stream, group, log
     """Ensure a redis consumer group exists."""
     try:
         await redis_client.xgroup_create(stream, group, "0", mkstream=True)
+    except ResponseError:
+        # this gets called every time we poll for new tasks and will throw an error if the group already exists
+        pass
     except Exception as e:
         logger.warning(f"Failed to create consumer group: {e}")
         pass
