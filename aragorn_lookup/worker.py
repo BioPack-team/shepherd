@@ -10,7 +10,7 @@ import time
 import uuid
 from shepherd_utils.broker import mark_task_as_complete, add_task
 from shepherd_utils.db import get_message, get_running_callbacks, add_callback_id, save_callback_response
-from shepherd_utils.shared import task_decorator, get_next_operation
+from shepherd_utils.shared import task, get_next_operation
 
 # Queue name
 STREAM = "aragorn.lookup"
@@ -60,7 +60,7 @@ def examine_query(message):
     return infer, question_node, answer_node, pathfinder
 
 
-@task_decorator(STREAM, GROUP, CONSUMER)
+@task(STREAM, GROUP, CONSUMER)
 async def aragorn_lookup(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db

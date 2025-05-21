@@ -6,7 +6,7 @@ import time
 import uuid
 from shepherd_utils.broker import mark_task_as_complete, add_task
 from shepherd_utils.db import get_message
-from shepherd_utils.shared import task_decorator
+from shepherd_utils.shared import task
 
 # Queue name
 STREAM = "aragorn"
@@ -56,7 +56,7 @@ def examine_query(message):
     return infer, question_node, answer_node, pathfinder
 
 
-@task_decorator(STREAM, GROUP, CONSUMER)
+@task(STREAM, GROUP, CONSUMER)
 async def aragorn(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db

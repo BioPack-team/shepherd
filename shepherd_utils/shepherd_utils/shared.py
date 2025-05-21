@@ -45,7 +45,7 @@ def get_current_operation(current_op: str, workflow: List[Dict[str, str]]):
     return workflow[cur_op_index]
 
 
-def task_decorator(stream, group, consumer):
+def task(stream, group, consumer):
     def decorator(fcn: Callable[..., Any]) -> Callable[[], Any]:
         @wraps(fcn)
         async def wrapper():

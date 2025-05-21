@@ -6,7 +6,7 @@ import logging
 import uuid
 from shepherd_utils.broker import mark_task_as_complete, add_task
 from shepherd_utils.db import get_message, save_callback_response
-from shepherd_utils.shared import task_decorator, get_next_operation
+from shepherd_utils.shared import task, get_next_operation
 
 # Queue name
 STREAM = "aragorn.score"
@@ -15,7 +15,7 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 
 
-@task_decorator(STREAM, GROUP, CONSUMER)
+@task(STREAM, GROUP, CONSUMER)
 async def aragorn_score(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]

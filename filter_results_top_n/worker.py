@@ -6,7 +6,7 @@ import time
 import uuid
 from shepherd_utils.broker import mark_task_as_complete, add_task
 from shepherd_utils.db import get_message, save_callback_response, get_query_state
-from shepherd_utils.shared import task_decorator, get_next_operation, get_current_operation
+from shepherd_utils.shared import task, get_next_operation, get_current_operation
 
 # Queue name
 STREAM = "filter_results_top_n"
@@ -14,7 +14,7 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 
 
-@task_decorator(STREAM, GROUP, CONSUMER)
+@task(STREAM, GROUP, CONSUMER)
 async def filter_results_top_n(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db

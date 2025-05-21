@@ -6,7 +6,7 @@ import time
 import uuid
 from shepherd_utils.broker import mark_task_as_complete, add_task
 from shepherd_utils.db import get_message
-from shepherd_utils.shared import task_decorator
+from shepherd_utils.shared import task
 
 # Queue name
 STREAM = "example"
@@ -14,7 +14,7 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 
 
-@task_decorator(STREAM, GROUP, CONSUMER)
+@task(STREAM, GROUP, CONSUMER)
 async def example_ara(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db

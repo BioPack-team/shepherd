@@ -13,7 +13,7 @@ from reasoner_pydantic import (
 )
 from shepherd_utils.broker import mark_task_as_complete, acquire_lock, remove_lock
 from shepherd_utils.db import get_message, get_query_state, save_callback_response, remove_callback_id
-from shepherd_utils.shared import task_decorator
+from shepherd_utils.shared import task
 
 # Queue name
 STREAM = "merge_message"
@@ -300,7 +300,7 @@ def merge_messages(
     return mergedresults
 
 
-@task_decorator(STREAM, GROUP, CONSUMER)
+@task(STREAM, GROUP, CONSUMER)
 async def merge_message(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
