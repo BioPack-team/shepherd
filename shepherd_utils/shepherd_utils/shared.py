@@ -23,7 +23,7 @@ def get_next_operation(current_op: str, workflow: List[Dict[str, str]]):
     for index, operation in enumerate(workflow):
         if operation["id"] == current_op:
             next_op_index = index + 1
-    if next_op_index == -1 or next_op_index > len(workflow):
+    if next_op_index == -1 or next_op_index > len(workflow) - 1:
         return None
     return workflow[next_op_index]
 
