@@ -1,4 +1,5 @@
 """Example ARA module."""
+
 import asyncio
 import logging
 import time
@@ -28,7 +29,7 @@ async def example_ara(task, logger: logging.Logger):
     ]
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-    
+
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 

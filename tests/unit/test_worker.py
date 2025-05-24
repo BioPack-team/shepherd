@@ -22,4 +22,10 @@ async def test_example(monkeypatch, mocker):
     workflow = json.loads(task[1]["workflow"])
     # make sure the workflow was correctly passed
     assert len(workflow) == 5
-    assert ["example.lookup", "example.score", "sort_results_score", "filter_results_top_n", "filter_kgraph_orphans"] == [op["id"] for op in workflow]
+    assert [
+        "example.lookup",
+        "example.score",
+        "sort_results_score",
+        "filter_results_top_n",
+        "filter_kgraph_orphans",
+    ] == [op["id"] for op in workflow]

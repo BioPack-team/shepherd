@@ -1,4 +1,5 @@
 """Example ARA module."""
+
 import asyncio
 import json
 import logging
@@ -42,28 +43,55 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
                     auxgraphs.add(auxgraph)
         # 4. Support graphs from edges in 2
         for edge in edges:
-            for attribute in message.get("message", {}).get("knowledge_graph", {}).get("edges", {}).get(edge, {}).get("attributes", {}):
+            for attribute in (
+                message.get("message", {})
+                .get("knowledge_graph", {})
+                .get("edges", {})
+                .get(edge, {})
+                .get("attributes", {})
+            ):
                 if attribute.get("attribute_type_id", None) == "biolink:support_graphs":
                     auxgraphs.update(attribute.get("value", []))
         # 5. For all the auxgraphs collect their edges and nodes
         for auxgraph in auxgraphs:
-            aux_edges = message.get("message", {}).get("auxiliary_graphs", {}).get(auxgraph, {}).get("edges", [])
+            aux_edges = (
+                message.get("message", {})
+                .get("auxiliary_graphs", {})
+                .get(auxgraph, {})
+                .get("edges", [])
+            )
             for aux_edge in aux_edges:
                 if aux_edge not in message["message"]["knowledge_graph"]["edges"]:
-                    logger.warning(f"{query_id}: aux_edge {aux_edge} not in knowledge_graph.edges")
+                    logger.warning(
+                        f"{query_id}: aux_edge {aux_edge} not in knowledge_graph.edges"
+                    )
                     continue
                 edges.add(aux_edge)
-                nodes.add(message["message"]["knowledge_graph"]["edges"][aux_edge]["subject"])
-                nodes.add(message["message"]["knowledge_graph"]["edges"][aux_edge]["object"])
-        #now remove all knowledge_graph nodes and edges that are not in our nodes and edges sets.
-        kg_nodes = message.get("message", {}).get("knowledge_graph", {}).get("nodes", {})
-        message["message"]["knowledge_graph"]["nodes"] = {nid: ndata for nid, ndata in kg_nodes.items() if nid in nodes}
-        kg_edges = message.get("message",{}).get("knowledge_graph", {}).get("edges", {})
-        message["message"]["knowledge_graph"]["edges"] = {eid: edata for eid, edata in kg_edges.items() if eid in edges}
+                nodes.add(
+                    message["message"]["knowledge_graph"]["edges"][aux_edge]["subject"]
+                )
+                nodes.add(
+                    message["message"]["knowledge_graph"]["edges"][aux_edge]["object"]
+                )
+        # now remove all knowledge_graph nodes and edges that are not in our nodes and edges sets.
+        kg_nodes = (
+            message.get("message", {}).get("knowledge_graph", {}).get("nodes", {})
+        )
+        message["message"]["knowledge_graph"]["nodes"] = {
+            nid: ndata for nid, ndata in kg_nodes.items() if nid in nodes
+        }
+        kg_edges = (
+            message.get("message", {}).get("knowledge_graph", {}).get("edges", {})
+        )
+        message["message"]["knowledge_graph"]["edges"] = {
+            eid: edata for eid, edata in kg_edges.items() if eid in edges
+        }
         # validate_message(message)
         message["message"]["auxiliary_graphs"] = {
             auxgraph: adata
-            for auxgraph, adata in message["message"].get("auxiliary_graphs", {}).items()
+            for auxgraph, adata in message["message"]
+            .get("auxiliary_graphs", {})
+            .items()
             if auxgraph in auxgraphs
         }
         # is_invalid = validate_message(message)

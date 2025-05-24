@@ -1,4 +1,5 @@
 """Mark a query as completed and do any callbacks."""
+
 import asyncio
 import httpx
 import logging
@@ -32,7 +33,7 @@ async def finish_query(task, logger: logging.Logger):
                     callback_url,
                     json=message,
                 )
-        
+
         await set_query_completed(query_id, "OK", logger)
 
     await mark_task_as_complete(STREAM, GROUP, task[0], logger)

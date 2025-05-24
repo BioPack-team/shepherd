@@ -1,8 +1,10 @@
 """Postgres DB Manager."""
+
 import logging
 from psycopg_pool import AsyncConnectionPool
 import redis.asyncio as aioredis
 import orjson
+
 # from reasoner_pydantic import (
 #     Response as ReasonerResponse,
 # )
@@ -11,6 +13,7 @@ from typing import Dict, Any, List, Union
 import zstandard
 
 from .config import settings
+
 # from shepherd.merge_messages import merge_messages
 
 pool = AsyncConnectionPool(
@@ -54,7 +57,7 @@ async def add_query(
 
     Args:
         query (Dict): TRAPI query graph
-    
+
     Returns:
         query_id: str
     """
@@ -74,17 +77,14 @@ async def add_query(
         pass
     try:
         async with pool.connection(60) as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
             INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status) VALUES (
                 %s, NOW(), %s, %s, %s, %s
             )
-            """, (
-                query_id,
-                response_id,
-                callback_url,
-                "QUEUED",
-                "OK"
-            ))
+            """,
+                (query_id, response_id, callback_url, "QUEUED", "OK"),
+            )
             # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
             await conn.commit()
     except Exception as e:
@@ -131,14 +131,17 @@ async def add_callback_id(
     """Add a callback->query mapping."""
     try:
         async with pool.connection(60) as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
             INSERT INTO callbacks (query_id, callback_id) VALUES (
                 %s, %s
             )
-            """, (
-                query_id,
-                callback_id,
-            ))
+            """,
+                (
+                    query_id,
+                    callback_id,
+                ),
+            )
             await conn.commit()
     except Exception as e:
         logger.error(f"Failed to save callback: {e}")
@@ -151,11 +154,12 @@ async def remove_callback_id(
     """Once a callback has been processed, remove it."""
     try:
         async with pool.connection(60) as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
             DELETE FROM callbacks WHERE callback_id = %s
-            """, (
-                callback_id,
-            ))
+            """,
+                (callback_id,),
+            )
             await conn.commit()
     except Exception as e:
         logger.error("Failed to remove callback after processing.")
@@ -169,11 +173,12 @@ async def get_running_callbacks(
     running_lookups = []
     try:
         async with pool.connection(60) as conn:
-            cursor = await conn.execute("""
+            cursor = await conn.execute(
+                """
             SELECT callback_id FROM callbacks WHERE query_id = %s
-            """, (
-                query_id,
-            ))
+            """,
+                (query_id,),
+            )
             rows = await cursor.fetchall()
             running_lookups = rows
     except Exception as e:
@@ -189,11 +194,12 @@ async def get_callback_query_id(
     query_id = None
     try:
         async with pool.connection(60) as conn:
-            cursor = await conn.execute("""
+            cursor = await conn.execute(
+                """
             SELECT query_id FROM callbacks WHERE callback_id = %s            
-            """, (
-                callback_id,
-            ))
+            """,
+                (callback_id,),
+            )
             row = await cursor.fetchone()
             if row is not None:
                 query_id = row[0]
@@ -236,11 +242,12 @@ async def get_query_state(
     query_state = None
     try:
         async with pool.connection(60) as conn:
-            cursor = await conn.execute("""
+            cursor = await conn.execute(
+                """
             SELECT * FROM shepherd_brain WHERE qid = %s
-            """, (
-                query_id,
-            ))
+            """,
+                (query_id,),
+            )
             row = await cursor.fetchone()
             query_state = row
     except Exception as e:
@@ -256,12 +263,15 @@ async def set_query_completed(
     """This query is done."""
     try:
         async with pool.connection(60) as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
             UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s
-            """, (
-                status,
-                query_id,
-            ))
+            """,
+                (
+                    status,
+                    query_id,
+                ),
+            )
             await conn.commit()
     except Exception as e:
         logger.error(f"Failed to successfully complete query in db: {e}")

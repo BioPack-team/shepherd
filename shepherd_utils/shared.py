@@ -1,4 +1,5 @@
 """Shared Shepherd Utility Functions."""
+
 import json
 import logging
 from typing import List, Dict, Union, Tuple, AsyncGenerator
@@ -10,10 +11,12 @@ from .broker import add_task, get_task, mark_task_as_complete
 setup_logging()
 
 
-def get_next_operation(workflow: List[Dict[str, str]]) -> Tuple[Dict[str, str], List[Dict[str, str]]]:
+def get_next_operation(
+    workflow: List[Dict[str, str]],
+) -> Tuple[Dict[str, str], List[Dict[str, str]]]:
     """
     Get the next workflow operation from the list.
-    
+
     Args:
         workflow (List[Dict[str, str]]): TRAPI workflow operation list
     """
@@ -21,7 +24,9 @@ def get_next_operation(workflow: List[Dict[str, str]]) -> Tuple[Dict[str, str], 
     return next_op, workflow
 
 
-async def get_tasks(stream: str, group: str, consumer: str) -> AsyncGenerator[Tuple[Union[Tuple[str, str], None], logging.Logger], None]:
+async def get_tasks(
+    stream: str, group: str, consumer: str
+) -> AsyncGenerator[Tuple[Union[Tuple[str, str], None], logging.Logger], None]:
     """Continually monitor the ara queue for tasks."""
     # Set up logger
     level_number = logging._nameToLevel["INFO"]
@@ -37,7 +42,9 @@ async def get_tasks(stream: str, group: str, consumer: str) -> AsyncGenerator[Tu
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
             log_handler = QueryLogger().log_handler
-            task_logger = logging.getLogger(f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}")
+            task_logger = logging.getLogger(
+                f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+            )
             task_logger.setLevel(level_number)
             task_logger.addHandler(log_handler)
             task_logger.info(f"Doing task {ara_task}")
@@ -65,6 +72,10 @@ async def wrap_up_task(
     else:
         next_op = "finish_query"
     logger.info(f"Sending task to {next_op}")
-    await add_task(next_op, {"query_id": task[1]["query_id"], "workflow": json.dumps(workflow)}, logger)
+    await add_task(
+        next_op,
+        {"query_id": task[1]["query_id"], "workflow": json.dumps(workflow)},
+        logger,
+    )
 
     await mark_task_as_complete(stream, group, task[0], logger)

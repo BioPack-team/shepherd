@@ -1,4 +1,5 @@
 """Aragorn ARA scoring module."""
+
 import asyncio
 import httpx
 import json
@@ -31,7 +32,7 @@ async def aragorn_score(task, logger: logging.Logger):
         scored_message = response.json()
 
         await save_callback_response(query_id, scored_message, logger)
-    
+
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
 
 

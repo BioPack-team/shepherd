@@ -1,4 +1,5 @@
 """Shepherd Broker Manager."""
+
 import asyncio
 import logging
 from redis.exceptions import ResponseError
@@ -26,7 +27,9 @@ lock_redis_pool = aioredis.BlockingConnectionPool(
 )
 
 
-async def create_consumer_group(redis_client: aioredis.Redis, stream, group, logger: logging.Logger):
+async def create_consumer_group(
+    redis_client: aioredis.Redis, stream, group, logger: logging.Logger
+):
     """Ensure a redis consumer group exists."""
     try:
         await redis_client.xgroup_create(stream, group, "0", mkstream=True)
@@ -50,7 +53,9 @@ async def add_task(queue, payload, logger: logging.Logger):
     except Exception as e:
         # failed to put message on ara stream
         # TODO: do something more severe
-        logger.error(f"Failed to put new task on the queue: {e}, inputs: {queue}, {payload}")
+        logger.error(
+            f"Failed to put new task on the queue: {e}, inputs: {queue}, {payload}"
+        )
         pass
 
 
@@ -77,7 +82,9 @@ async def get_task(stream, group, consumer, logger: logging.Logger):
     return None
 
 
-async def mark_task_as_complete(stream, group, msg_id, logger: logging.Logger, retries=0):
+async def mark_task_as_complete(
+    stream, group, msg_id, logger: logging.Logger, retries=0
+):
     """Send ACK message back to queue."""
     try:
         client = await aioredis.Redis(
@@ -88,11 +95,15 @@ async def mark_task_as_complete(stream, group, msg_id, logger: logging.Logger, r
 
     except Exception as e:
         retries += 1
-        logger.info(f"Failed to mark task {msg_id} in stream {stream} as complete. Try #{retries}. Trying again, {e}")
+        logger.info(
+            f"Failed to mark task {msg_id} in stream {stream} as complete. Try #{retries}. Trying again, {e}"
+        )
         if retries < 5:
             await mark_task_as_complete(stream, group, msg_id, logger, retries)
         else:
-            logger.error(f"[{msg_id}] Failed to successfully ACK message even though it was completed.")
+            logger.error(
+                f"[{msg_id}] Failed to successfully ACK message even though it was completed."
+            )
 
 
 async def acquire_lock(

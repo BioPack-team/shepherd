@@ -1,4 +1,5 @@
 """Merge two TRAPI messages together."""
+
 import asyncio
 import logging
 import uuid
@@ -8,7 +9,12 @@ import time
 from typing import Union, Dict, Any, List
 
 from shepherd_utils.broker import mark_task_as_complete, acquire_lock, remove_lock
-from shepherd_utils.db import get_message, get_query_state, save_callback_response, remove_callback_id
+from shepherd_utils.db import (
+    get_message,
+    get_query_state,
+    save_callback_response,
+    remove_callback_id,
+)
 from shepherd_utils.shared import get_tasks
 
 # Queue name
@@ -47,14 +53,21 @@ def add_knowledge_edge(result_message, aux_graph_ids, answer):
     # For the nodes, if there is an id, then use it in the knowledge edge. If there is not, then use the answer
     qnode_subject_id = qedge["subject"]
     qnode_object_id = qedge["object"]
-    if "ids" in query_graph["nodes"][qnode_subject_id] and query_graph["nodes"][qnode_subject_id]["ids"] is not None:
+    if (
+        "ids" in query_graph["nodes"][qnode_subject_id]
+        and query_graph["nodes"][qnode_subject_id]["ids"] is not None
+    ):
         qnode_subject = query_graph["nodes"][qnode_subject_id]["ids"][0]
         qnode_object = answer
     else:
         qnode_subject = answer
         qnode_object = query_graph["nodes"][qnode_object_id]["ids"][0]
     predicate = qedge["predicates"][0]
-    if "qualifier_constraints" in qedge and qedge["qualifier_constraints"] is not None and len(qedge["qualifier_constraints"]) > 0:
+    if (
+        "qualifier_constraints" in qedge
+        and qedge["qualifier_constraints"] is not None
+        and len(qedge["qualifier_constraints"]) > 0
+    ):
         qualifiers = qedge["qualifier_constraints"][0]["qualifier_set"]
     else:
         qualifiers = None
@@ -66,23 +79,22 @@ def add_knowledge_edge(result_message, aux_graph_ids, answer):
         "object": qnode_object,
         "predicate": predicate,
         "attributes": [
-            {
-                "attribute_type_id": "biolink:support_graphs",
-                "value": aux_graph_ids
-            },
+            {"attribute_type_id": "biolink:support_graphs", "value": aux_graph_ids},
             {
                 "attribute_type_id": "biolink:agent_type",
                 "value": "computational_model",
-                "attribute_source": source
+                "attribute_source": source,
             },
             {
                 "attribute_type_id": "biolink:knowledge_level",
                 "value": "prediction",
-                "attribute_source": source
-            }
+                "attribute_source": source,
+            },
         ],
         # Shepherd is the primary ks because shepherd inferred the existence of this edge.
-        "sources": [{"resource_id": source, "resource_role": "primary_knowledge_source"}]
+        "sources": [
+            {"resource_id": source, "resource_role": "primary_knowledge_source"}
+        ],
     }
     if qualifiers is not None:
         new_edge["qualifiers"] = qualifiers
@@ -146,7 +158,10 @@ def merge_answer(result_message, answer, results, qnode_ids):
 
     # 2. convert the analysis of each input result into an auxiliary graph
     aux_graph_ids = []
-    if "auxiliary_graphs" not in result_message["message"] or result_message["message"]["auxiliary_graphs"] is None:
+    if (
+        "auxiliary_graphs" not in result_message["message"]
+        or result_message["message"]["auxiliary_graphs"] is None
+    ):
         result_message["message"]["auxiliary_graphs"] = {}
     for result in results["creative"]:
         for analysis in result["analyses"]:
@@ -168,11 +183,8 @@ def merge_answer(result_message, answer, results, qnode_ids):
     analysis = {
         "resource_id": "infores:shepherd",
         "edge_bindings": {
-            qedge_id: [
-                {"id": kid, "attributes": []}
-                for kid in knowledge_edge_ids
-            ]
-        }
+            qedge_id: [{"id": kid, "attributes": []} for kid in knowledge_edge_ids]
+        },
     }
     mergedresult["analyses"].append(analysis)
 
@@ -182,7 +194,9 @@ def merge_answer(result_message, answer, results, qnode_ids):
             for qedge in analysis["edge_bindings"]:
                 if qedge not in mergedresult["analyses"][0]["edge_bindings"]:
                     mergedresult["analyses"][0]["edge_bindings"][qedge] = []
-                mergedresult["analyses"][0]["edge_bindings"][qedge].extend(analysis["edge_bindings"][qedge])
+                mergedresult["analyses"][0]["edge_bindings"][qedge].extend(
+                    analysis["edge_bindings"][qedge]
+                )
 
     # result_message["message"]["results"].append(mergedresult)
     return mergedresult
@@ -201,9 +215,15 @@ def queries_equivalent(query1, query2):
             if "constraints" in node and len(node["constraints"]) == 0:
                 del node["constraints"]
         for edge in q["edges"].values():
-            if "attribute_constraints" in edge and len(edge["attribute_constraints"]) == 0:
+            if (
+                "attribute_constraints" in edge
+                and len(edge["attribute_constraints"]) == 0
+            ):
                 del edge["attribute_constraints"]
-            if "qualifier_constraints" in edge and len(edge["qualifier_constraints"]) == 0:
+            if (
+                "qualifier_constraints" in edge
+                and len(edge["qualifier_constraints"]) == 0
+            ):
                 del edge["qualifier_constraints"]
     return q1 == q2
 
@@ -217,7 +237,10 @@ def group_results_by_qnode(merge_qnode, result_message, lookup_results):
     # group results
     grouped_results = defaultdict(lambda: {"creative": [], "lookup": []})
     # Group results by the merge_qnode
-    for result_set, result_key in [(original_results, "creative"), (lookup_results, "lookup")]:
+    for result_set, result_key in [
+        (original_results, "creative"),
+        (lookup_results, "lookup"),
+    ]:
         for result in result_set:
             answer = result["node_bindings"][merge_qnode]
             bound = frozenset([x["id"] for x in answer])
@@ -229,12 +252,16 @@ def merge_results_by_node(result_message, merge_qnode, lookup_results):
     """This assumes a single result message, with a single merged KG.  The goal is to take all results that share a
     binding for merge_qnode and combine them into a single result.
     Assumes that the results are not scored."""
-    grouped_results = group_results_by_qnode(merge_qnode, result_message, lookup_results)
+    grouped_results = group_results_by_qnode(
+        merge_qnode, result_message, lookup_results
+    )
     original_qnodes = result_message["message"]["query_graph"]["nodes"].keys()
     # TODO : I'm sure there's a better way to handle this with asyncio
     new_results = []
     for r in grouped_results:
-        new_result = merge_answer(result_message, r, grouped_results[r], original_qnodes)
+        new_result = merge_answer(
+            result_message, r, grouped_results[r], original_qnodes
+        )
         new_results.append(new_result)
     result_message["message"]["results"] = new_results
     return result_message
@@ -253,7 +280,7 @@ def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
 def merge_messages(
     original_query_graph: Dict[str, Any],
     lookup_query_graph: Dict[str, Any],
-    result_messages: List[Dict[str, Any]]
+    result_messages: List[Dict[str, Any]],
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
     for result_message in result_messages:
@@ -284,10 +311,20 @@ def merge_messages(
     # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
     lookup_results = []  # in case we don't have any
     for result_message in result_messages:
-        if queries_equivalent(result_message["message"]["query_graph"], lookup_query_graph):
-            lookup_results = result_message["message"]["results"] if result_message["message"]["results"] is not None else []
+        if queries_equivalent(
+            result_message["message"]["query_graph"], lookup_query_graph
+        ):
+            lookup_results = (
+                result_message["message"]["results"]
+                if result_message["message"]["results"] is not None
+                else []
+            )
         else:
-            result["message"]["results"].extend(result_message["message"]["results"] if result_message["message"]["results"] is not None else [])
+            result["message"]["results"].extend(
+                result_message["message"]["results"]
+                if result_message["message"]["results"] is not None
+                else []
+            )
 
     answer_node_id = get_answer_node(original_query_graph)
     mergedresults = merge_results_by_node(result, answer_node_id, lookup_results)
@@ -316,7 +353,11 @@ async def merge_message(task, logger: logging.Logger):
         # gonna stub this for now
         # merged_message = callback_response
         # TODO: make the following work
-        merged_message = merge_messages(original_query_graph, lookup_query_graph, [original_response, callback_response])
+        merged_message = merge_messages(
+            original_query_graph,
+            lookup_query_graph,
+            [original_response, callback_response],
+        )
         # save merged message back to db
         await save_callback_response(response_id, merged_message, logger)
         logger.info(f"Kept the lock for {time.time() - lock_time} seconds")
@@ -324,7 +365,9 @@ async def merge_message(task, logger: logging.Logger):
         await remove_lock(response_id, CONSUMER, logger)
         await remove_callback_id(callback_id, logger)
     else:
-        logger.error("We're in some sort of hung state and couldn't get a lock on the response.")
+        logger.error(
+            "We're in some sort of hung state and couldn't get a lock on the response."
+        )
 
     await mark_task_as_complete(STREAM, GROUP, task[0], logger)
     logger.info(f"[{task[0]}] Finished task {task[0]} in {time.time() - start}")

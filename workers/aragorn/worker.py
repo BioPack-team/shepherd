@@ -1,4 +1,5 @@
 """Aragorn ARA module."""
+
 import asyncio
 import logging
 import time
@@ -64,8 +65,18 @@ async def aragorn(task, logger: logging.Logger):
     except Exception as e:
         logger.error(e)
         return None, 500
-    
-    supported_workflow_operations = set(["lookup", "enrich_results", "overlay_connect_knodes", "score", "sort_results_score", "filter_results_top_n", "filter_kgraph_ophans"])
+
+    supported_workflow_operations = set(
+        [
+            "lookup",
+            "enrich_results",
+            "overlay_connect_knodes",
+            "score",
+            "sort_results_score",
+            "filter_results_top_n",
+            "filter_kgraph_ophans",
+        ]
+    )
     workflow = None
     if "workflow" in message:
         workflow = message["workflow"]
@@ -87,7 +98,7 @@ async def aragorn(task, logger: logging.Logger):
                 {"id": "aragorn.lookup"},
                 # {"id": "aragorn.overlay_connect_knodes"},
                 {"id": "aragorn.score"},
-                {"id": "filter_kgraph_orphans"}
+                {"id": "filter_kgraph_orphans"},
             ]
         else:
             workflow = [
@@ -98,7 +109,7 @@ async def aragorn(task, logger: logging.Logger):
                 {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
                 {"id": "filter_kgraph_orphans"},
             ]
-    
+
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
     logger.info(f"Task took {time.time() - start}")
 

@@ -1,4 +1,5 @@
 """Shepherd ARA."""
+
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response
@@ -118,21 +119,17 @@ async def query(
                 response_id = query_state[7]
                 response = await get_message(response_id, logger)
                 if response is None:
-                    return {
-                        "status": "ERROR",
-                        "description": "Unable to get response"
-                    }
+                    return {"status": "ERROR", "description": "Unable to get response"}
                 return response
         else:
             logger.warning(f"Failed to get the query state of query id {query_id}")
         await asyncio.sleep(5)
-    
+
     logger.error("Query timed out")
     return {
         "status": "TIMEOUT",
         "description": "Query timeout",
     }
-    
 
 
 @APP.post("/{target}/asyncquery")
@@ -199,7 +196,9 @@ async def callback(
     await save_callback_response(callback_id, response, logger)
     logger.info(f"Saved callback {callback_id} to redis")
     # add new task to merge callback response into original message
-    await add_task("merge_message", {"query_id": query_id, "callback_id": callback_id}, logger)
+    await add_task(
+        "merge_message", {"query_id": query_id, "callback_id": callback_id}, logger
+    )
     return Response("Callback received.", 200)
 
 

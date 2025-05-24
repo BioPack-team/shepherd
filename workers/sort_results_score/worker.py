@@ -1,4 +1,5 @@
 """Example ARA module."""
+
 import asyncio
 import json
 import logging
@@ -27,9 +28,13 @@ async def sort_results_score(task, logger: logging.Logger):
         logger.error(f"Unable to find operation {STREAM} in workflow")
         raise Exception(f"Operation {STREAM} is not in workflow")
     aord = current_op.get("ascending_or_descending", "descending")
-    reverse = (aord == "descending")
+    reverse = aord == "descending"
     try:
-        message["message"]["results"] = sorted(results, key=lambda x: max([y.get("score", 0) for y in x["analyses"]]), reverse=reverse)
+        message["message"]["results"] = sorted(
+            results,
+            key=lambda x: max([y.get("score", 0) for y in x["analyses"]]),
+            reverse=reverse,
+        )
     except KeyError as e:
         # can't find the right structure of message
         logger.error(f"Error sorting results: {e}")
