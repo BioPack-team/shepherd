@@ -1,5 +1,3 @@
-version: '3.7'
-
 services:
   shepherd_server:
     container_name: shepherd_server
@@ -17,7 +15,6 @@ services:
     networks:
       - shepherd
   shepherd_db:
-    image: postgres:bookworm
     container_name: shepherd_db
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
@@ -64,12 +61,12 @@ services:
       - ./data:/data
   
 
-  ########### Shared Workers
+  ########## Shared Workers
   merge_message:
     container_name: merge_message
     build:
       context: .
-      dockerfile: merge_message/Dockerfile
+      dockerfile: workers/merge_message/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -85,7 +82,7 @@ services:
     container_name: sort_results_score
     build:
       context: .
-      dockerfile: sort_results_score/Dockerfile
+      dockerfile: workers/sort_results_score/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -101,7 +98,7 @@ services:
     container_name: filter_results_top_n
     build:
       context: .
-      dockerfile: filter_results_top_n/Dockerfile
+      dockerfile: workers/filter_results_top_n/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -117,7 +114,7 @@ services:
     container_name: filter_kgraph_orphans
     build:
       context: .
-      dockerfile: filter_kgraph_orphans/Dockerfile
+      dockerfile: workers/filter_kgraph_orphans/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -133,7 +130,7 @@ services:
     container_name: finish_query
     build:
       context: .
-      dockerfile: finish_query/Dockerfile
+      dockerfile: workers/finish_query/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -147,12 +144,12 @@ services:
       - shepherd
   
 
-  ########## Example ARA
-  example_worker:
+  ######### Example ARA
+  example_ara:
     container_name: example_ara
     build:
       context: .
-      dockerfile: example_ara/Dockerfile
+      dockerfile: workers/example_ara/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -168,7 +165,7 @@ services:
     container_name: example_lookup
     build:
       context: .
-      dockerfile: example_lookup/Dockerfile
+      dockerfile: workers/example_lookup/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -184,7 +181,7 @@ services:
     container_name: example_score
     build:
       context: .
-      dockerfile: example_score/Dockerfile
+      dockerfile: workers/example_score/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -198,12 +195,12 @@ services:
       - shepherd
 
 
-  ########## ARAGORN
-  aragorn_worker:
-    container_name: aragorn_worker
+  ######### ARAGORN
+  aragorn:
+    container_name: aragorn
     build:
       context: .
-      dockerfile: aragorn/Dockerfile
+      dockerfile: workers/aragorn/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -219,7 +216,7 @@ services:
     container_name: aragorn_lookup
     build:
       context: .
-      dockerfile: aragorn_lookup/Dockerfile
+      dockerfile: workers/aragorn_lookup/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -235,7 +232,7 @@ services:
     container_name: aragorn_score
     build:
       context: .
-      dockerfile: aragorn_score/Dockerfile
+      dockerfile: workers/aragorn_score/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:

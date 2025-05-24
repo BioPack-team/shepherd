@@ -17,19 +17,18 @@ COPY ./shepherd_utils ./shepherd_utils
 COPY ./pyproject.toml .
 RUN pip install .
 
-COPY . .
-RUN pip install -e .
-
+COPY ./workers/aragorn/requirements.txt .
+RUN pip install -r requirements.txt
 
 # switch to the non-root user (nru). defined in the base image
 USER nru
 
 # Copy in files
-# ADD shepherd_server/ ./shepherd_ser
+COPY ./workers/aragorn ./
 
 # Set up base for command and any variables
 # that shouldn't be modified
 # ENTRYPOINT ["uvicorn", "shepherd_server.server:APP"]
 
 # Variables that can be overriden
-CMD ["python", "-m", "uvicorn", "--host", "0.0.0.0", "--port", "5439", "shepherd_server.server:APP"]
+CMD ["python", "worker.py"]
