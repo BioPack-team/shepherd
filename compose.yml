@@ -1,0 +1,248 @@
+services:
+  shepherd_server:
+    container_name: shepherd_server
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
+    build:
+      context: .
+      dockerfile: shepherd_server/Dockerfile
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - ./shepherd_server/shepherd_server/outputs:/app/shepherd_server/shepherd_server/outputs
+    ports:
+      - '5439:5439'
+    networks:
+      - shepherd
+  shepherd_db:
+    container_name: shepherd_db
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
+    build:
+      context: .
+      dockerfile: shepherd_db/Dockerfile
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shepherd
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+  shepherd_broker:
+    container_name: shepherd_broker
+    build:
+      context: .
+      dockerfile: shepherd_broker/Dockerfile
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shepherd
+    volumes:
+      - ./data:/data
+  shepherd_broker_insight:
+    image: redislabs/redisinsight:latest
+    container_name: redis-insight
+    ports:
+      - '8001:8001'
+    networks:
+      - shepherd
+    volumes:
+      - ./data:/data
+  
+
+  ########## Shared Workers
+  merge_message:
+    container_name: merge_message
+    build:
+      context: .
+      dockerfile: workers/merge_message/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  sort_results_score:
+    container_name: sort_results_score
+    build:
+      context: .
+      dockerfile: workers/sort_results_score/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  filter_results_top_n:
+    container_name: filter_results_top_n
+    build:
+      context: .
+      dockerfile: workers/filter_results_top_n/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  filter_kgraph_orphans:
+    container_name: filter_kgraph_orphans
+    build:
+      context: .
+      dockerfile: workers/filter_kgraph_orphans/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  finish_query:
+    container_name: finish_query
+    build:
+      context: .
+      dockerfile: workers/finish_query/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  
+
+  ######### Example ARA
+  example_ara:
+    container_name: example_ara
+    build:
+      context: .
+      dockerfile: workers/example_ara/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  example_lookup:
+    container_name: example_lookup
+    build:
+      context: .
+      dockerfile: workers/example_lookup/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  example_score:
+    container_name: example_score
+    build:
+      context: .
+      dockerfile: workers/example_score/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+
+
+  ######### ARAGORN
+  aragorn:
+    container_name: aragorn
+    build:
+      context: .
+      dockerfile: workers/aragorn/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  aragorn_lookup:
+    container_name: aragorn_lookup
+    build:
+      context: .
+      dockerfile: workers/aragorn_lookup/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+  aragorn_score:
+    container_name: aragorn_score
+    build:
+      context: .
+      dockerfile: workers/aragorn_score/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    networks:
+      - shepherd
+networks:
+  shepherd:

@@ -1,0 +1,31 @@
+[project]
+name = "shepherd"
+version = "1.0.0"
+description = "A shared platform for Translator ARAs"
+authors = [{ name = "Max Wang", email = "max@covar.com" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "redis==5.2.1",
+  "orjson==3.10.18",
+  "psycopg[binary]==3.1.19",
+  "psycopg_pool==3.2.1",
+  "pydantic==2.11.4",
+  "pydantic-settings==2.9.1",
+  "python-dotenv==1.0.1",
+  "pyyaml==6.0.1",
+  "zstandard==0.23.0"
+]
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["shepherd_utils", "workers", "shepherd_server"]
+include = ["shepherd_utils.*", "workers.*", "shepherd_server.*"]
+
+[tool.setuptools.package-data]
+shepherd_utils = ["*.yml"]

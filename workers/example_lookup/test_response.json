@@ -1,0 +1,1949 @@
+{
+  "message": {
+    "query_graph": {
+      "nodes": {
+        "n0": {
+          "ids": ["MONDO:0005148"],
+          "categories": ["biolink:Disease"],
+          "set_interpretation": "BATCH",
+          "constraints": [],
+          "member_ids": []
+        },
+        "n1": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "set_interpretation": "BATCH",
+          "constraints": [],
+          "member_ids": []
+        }
+      },
+      "edges": {
+        "e01": {
+          "subject": "n0",
+          "object": "n1",
+          "predicates": ["biolink:has_phenotype"],
+          "attribute_constraints": [],
+          "qualifier_constraints": []
+        }
+      }
+    },
+    "knowledge_graph": {
+      "nodes": {
+        "MONDO:0005148": {
+          "categories": ["biolink:Disease"],
+          "name": "type 2 diabetes mellitus",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "Disease Ontology",
+              "original_attribute_name": "source"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "type 2 diabetes mellitus",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:xref",
+              "value": [
+                "MONDO:0005148",
+                "DOID:9352",
+                "OMIM:125853",
+                "OMIM:147545",
+                "OMIM:168820",
+                "UMLS:C0011860",
+                "UMLS:C1840169",
+                "UMLS:C1852091",
+                "UMLS:C2674662",
+                "UMLS:C2674663",
+                "UMLS:C3149706",
+                "UMLS:C4017238",
+                "MESH:D003924",
+                "MEDDRA:10012611",
+                "MEDDRA:10012613",
+                "MEDDRA:10026947",
+                "MEDDRA:10029402",
+                "MEDDRA:10029505",
+                "MEDDRA:10045242",
+                "MEDDRA:10067585",
+                "NCIT:C26747",
+                "SNOMEDCT:44054006",
+                "medgen:41523",
+                "ICD10:E11",
+                "KEGG.DISEASE:04930",
+                "HP:0005978"
+              ]
+            },
+            {
+              "attribute_type_id": "biolink:mesh_terms",
+              "value": ["D003924"],
+              "original_attribute_name": "mesh_list"
+            },
+            {
+              "attribute_type_id": "biolink:synonym",
+              "value": [
+                "type 2 diabetes mellitus",
+                "Diabetes Mellitus, Non-Insulin-Dependent",
+                "CORONARY ARTERY DISEASE, SUSCEPTIBILITY TO",
+                "INSULIN RESISTANCE, SUSCEPTIBILITY TO",
+                "PON1 ENZYME ACTIVITY, VARIATION IN",
+                "ORGANOPHOSPHATE POISONING, SUSCEPTIBILITY TO",
+                "CORONARY ARTERY SPASM 2, SUSCEPTIBILITY TO",
+                "TYPE 2 DIABETES MELLITUS, PROTECTION AGAINST",
+                "Diabetes Mellitus, Type 2",
+                "Type 2 Diabetes Mellitus",
+                "Type II diabetes mellitus"
+              ]
+            }
+          ]
+        },
+        "HP:0025502": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Overweight",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D050177",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Overweight",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "UMLS:C4042861": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Obesity, Metabolically Benign",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Obesity, Metabolically Benign",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D000067329",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "HP:0001824": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Weight Loss",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D015431",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Weight Loss",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "MESH:D000077962": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Body-Weight Trajectory",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D000077962",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Body-Weight Trajectory",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "UMLS:C3658248": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Hypertriglyceridemic Waist",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Hypertriglyceridemic Waist",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D064250",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "HP:0001520": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Fetal Macrosomia",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Fetal Macrosomia",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D005320",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "HP:0012592": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Albuminuria",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Albuminuria",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D000419",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "MONDO:0024381": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Jet Lag Syndrome",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Jet Lag Syndrome",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D020179",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "UMLS:C0795692": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Hyperlactatemia",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Hyperlactatemia",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D065906",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "HP:0000017": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Nocturia",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Nocturia",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D053158",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "HP:0004324": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Weight Gain",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Weight Gain",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D015430",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "UMLS:C2362324": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Pediatric Obesity",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:license",
+              "value": "CC0 1.0",
+              "original_attribute_name": "license"
+            },
+            {
+              "attribute_type_id": "biolink:iri",
+              "value": "http://identifiers.org/mesh/D063766",
+              "original_attribute_name": "url"
+            },
+            {
+              "attribute_type_id": "biolink:full_name",
+              "value": "Pediatric Obesity",
+              "original_attribute_name": "name"
+            },
+            {
+              "attribute_type_id": "biolink:source",
+              "value": "MeSH",
+              "original_attribute_name": "source"
+            }
+          ]
+        },
+        "HP:0031819": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Increased waist to hip ratio",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:synonym",
+              "value": ["Increased waist to hip ratio"]
+            },
+            {
+              "attribute_type_id": "biolink:xref",
+              "value": ["HP:0031819", "UMLS:C4703554"]
+            }
+          ]
+        },
+        "HP:0000855": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Insulin resistance",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:synonym",
+              "value": ["Insulin resistance", "Insulin Resistance"]
+            },
+            {
+              "attribute_type_id": "biolink:xref",
+              "value": [
+                "HP:0000855",
+                "NCIT:C113101",
+                "UMLS:C0021655",
+                "MEDDRA:10022489",
+                "SNOMEDCT:48606007",
+                "SNOMEDCT:763325000",
+                "MESH:D007333"
+              ]
+            }
+          ]
+        },
+        "HP:0001939": {
+          "categories": ["biolink:PhenotypicFeature"],
+          "name": "Abnormality of metabolism/homeostasis",
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:synonym",
+              "value": ["Abnormality of metabolism/homeostasis"]
+            },
+            {
+              "attribute_type_id": "biolink:xref",
+              "value": ["HP:0001939", "UMLS:C4021768"]
+            }
+          ]
+        }
+      },
+      "edges": {
+        "1934f3c461ef": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0025502",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 585,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.007046832523005,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.677070454054205,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.2455109347801505e-156,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "c00e263a1ae3": {
+          "subject": "MONDO:0005148",
+          "object": "UMLS:C4042861",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 11,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 7.10693419457017e-5,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.210169926265298,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.488906436622872,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            }
+          ]
+        },
+        "991331aa874d": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0001824",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 892,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.32160135124125,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.872951276982835,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 2.0666894424066217e-289,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            }
+          ]
+        },
+        "f088f4fa3e70": {
+          "subject": "MONDO:0005148",
+          "object": "MESH:D000077962",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 0.044280235150596224,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.800088439940756,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.016154764364254,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "39cfd2c8291e": {
+          "subject": "MONDO:0005148",
+          "object": "UMLS:C3658248",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 5,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 0.0013836091055031419,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 6.694590168325432,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 6.0455952453602935,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "ad294653032c": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0001520",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 1.1072034746035102e-12,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.3881547337141154,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.5595636151719714,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 47,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "e3b04dfe114d": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0012592",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 27.299558095473188,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 16.654462452765888,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 0.0,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 1790,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "fcd02bb8cdd7": {
+          "subject": "MONDO:0005148",
+          "object": "MONDO:0024381",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 6.810157253512903,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 6.138604402981221,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 0.012498400731958546,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "1ef95dc37310": {
+          "subject": "MONDO:0005148",
+          "object": "UMLS:C0795692",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 5,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 5.328271138331471,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.926040570293572,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 0.0034524709802413868,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "5e5184b91caa": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0000017",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.4252026998084677,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.2739223482566513,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 0.00036503077110340196,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 12,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "bb41939f9e35": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0004324",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 283,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.759821473505879,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 3.522683762060195,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 8.529741664921051e-72,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            }
+          ]
+        },
+        "458c5dd6f840": {
+          "subject": "MONDO:0005148",
+          "object": "UMLS:C2362324",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:spoke"]
+            },
+            {
+              "resource_id": "infores:spoke",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mesh"]
+            },
+            {
+              "resource_id": "infores:mesh",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "computational_model",
+              "attribute_source": "infores:spoke"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 142,
+              "original_attribute_name": "cooccur",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.5345593148872885,
+              "original_attribute_name": "enrichment",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.1432345933164016e-49,
+              "original_attribute_name": "fisher",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:has_evidence",
+              "value": 4.905257357342205,
+              "original_attribute_name": "odds",
+              "attribute_source": "infores:mesh"
+            },
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "statistical_association",
+              "attribute_source": "infores:spoke"
+            }
+          ]
+        },
+        "e66a6668c645": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0031819",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:omim",
+              "resource_role": "primary_knowledge_source"
+            },
+            {
+              "resource_id": "infores:hpo-annotations",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:omim"]
+            },
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:service-provider-trapi"]
+            },
+            {
+              "resource_id": "infores:service-provider-trapi",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:monarchinitiative"]
+            },
+            {
+              "resource_id": "infores:monarchinitiative",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:hpo-annotations"]
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "knowledge_assertion"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "manual_agent"
+            }
+          ]
+        },
+        "d06198affc26": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0031819",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:service-provider-trapi"]
+            },
+            {
+              "resource_id": "infores:mydisease-info",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:hpo-annotations"]
+            },
+            {
+              "resource_id": "infores:service-provider-trapi",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mydisease-info"]
+            },
+            {
+              "resource_id": "infores:hpo-annotations",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "knowledge_assertion"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "manual_agent"
+            }
+          ]
+        },
+        "6492ac44321b": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0000855",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:omim",
+              "resource_role": "primary_knowledge_source"
+            },
+            {
+              "resource_id": "infores:hpo-annotations",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:omim"]
+            },
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:service-provider-trapi"]
+            },
+            {
+              "resource_id": "infores:service-provider-trapi",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:monarchinitiative"]
+            },
+            {
+              "resource_id": "infores:monarchinitiative",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:hpo-annotations"]
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "knowledge_assertion"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "manual_agent"
+            }
+          ]
+        },
+        "73b7fe7b01ff": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0000855",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:service-provider-trapi"]
+            },
+            {
+              "resource_id": "infores:mydisease-info",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:hpo-annotations"]
+            },
+            {
+              "resource_id": "infores:service-provider-trapi",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mydisease-info"]
+            },
+            {
+              "resource_id": "infores:hpo-annotations",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "knowledge_assertion"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "manual_agent"
+            }
+          ]
+        },
+        "37e30d3d96b5": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0000855",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:mondo",
+              "resource_role": "primary_knowledge_source"
+            },
+            {
+              "resource_id": "infores:phenio",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mondo"]
+            },
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:service-provider-trapi"]
+            },
+            {
+              "resource_id": "infores:service-provider-trapi",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:monarchinitiative"]
+            },
+            {
+              "resource_id": "infores:monarchinitiative",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:phenio"]
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "knowledge_assertion"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "manual_agent"
+            }
+          ]
+        },
+        "32fefb06aaaf": {
+          "subject": "MONDO:0005148",
+          "object": "HP:0001939",
+          "predicate": "biolink:has_phenotype",
+          "sources": [
+            {
+              "resource_id": "infores:aragorn",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:service-provider-trapi"]
+            },
+            {
+              "resource_id": "infores:mydisease-info",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:hpo-annotations"]
+            },
+            {
+              "resource_id": "infores:service-provider-trapi",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": ["infores:mydisease-info"]
+            },
+            {
+              "resource_id": "infores:hpo-annotations",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:knowledge_level",
+              "value": "knowledge_assertion"
+            },
+            {
+              "attribute_type_id": "biolink:agent_type",
+              "value": "manual_agent"
+            }
+          ]
+        }
+      }
+    },
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0025502", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "1934f3c461ef", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "UMLS:C4042861", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "c00e263a1ae3", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0001824", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "991331aa874d", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "MESH:D000077962", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "f088f4fa3e70", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "UMLS:C3658248", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "39cfd2c8291e", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0001520", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "ad294653032c", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0012592", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "e3b04dfe114d", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "MONDO:0024381", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "fcd02bb8cdd7", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "UMLS:C0795692", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "1ef95dc37310", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0000017", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "5e5184b91caa", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0004324", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "bb41939f9e35", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "UMLS:C2362324", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "458c5dd6f840", "attributes": [] }]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0031819", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [
+                { "id": "e66a6668c645", "attributes": [] },
+                { "id": "d06198affc26", "attributes": [] }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0000855", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [
+                { "id": "6492ac44321b", "attributes": [] },
+                { "id": "73b7fe7b01ff", "attributes": [] },
+                { "id": "37e30d3d96b5", "attributes": [] }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
+          "n1": [{ "id": "HP:0001939", "attributes": [] }]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:aragorn",
+            "edge_bindings": {
+              "e01": [{ "id": "32fefb06aaaf", "attributes": [] }]
+            }
+          }
+        ]
+      }
+    ],
+    "auxiliary_graphs": {}
+  },
+  "log_level": "INFO",
+  "bypass_cache": true,
+  "logs": [
+    {
+      "message": "[b4d5ae77.bd81babe] Finished call stack: infores:service-provider-trapi",
+      "timestamp": "2024-10-31T14:40:52.696939",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:service-provider-trapi] Received response with 3 results in 1.746 seconds",
+      "timestamp": "2024-10-31T14:40:52.649963",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Ending call stack with no results: infores:rtx-kg2",
+      "timestamp": "2024-10-31T14:40:51.273488",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:rtx-kg2] Received response with 0 results in 0.332 seconds",
+      "timestamp": "2024-10-31T14:40:51.243263",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77.ff08bee9] Finished call stack: infores:spoke",
+      "timestamp": "2024-10-31T14:40:51.054740",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:spoke] Postprocessing took out 1 results",
+      "timestamp": "2024-10-31T14:40:51.042020",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:spoke] Received response with 13 results in 0.051 seconds",
+      "timestamp": "2024-10-31T14:40:50.973454",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-monarchinitiative",
+      "timestamp": "2024-10-31T14:40:50.960189",
+      "level": "INFO"
+    },
+    {
+      "message": "Response Error contacting infores:automat-monarchinitiative",
+      "error": "Server error '500 Internal Server Error' for url 'https://automat.transltr.io/monarch-kg/query'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+      "request": {
+        "method": "POST",
+        "url": "https://automat.transltr.io/monarch-kg/query",
+        "headers": {
+          "host": "automat.transltr.io",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "connection": "keep-alive",
+          "user-agent": "python-httpx/0.27.0",
+          "content-length": "505",
+          "content-type": "application/json",
+          "traceparent": "00-4a2454d088f00c26120da088ec6cb340-fce833eca4d4f16a-01"
+        },
+        "data": {
+          "message": {
+            "query_graph": {
+              "nodes": {
+                "n0": {
+                  "ids": ["MONDO:0005148"],
+                  "categories": ["biolink:Disease"],
+                  "set_interpretation": "BATCH",
+                  "constraints": [],
+                  "member_ids": []
+                },
+                "n1": {
+                  "categories": ["biolink:PhenotypicFeature"],
+                  "set_interpretation": "BATCH",
+                  "constraints": [],
+                  "member_ids": []
+                }
+              },
+              "edges": {
+                "e01": {
+                  "subject": "n0",
+                  "object": "n1",
+                  "predicates": ["biolink:has_phenotype"],
+                  "attribute_constraints": [],
+                  "qualifier_constraints": []
+                }
+              }
+            }
+          },
+          "bypass_cache": true,
+          "submitter": "infores:aragorn"
+        }
+      },
+      "response": {
+        "status_code": 500,
+        "headers": {
+          "date": "Thu, 31 Oct 2024 14:40:50 GMT",
+          "content-type": "application/json",
+          "content-length": "12",
+          "connection": "keep-alive",
+          "server": "uvicorn"
+        },
+        "data": "{\"error\":\"\"}"
+      },
+      "timestamp": "2024-10-31T14:40:50.959848",
+      "level": "WARNING"
+    },
+    {
+      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-robokop",
+      "timestamp": "2024-10-31T14:40:50.956218",
+      "level": "INFO"
+    },
+    {
+      "message": "Response Error contacting infores:automat-robokop",
+      "error": "Server error '500 Internal Server Error' for url 'https://automat.transltr.io/robokopkg/query'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+      "request": {
+        "method": "POST",
+        "url": "https://automat.transltr.io/robokopkg/query",
+        "headers": {
+          "host": "automat.transltr.io",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "connection": "keep-alive",
+          "user-agent": "python-httpx/0.27.0",
+          "content-length": "505",
+          "content-type": "application/json",
+          "traceparent": "00-4a2454d088f00c26120da088ec6cb340-9e04fb60ad2456fd-01"
+        },
+        "data": {
+          "message": {
+            "query_graph": {
+              "nodes": {
+                "n0": {
+                  "ids": ["MONDO:0005148"],
+                  "categories": ["biolink:Disease"],
+                  "set_interpretation": "BATCH",
+                  "constraints": [],
+                  "member_ids": []
+                },
+                "n1": {
+                  "categories": ["biolink:PhenotypicFeature"],
+                  "set_interpretation": "BATCH",
+                  "constraints": [],
+                  "member_ids": []
+                }
+              },
+              "edges": {
+                "e01": {
+                  "subject": "n0",
+                  "object": "n1",
+                  "predicates": ["biolink:has_phenotype"],
+                  "attribute_constraints": [],
+                  "qualifier_constraints": []
+                }
+              }
+            }
+          },
+          "bypass_cache": true,
+          "submitter": "infores:aragorn"
+        }
+      },
+      "response": {
+        "status_code": 500,
+        "headers": {
+          "date": "Thu, 31 Oct 2024 14:40:50 GMT",
+          "content-type": "application/json",
+          "content-length": "12",
+          "connection": "keep-alive",
+          "server": "uvicorn"
+        },
+        "data": "{\"error\":\"\"}"
+      },
+      "timestamp": "2024-10-31T14:40:50.955868",
+      "level": "WARNING"
+    },
+    {
+      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-ubergraph",
+      "timestamp": "2024-10-31T14:40:50.955508",
+      "level": "INFO"
+    },
+    {
+      "message": "Response Error contacting infores:automat-ubergraph",
+      "error": "Server error '500 Internal Server Error' for url 'https://automat.transltr.io/ubergraph/query'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+      "request": {
+        "method": "POST",
+        "url": "https://automat.transltr.io/ubergraph/query",
+        "headers": {
+          "host": "automat.transltr.io",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "connection": "keep-alive",
+          "user-agent": "python-httpx/0.27.0",
+          "content-length": "505",
+          "content-type": "application/json",
+          "traceparent": "00-4a2454d088f00c26120da088ec6cb340-75f29656be4f9b5b-01"
+        },
+        "data": {
+          "message": {
+            "query_graph": {
+              "nodes": {
+                "n0": {
+                  "ids": ["MONDO:0005148"],
+                  "categories": ["biolink:Disease"],
+                  "set_interpretation": "BATCH",
+                  "constraints": [],
+                  "member_ids": []
+                },
+                "n1": {
+                  "categories": ["biolink:PhenotypicFeature"],
+                  "set_interpretation": "BATCH",
+                  "constraints": [],
+                  "member_ids": []
+                }
+              },
+              "edges": {
+                "e01": {
+                  "subject": "n0",
+                  "object": "n1",
+                  "predicates": ["biolink:has_phenotype"],
+                  "attribute_constraints": [],
+                  "qualifier_constraints": []
+                }
+              }
+            }
+          },
+          "bypass_cache": true,
+          "submitter": "infores:aragorn"
+        }
+      },
+      "response": {
+        "status_code": 500,
+        "headers": {
+          "date": "Thu, 31 Oct 2024 14:40:50 GMT",
+          "content-type": "application/json",
+          "content-length": "12",
+          "connection": "keep-alive",
+          "server": "uvicorn"
+        },
+        "data": "{\"error\":\"\"}"
+      },
+      "timestamp": "2024-10-31T14:40:50.954684",
+      "level": "WARNING"
+    },
+    {
+      "message": "[infores:automat-monarchinitiative] Sending request made of 1 subrequests (1 x 0 curies)",
+      "timestamp": "2024-10-31T14:40:50.928951",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:automat-ubergraph] Sending request made of 1 subrequests (1 x 0 curies)",
+      "timestamp": "2024-10-31T14:40:50.922819",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:spoke] Sending request made of 1 subrequests (1 x 0 curies)",
+      "timestamp": "2024-10-31T14:40:50.917082",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:automat-robokop] Sending request made of 1 subrequests (1 x 0 curies)",
+      "timestamp": "2024-10-31T14:40:50.911383",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:rtx-kg2] Sending request made of 1 subrequests (1 x 0 curies)",
+      "timestamp": "2024-10-31T14:40:50.906038",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:service-provider-trapi] Sending request made of 1 subrequests (1 x 0 curies)",
+      "timestamp": "2024-10-31T14:40:50.898632",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:automat-monarchinitiative] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
+      "timestamp": "2024-10-31T14:40:50.878007",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Current call stack: infores:automat-monarchinitiative",
+      "timestamp": "2024-10-31T14:40:50.877648",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:automat-ubergraph] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
+      "timestamp": "2024-10-31T14:40:50.874494",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Current call stack: infores:automat-ubergraph",
+      "timestamp": "2024-10-31T14:40:50.874137",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:automat-robokop] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
+      "timestamp": "2024-10-31T14:40:50.870878",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Current call stack: infores:automat-robokop",
+      "timestamp": "2024-10-31T14:40:50.870521",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:rtx-kg2] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
+      "timestamp": "2024-10-31T14:40:50.867665",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Current call stack: infores:rtx-kg2",
+      "timestamp": "2024-10-31T14:40:50.867306",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:service-provider-trapi] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
+      "timestamp": "2024-10-31T14:40:50.864350",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Current call stack: infores:service-provider-trapi",
+      "timestamp": "2024-10-31T14:40:50.863980",
+      "level": "INFO"
+    },
+    {
+      "message": "[infores:spoke] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
+      "timestamp": "2024-10-31T14:40:50.860490",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Current call stack: infores:spoke",
+      "timestamp": "2024-10-31T14:40:50.860123",
+      "level": "INFO"
+    },
+    {
+      "message": "[b4d5ae77] Getting results for e01",
+      "timestamp": "2024-10-31T14:40:50.859523",
+      "level": "INFO"
+    },
+    {
+      "message": "Generated query plan: {'e01': ['infores:spoke', 'infores:service-provider-trapi', 'infores:rtx-kg2', 'infores:automat-robokop', 'infores:automat-ubergraph', 'infores:automat-monarchinitiative']}",
+      "timestamp": "2024-10-31T14:40:50.857843",
+      "level": "INFO"
+    },
+    {
+      "message": "Doing lookup for message: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
+      "timestamp": "2024-10-31T14:40:50.537320",
+      "level": "INFO"
+    }
+  ]
+}

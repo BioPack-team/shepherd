@@ -1,0 +1,7 @@
+fakeredis
+pytest
+pytest-asyncio
+pytest-cov
+pytest-mock
+tox
+tox-venv

@@ -1,0 +1,28 @@
+contact:
+  email: max@covar.com
+  name: Max Wang
+  x-id: https://github.com/maximusunc
+  x-role: responsible developer
+description: 'Shepherd: A Translator ARA that aims to be modular in its query expansion and ranking, among other TRAPI workflow operations.'
+servers:
+- description: Default server
+  url: https://shepherd.renci.org
+title: Shepherd
+tags:
+- name: translator
+- name: ARA
+- name: trapi
+x-translator:
+  biolink-version: 4.1.6
+  component: ARA
+  team:
+  - DOGSLED
+  infores: infores:shepherd
+x-trapi:
+  version: 1.5.0
+  operations:
+  - lookup
+  - score
+  - sort_results_score
+  - filter_results_top_n
+  - filter_kgraph_orphans

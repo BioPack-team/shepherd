@@ -1,10 +1,11 @@
-# OS files
 .DS_Store
 
 # Project specific
-curls/
+scripts/
 pgdata/
 scripts/
+data/
+*.xml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
