@@ -3,7 +3,6 @@ import logging
 import pytest
 import redis.asyncio
 from shepherd_utils.broker import get_task
-from shepherd_utils.db import add_query
 from workers.example_ara.worker import example_ara
 from tests.helpers.mock_redis import redis_mock
 

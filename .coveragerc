@@ -1,0 +1,26 @@
+[run]
+source = 
+  shepherd_utils
+  shepherd_server
+  workers
+branch = true
+include =
+  workers/*.py
+  workers/**/*.py
+  shepherd_utils/*.py
+  shepherd_utils/**/*.py
+  shepherd_server/*.py
+  shepherd_server/**/*.py
+
+[report]
+show_missing = true
+skip_covered = false
+fail_under = 10
+exclude_lines =
+    pragma: no cover
+
+[paths]
+source =
+  workers
+  shepherd_utils
+  shepherd_server
