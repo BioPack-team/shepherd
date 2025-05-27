@@ -4,6 +4,7 @@ import asyncio
 import httpx
 import json
 import logging
+from pathlib import Path
 import time
 import uuid
 from shepherd_utils.db import (
@@ -30,7 +31,8 @@ async def example_lookup(task, logger: logging.Logger):
     # Do query expansion or whatever lookup process
     # We're going to stub a response
     start = time.time()
-    with open("test_response.json", "r") as f:
+    test_response = Path(__file__).parent / "test_response.json"
+    with open(test_response, "r") as f:
         response = json.load(f)
     logger.debug(f"Loading json took {time.time() - start}")
 
