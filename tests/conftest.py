@@ -13,6 +13,7 @@ def postgres_mock():
     """
     Factory for creating a mock postgres pool with custom return value.
     """
+
     def _create_mock(return_value):
         mock_conn = AsyncMock()
         mock_conn.execute.side_effect = return_value

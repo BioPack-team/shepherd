@@ -35,15 +35,30 @@ async def test_example(redis_mock):
 async def test_example_lookup(mocker, redis_mock):
     mock_callback_id = mocker.patch("workers.example_lookup.worker.add_callback_id")
     mock_callback_id.return_value = "test"
-    mock_callback_response = mocker.patch("workers.example_lookup.worker.save_callback_response")
+    mock_callback_response = mocker.patch(
+        "workers.example_lookup.worker.save_callback_response"
+    )
     mock_callback_response.return_value = {}
-    mock_running_callbacks = mocker.patch("workers.example_lookup.worker.get_running_callbacks")
+    mock_running_callbacks = mocker.patch(
+        "workers.example_lookup.worker.get_running_callbacks"
+    )
     mock_running_callbacks.return_value = []
     mock_response = mocker.Mock()
     mocker.patch("httpx.AsyncClient.post", return_value=mock_response)
     logger = logging.getLogger(__name__)
 
-    await example_lookup(["test", {"query_id": "test", "workflow": json.dumps([{"id": "example.lookup"}, {"id": "example.score"}])}], logger)
+    await example_lookup(
+        [
+            "test",
+            {
+                "query_id": "test",
+                "workflow": json.dumps(
+                    [{"id": "example.lookup"}, {"id": "example.score"}]
+                ),
+            },
+        ],
+        logger,
+    )
 
     # Get the task that the ara should have put on the queue
     task = await get_task("example.score", "consumer", "test", logger)
