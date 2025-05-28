@@ -31,22 +31,29 @@ Multiple workers of the same type can be in the same `GROUP`, and redis will mak
 ### Creating your own ARA
 
 Creating a brand new ARA is fairly straightforward. Here are the steps to create a basic ARA that performs all the necessary Translator operations:
-- Copy the `example_ara` folder. This will be the main entrypoint to your new ARA.
+- Copy the `workers/example_ara` folder. This will be the main entrypoint to your new ARA.
   - Towards the top of that file, replace the `STREAM` variable value with your ARA name.
   - Within the `example_ara` function in that file, replace the `workflow` list with your ARA's workflow. This could include analyzing the `message` to determine a pertinent workflow.
   - **Note:** If using operations not in the shared workers, your workflow operation ids need to reflect the `STREAM` name of your custom operation workers. This is how the task get passed to your operation worker.
-- (If needed) Copy the `example_lookup` folder. This will be your ARA's lookup operation.
+- (If needed) Copy the `workers/example_lookup` folder. This will be your ARA's lookup operation.
   - Towards the top of that file, replace the `STREAM` variable value with `{ara_name}.lookup`.
   - Within the `example_lookup` function in that file, replace the contents with your ARA's lookup logic.
-- (If needed) Copy the `example_score` folder. This will be your ARA's score operation.
+- (If needed) Copy the `workers/example_score` folder. This will be your ARA's score operation.
   - Towards the top of that file, replace the `STREAM` variable value with `{ara_name}.score`.
   - Within the `example_score` funciton in that file, replace the contents with your ARA's scoring logic.
 - If you have other custom operations you want to perform that are in your `workflow` above, pick a similar folder to copy and adjust the code inside to fit your needs.
-- If you want to use shared workers (i.e. `sort_results_score`, `filter_results_top_n`), you don't need to do anything other than include them in your workflow. They will automatically pick up your query and pass it along like your other operations.
+- If you want to use shared workers (i.e. `workers/sort_results_score`, `workers/filter_results_top_n`), you don't need to do anything other than include them in your workflow. They will automatically pick up your query and pass it along like your other operations.
 - Open the `compose.yml` file in the root directory, and for each ARA folder you created, add a `service` (or copy an existing one), and make sure that the `container_name` and `build/dockerfile` reflect you worker names and the path to your worker Dockerfile
 - Run Shepherd with `docker compose up --build`
 
 ### Testing your ARA
 
-TODO: we're going to make a bunch of unit tests for each type of worker.
-Run the `scripts/test_shepherd.py` script to run a query against your ARA. Replace the `target` argument with your ARA name so the server routes the query to your worker. This script requires that Shepherd be running locally.
+Shepherd uses pytest and tox for local test running and GitHub Actions. To run tests, simply activate your virtual env, run:
+- `pip install tox`
+and then run:
+- `tox`
+
+This will run all the tests and then also provide code coverage.
+
+
+If you would like to run local integration tests, run the `scripts/test_shepherd.py` script to run a query against your ARA. Replace the `target` argument with your ARA name so the server routes the query to your worker. This script requires that Shepherd be running locally.
