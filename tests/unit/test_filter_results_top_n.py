@@ -9,7 +9,9 @@ from workers.filter_results_top_n.worker import filter_results_top_n
 @pytest.mark.asyncio
 async def test_filter_results_top_n(redis_mock, mocker):
     """Test that results are filtered."""
-    mock_query_state = mocker.patch("workers.filter_results_top_n.worker.get_query_state")
+    mock_query_state = mocker.patch(
+        "workers.filter_results_top_n.worker.get_query_state"
+    )
     response_id = "test"
     mock_query_state.return_value = ["", "", "", "", "", "", "", response_id, None]
     mock_callback_response = mocker.patch(

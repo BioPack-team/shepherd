@@ -10,7 +10,9 @@ from workers.filter_kgraph_orphans.worker import filter_kgraph_orphans
 @pytest.mark.asyncio
 async def test_filter_kgraph_orphans(redis_mock, mocker):
     """Test that kgraph orphans are removed."""
-    mock_query_state = mocker.patch("workers.filter_kgraph_orphans.worker.get_query_state")
+    mock_query_state = mocker.patch(
+        "workers.filter_kgraph_orphans.worker.get_query_state"
+    )
     response_id = "test"
     mock_query_state.return_value = ["", "", "", "", "", "", "", response_id, None]
     mock_callback_response = mocker.patch(

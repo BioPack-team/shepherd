@@ -6,7 +6,11 @@ import pytest
 from shepherd_utils.db import get_message, save_callback_response
 from workers.merge_message.worker import merge_message
 
-from tests.helpers.generate_messages import generate_response, generate_query, response_2
+from tests.helpers.generate_messages import (
+    generate_response,
+    generate_query,
+    response_2,
+)
 
 
 @pytest.mark.asyncio
@@ -17,12 +21,16 @@ async def test_message_merge(redis_mock, mocker):
     mock_callback_id = mocker.patch("workers.merge_message.worker.get_query_state")
     response_id = "test_response"
     mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
-    mock_remove_callback_id = mocker.patch("workers.merge_message.worker.remove_callback_id")
+    mock_remove_callback_id = mocker.patch(
+        "workers.merge_message.worker.remove_callback_id"
+    )
 
     logger = logging.getLogger(__name__)
     await save_callback_response(query_id, generate_query(), logger)
     callback_response = copy.deepcopy(response_2)
-    await save_callback_response(f"{callback_id}_query_graph", response_2["message"]["query_graph"], logger)
+    await save_callback_response(
+        f"{callback_id}_query_graph", response_2["message"]["query_graph"], logger
+    )
     await save_callback_response(callback_id, callback_response, logger)
     await save_callback_response(response_id, generate_response(), logger)
 
@@ -40,5 +48,5 @@ async def test_message_merge(redis_mock, mocker):
     message = await get_message(response_id, logger)
 
     assert len(message["message"]["results"]) == 3
-    
+
     mock_remove_callback_id.assert_called_once()

@@ -39,7 +39,9 @@ def redis_mock(monkeypatch):
 
     def mock_redis_constructor(*args, **kwargs):
         if kwargs.get("connection_pool", None):
-            decode = kwargs["connection_pool"].connection_kwargs.get("decode_responses", False)
+            decode = kwargs["connection_pool"].connection_kwargs.get(
+                "decode_responses", False
+            )
             return decoded_redis if decode else raw_redis
         return raw_redis
 

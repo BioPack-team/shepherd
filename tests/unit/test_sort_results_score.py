@@ -43,16 +43,14 @@ async def test_default_sort(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
-                "workflow": json.dumps(
-                    [{"id": "sort_results_score"}]
-                ),
+                "workflow": json.dumps([{"id": "sort_results_score"}]),
             },
         ],
         logger,
     )
 
     message = await get_message(response_id, logger)
-    
+
     assert len(message["message"]["results"]) == 2
     assert message["message"]["results"][0]["analyses"][0]["score"] == 0.9
     assert message["message"]["results"][1]["analyses"][0]["score"] == 0.1
@@ -109,7 +107,7 @@ async def test_ascending_sort(redis_mock, mocker):
     )
 
     message = await get_message(response_id, logger)
-    
+
     assert len(message["message"]["results"]) == 2
     assert message["message"]["results"][0]["analyses"][0]["score"] == 0.1
     assert message["message"]["results"][1]["analyses"][0]["score"] == 0.9

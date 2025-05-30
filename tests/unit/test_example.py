@@ -73,16 +73,13 @@ async def test_example_lookup(mocker, redis_mock):
     ] == [op["id"] for op in workflow]
 
 
-
 @pytest.mark.asyncio
 async def test_example_score(mocker, redis_mock):
     """Test example scoring."""
     mock_callback_id = mocker.patch("workers.example_score.worker.get_query_state")
     response_id = "test"
     mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
-    mock_callback_response = mocker.patch(
-        "workers.example_score.worker.get_message"
-    )
+    mock_callback_response = mocker.patch("workers.example_score.worker.get_message")
     mock_callback_response.return_value = {
         "message": {
             "results": [
@@ -101,16 +98,14 @@ async def test_example_score(mocker, redis_mock):
             "test",
             {
                 "query_id": "test",
-                "workflow": json.dumps(
-                    [{"id": "example.score"}]
-                ),
+                "workflow": json.dumps([{"id": "example.score"}]),
             },
         ],
         logger,
     )
 
     message = await get_message(response_id, logger)
-    
+
     assert len(message["message"]["results"]) == 1
     assert "score" in message["message"]["results"][0]["analyses"][0]
     assert len(message["message"]["results"][0]["analyses"]) == 1

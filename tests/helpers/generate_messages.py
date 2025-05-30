@@ -25,7 +25,7 @@ creative_query = {
                     "ids": ["MONDO:0001"],
                     "categories": ["biolink:DiseaseOrPhenotypicFeature"],
                     "set_interpretation": "BATCH",
-                }
+                },
             },
             "edges": {
                 "e0": {
@@ -245,9 +245,7 @@ response_1 = {
                 "analyses": [
                     {
                         "resource_id": "infores:aragorn",
-                        "edge_bindings": {
-                            "e0": [{"id": "123", "attributes": []}]
-                        },
+                        "edge_bindings": {"e0": [{"id": "123", "attributes": []}]},
                     }
                 ],
             },
@@ -259,9 +257,7 @@ response_1 = {
                 "analyses": [
                     {
                         "resource_id": "infores:aragorn",
-                        "edge_bindings": {
-                            "e0": [{"id": "234", "attributes": []}]
-                        },
+                        "edge_bindings": {"e0": [{"id": "234", "attributes": []}]},
                     }
                 ],
             },
@@ -272,7 +268,7 @@ response_1 = {
     "bypass_cache": True,
     "logs": [
         {
-            "message": 'Doing lookup',
+            "message": "Doing lookup",
             "timestamp": "2024-10-31T14:40:50.537320",
             "level": "INFO",
         },
@@ -292,9 +288,7 @@ response_2 = {
                     "categories": ["biolink:DiseaseOrPhenotypicFeature"],
                     "set_interpretation": "BATCH",
                 },
-                "g": {
-                    "categories": ["biolink:Gene"]
-                }
+                "g": {"categories": ["biolink:Gene"]},
             },
             "edges": {
                 "e0": {
@@ -305,9 +299,7 @@ response_2 = {
                 "e1": {
                     "subject": "g",
                     "object": "SN",
-                    "predicates": [
-                        "biolink:affects_response_to"
-                    ]
+                    "predicates": ["biolink:affects_response_to"],
                 },
             },
         },
@@ -495,9 +487,7 @@ response_2 = {
                 "analyses": [
                     {
                         "resource_id": "infores:aragorn",
-                        "edge_bindings": {
-                            "e0": [{"id": "123", "attributes": []}]
-                        },
+                        "edge_bindings": {"e0": [{"id": "123", "attributes": []}]},
                     }
                 ],
             },
@@ -508,7 +498,7 @@ response_2 = {
     "bypass_cache": True,
     "logs": [
         {
-            "message": 'Doing lookup',
+            "message": "Doing lookup",
             "timestamp": "2024-10-31T14:40:50.537320",
             "level": "INFO",
         },
