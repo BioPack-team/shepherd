@@ -24,9 +24,6 @@ async def sort_results_score(task, logger: logging.Logger):
     message = await get_message(response_id, logger)
     results = message["message"].get("results", [])
     current_op = workflow[0]
-    if current_op is None:
-        logger.error(f"Unable to find operation {STREAM} in workflow")
-        raise Exception(f"Operation {STREAM} is not in workflow")
     aord = current_op.get("ascending_or_descending", "descending")
     reverse = aord == "descending"
     try:
@@ -37,8 +34,9 @@ async def sort_results_score(task, logger: logging.Logger):
         )
     except KeyError as e:
         # can't find the right structure of message
-        logger.error(f"Error sorting results: {e}")
-        return message, 400
+        err = f"Error sorting results: {e}"
+        logger.error(err)
+        raise KeyError(err)
     logger.info("Returning sorted results.")
 
     # save merged message back to db

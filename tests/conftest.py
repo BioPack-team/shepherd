@@ -31,12 +31,21 @@ def postgres_mock():
 def redis_mock(monkeypatch):
     """
     Create a fake redis client and function for getting that client.
+
+    Handles if the connection decodes response or not.
     """
-    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    decoded_redis = fakeredis.FakeRedis(decode_responses=True)
+    raw_redis = fakeredis.FakeRedis(decode_responses=False)
 
     def mock_redis_constructor(*args, **kwargs):
-        return fake_redis
+        if kwargs.get("connection_pool", None):
+            decode = kwargs["connection_pool"].connection_kwargs.get("decode_responses", False)
+            return decoded_redis if decode else raw_redis
+        return raw_redis
 
     monkeypatch.setattr(aioredis, "Redis", mock_redis_constructor)
 
-    return fake_redis
+    return {
+        "decoded": decoded_redis,
+        "raw": raw_redis,
+    }

@@ -3,9 +3,11 @@ import logging
 import pytest
 import redis.asyncio
 from shepherd_utils.broker import get_task
+from shepherd_utils.db import get_message
 
 from workers.example_ara.worker import example_ara
 from workers.example_lookup.worker import example_lookup
+from workers.example_score.worker import example_score
 
 
 @pytest.mark.asyncio
@@ -69,3 +71,47 @@ async def test_example_lookup(mocker, redis_mock):
     assert [
         "example.score",
     ] == [op["id"] for op in workflow]
+
+
+
+@pytest.mark.asyncio
+async def test_example_score(mocker, redis_mock):
+    """Test example scoring."""
+    mock_callback_id = mocker.patch("workers.example_score.worker.get_query_state")
+    response_id = "test"
+    mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
+    mock_callback_response = mocker.patch(
+        "workers.example_score.worker.get_message"
+    )
+    mock_callback_response.return_value = {
+        "message": {
+            "results": [
+                {
+                    "analyses": [
+                        {},
+                    ],
+                },
+            ],
+        },
+    }
+    logger = logging.getLogger(__name__)
+
+    await example_score(
+        [
+            "test",
+            {
+                "query_id": "test",
+                "workflow": json.dumps(
+                    [{"id": "example.score"}]
+                ),
+            },
+        ],
+        logger,
+    )
+
+    message = await get_message(response_id, logger)
+    
+    assert len(message["message"]["results"]) == 1
+    assert "score" in message["message"]["results"][0]["analyses"][0]
+    assert len(message["message"]["results"][0]["analyses"]) == 1
+    assert isinstance(message["message"]["results"][0]["analyses"][0]["score"], float)

@@ -27,7 +27,7 @@ async def finish_query(task, logger: logging.Logger):
         callback_url = query_state[8]
         if callback_url is not None:
             # this was an async query, need to send message back
-            message = await get_message(query_state.response_id, logger)
+            message = await get_message(query_state[7], logger)
             async with httpx.AsyncClient() as client:
                 await client.post(
                     callback_url,
