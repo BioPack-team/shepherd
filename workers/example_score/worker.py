@@ -22,7 +22,6 @@ async def example_score(task, logger: logging.Logger):
     workflow = json.loads(task[1]["workflow"])
 
     query_state = await get_query_state(query_id, logger)
-    logger.info(query_state)
     response_id = query_state[7]
     message = await get_message(response_id, logger)
     # give a random score to all results
