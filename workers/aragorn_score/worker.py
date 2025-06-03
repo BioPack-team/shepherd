@@ -5,7 +5,7 @@ import httpx
 import json
 import logging
 import uuid
-from shepherd_utils.db import get_message, save_callback_response
+from shepherd_utils.db import get_message, save_message
 from shepherd_utils.shared import get_tasks, wrap_up_task
 
 # Queue name
@@ -31,7 +31,7 @@ async def aragorn_score(task, logger: logging.Logger):
         response.raise_for_status()
         scored_message = response.json()
 
-        await save_callback_response(query_id, scored_message, logger)
+        await save_message(query_id, scored_message, logger)
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
 

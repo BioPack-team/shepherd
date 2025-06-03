@@ -14,7 +14,7 @@ from shepherd_utils.db import (
     initialize_db,
     shutdown_db,
     add_query,
-    save_callback_response,
+    save_message,
     get_callback_query_id,
     get_message,
     get_query_state,
@@ -193,7 +193,7 @@ async def callback(
     logger.info(f"Got original query id: {query_id}")
     # save callback to redis
     logger.info(f"Saving callback {callback_id} to redis")
-    await save_callback_response(callback_id, response, logger)
+    await save_message(callback_id, response, logger)
     logger.info(f"Saved callback {callback_id} to redis")
     # add new task to merge callback response into original message
     await add_task(

@@ -11,7 +11,7 @@ from shepherd_utils.db import (
     get_message,
     add_callback_id,
     get_running_callbacks,
-    save_callback_response,
+    save_message,
 )
 from shepherd_utils.shared import get_tasks, wrap_up_task
 
@@ -44,7 +44,7 @@ async def example_lookup(task, logger: logging.Logger):
             # Put callback UID and query ID in postgres
             await add_callback_id(query_id, callback_id, logger)
             # put lookup query graph in redis
-            await save_callback_response(
+            await save_message(
                 f"{callback_id}_query_graph", response["message"]["query_graph"], logger
             )
 

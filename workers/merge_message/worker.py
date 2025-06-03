@@ -12,7 +12,7 @@ from shepherd_utils.broker import mark_task_as_complete, acquire_lock, remove_lo
 from shepherd_utils.db import (
     get_message,
     get_query_state,
-    save_callback_response,
+    save_message,
     remove_callback_id,
 )
 from shepherd_utils.shared import get_tasks
@@ -359,7 +359,7 @@ async def merge_message(task, logger: logging.Logger):
             [original_response, callback_response],
         )
         # save merged message back to db
-        await save_callback_response(response_id, merged_message, logger)
+        await save_message(response_id, merged_message, logger)
         logger.info(f"Kept the lock for {time.time() - lock_time} seconds")
         # remove lock so others can now modify message
         await remove_lock(response_id, CONSUMER, logger)

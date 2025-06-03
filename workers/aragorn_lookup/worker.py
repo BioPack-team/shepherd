@@ -13,7 +13,7 @@ from shepherd_utils.db import (
     get_message,
     get_running_callbacks,
     add_callback_id,
-    save_callback_response,
+    save_message,
 )
 from shepherd_utils.shared import get_tasks, wrap_up_task
 
@@ -82,7 +82,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
         callback_id = str(uuid.uuid4())[:8]
         await add_callback_id(query_id, callback_id, logger)
         # put lookup query graph in redis
-        await save_callback_response(
+        await save_message(
             f"{callback_id}_query_graph", message["message"]["query_graph"], logger
         )
         # TODO: send single query to retriever
@@ -96,7 +96,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
                 # put lookup query graph in redis
-                await save_callback_response(
+                await save_message(
                     f"{callback_id}_query_graph",
                     expanded_message["message"]["query_graph"],
                     logger,

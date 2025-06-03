@@ -6,7 +6,7 @@ import logging
 import random
 import time
 import uuid
-from shepherd_utils.db import get_message, get_query_state, save_callback_response
+from shepherd_utils.db import get_message, get_query_state, save_message
 from shepherd_utils.shared import get_tasks, wrap_up_task
 
 # Queue name
@@ -29,7 +29,7 @@ async def example_score(task, logger: logging.Logger):
         for analysis in result["analyses"]:
             analysis["score"] = random.random()
 
-    await save_callback_response(response_id, message, logger)
+    await save_message(response_id, message, logger)
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 

@@ -92,7 +92,7 @@ async def add_query(
     logger.debug(f"Adding query took {time.time() - start} seconds")
 
 
-async def save_callback_response(
+async def save_message(
     callback_id: str,
     response: dict[str, Any],
     logger: logging.Logger,
@@ -121,6 +121,32 @@ async def save_callback_response(
         logger.error(f"Failed to put it on there {e}")
         pass
     logger.debug(f"Saving message took {time.time() - start} seconds")
+
+
+async def get_message(
+    message_id: str,
+    logger: logging.Logger,
+) -> Dict:
+    """Get the message from db."""
+    message = {}
+    start = time.time()
+    try:
+        client = await aioredis.Redis(
+            connection_pool=data_db_pool,
+        )
+        # print(f"Putting {query_id} on {ara_target} stream")
+        message = await client.get(message_id)
+        await client.aclose()
+        if message is not None:
+            start_decomp = time.time()
+            message = orjson.loads(zstandard.decompress(message))
+            logger.debug(f"Decompression took {time.time() - start_decomp}")
+    except Exception as e:
+        # failed to get message from db
+        # TODO: do something more severe
+        pass
+    logger.debug(f"Getting message took {time.time() - start} seconds")
+    return message
 
 
 async def add_callback_id(
@@ -206,32 +232,6 @@ async def get_callback_query_id(
     except Exception as e:
         logger.error(f"Failed to get a query id from callback: {e}")
     return query_id
-
-
-async def get_message(
-    message_id: str,
-    logger: logging.Logger,
-) -> Dict:
-    """Get the message from db."""
-    message = {}
-    start = time.time()
-    try:
-        client = await aioredis.Redis(
-            connection_pool=data_db_pool,
-        )
-        # print(f"Putting {query_id} on {ara_target} stream")
-        message = await client.get(message_id)
-        await client.aclose()
-        if message is not None:
-            start_decomp = time.time()
-            message = orjson.loads(zstandard.decompress(message))
-            logger.debug(f"Decompression took {time.time() - start_decomp}")
-    except Exception as e:
-        # failed to get message from db
-        # TODO: do something more severe
-        pass
-    logger.debug(f"Getting message took {time.time() - start} seconds")
-    return message
 
 
 async def get_query_state(
