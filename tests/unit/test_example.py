@@ -37,9 +37,7 @@ async def test_example(redis_mock):
 async def test_example_lookup(mocker, redis_mock):
     mock_callback_id = mocker.patch("workers.example_lookup.worker.add_callback_id")
     mock_callback_id.return_value = "test"
-    mock_callback_response = mocker.patch(
-        "workers.example_lookup.worker.save_message"
-    )
+    mock_callback_response = mocker.patch("workers.example_lookup.worker.save_message")
     mock_callback_response.return_value = {}
     mock_running_callbacks = mocker.patch(
         "workers.example_lookup.worker.get_running_callbacks"
