@@ -3,16 +3,9 @@ services:
     container_name: shepherd_server
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile
-    depends_on:
-      shepherd_db:
-        condition: service_healthy
-      shepherd_broker:
-        condition: service_healthy
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
@@ -25,8 +18,6 @@ services:
     container_name: shepherd_db
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     build:
       context: .
       dockerfile: shepherd_db/Dockerfile
@@ -47,10 +38,6 @@ services:
     build:
       context: .
       dockerfile: shepherd_broker/Dockerfile
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -72,7 +59,7 @@ services:
       - shepherd
     volumes:
       - ./data:/data
-  
+
 
   ########## Shared Workers
   merge_message:
@@ -81,10 +68,6 @@ services:
       context: .
       dockerfile: workers/merge_message/Dockerfile
     restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -100,10 +83,6 @@ services:
     build:
       context: .
       dockerfile: workers/sort_results_score/Dockerfile
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -120,10 +99,6 @@ services:
     build:
       context: .
       dockerfile: workers/filter_results_top_n/Dockerfile
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -140,10 +115,6 @@ services:
     build:
       context: .
       dockerfile: workers/filter_kgraph_orphans/Dockerfile
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -166,16 +137,12 @@ services:
         condition: service_healthy
       shepherd_broker:
         condition: service_healthy
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
     networks:
       - shepherd
-  
+
 
   ######### Example ARA
   example_ara:
@@ -184,10 +151,6 @@ services:
       context: .
       dockerfile: workers/example_ara/Dockerfile
     restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -204,10 +167,6 @@ services:
       context: .
       dockerfile: workers/example_lookup/Dockerfile
     restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -223,10 +182,6 @@ services:
     build:
       context: .
       dockerfile: workers/example_score/Dockerfile
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -247,10 +202,6 @@ services:
       context: .
       dockerfile: workers/aragorn/Dockerfile
     restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -267,10 +218,6 @@ services:
       context: .
       dockerfile: workers/aragorn_lookup/Dockerfile
     restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -287,10 +234,6 @@ services:
       context: .
       dockerfile: workers/aragorn_score/Dockerfile
     restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-      POSTGRES_HOST: shepherd_db
-      REDIS_HOST: shepherd_broker
     depends_on:
       shepherd_db:
         condition: service_healthy
