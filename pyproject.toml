@@ -16,7 +16,8 @@ dependencies = [
   "pydantic-settings==2.9.1",
   "python-dotenv==1.0.1",
   "pyyaml==6.0.1",
-  "zstandard==0.23.0"
+  "zstandard==0.23.0",
+  "httpx"
 ]
 
 [build-system]
