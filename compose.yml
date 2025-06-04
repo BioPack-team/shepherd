@@ -59,7 +59,7 @@ services:
       - shepherd
     volumes:
       - ./data:/data
-  
+
 
   ########## Shared Workers
   merge_message:
@@ -142,7 +142,7 @@ services:
       - ./.env:/app/.env
     networks:
       - shepherd
-  
+
 
   ######### Example ARA
   example_ara:

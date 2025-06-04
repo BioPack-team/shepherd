@@ -10,11 +10,11 @@ class Settings(BaseSettings):
     server_location: str = "RENCI"
 
     postgres_user: str = "postgres"
-    postgres_host: str = "localhost"
+    postgres_host: str = "shepherd_db"
     postgres_port: int = 5432
     postgres_password: str = "supersecretpassw0rd"
 
-    redis_host: str = "localhost"
+    redis_host: str = "shepherd_broker"
     redis_port: int = 6379
     redis_password: str = "supersecretpassword"
 
