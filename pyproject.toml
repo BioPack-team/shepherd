@@ -8,16 +8,16 @@ requires-python = ">=3.10"
 dependencies = [
   "fastapi",
   "httpx==0.28.1",
-  "orjson==3.10.18",
-  "psycopg[binary]==3.1.19",
-  "psycopg_pool==3.2.1",
-  "pydantic==2.11.4",
-  "pydantic-settings==2.9.1",
-  "python-dotenv==1.0.1",
-  "pyyaml==6.0.1",
-  "redis==5.2.1",
   "uvicorn[standard]",
-  "zstandard==0.23.0"
+  "redis~=5.2",
+  "orjson~=3.10",
+  "psycopg[binary]~=3.1",
+  "psycopg_pool~=3.2",
+  "pydantic~=2.11",
+  "pydantic-settings~=2.9",
+  "python-dotenv~=1.0",
+  "pyyaml~=6.0",
+  "zstandard~=0.23"
 ]
 
 [build-system]
