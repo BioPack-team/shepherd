@@ -112,26 +112,43 @@ async def acquire_lock(
     logger: logging.Logger,
 ):
     """Acquire a redis lock for a given row."""
+    got_lock = False
     try:
         client = await aioredis.Redis(
             connection_pool=lock_redis_pool,
         )
-        locked = await client.get(response_id)
-        if locked is None:
-            await client.setex(response_id, 45, consumer_id)
-            await client.aclose()
-            return True
-        for i in range(60):
-            await asyncio.sleep(5)
-            locked = await client.get(response_id)
-            if locked is None:
-                await client.setex(response_id, 45, consumer_id)
-                await client.aclose()
-                return True
-        return False
+        pubsub = client.pubsub()
+        await pubsub.subscribe(response_id)
+        for i in range(12):
+            aquired = await client.set(response_id, consumer_id, ex=45, nx=True)
+            if aquired:
+                got_lock = True
+                break
+            try:
+                await pubsub.get_message(ignore_subscribe_messages=True, timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            # await asyncio.sleep(1)
+            # try again
+
+        await pubsub.unsubscribe(response_id)
+        await pubsub.aclose()
+        await client.aclose()
+        return got_lock
     except Exception as e:
         logger.error(f"Failed to successfully lock message: {e}")
-        return False
+        return got_lock
+
+
+UNLOCK_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    redis.call("del", KEYS[1])
+    redis.call("publish", KEYS[1], "released")
+    return 1
+else
+    return 0
+end
+"""
 
 
 async def remove_lock(
@@ -144,13 +161,8 @@ async def remove_lock(
         client = await aioredis.Redis(
             connection_pool=lock_redis_pool,
         )
-        locked = await client.get(response_id)
-        if locked is None:
-            logger.error("Something happened and we don't have the lock anymore.")
-        elif locked != consumer_id:
-            logger.error("A different consumer has a lock on this entry.")
-        else:
-            await client.delete(response_id)
+        unlock_script = client.register_script(UNLOCK_SCRIPT)
+        await unlock_script(keys=[response_id], args=[consumer_id])
         await client.aclose()
     except Exception as e:
         logger.error(f"Failed to successfully unlock message: {e}")
