@@ -112,6 +112,8 @@ async def acquire_lock(
     logger: logging.Logger,
 ):
     """Acquire a redis lock for a given row."""
+    client = None
+    pubsub = None
     got_lock = False
     try:
         client = await aioredis.Redis(
@@ -131,12 +133,14 @@ async def acquire_lock(
             # await asyncio.sleep(1)
             # try again
 
-        await pubsub.unsubscribe(response_id)
-        await pubsub.aclose()
-        await client.aclose()
-        return got_lock
     except Exception as e:
         logger.error(f"Failed to successfully lock message: {e}")
+    finally:
+        if pubsub is not None:
+            await pubsub.unsubscribe(response_id)
+            await pubsub.aclose()
+        if client is not None:
+            await client.aclose()
         return got_lock
 
 
