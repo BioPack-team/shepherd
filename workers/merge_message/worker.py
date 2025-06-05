@@ -345,8 +345,9 @@ async def merge_message(task, logger: logging.Logger):
     callback_response = await get_message(callback_id, logger)
     query_state = await get_query_state(query_id, logger)
     response_id = query_state[7]
-    locked = await acquire_lock(response_id, CONSUMER, logger)
-    if locked:
+    got_lock = await acquire_lock(response_id, CONSUMER, logger)
+    if got_lock:
+        logger.info(f"[{callback_id}] Obtained lock.")
         lock_time = time.time()
         original_response = await get_message(response_id, logger)
         # do message merging
@@ -360,7 +361,9 @@ async def merge_message(task, logger: logging.Logger):
         )
         # save merged message back to db
         await save_message(response_id, merged_message, logger)
-        logger.info(f"Kept the lock for {time.time() - lock_time} seconds")
+        logger.info(
+            f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
+        )
         # remove lock so others can now modify message
         await remove_lock(response_id, CONSUMER, logger)
         await remove_callback_id(callback_id, logger)
@@ -370,7 +373,7 @@ async def merge_message(task, logger: logging.Logger):
         )
 
     await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-    logger.info(f"[{task[0]}] Finished task {task[0]} in {time.time() - start}")
+    logger.info(f"[{callback_id}] Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
