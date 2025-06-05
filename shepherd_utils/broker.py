@@ -120,8 +120,8 @@ async def acquire_lock(
         pubsub = client.pubsub()
         await pubsub.subscribe(response_id)
         for i in range(12):
-            aquired = await client.set(response_id, consumer_id, ex=45, nx=True)
-            if aquired:
+            acquired = await client.set(response_id, consumer_id, ex=45, nx=True)
+            if acquired:
                 got_lock = True
                 break
             try:
