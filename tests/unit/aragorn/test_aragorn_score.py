@@ -40,9 +40,5 @@ async def test_aragorn_ranker(redis_mock, mocker):
     assert "score" in message["message"]["results"][0]["analyses"][0]
     assert len(message["message"]["results"][0]["analyses"]) == 1
     assert isinstance(message["message"]["results"][0]["analyses"][0]["score"], float)
-    assert (
-        message["message"]["results"][0]["analyses"][0]["score"] > 0.063
-    )
-    assert (
-        message["message"]["results"][0]["analyses"][0]["score"] < 0.064
-    )
+    assert message["message"]["results"][0]["analyses"][0]["score"] > 0.063
+    assert message["message"]["results"][0]["analyses"][0]["score"] < 0.064
