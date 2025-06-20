@@ -1,5 +1,6 @@
 fakeredis
 httpx
+numpy
 pytest
 pytest-asyncio
 pytest-cov
