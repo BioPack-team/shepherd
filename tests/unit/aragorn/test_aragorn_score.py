@@ -24,9 +24,11 @@ async def test_aragorn_ranker(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
-                "workflow": json.dumps([
-                    {"id": "aragorn.score"},
-                ]),
+                "workflow": json.dumps(
+                    [
+                        {"id": "aragorn.score"},
+                    ]
+                ),
             },
         ],
         logger,
@@ -39,5 +41,5 @@ async def test_aragorn_ranker(redis_mock, mocker):
     assert len(message["message"]["results"][0]["analyses"]) == 1
     assert isinstance(message["message"]["results"][0]["analyses"][0]["score"], float)
     assert (
-      message["message"]["results"][0]["analyses"][0]["score"] == 0.06309573444801943
+        message["message"]["results"][0]["analyses"][0]["score"] == 0.06309573444801943
     )
