@@ -85,8 +85,13 @@ async def aragorn_lookup(task, logger: logging.Logger):
         await save_message(
             f"{callback_id}_query_graph", message["message"]["query_graph"], logger
         )
-        # TODO: send single query to retriever
-        pass
+        message["callback"] = f"http://localhost:5439/callback/{callback_id}"
+
+        async with httpx.AsyncClient(timeout=100) as client:
+            await client.post(
+                "http://host.docker.internal:5781/asyncquery",
+                json=message,
+            )
     else:
         expanded_messages = expand_aragorn_query(message)
         # send all messages to retriever
