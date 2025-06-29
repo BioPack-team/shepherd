@@ -17,10 +17,8 @@ CONSUMER = str(uuid.uuid4())[:8]
 async def filter_results_top_n(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
-    query_id = task[1]["query_id"]
+    response_id = task[1]["response_id"]
     workflow = json.loads(task[1]["workflow"])
-    query_state = await get_query_state(query_id, logger)
-    response_id = query_state[7]
     message = await get_message(response_id, logger)
     results = message["message"].get("results", [])
     current_op = workflow[0]

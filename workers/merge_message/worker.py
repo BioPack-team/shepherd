@@ -335,6 +335,7 @@ async def merge_message(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
+    response_id = task[1]["response_id"]
     callback_id = task[1]["callback_id"]
 
     original_query = await get_message(query_id, logger)
@@ -343,8 +344,6 @@ async def merge_message(task, logger: logging.Logger):
     original_query_graph = original_query["message"]["query_graph"]
     lookup_query_graph = await get_message(f"{callback_id}_query_graph", logger)
     callback_response = await get_message(callback_id, logger)
-    query_state = await get_query_state(query_id, logger)
-    response_id = query_state[7]
     got_lock = await acquire_lock(response_id, CONSUMER, logger)
     if got_lock:
         logger.info(f"[{callback_id}] Obtained lock.")

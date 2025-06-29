@@ -1,26 +1,27 @@
 """Shepherd ARA."""
 
 import asyncio
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Response
-from fastapi.middleware.cors import CORSMiddleware
 import logging
 import time
-from typing import Tuple, Optional
 import uuid
+from contextlib import asynccontextmanager
+from typing import Optional, Tuple
 
-from shepherd_utils.logger import QueryLogger, setup_logging
+from fastapi import FastAPI, Response
+from fastapi.middleware.cors import CORSMiddleware
+
+from shepherd_server.openapi import construct_open_api_schema
+from shepherd_utils.broker import add_task
 from shepherd_utils.db import (
-    initialize_db,
-    shutdown_db,
     add_query,
-    save_message,
     get_callback_query_id,
     get_message,
     get_query_state,
+    initialize_db,
+    save_message,
+    shutdown_db,
 )
-from shepherd_utils.broker import add_task
-from shepherd_server.openapi import construct_open_api_schema
+from shepherd_utils.logger import QueryLogger, setup_logging
 
 setup_logging()
 
@@ -37,7 +38,7 @@ APP = FastAPI(title="BioPack Shepherd", version="0.0.3", lifespan=lifespan)
 
 APP.openapi_schema = construct_open_api_schema(
     APP,
-    description="Sheperd: Fully modular ARA.",
+    description="Sheperd: Fully modular ARA platform.",
     infores="infores:shepherd",
 )
 
@@ -48,23 +49,6 @@ APP.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# supported_operations = {
-#     "lookup": retrieve,
-#     "score": score_query,
-#     "sort_results_score": sort_results_score,
-#     "filter_results_top_n": filter_results_top_n,
-#     "filter_kgraph_orphans": filter_kgraph_orphans,
-# }
-
-# default_workflow = [
-#     {"id": "lookup"},
-#     {"id": "score"},
-#     {"id": "sort_results_score", "parameters": {"ascending_or_descending": "descending"}},
-#     {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
-#     {"id": "filter_kgraph_orphans"},
-# ]
 
 
 async def run_query(
@@ -86,7 +70,14 @@ async def run_query(
     # save query to db
     try:
         await add_query(query_id, response_id, query, callback_url, logger)
-        await add_task(target, {"query_id": query_id}, logger)
+        await add_task(
+            target,
+            {
+                "query_id": query_id,
+                "response_id": response_id,
+            },
+            logger,
+        )
     except Exception as e:
         logger.error(f"Failed to save query: {e}")
         # TODO: set query to failed state
@@ -96,7 +87,7 @@ async def run_query(
 
 # @APP.post("/{target}/query", response_model=ReasonerResponse)
 @APP.post("/{target}/query")
-async def query(
+async def sync_query(
     target: str,
     # query: Query,
     query: dict,
@@ -168,36 +159,30 @@ async def callback(
             "nodes": {},
             "edges": {},
         }
-    # try:
-    #     ReasonerResponse.parse_obj(response)
-    # except pydantic.ValidationError as e:
-    #     logger.error(f"Received a non TRAPI-compliant callback response: {e}")
-    #     response = {
-    #         "message": {
-    #             "query_graph": {
-    #                 "nodes": {},
-    #                 "edges": {},
-    #             },
-    #             "knowledge_graph": {
-    #                 "nodes": {},
-    #                 "edges": {},
-    #             },
-    #             "results": [],
-    #             "auxiliary_graphs": {},
-    #         }
-    #     }
 
     logger.info(f"Got back {len(response['message']['results'])} results.")
     # get associated query id for this callback
     query_id = await get_callback_query_id(callback_id, logger)
     logger.info(f"Got original query id: {query_id}")
+    if query_id is None:
+        return Response("Couldn't find original query.", 500)
+    query_state = await get_query_state(query_id, logger)
+    if query_state is None:
+        return Response("Failed to get query state.", 500)
+    response_id = query_state[7]
     # save callback to redis
     logger.info(f"Saving callback {callback_id} to redis")
     await save_message(callback_id, response, logger)
     logger.info(f"Saved callback {callback_id} to redis")
     # add new task to merge callback response into original message
     await add_task(
-        "merge_message", {"query_id": query_id, "callback_id": callback_id}, logger
+        "merge_message",
+        {
+            "query_id": query_id,
+            "response_id": response_id,
+            "callback_id": callback_id,
+        },
+        logger,
     )
     return Response("Callback received.", 200)
 

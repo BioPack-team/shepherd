@@ -48,7 +48,7 @@ async def example_lookup(task, logger: logging.Logger):
                 f"{callback_id}_query_graph", response["message"]["query_graph"], logger
             )
 
-            # TODO: this is just fake, this could take minutes
+            # this is just fake, this could take minutes
 
             request = client.post(
                 f"http://shepherd_server:5439/callback/{callback_id}",

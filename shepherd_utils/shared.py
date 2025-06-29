@@ -74,7 +74,11 @@ async def wrap_up_task(
     logger.info(f"Sending task to {next_op}")
     await add_task(
         next_op,
-        {"query_id": task[1]["query_id"], "workflow": json.dumps(workflow)},
+        {
+            "query_id": task[1]["query_id"],
+            "response_id": task[1]["response_id"],
+            "workflow": json.dumps(workflow),
+        },
         logger,
     )
 

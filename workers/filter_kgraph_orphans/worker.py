@@ -17,10 +17,8 @@ CONSUMER = str(uuid.uuid4())[:8]
 async def filter_kgraph_orphans(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
-    query_id = task[1]["query_id"]
+    response_id = task[1]["response_id"]
     workflow = json.loads(task[1]["workflow"])
-    query_state = await get_query_state(query_id, logger)
-    response_id = query_state[7]
     message = await get_message(response_id, logger)
     try:
         results = message.get("message", {}).get("results", [])
@@ -62,9 +60,7 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
             )
             for aux_edge in aux_edges:
                 if aux_edge not in message["message"]["knowledge_graph"]["edges"]:
-                    logger.warning(
-                        f"{query_id}: aux_edge {aux_edge} not in knowledge_graph.edges"
-                    )
+                    logger.warning(f"aux_edge {aux_edge} not in knowledge_graph.edges")
                     continue
                 edges.add(aux_edge)
                 nodes.add(
