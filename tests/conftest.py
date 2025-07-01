@@ -36,12 +36,22 @@ def redis_mock(monkeypatch):
     """
     decoded_redis = fakeredis.FakeRedis(decode_responses=True)
     raw_redis = fakeredis.FakeRedis(decode_responses=False)
+    broker_redis = fakeredis.FakeRedis(decode_responses=True)
+    data_redis = fakeredis.FakeRedis(decode_responses=False)
+    lock_redis = fakeredis.FakeRedis(decode_responses=True)
     logs_redis = fakeredis.FakeRedis(decode_responses=False)
 
     def mock_redis_constructor(*args, **kwargs):
         if kwargs.get("connection_pool", None):
             connection_kwargs = kwargs["connection_pool"].connection_kwargs
-            if connection_kwargs.get("db", 0) == 3:
+            db_index = connection_kwargs.get("db", 0)
+            if db_index == 0:
+                return broker_redis
+            if db_index == 1:
+                return data_redis
+            if db_index == 2:
+                return lock_redis
+            if db_index == 3:
                 return logs_redis
             decode = connection_kwargs.get(
                 "decode_responses", False
@@ -54,5 +64,8 @@ def redis_mock(monkeypatch):
     return {
         "decoded": decoded_redis,
         "raw": raw_redis,
+        "broker": broker_redis,
+        "data": data_redis,
+        "lock": lock_redis,
         "logs": logs_redis,
     }
