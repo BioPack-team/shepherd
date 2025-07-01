@@ -15,6 +15,7 @@ from shepherd_utils.broker import add_task
 from shepherd_utils.db import (
     add_query,
     get_callback_query_id,
+    get_logs,
     get_message,
     get_query_state,
     initialize_db,
@@ -111,6 +112,8 @@ async def sync_query(
                 response = await get_message(response_id, logger)
                 if response is None:
                     return {"status": "ERROR", "description": "Unable to get response"}
+                logs = await get_logs(response_id, logger)
+                response["logs"] = logs
                 return response
         else:
             logger.warning(f"Failed to get the query state of query id {query_id}")
@@ -213,4 +216,6 @@ async def get_query_response(
     response = await get_message(query_id, logger)
     if response is None:
         return 404
+    logs = await get_logs(query_id, logger)
+    response["logs"] = logs
     return response

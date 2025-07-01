@@ -1,20 +1,15 @@
 """Postgres DB Manager."""
 
 import logging
-from psycopg_pool import AsyncConnectionPool
-import redis.asyncio as aioredis
-import orjson
-
-# from reasoner_pydantic import (
-#     Response as ReasonerResponse,
-# )
 import time
-from typing import Dict, Any, List, Union
+from typing import Any, Dict, List, Union
+
+import orjson
+import redis.asyncio as aioredis
 import zstandard
+from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
-
-# from shepherd.merge_messages import merge_messages
 
 pool = AsyncConnectionPool(
     conninfo=f"postgresql://postgres:{settings.postgres_password}@{settings.postgres_host}:{settings.postgres_port}",
@@ -29,6 +24,15 @@ data_db_pool = aioredis.BlockingConnectionPool(
     host=settings.redis_host,
     port=settings.redis_port,
     db=1,
+    password=settings.redis_password,
+    max_connections=10,
+    timeout=600,
+)
+
+logs_db_pool = aioredis.BlockingConnectionPool(
+    host=settings.redis_host,
+    port=settings.redis_port,
+    db=3,
     password=settings.redis_password,
     max_connections=10,
     timeout=600,
@@ -147,6 +151,70 @@ async def get_message(
         pass
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
+
+
+async def save_logs(
+    response_id: str,
+    logger: logging.Logger,
+):
+    """
+    Save logs from a worker to the db.
+
+    Args:
+        response_id (str): UID for a query response
+    """
+    try:
+        client = await aioredis.Redis(
+            connection_pool=logs_db_pool,
+        )
+        existing_logs = await client.get(response_id)
+        if existing_logs is None:
+            existing_logs = []
+        else:
+            existing_logs = orjson.loads(existing_logs)
+        # get log handler from logger
+        handler = next(
+            (
+                h
+                for h in logger.handlers
+                if getattr(h, "name", None) == "query_log_handler"
+            ),
+            None,
+        )
+        if handler is not None:
+            new_logs = list(handler.contents())
+            new_logs.reverse()
+            existing_logs.extend(new_logs)
+        await client.set(response_id, orjson.dumps(existing_logs))
+        await client.aclose()
+    except Exception as e:
+        logger.error(f"Failed to save logs for response {response_id}: {e}")
+
+
+async def get_logs(
+    response_id: str,
+    logger: logging.Logger,
+):
+    """
+    Get the log messages for a given query.
+
+    Args:
+        response_id (str): UID for a query response
+    """
+    try:
+        client = await aioredis.Redis(
+            connection_pool=logs_db_pool,
+        )
+        logs = await client.get(response_id)
+        await client.aclose()
+        if logs is not None:
+            logs = orjson.loads(logs)
+            return logs
+        else:
+            logger.error(f"Failed to get logs for response {response_id}")
+            return []
+    except Exception as e:
+        logger.error(f"Failed to get logs from query: {e}")
 
 
 async def add_callback_id(

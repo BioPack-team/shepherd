@@ -5,7 +5,7 @@ import json
 import logging
 import time
 import uuid
-from shepherd_utils.db import get_message, save_message, get_query_state
+from shepherd_utils.db import get_message, save_message
 from shepherd_utils.shared import get_tasks, wrap_up_task
 
 # Queue name

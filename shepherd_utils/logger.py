@@ -39,6 +39,7 @@ class QueryLogHandler(logging.Handler):
     def __init__(self, log_queue):
         logging.Handler.__init__(self)
         self.log_queue = log_queue
+        self.name = "query_log_handler"
 
     def emit(self, record):
         # put newer messages in front

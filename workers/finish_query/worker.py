@@ -1,12 +1,19 @@
 """Mark a query as completed and do any callbacks."""
 
 import asyncio
-import httpx
 import logging
 import time
 import uuid
+
+import httpx
+
 from shepherd_utils.broker import mark_task_as_complete
-from shepherd_utils.db import get_message, get_query_state, set_query_completed
+from shepherd_utils.db import (
+    get_logs,
+    get_message,
+    get_query_state,
+    set_query_completed,
+)
 from shepherd_utils.shared import get_tasks
 
 # Queue name
@@ -19,6 +26,7 @@ async def finish_query(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
+    response_id = task[1]["response_id"]
     query_state = await get_query_state(query_id, logger)
 
     if query_state is None:
@@ -27,7 +35,9 @@ async def finish_query(task, logger: logging.Logger):
         callback_url = query_state[8]
         if callback_url is not None:
             # this was an async query, need to send message back
-            message = await get_message(query_state[7], logger)
+            message = await get_message(response_id, logger)
+            logs = await get_logs(response_id, logger)
+            message["logs"] = logs
             async with httpx.AsyncClient() as client:
                 await client.post(
                     callback_url,

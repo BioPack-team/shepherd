@@ -2,11 +2,11 @@
 
 import json
 import logging
-from typing import List, Dict, Union, Tuple, AsyncGenerator
+from typing import AsyncGenerator, Dict, List, Tuple, Union
 
-from .logger import QueryLogger, setup_logging
-from .db import initialize_db
 from .broker import add_task, get_task, mark_task_as_complete
+from .db import initialize_db, save_logs
+from .logger import QueryLogger, setup_logging
 
 setup_logging()
 
@@ -83,3 +83,4 @@ async def wrap_up_task(
     )
 
     await mark_task_as_complete(stream, group, task[0], logger)
+    await save_logs(task[1]["response_id"], logger)
