@@ -12,9 +12,6 @@ from workers.aragorn_score.worker import aragorn_score
 @pytest.mark.asyncio
 async def test_aragorn_ranker(redis_mock, mocker):
     """Test that Aragorn Ranker returns the correct score."""
-    mock_callback_id = mocker.patch("workers.aragorn_score.worker.get_query_state")
-    response_id = "test_response"
-    mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
     mock_callback_response = mocker.patch("workers.aragorn_score.worker.get_message")
     mock_callback_response.return_value = copy.deepcopy(response_1)
     logger = logging.getLogger(__name__)
@@ -24,6 +21,7 @@ async def test_aragorn_ranker(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
+                "response_id": "test_response",
                 "workflow": json.dumps(
                     [
                         {"id": "aragorn.score"},
@@ -34,7 +32,7 @@ async def test_aragorn_ranker(redis_mock, mocker):
         logger,
     )
 
-    message = await get_message(response_id, logger)
+    message = await get_message("test_response", logger)
 
     assert len(message["message"]["results"]) == 2
     assert "score" in message["message"]["results"][0]["analyses"][0]

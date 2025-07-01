@@ -21,6 +21,7 @@ async def test_aragorn_entrypoint(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
+                "response_id": "test_response",
             },
         ],
         logger,

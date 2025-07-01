@@ -39,6 +39,7 @@ async def test_message_merge(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
+                "response_id": "test_response",
                 "callback_id": "test_callback",
             },
         ],

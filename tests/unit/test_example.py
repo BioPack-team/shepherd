@@ -16,7 +16,7 @@ async def test_example(redis_mock):
     # monkeypatch.setattr(redis.asyncio, "Redis", redis_constructor)
     logger = logging.getLogger(__name__)
 
-    await example_ara(["test", {"query_id": "test"}], logger)
+    await example_ara(["test", {"query_id": "test", "response_id": "test_response"}], logger)
 
     # Get the task that the ara should have put on the queue
     task = await get_task("example.lookup", "consumer", "test", logger)
@@ -52,6 +52,7 @@ async def test_example_lookup(mocker, redis_mock):
             "test",
             {
                 "query_id": "test",
+                "response_id": "test_response",
                 "workflow": json.dumps(
                     [{"id": "example.lookup"}, {"id": "example.score"}]
                 ),
@@ -74,9 +75,7 @@ async def test_example_lookup(mocker, redis_mock):
 @pytest.mark.asyncio
 async def test_example_score(mocker, redis_mock):
     """Test example scoring."""
-    mock_callback_id = mocker.patch("workers.example_score.worker.get_query_state")
-    response_id = "test"
-    mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
+    response_id = "test_response"
     mock_callback_response = mocker.patch("workers.example_score.worker.get_message")
     mock_callback_response.return_value = {
         "message": {
@@ -96,6 +95,7 @@ async def test_example_score(mocker, redis_mock):
             "test",
             {
                 "query_id": "test",
+                "response_id": response_id,
                 "workflow": json.dumps([{"id": "example.score"}]),
             },
         ],

@@ -9,9 +9,6 @@ from workers.sort_results_score.worker import sort_results_score
 @pytest.mark.asyncio
 async def test_default_sort(redis_mock, mocker):
     """Test sort results score."""
-    mock_callback_id = mocker.patch("workers.sort_results_score.worker.get_query_state")
-    response_id = "test"
-    mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
     mock_callback_response = mocker.patch(
         "workers.sort_results_score.worker.get_message"
     )
@@ -43,13 +40,14 @@ async def test_default_sort(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
+                "response_id": "test_response",
                 "workflow": json.dumps([{"id": "sort_results_score"}]),
             },
         ],
         logger,
     )
 
-    message = await get_message(response_id, logger)
+    message = await get_message("test_response", logger)
 
     assert len(message["message"]["results"]) == 2
     assert message["message"]["results"][0]["analyses"][0]["score"] == 0.9
@@ -59,9 +57,6 @@ async def test_default_sort(redis_mock, mocker):
 @pytest.mark.asyncio
 async def test_ascending_sort(redis_mock, mocker):
     """Test sort ascending is applied."""
-    mock_callback_id = mocker.patch("workers.sort_results_score.worker.get_query_state")
-    response_id = "test"
-    mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
     mock_callback_response = mocker.patch(
         "workers.sort_results_score.worker.get_message"
     )
@@ -93,6 +88,7 @@ async def test_ascending_sort(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
+                "response_id": "test_response",
                 "workflow": json.dumps(
                     [
                         {
@@ -106,7 +102,7 @@ async def test_ascending_sort(redis_mock, mocker):
         logger,
     )
 
-    message = await get_message(response_id, logger)
+    message = await get_message("test_response", logger)
 
     assert len(message["message"]["results"]) == 2
     assert message["message"]["results"][0]["analyses"][0]["score"] == 0.1
@@ -116,9 +112,6 @@ async def test_ascending_sort(redis_mock, mocker):
 @pytest.mark.asyncio
 async def test_invalid_json(redis_mock, mocker):
     """Test sort ascending is applied."""
-    mock_callback_id = mocker.patch("workers.sort_results_score.worker.get_query_state")
-    response_id = "test"
-    mock_callback_id.return_value = ["", "", "", "", "", "", "", response_id]
     mock_callback_response = mocker.patch(
         "workers.sort_results_score.worker.get_message"
     )
@@ -140,6 +133,7 @@ async def test_invalid_json(redis_mock, mocker):
                 "test",
                 {
                     "query_id": "test",
+                    "response_id": "test_response",
                     "workflow": json.dumps(
                         [
                             {

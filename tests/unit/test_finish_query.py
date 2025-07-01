@@ -10,7 +10,7 @@ from workers.finish_query.worker import finish_query
 async def test_finish_sync_query(redis_mock, mocker):
     """Test that a synchronous query is finished correctly."""
     mock_query_state = mocker.patch("workers.finish_query.worker.get_query_state")
-    response_id = "test"
+    response_id = "test_response"
     mock_query_state.return_value = ["", "", "", "", "", "", "", response_id, None]
     mock_set_query_completed = mocker.patch(
         "workers.finish_query.worker.set_query_completed"
@@ -44,6 +44,7 @@ async def test_finish_sync_query(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
+                "response_id": response_id,
                 "workflow": json.dumps([]),
             },
         ],
@@ -57,7 +58,7 @@ async def test_finish_sync_query(redis_mock, mocker):
 async def test_finish_async_query(redis_mock, mocker):
     """Test that a synchronous query is finished correctly."""
     mock_query_state = mocker.patch("workers.finish_query.worker.get_query_state")
-    response_id = "test"
+    response_id = "test_response"
     mock_query_state.return_value = [
         "",
         "",
@@ -89,6 +90,7 @@ async def test_finish_async_query(redis_mock, mocker):
             "test",
             {
                 "query_id": "test",
+                "response_id": response_id,
                 "workflow": json.dumps([]),
             },
         ],
