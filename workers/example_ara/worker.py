@@ -2,18 +2,21 @@
 
 import asyncio
 import logging
+
 import time
 import uuid
 from shepherd_utils.db import get_message
 from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.otel import setup_tracer
 
 # Queue name
 STREAM = "example"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
+setup_tracer(STREAM)
 
 
-async def example_ara(task, logger: logging.Logger):
+async def example_ara(task, otel, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     message = await get_message(task[1]["query_id"], logger)
@@ -28,14 +31,14 @@ async def example_ara(task, logger: logging.Logger):
         {"id": "filter_kgraph_orphans"},
     ]
 
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+    await wrap_up_task(STREAM, GROUP, task, workflow, otel, logger)
 
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
-    async for task, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(example_ara(task, logger))
+    async for task, otel, logger in get_tasks(STREAM, GROUP, CONSUMER):
+        asyncio.create_task(example_ara(task, otel, logger))
 
 
 if __name__ == "__main__":

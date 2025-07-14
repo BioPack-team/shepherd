@@ -5,10 +5,15 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+import orjson
 from typing import Optional, Tuple
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.propagate import inject
+from opentelemetry import trace
 
 from shepherd_server.openapi import construct_open_api_schema
 from shepherd_utils.broker import add_task
@@ -23,8 +28,10 @@ from shepherd_utils.db import (
     shutdown_db,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
+from shepherd_utils.otel import setup_tracer
 
 setup_logging()
+provider = setup_tracer("shepherd-server")
 
 
 @asynccontextmanager
@@ -51,6 +58,8 @@ APP.add_middleware(
     allow_headers=["*"],
 )
 
+FastAPIInstrumentor.instrument_app(APP, tracer_provider=provider, excluded_urls="docs,openapi.json")
+
 
 async def run_query(
     target: str,
@@ -68,6 +77,12 @@ async def run_query(
     logger.setLevel(level_number)
     logger.addHandler(log_handler)
 
+    tracer = trace.get_tracer(__name__, tracer_provider=provider)
+    with tracer.start_as_current_span("") as span:
+        span_carrier = {}
+        # adds otel trace to carrier for next worker
+        inject(span_carrier)
+
     # save query to db
     try:
         await add_query(query_id, response_id, query, callback_url, logger)
@@ -76,6 +91,7 @@ async def run_query(
             {
                 "query_id": query_id,
                 "response_id": response_id,
+                "otel": orjson.dumps(span_carrier),
             },
             logger,
         )

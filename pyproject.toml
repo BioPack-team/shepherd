@@ -6,10 +6,15 @@ authors = [{ name = "Max Wang", email = "max@covar.com" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "fastapi",
-  "httpx==0.28.1",
-  "uvicorn[standard]",
-  "redis~=5.2",
+  "fastapi~=0.110",
+  "httpx~=0.28",
+  "opentelemetry-api",
+  "opentelemetry-sdk==1.16.0",
+  "opentelemetry-exporter-jaeger",
+  "opentelemetry-exporter-otlp",
+  "opentelemetry-instrumentation-fastapi==0.37b0",
+  "opentelemetry-instrumentation-httpx==0.37b0",
+  "opentelemetry-instrumentation-redis",
   "orjson~=3.10",
   "psycopg[binary]~=3.1",
   "psycopg_pool~=3.2",
@@ -17,6 +22,8 @@ dependencies = [
   "pydantic-settings~=2.9",
   "python-dotenv~=1.0",
   "pyyaml~=6.0",
+  "redis~=5.2",
+  "uvicorn[standard]~=0.29",
   "zstandard~=0.23"
 ]
 

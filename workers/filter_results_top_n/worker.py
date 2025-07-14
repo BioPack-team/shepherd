@@ -7,14 +7,16 @@ import time
 import uuid
 from shepherd_utils.db import get_message, save_message, get_query_state
 from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.otel import setup_tracer
 
 # Queue name
 STREAM = "filter_results_top_n"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
+setup_tracer(STREAM)
 
 
-async def filter_results_top_n(task, logger: logging.Logger):
+async def filter_results_top_n(task, otel, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
@@ -37,13 +39,13 @@ async def filter_results_top_n(task, logger: logging.Logger):
     # save merged message back to db
     await save_message(response_id, message, logger)
 
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+    await wrap_up_task(STREAM, GROUP, task, workflow, otel, logger)
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
-    async for task, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(filter_results_top_n(task, logger))
+    async for task, otel, logger in get_tasks(STREAM, GROUP, CONSUMER):
+        asyncio.create_task(filter_results_top_n(task, otel, logger))
 
 
 if __name__ == "__main__":

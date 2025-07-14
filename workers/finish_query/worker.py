@@ -15,14 +15,16 @@ from shepherd_utils.db import (
     set_query_completed,
 )
 from shepherd_utils.shared import get_tasks
+from shepherd_utils.otel import setup_tracer
 
 # Queue name
 STREAM = "finish_query"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
+setup_tracer(STREAM)
 
 
-async def finish_query(task, logger: logging.Logger):
+async def finish_query(task, otel, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
@@ -48,11 +50,12 @@ async def finish_query(task, logger: logging.Logger):
 
     await mark_task_as_complete(STREAM, GROUP, task[0], logger)
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
+    otel.end()
 
 
 async def poll_for_tasks():
-    async for task, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(finish_query(task, logger))
+    async for task, otel, logger in get_tasks(STREAM, GROUP, CONSUMER):
+        asyncio.create_task(finish_query(task, otel, logger))
 
 
 if __name__ == "__main__":
