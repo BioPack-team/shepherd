@@ -44,6 +44,7 @@ async def test_filter_results_top_n(redis_mock, mocker):
                 "workflow": json.dumps(
                     [{"id": "filter_results_top_n", "max_results": 1}]
                 ),
+                "otel": json.dumps({}),
             },
         ],
         logger,

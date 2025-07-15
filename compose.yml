@@ -12,8 +12,6 @@ services:
       - ./shepherd_server/shepherd_server/outputs:/app/shepherd_server/shepherd_server/outputs
     ports:
       - '5439:5439'
-    networks:
-      - shepherd
   shepherd_db:
     container_name: shepherd_db
     environment:
@@ -29,8 +27,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - shepherd
     volumes:
       - ./pgdata:/var/lib/postgresql/data
   shepherd_broker:
@@ -46,8 +42,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - shepherd
     volumes:
       - ./data:/data
   shepherd_broker_insight:
@@ -55,8 +49,6 @@ services:
     container_name: redis-insight
     ports:
       - '8001:8001'
-    networks:
-      - shepherd
     volumes:
       - ./data:/data
   jaeger:
@@ -84,8 +76,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   sort_results_score:
     container_name: sort_results_score
     build:
@@ -100,8 +90,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   filter_results_top_n:
     container_name: filter_results_top_n
     build:
@@ -116,8 +104,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   filter_kgraph_orphans:
     container_name: filter_kgraph_orphans
     build:
@@ -132,8 +118,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   finish_query:
     container_name: finish_query
     build:
@@ -148,8 +132,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
 
 
   ######### Example ARA
@@ -167,8 +149,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   example_lookup:
     container_name: example_lookup
     build:
@@ -183,8 +163,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   example_score:
     container_name: example_score
     build:
@@ -199,8 +177,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
 
 
   ######### ARAGORN
@@ -218,8 +194,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   aragorn_lookup:
     container_name: aragorn_lookup
     build:
@@ -234,8 +208,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
   aragorn_score:
     container_name: aragorn_score
     build:
@@ -250,7 +222,3 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    networks:
-      - shepherd
-networks:
-  shepherd:

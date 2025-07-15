@@ -33,6 +33,7 @@ async def test_aragorn_creative_lookup(redis_mock, mocker):
                 "workflow": json.dumps(
                     [{"id": "aragorn.lookup"}, {"id": "aragorn.score"}]
                 ),
+                "otel": json.dumps({}),
             },
         ],
         logger,

@@ -20,10 +20,10 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "example.lookup"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-setup_tracer(STREAM)
+tracer = setup_tracer(STREAM)
 
 
-async def example_lookup(task, otel, logger: logging.Logger):
+async def example_lookup(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
@@ -77,13 +77,21 @@ async def example_lookup(task, otel, logger: logging.Logger):
         if len(running_callback_ids) == 0:
             break
 
-    await wrap_up_task(STREAM, GROUP, task, workflow, otel, logger)
+    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
+async def process_task(task, parent_ctx, logger):
+    span = tracer.start_span(STREAM, context=parent_ctx)
+    try:
+        await example_lookup(task, logger)
+    finally:
+        span.end()
+
+
 async def poll_for_tasks():
-    async for task, otel, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(example_lookup(task, otel, logger))
+    async for task, parent_ctx, logger in get_tasks(STREAM, GROUP, CONSUMER):
+        asyncio.create_task(process_task(task, parent_ctx, logger))
 
 
 if __name__ == "__main__":

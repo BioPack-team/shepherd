@@ -2,10 +2,8 @@
 
 import json
 import logging
-from opentelemetry import trace
+from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
-from opentelemetry.trace import Span
-import orjson
 from typing import AsyncGenerator, Dict, List, Tuple, Union
 
 from .broker import add_task, get_task, mark_task_as_complete
@@ -30,7 +28,7 @@ def get_next_operation(
 
 async def get_tasks(
     stream: str, group: str, consumer: str
-) -> AsyncGenerator[Tuple[Union[Tuple[str, str], None], Span, logging.Logger], None]:
+) -> AsyncGenerator[Tuple[Union[Tuple[str, str], None], Context, logging.Logger], None]:
     """Continually monitor the ara queue for tasks."""
     # Set up logger
     level_number = logging._nameToLevel["INFO"]
@@ -52,12 +50,10 @@ async def get_tasks(
             task_logger.setLevel(level_number)
             task_logger.addHandler(log_handler)
             task_logger.info(f"Doing task {ara_task}")
-            tracer = trace.get_tracer(__name__)
-            context = extract(orjson.loads(ara_task[1].get("otel", "{}")))
-            otel = tracer.start_span(stream, context=context)
+            ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
-            yield ara_task, otel, task_logger
+            yield ara_task, ctx, task_logger
 
 
 async def wrap_up_task(
@@ -65,7 +61,6 @@ async def wrap_up_task(
     group: str,
     task: Tuple[str, dict],
     workflow: List[dict],
-    otel: Span,
     logger: logging.Logger,
 ):
     """Call the next task and mark this one as complete."""
@@ -86,10 +81,10 @@ async def wrap_up_task(
             "query_id": task[1]["query_id"],
             "response_id": task[1]["response_id"],
             "workflow": json.dumps(workflow),
+            "otel": task[1]["otel"],
         },
         logger,
     )
 
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
-    otel.end()

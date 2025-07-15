@@ -1,11 +1,11 @@
 """Shepherd ARA."""
 
 import asyncio
+import json
 import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-import orjson
 from typing import Optional, Tuple
 
 from fastapi import FastAPI, Response
@@ -31,7 +31,7 @@ from shepherd_utils.logger import QueryLogger, setup_logging
 from shepherd_utils.otel import setup_tracer
 
 setup_logging()
-provider = setup_tracer("shepherd-server")
+tracer = setup_tracer("shepherd-server")
 
 
 @asynccontextmanager
@@ -58,7 +58,7 @@ APP.add_middleware(
     allow_headers=["*"],
 )
 
-FastAPIInstrumentor.instrument_app(APP, tracer_provider=provider, excluded_urls="docs,openapi.json")
+FastAPIInstrumentor.instrument_app(APP, excluded_urls="docs,openapi.json")
 
 
 async def run_query(
@@ -77,7 +77,8 @@ async def run_query(
     logger.setLevel(level_number)
     logger.addHandler(log_handler)
 
-    tracer = trace.get_tracer(__name__, tracer_provider=provider)
+    logger.info(f"Starting work on {query_id}")
+
     with tracer.start_as_current_span("") as span:
         span_carrier = {}
         # adds otel trace to carrier for next worker
@@ -91,7 +92,7 @@ async def run_query(
             {
                 "query_id": query_id,
                 "response_id": response_id,
-                "otel": orjson.dumps(span_carrier),
+                "otel": json.dumps(span_carrier),
             },
             logger,
         )

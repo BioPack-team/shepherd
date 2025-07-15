@@ -22,7 +22,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "merge_message"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-setup_tracer(STREAM)
+tracer = setup_tracer(STREAM)
 
 
 def get_edgeset(result):
@@ -333,7 +333,7 @@ def merge_messages(
     return mergedresults
 
 
-async def merge_message(task, otel, logger: logging.Logger):
+async def merge_message(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
@@ -375,12 +375,19 @@ async def merge_message(task, otel, logger: logging.Logger):
 
     await mark_task_as_complete(STREAM, GROUP, task[0], logger)
     logger.info(f"[{callback_id}] Finished task {task[0]} in {time.time() - start}")
-    otel.end()
+
+
+async def process_task(task, parent_ctx, logger):
+    span = tracer.start_span(STREAM, context=parent_ctx)
+    try:
+        await merge_message(task, logger)
+    finally:
+        span.end()
 
 
 async def poll_for_tasks():
-    async for task, otel, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(merge_message(task, otel, logger))
+    async for task, parent_ctx, logger in get_tasks(STREAM, GROUP, CONSUMER):
+        asyncio.create_task(process_task(task, parent_ctx, logger))
 
 
 if __name__ == "__main__":

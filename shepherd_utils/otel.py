@@ -27,4 +27,4 @@ def setup_tracer(service_name: str):
     )
     provider.add_span_processor(span_processor)
     HTTPXClientInstrumentor().instrument()
-    return provider
+    return trace.get_tracer(__name__)
