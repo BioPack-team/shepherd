@@ -23,7 +23,7 @@ async def test_example(redis_mock):
                 "query_id": "test",
                 "response_id": "test_response",
                 "otel": json.dumps({}),
-            }
+            },
         ],
         logger,
     )

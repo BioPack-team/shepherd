@@ -9,9 +9,7 @@ from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
 
 def setup_tracer(service_name: str):
-    provider = TracerProvider(
-        resource=Resource.create({SERVICE_NAME: service_name})
-    )
+    provider = TracerProvider(resource=Resource.create({SERVICE_NAME: service_name}))
     trace.set_tracer_provider(provider)
     span_processor = BatchSpanProcessor(ConsoleSpanExporter())
     # span_processor = BatchSpanProcessor(

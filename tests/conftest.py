@@ -53,9 +53,7 @@ def redis_mock(monkeypatch):
                 return lock_redis
             if db_index == 3:
                 return logs_redis
-            decode = connection_kwargs.get(
-                "decode_responses", False
-            )
+            decode = connection_kwargs.get("decode_responses", False)
             return decoded_redis if decode else raw_redis
         return raw_redis
 
