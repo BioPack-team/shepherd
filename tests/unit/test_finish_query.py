@@ -46,6 +46,7 @@ async def test_finish_sync_query(redis_mock, mocker):
                 "query_id": "test",
                 "response_id": response_id,
                 "workflow": json.dumps([]),
+                "otel": json.dumps({}),
             },
         ],
         logger,

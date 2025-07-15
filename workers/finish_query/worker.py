@@ -1,11 +1,11 @@
 """Mark a query as completed and do any callbacks."""
 
 import asyncio
+import httpx
 import logging
 import time
 import uuid
 
-import httpx
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
@@ -15,11 +15,13 @@ from shepherd_utils.db import (
     set_query_completed,
 )
 from shepherd_utils.shared import get_tasks
+from shepherd_utils.otel import setup_tracer
 
 # Queue name
 STREAM = "finish_query"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
+tracer = setup_tracer(STREAM)
 
 
 async def finish_query(task, logger: logging.Logger):
@@ -50,9 +52,17 @@ async def finish_query(task, logger: logging.Logger):
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
+async def process_task(task, parent_ctx, logger):
+    span = tracer.start_span(STREAM, context=parent_ctx)
+    try:
+        await finish_query(task, logger)
+    finally:
+        span.end()
+
+
 async def poll_for_tasks():
-    async for task, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(finish_query(task, logger))
+    async for task, parent_ctx, logger in get_tasks(STREAM, GROUP, CONSUMER):
+        asyncio.create_task(process_task(task, parent_ctx, logger))
 
 
 if __name__ == "__main__":
