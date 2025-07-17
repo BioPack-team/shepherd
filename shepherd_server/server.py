@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     await shutdown_db()
 
 
-APP = FastAPI(title="BioPack Shepherd", version="0.0.3", lifespan=lifespan)
+APP = FastAPI(title="BioPack Shepherd", version="0.1.0", lifespan=lifespan)
 
 APP.openapi_schema = construct_open_api_schema(
     APP,
