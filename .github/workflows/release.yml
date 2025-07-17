@@ -31,8 +31,8 @@ jobs:
           file: ./shepherd_server/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/shepherd_server:latest
-            ghcr.io/${{ github.repository }}/shepherd_server:${{ steps.get_version.outputs.VERSION }}
+            ghcr.io/${{ github.repository | toLowerCase() }}/shepherd_server:latest
+            ghcr.io/${{ github.repository | toLowerCase() }}/shepherd_server:${{ steps.get_version.outputs.VERSION }}
 
   push_workers_to_registry:
     name: Push Docker image to GitHub Packages tagged with "latest" and version number.
@@ -63,5 +63,5 @@ jobs:
           file: ./workers/${{ matrix.worker }}/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/${{ matrix.worker }}:latest
-            ghcr.io/${{ github.repository }}/${{ matrix.worker }}:${{ steps.get_version.outputs.VERSION }}
+            ghcr.io/${{ github.repository | toLowerCase() }}/${{ matrix.worker }}:latest
+            ghcr.io/${{ github.repository | toLowerCase() }}/${{ matrix.worker }}:${{ steps.get_version.outputs.VERSION }}
