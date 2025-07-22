@@ -88,7 +88,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
         await save_message(
             f"{callback_id}_query_graph", message["message"]["query_graph"], logger
         )
-        message["callback"] = f"http://localhost:5439/callback/{callback_id}"
+        message["callback"] = f"{settings.callback_host}/callback/{callback_id}"
 
         async with httpx.AsyncClient(timeout=100) as client:
             await client.post(
@@ -111,11 +111,11 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 )
 
                 expanded_message["callback"] = (
-                    f"http://localhost:5439/callback/{callback_id}"
+                    f"{settings.callback_host}/callback/{callback_id}"
                 )
 
                 await client.post(
-                    "http://host.docker.internal:5781/asyncquery",
+                    settings.kg_retrieval_url,
                     json=expanded_message,
                 )
                 # Then we can retrieve all callback ids from query id to see which are still
