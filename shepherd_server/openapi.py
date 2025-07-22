@@ -59,7 +59,7 @@ def construct_open_api_schema(app, description, infores=None):
         open_api_schema["info"]["version"] = app_version
 
     # adds support to override server root path
-    server_root = settings.server_url
+    server_root = str(settings.server_url)
 
     if servers_conf:
         for s in servers_conf:

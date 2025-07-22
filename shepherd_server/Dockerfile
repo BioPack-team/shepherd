@@ -17,7 +17,7 @@ COPY ./shepherd_utils ./shepherd_utils
 COPY ./pyproject.toml .
 RUN pip install .
 
-COPY . .
+COPY ./shepherd_server ./shepherd_server
 RUN pip install -e .
 
 
