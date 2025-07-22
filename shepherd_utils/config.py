@@ -1,11 +1,8 @@
-from typing import Optional
-
-from pydantic import AnyUrl
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    server_url: AnyUrl = "http://localhost:5439"
+    server_url: str = "http://localhost:5439"
     server_maturity: str = "development"
     server_location: str = "RENCI"
 
@@ -19,8 +16,12 @@ class Settings(BaseSettings):
     redis_password: str = "supersecretpassword"
 
     lookup_timeout: int = 240
-    callback_host: AnyUrl = "http://127.0.0.1:5439"
-    retriever_url: AnyUrl = "http://localhost:3000/v1/asyncquery"
+    callback_host: str = "http://127.0.0.1:5439"
+    kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
+
+    otel_enabled: bool = True
+    jaeger_host: str = "http://jaeger"
+    jaeger_port: int = 4317
 
     class Config:
         env_file = ".env"

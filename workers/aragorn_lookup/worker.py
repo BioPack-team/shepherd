@@ -15,6 +15,7 @@ from shepherd_utils.db import (
     add_callback_id,
     save_message,
 )
+from shepherd_utils.config import settings
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, wrap_up_task
 
@@ -91,7 +92,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
 
         async with httpx.AsyncClient(timeout=100) as client:
             await client.post(
-                "http://host.docker.internal:5781/asyncquery",
+                settings.kg_retrieval_url,
                 json=message,
             )
     else:

@@ -7,6 +7,8 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
+from .config import settings
+
 
 def setup_tracer(service_name: str):
     provider = TracerProvider(resource=Resource.create({SERVICE_NAME: service_name}))
@@ -20,7 +22,7 @@ def setup_tracer(service_name: str):
     # )
     span_processor = BatchSpanProcessor(
         OTLPSpanExporter(
-            endpoint="http://jaeger:4317",
+            endpoint=f"{settings.jaeger_host}:{settings.jaeger_port}",
         )
     )
     provider.add_span_processor(span_processor)
