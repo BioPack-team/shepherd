@@ -22,6 +22,7 @@ from opentelemetry import trace
 
 from shepherd_server.openapi import construct_open_api_schema
 from shepherd_utils.broker import add_task
+from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_query,
     get_callback_query_id,
@@ -84,14 +85,14 @@ async def run_query(
     query_id = str(uuid.uuid4())[:8]
     response_id = str(uuid.uuid4())[:8]
     # Set up logger
-    log_level = query.get("log_level") or "INFO"
+    log_level = query.get("log_level") or settings.log_level
     level_number = logging._nameToLevel[log_level]
     log_handler = QueryLogger().log_handler
     logger = logging.getLogger(f"shepherd.{query_id}")
     logger.setLevel(level_number)
     logger.addHandler(log_handler)
 
-    logger.info(f"Starting work on {query_id}")
+    logger.info(f"Sending {query_id} to {target}")
 
     with tracer.start_as_current_span("") as span:
         span_carrier = {}

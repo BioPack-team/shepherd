@@ -7,6 +7,7 @@ from opentelemetry.propagate import extract
 from typing import AsyncGenerator, Dict, List, Tuple, Union
 
 from .broker import add_task, get_task, mark_task_as_complete
+from .config import settings
 from .db import initialize_db, save_logs
 from .logger import QueryLogger, setup_logging
 
@@ -31,7 +32,7 @@ async def get_tasks(
 ) -> AsyncGenerator[Tuple[Union[Tuple[str, str], None], Context, logging.Logger], None]:
     """Continually monitor the ara queue for tasks."""
     # Set up logger
-    level_number = logging._nameToLevel["INFO"]
+    level_number = logging._nameToLevel[settings.log_level]
     log_handler = QueryLogger().log_handler
     worker_logger = logging.getLogger(f"shepherd.{stream}.{consumer}")
     worker_logger.setLevel(level_number)

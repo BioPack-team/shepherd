@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     server_maturity: str = "development"
     server_location: str = "RENCI"
 
+    log_level: str = "INFO"
+
     postgres_user: str = "postgres"
     postgres_host: str = "shepherd_db"
     postgres_port: int = 5432
