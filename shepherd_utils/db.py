@@ -14,8 +14,10 @@ from .config import settings
 pool = AsyncConnectionPool(
     conninfo=f"postgresql://postgres:{settings.postgres_password}@{settings.postgres_host}:{settings.postgres_port}",
     timeout=60,
+    min_size=5,
     max_size=20,
-    max_idle=300,
+    max_idle=120,
+    max_lifetime=3600,
     # initialize with the connection closed
     open=False,
 )
@@ -26,7 +28,12 @@ data_db_pool = aioredis.BlockingConnectionPool(
     db=1,
     password=settings.redis_password,
     max_connections=10,
-    timeout=600,
+    timeout=30,
+    socket_timeout=5,
+    socket_connect_timeout=10,
+    socket_keepalive=True,
+    socket_keepalive_options={},
+    health_check_interval=30,
 )
 
 logs_db_pool = aioredis.BlockingConnectionPool(
@@ -35,7 +42,12 @@ logs_db_pool = aioredis.BlockingConnectionPool(
     db=3,
     password=settings.redis_password,
     max_connections=10,
-    timeout=600,
+    timeout=30,
+    socket_timeout=5,
+    socket_connect_timeout=10,
+    socket_keepalive=True,
+    socket_keepalive_options={},
+    health_check_interval=30,
 )
 
 
@@ -78,7 +90,7 @@ async def add_query(
         # failed to put message in db
         # TODO: do something more severe
         logger.error(f"Failed to save initial query or response: {e}")
-        pass
+        raise Exception("Failed to save initial query or response.")
     try:
         async with pool.connection(60) as conn:
             await conn.execute(
@@ -93,6 +105,7 @@ async def add_query(
             await conn.commit()
     except Exception as e:
         logger.error(f"Failed to save initial query state to db: {e}")
+        raise Exception("Failed to save initial query state.")
     logger.debug(f"Adding query took {time.time() - start} seconds")
 
 

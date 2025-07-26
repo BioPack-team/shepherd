@@ -12,7 +12,12 @@ broker_redis_pool = aioredis.BlockingConnectionPool(
     db=0,
     password=settings.redis_password,
     max_connections=10,
-    timeout=600,
+    timeout=30,
+    socket_timeout=7,  # Needs to be greater than get_task xgroupread timeout
+    socket_connect_timeout=10,
+    socket_keepalive=True,
+    socket_keepalive_options={},
+    health_check_interval=30,
     decode_responses=True,
 )
 
@@ -22,7 +27,12 @@ lock_redis_pool = aioredis.BlockingConnectionPool(
     db=2,
     password=settings.redis_password,
     max_connections=10,
-    timeout=600,
+    timeout=30,
+    socket_timeout=5,
+    socket_connect_timeout=10,
+    socket_keepalive=True,
+    socket_keepalive_options={},
+    health_check_interval=30,
     decode_responses=True,
 )
 
