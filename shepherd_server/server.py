@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
 APP = FastAPI(
     title="BioPack Shepherd",
     description=DESCRIPTION,
-    version="0.1.1",
+    version="0.1.2",
     lifespan=lifespan,
     docs_url=None,
 )
