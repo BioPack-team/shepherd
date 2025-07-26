@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional, Tuple
 
-from fastapi import FastAPI, Response, Request
+from fastapi import Body, FastAPI, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import (
     get_swagger_ui_html,
@@ -42,7 +42,7 @@ tracer = setup_tracer("shepherd-server")
 DESCRIPTION = """
 <img src="/static/favicon.png" width="200px">
 <br /><br />
-Shepherd: Translator Autonomous Relay Agent
+Shepherd: Translator Autonomous Relay Agent Platform
 """
 
 
@@ -74,6 +74,40 @@ APP.add_middleware(
 APP.mount("/static", StaticFiles(directory="shepherd_server/static"), name="static")
 
 FastAPIInstrumentor.instrument_app(APP, excluded_urls="docs,openapi.json")
+
+default_input_query: dict = {
+    "message": {
+        "query_graph": {
+            "edges": {
+                "e01": {
+                    "object": "n0",
+                    "subject": "n1",
+                    "predicates": [
+                        "biolink:regulates"
+                    ]
+                }
+            },
+            "nodes": {
+                "n0": {
+                    "ids": [
+                        "NCBIGene:23321"
+                    ],
+                    "categories": [
+                        "biolink:Gene"
+                    ]
+                },
+                "n1": {
+                    "categories": [
+                        "biolink:Gene"
+                    ]
+                }
+            }
+        },
+        "knowledge_graph": {"nodes": {}, "edges": {}},
+        "results": [],
+        "auxiliary_graphs": {}
+    }
+}
 
 
 async def run_query(
@@ -121,9 +155,9 @@ async def run_query(
 # @APP.post("/{target}/query", response_model=ReasonerResponse)
 @APP.post("/{target}/query")
 async def sync_query(
-    target: str,
+    target: str = "aragorn",
     # query: Query,
-    query: dict,
+    query: dict = Body(..., example=default_input_query),
 ) -> dict:
     """Handle synchronous TRAPI queries."""
     # query_dict = query.dict()
@@ -160,8 +194,8 @@ async def sync_query(
 
 @APP.post("/{target}/asyncquery")
 async def async_query(
-    target: str,
-    query: dict,
+    target: str = "aragorn",
+    query: dict = Body(..., example=default_input_query),
 ) -> Response:
     """Handle asynchronous TRAPI queries."""
     callback_url = query.get("callback")
