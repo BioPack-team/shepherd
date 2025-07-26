@@ -97,6 +97,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
             )
     else:
         expanded_messages = expand_aragorn_query(message)
+        requests = []
         # send all messages to retriever
         async with httpx.AsyncClient(timeout=100) as client:
             for expanded_message in expanded_messages:
@@ -114,17 +115,22 @@ async def aragorn_lookup(task, logger: logging.Logger):
                     f"{settings.callback_host}/callback/{callback_id}"
                 )
 
-                await client.post(
+                logger.debug(f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}""")
+                request = client.post(
                     settings.kg_retrieval_url,
                     json=expanded_message,
                 )
+                requests.append(request)
                 # Then we can retrieve all callback ids from query id to see which are still
                 # being looked up
+            # fire all the lookups at the same time
+            await asyncio.gather(*requests)
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
     MAX_QUERY_TIME = 300
     start_time = time.time()
+    running_callback_ids = ['']
     while time.time() - start_time < MAX_QUERY_TIME:
         # see if there are existing lookups going
         running_callback_ids = await get_running_callbacks(query_id, logger)
@@ -135,8 +141,11 @@ async def aragorn_lookup(task, logger: logging.Logger):
             continue
         # if there aren't, lookup is complete and we need to pass on to next workflow operation
         if len(running_callback_ids) == 0:
+            logger.debug("Got all lookups back. Continuing...")
             break
 
+    if time.time() - start_time > MAX_QUERY_TIME:
+        logger.warning(f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries still running...")
     # TODO: clean up any on-going queries so they don't get merged in after we've already moved on and potentially overwrite with an old message
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
