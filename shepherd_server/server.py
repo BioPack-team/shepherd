@@ -1,6 +1,7 @@
 """Shepherd ARA."""
 
 import asyncio
+from enum import Enum
 import json
 import logging
 import time
@@ -110,6 +111,10 @@ default_input_query: dict = {
 }
 
 
+class ARATargetEnum(str, Enum):
+    aragorn = "aragorn"
+
+
 async def run_query(
     target: str,
     query: dict,
@@ -155,7 +160,7 @@ async def run_query(
 # @APP.post("/{target}/query", response_model=ReasonerResponse)
 @APP.post("/{target}/query")
 async def sync_query(
-    target: str = "aragorn",
+    target: ARATargetEnum,
     # query: Query,
     query: dict = Body(..., example=default_input_query),
 ) -> dict:
@@ -194,7 +199,7 @@ async def sync_query(
 
 @APP.post("/{target}/asyncquery")
 async def async_query(
-    target: str = "aragorn",
+    target: ARATargetEnum,
     query: dict = Body(..., example=default_input_query),
 ) -> Response:
     """Handle asynchronous TRAPI queries."""
