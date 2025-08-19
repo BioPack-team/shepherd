@@ -27,6 +27,7 @@ async def test_aragorn_ranker(redis_mock, mocker):
                         {"id": "aragorn.score"},
                     ]
                 ),
+                "log_level": '20',
                 "otel": json.dumps({}),
             },
         ],
