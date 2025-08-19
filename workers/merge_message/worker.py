@@ -4,7 +4,9 @@ import asyncio
 import logging
 import uuid
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 import json
+import os
 import time
 from typing import Union, Dict, Any, List
 
@@ -22,6 +24,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "merge_message"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
+TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
@@ -333,29 +336,36 @@ def merge_messages(
     return mergedresults
 
 
-async def merge_message(task, logger: logging.Logger):
-    start = time.time()
-    # given a task, get the message from the db
-    query_id = task[1]["query_id"]
-    response_id = task[1]["response_id"]
-    callback_id = task[1]["callback_id"]
-
-    original_query = await get_message(query_id, logger)
-    if original_query is None:
-        raise Exception("Failed to get original query")
-    original_query_graph = original_query["message"]["query_graph"]
-    lookup_query_graph = await get_message(f"{callback_id}_query_graph", logger)
-    callback_response = await get_message(callback_id, logger)
-    got_lock = await acquire_lock(response_id, CONSUMER, logger)
-    if got_lock:
+async def poll_for_tasks():
+    loop = asyncio.get_running_loop()
+    cpu_count = os.cpu_count()
+    cpu_count = cpu_count if cpu_count is not None else 1
+    executor = ProcessPoolExecutor(max_workers=cpu_count)
+    async for task, parent_ctx, logger, limiter in get_tasks(STREAM, GROUP, CONSUMER, cpu_count):
+        logger.info(cpu_count)
+        span = tracer.start_span(STREAM, context=parent_ctx)
+        query_id = task[1]["query_id"]
+        response_id = task[1]["response_id"]
+        callback_id = task[1]["callback_id"]
+        got_lock = await acquire_lock(response_id, CONSUMER, logger)
         logger.info(f"[{callback_id}] Obtained lock.")
+
+        # given a task, get the message from the db
+        original_query = await get_message(query_id, logger)
+        if original_query is None:
+            raise Exception("Failed to get original query")
+        original_query_graph = original_query["message"]["query_graph"]
+        lookup_query_graph = await get_message(f"{callback_id}_query_graph", logger)
+        callback_response = await get_message(callback_id, logger)
         lock_time = time.time()
         original_response = await get_message(response_id, logger)
         # do message merging
         # gonna stub this for now
         # merged_message = callback_response
         # TODO: make the following work
-        merged_message = merge_messages(
+        merged_message = await loop.run_in_executor(
+            executor,
+            merge_messages,
             original_query_graph,
             lookup_query_graph,
             [original_response, callback_response],
@@ -368,26 +378,9 @@ async def merge_message(task, logger: logging.Logger):
         # remove lock so others can now modify message
         await remove_lock(response_id, CONSUMER, logger)
         await remove_callback_id(callback_id, logger)
-    else:
-        logger.error(
-            "We're in some sort of hung state and couldn't get a lock on the response."
-        )
-
-    await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-    logger.info(f"[{callback_id}] Finished task {task[0]} in {time.time() - start}")
-
-
-async def process_task(task, parent_ctx, logger):
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await merge_message(task, logger)
-    finally:
+        limiter.release()
+        await mark_task_as_complete(STREAM, GROUP, task[0], logger)
         span.end()
-
-
-async def poll_for_tasks():
-    async for task, parent_ctx, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(process_task(task, parent_ctx, logger))
 
 
 if __name__ == "__main__":
