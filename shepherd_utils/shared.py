@@ -1,5 +1,6 @@
 """Shared Shepherd Utility Functions."""
 
+import asyncio
 import json
 import logging
 from opentelemetry.context.context import Context
@@ -28,8 +29,8 @@ def get_next_operation(
 
 
 async def get_tasks(
-    stream: str, group: str, consumer: str
-) -> AsyncGenerator[Tuple[Union[Tuple[str, str], None], Context, logging.Logger], None]:
+    stream: str, group: str, consumer: str, task_limit: int,
+) -> AsyncGenerator[Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None]:
     """Continually monitor the ara queue for tasks."""
     # Set up logger
     level_number = logging._nameToLevel[settings.log_level]
@@ -39,8 +40,11 @@ async def get_tasks(
     worker_logger.addHandler(log_handler)
     # initialize opens the db connection
     await initialize_db()
+    task_limiter = asyncio.Semaphore(task_limit)
     # continuously poll the broker for new tasks
     while True:
+        # check if we can take another task
+        await task_limiter.acquire()
         # get a new task for the given target
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
@@ -48,13 +52,16 @@ async def get_tasks(
             task_logger = logging.getLogger(
                 f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
             )
-            task_logger.setLevel(level_number)
+            task_log_level = int(ara_task[1].get("log_level", level_number))
+            task_logger.setLevel(task_log_level)
             task_logger.addHandler(log_handler)
             task_logger.info(f"Doing task {ara_task}")
             ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
-            yield ara_task, ctx, task_logger
+            yield ara_task, ctx, task_logger, task_limiter
+        else:
+            task_limiter.release()
 
 
 async def wrap_up_task(

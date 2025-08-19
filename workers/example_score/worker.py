@@ -14,6 +14,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "example.score"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
+TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
@@ -34,17 +35,18 @@ async def example_score(task, logger: logging.Logger):
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
-async def process_task(task, parent_ctx, logger):
+async def process_task(task, parent_ctx, logger, limiter):
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await example_score(task, logger)
     finally:
         span.end()
+        limiter.release()
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(process_task(task, parent_ctx, logger))
+    async for task, parent_ctx, logger, limiter in get_tasks(STREAM, GROUP, CONSUMER, TASK_LIMIT):
+        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
 
 
 if __name__ == "__main__":
