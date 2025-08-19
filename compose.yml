@@ -6,10 +6,14 @@ services:
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-      - ./shepherd_server/shepherd_server/outputs:/app/shepherd_server/shepherd_server/outputs
     ports:
       - '5439:5439'
   shepherd_db:
@@ -24,8 +28,8 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
-      interval: 5s
-      timeout: 5s
+      interval: 2s
+      timeout: 2s
       retries: 5
     volumes:
       - ./pgdata:/var/lib/postgresql/data
@@ -47,10 +51,11 @@ services:
   shepherd_broker_insight:
     image: redislabs/redisinsight:latest
     container_name: redis-insight
+    restart: unless-stopped
     ports:
-      - '8001:8001'
+      - '5540:5540'
     volumes:
-      - ./data:/data
+      - ./data/redisinsight:/db
   jaeger:
     image: jaegertracing/all-in-one:1.55
     ports:
@@ -59,6 +64,7 @@ services:
       - "6381:6381/udp" # Agent UDP (Jaeger native)
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+      - LOG_LEVEL=error
 
 
   ########## Shared Workers
@@ -199,6 +205,20 @@ services:
     build:
       context: .
       dockerfile: workers/aragorn_lookup/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  aragorn_omnicorp:
+    container_name: aragorn_omnicorp
+    build:
+      context: .
+      dockerfile: workers/aragorn_omnicorp/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:

@@ -13,6 +13,7 @@ STREAM = "aragorn"
 # Consumer group, most likely you don't need to change this.
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
+TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
@@ -89,7 +90,7 @@ async def aragorn(task, logger: logging.Logger):
         if infer:
             workflow = [
                 {"id": "aragorn.lookup"},
-                # {"id": "aragorn.overlay_connect_knodes"},
+                {"id": "aragorn.omnicorp"},
                 {"id": "aragorn.score"},
                 {"id": "sort_results_score"},
                 {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
@@ -98,14 +99,14 @@ async def aragorn(task, logger: logging.Logger):
         elif pathfinder:
             workflow = [
                 {"id": "aragorn.lookup"},
-                # {"id": "aragorn.overlay_connect_knodes"},
+                {"id": "aragorn.omnicorp"},
                 {"id": "aragorn.score"},
                 {"id": "filter_kgraph_orphans"},
             ]
         else:
             workflow = [
                 {"id": "aragorn.lookup"},
-                # {"id": "aragorn.overlay_connect_knodes"},
+                {"id": "aragorn.omnicorp"},
                 {"id": "aragorn.score"},
                 {"id": "sort_results_score"},
                 {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
@@ -116,17 +117,20 @@ async def aragorn(task, logger: logging.Logger):
     logger.info(f"Task took {time.time() - start}")
 
 
-async def process_task(task, parent_ctx, logger):
+async def process_task(task, parent_ctx, logger, limiter):
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await aragorn(task, logger)
     finally:
         span.end()
+        limiter.release()
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger in get_tasks(STREAM, GROUP, CONSUMER):
-        asyncio.create_task(process_task(task, parent_ctx, logger))
+    async for task, parent_ctx, logger, limiter in get_tasks(
+        STREAM, GROUP, CONSUMER, TASK_LIMIT
+    ):
+        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
 
 
 if __name__ == "__main__":

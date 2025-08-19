@@ -6,7 +6,7 @@ import yaml
 from shepherd_utils.config import settings
 
 
-def construct_open_api_schema(app, description, infores=None):
+def construct_open_api_schema(app, description=None, infores=None, subpath=""):
     """
     This creates the Open api schema object
 
@@ -52,6 +52,10 @@ def construct_open_api_schema(app, description, infores=None):
 
     if description:
         open_api_schema["info"]["description"] = description
+    else:
+        open_api_schema["info"]["description"] = open_api_extended_spec.get(
+            "description", ""
+        )
 
     open_api_schema["info"]["title"] = app.title
 
@@ -60,6 +64,8 @@ def construct_open_api_schema(app, description, infores=None):
 
     # adds support to override server root path
     server_root = str(settings.server_url)
+    if subpath:
+        server_root += subpath
 
     if servers_conf:
         for s in servers_conf:

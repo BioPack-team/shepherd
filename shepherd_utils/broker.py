@@ -139,6 +139,7 @@ async def acquire_lock(
             try:
                 await pubsub.get_message(ignore_subscribe_messages=True, timeout=5)
             except asyncio.TimeoutError:
+                logger.debug(f"Timed out trying to get lock on try {i}")
                 pass
             # await asyncio.sleep(1)
             # try again

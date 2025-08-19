@@ -22,6 +22,7 @@ async def test_aragorn_entrypoint(redis_mock, mocker):
             {
                 "query_id": "test",
                 "response_id": "test_response",
+                "log_level": "20",
                 "otel": json.dumps({}),
             },
         ],
@@ -33,9 +34,10 @@ async def test_aragorn_entrypoint(redis_mock, mocker):
     assert task is not None
     workflow = json.loads(task[1]["workflow"])
     # make sure the workflow was correctly passed
-    assert len(workflow) == 5
+    assert len(workflow) == 6
     assert [
         "aragorn.lookup",
+        "aragorn.omnicorp",
         "aragorn.score",
         "sort_results_score",
         "filter_results_top_n",

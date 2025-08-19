@@ -1,44 +1,46 @@
-"""Example ARA module."""
+"""Aragorn ARA module."""
 
 import asyncio
+import httpx
 import json
 import logging
-import random
 import time
 import uuid
-from shepherd_utils.db import get_message, save_message
-from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.config import settings
+from shepherd_utils.db import get_message
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.shared import get_tasks, wrap_up_task
 
 # Queue name
-STREAM = "example.score"
+STREAM = "aragorn.omnicorp"
+# Consumer group, most likely you don't need to change this.
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
-async def example_score(task, logger: logging.Logger):
+async def aragorn_omnicorp(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
     workflow = json.loads(task[1]["workflow"])
-
     message = await get_message(response_id, logger)
-    # give a random score to all results
-    for result in message["message"]["results"]:
-        for analysis in result["analyses"]:
-            analysis["score"] = random.random()
 
-    await save_message(response_id, message, logger)
+    async with httpx.AsyncClient(timeout=100) as client:
+        await client.post(
+            settings.omnicorp_url,
+            json=message,
+        )
+
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-    logger.info(f"Finished task {task[0]} in {time.time() - start}")
+    logger.info(f"Task took {time.time() - start}")
 
 
 async def process_task(task, parent_ctx, logger, limiter):
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await example_score(task, logger)
+        await aragorn_omnicorp(task, logger)
     finally:
         span.end()
         limiter.release()
