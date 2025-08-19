@@ -116,7 +116,9 @@ async def aragorn_lookup(task, logger: logging.Logger):
                     f"{settings.callback_host}/callback/{callback_id}"
                 )
 
-                logger.debug(f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}""")
+                logger.debug(
+                    f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
+                )
                 request = client.post(
                     settings.kg_retrieval_url,
                     json=expanded_message,
@@ -131,7 +133,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
     # amount of time
     MAX_QUERY_TIME = 300
     start_time = time.time()
-    running_callback_ids = ['']
+    running_callback_ids = [""]
     while time.time() - start_time < MAX_QUERY_TIME:
         # see if there are existing lookups going
         running_callback_ids = await get_running_callbacks(query_id, logger)
@@ -146,7 +148,9 @@ async def aragorn_lookup(task, logger: logging.Logger):
             break
 
     if time.time() - start_time > MAX_QUERY_TIME:
-        logger.warning(f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries still running...")
+        logger.warning(
+            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries still running..."
+        )
     # TODO: clean up any on-going queries so they don't get merged in after we've already moved on and potentially overwrite with an old message
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
@@ -251,7 +255,9 @@ async def process_task(task, parent_ctx, logger, limiter):
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger, limiter in get_tasks(STREAM, GROUP, CONSUMER, TASK_LIMIT):
+    async for task, parent_ctx, logger, limiter in get_tasks(
+        STREAM, GROUP, CONSUMER, TASK_LIMIT
+    ):
         asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
 
 

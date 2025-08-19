@@ -57,7 +57,9 @@ async def process_task(task, parent_ctx, logger, limiter):
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger, limiter in get_tasks(STREAM, GROUP, CONSUMER, TASK_LIMIT):
+    async for task, parent_ctx, logger, limiter in get_tasks(
+        STREAM, GROUP, CONSUMER, TASK_LIMIT
+    ):
         asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
 
 

@@ -29,8 +29,13 @@ def get_next_operation(
 
 
 async def get_tasks(
-    stream: str, group: str, consumer: str, task_limit: int,
-) -> AsyncGenerator[Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None]:
+    stream: str,
+    group: str,
+    consumer: str,
+    task_limit: int,
+) -> AsyncGenerator[
+    Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None
+]:
     """Continually monitor the ara queue for tasks."""
     # Set up logger
     level_number = logging._nameToLevel[settings.log_level]

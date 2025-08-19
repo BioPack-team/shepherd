@@ -1,4 +1,5 @@
 """Shepherd ARA."""
+
 import json
 import logging
 import time

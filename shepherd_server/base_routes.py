@@ -42,30 +42,17 @@ default_input_query: dict = {
                 "e01": {
                     "object": "n0",
                     "subject": "n1",
-                    "predicates": [
-                        "biolink:regulates"
-                    ]
+                    "predicates": ["biolink:regulates"],
                 }
             },
             "nodes": {
-                "n0": {
-                    "ids": [
-                        "NCBIGene:23321"
-                    ],
-                    "categories": [
-                        "biolink:Gene"
-                    ]
-                },
-                "n1": {
-                    "categories": [
-                        "biolink:Gene"
-                    ]
-                }
-            }
+                "n0": {"ids": ["NCBIGene:23321"], "categories": ["biolink:Gene"]},
+                "n1": {"categories": ["biolink:Gene"]},
+            },
         },
         "knowledge_graph": {"nodes": {}, "edges": {}},
         "results": [],
-        "auxiliary_graphs": {}
+        "auxiliary_graphs": {},
     }
 }
 

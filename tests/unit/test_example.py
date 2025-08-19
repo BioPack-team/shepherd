@@ -22,7 +22,7 @@ async def test_example(redis_mock):
             {
                 "query_id": "test",
                 "response_id": "test_response",
-                "log_level": '20',
+                "log_level": "20",
                 "otel": json.dumps({}),
             },
         ],
@@ -67,7 +67,7 @@ async def test_example_lookup(mocker, redis_mock):
                 "workflow": json.dumps(
                     [{"id": "example.lookup"}, {"id": "example.score"}]
                 ),
-                "log_level": '20',
+                "log_level": "20",
                 "otel": json.dumps({}),
             },
         ],
@@ -110,7 +110,7 @@ async def test_example_score(mocker, redis_mock):
                 "query_id": "test",
                 "response_id": response_id,
                 "workflow": json.dumps([{"id": "example.score"}]),
-                "log_level": '20',
+                "log_level": "20",
                 "otel": json.dumps({}),
             },
         ],

@@ -13,9 +13,7 @@ from shepherd_server.base_routes import (
 )
 from shepherd_server.openapi import construct_open_api_schema
 
-ARAGORN = FastAPI(
-    title="Shepherd Aragorn"
-)
+ARAGORN = FastAPI(title="Shepherd Aragorn")
 
 
 @ARAGORN.post("/query")
@@ -51,7 +49,5 @@ async def custom_swagger_ui_html(req: Request) -> HTMLResponse:
 
 
 ARAGORN.openapi_schema = construct_open_api_schema(
-    ARAGORN,
-    infores="infores:shepherd-aragorn",
-    subpath="/aragorn"
+    ARAGORN, infores="infores:shepherd-aragorn", subpath="/aragorn"
 )

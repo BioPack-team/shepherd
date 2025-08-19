@@ -53,7 +53,9 @@ def construct_open_api_schema(app, description=None, infores=None, subpath=""):
     if description:
         open_api_schema["info"]["description"] = description
     else:
-        open_api_schema["info"]["description"] = open_api_extended_spec.get("description", "")
+        open_api_schema["info"]["description"] = open_api_extended_spec.get(
+            "description", ""
+        )
 
     open_api_schema["info"]["title"] = app.title
 
