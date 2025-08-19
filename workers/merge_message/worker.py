@@ -24,7 +24,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "merge_message"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
 
@@ -291,7 +291,7 @@ def merge_messages(
     for result_message in result_messages:
         pydantic_kgraph.update(
             result_message["message"]["knowledge_graph"]
-            if result_message["message"]["knowledge_graph"] is not None
+            if result_message["message"].get("knowledge_graph") is not None
             else {"nodes": {}, "edges": {}}
         )
     # Construct the final result message, currently empty
@@ -321,13 +321,13 @@ def merge_messages(
         ):
             lookup_results = (
                 result_message["message"]["results"]
-                if result_message["message"]["results"] is not None
+                if result_message["message"].get("results") is not None
                 else []
             )
         else:
             result["message"]["results"].extend(
                 result_message["message"]["results"]
-                if result_message["message"]["results"] is not None
+                if result_message["message"].get("results") is not None
                 else []
             )
 
@@ -340,11 +340,11 @@ async def poll_for_tasks():
     loop = asyncio.get_running_loop()
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
+    cpu_count = min(cpu_count, TASK_LIMIT)
     executor = ProcessPoolExecutor(max_workers=cpu_count)
     async for task, parent_ctx, logger, limiter in get_tasks(
         STREAM, GROUP, CONSUMER, cpu_count
     ):
-        logger.info(cpu_count)
         span = tracer.start_span(STREAM, context=parent_ctx)
         query_id = task[1]["query_id"]
         response_id = task[1]["response_id"]
