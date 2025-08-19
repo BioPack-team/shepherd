@@ -341,7 +341,9 @@ async def poll_for_tasks():
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     executor = ProcessPoolExecutor(max_workers=cpu_count)
-    async for task, parent_ctx, logger, limiter in get_tasks(STREAM, GROUP, CONSUMER, cpu_count):
+    async for task, parent_ctx, logger, limiter in get_tasks(
+        STREAM, GROUP, CONSUMER, cpu_count
+    ):
         logger.info(cpu_count)
         span = tracer.start_span(STREAM, context=parent_ctx)
         query_id = task[1]["query_id"]
