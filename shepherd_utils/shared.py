@@ -89,6 +89,7 @@ async def wrap_up_task(
             "query_id": task[1]["query_id"],
             "response_id": task[1]["response_id"],
             "workflow": json.dumps(workflow),
+            "log_level": task[1]["log_level"],
             "otel": task[1]["otel"],
         },
         logger,
