@@ -209,6 +209,20 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+  aragorn_omnicorp:
+    container_name: aragorn_omnicorp
+    build:
+      context: .
+      dockerfile: workers/aragorn_omnicorp/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
   aragorn_score:
     container_name: aragorn_score
     build:

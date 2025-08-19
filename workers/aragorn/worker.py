@@ -90,7 +90,7 @@ async def aragorn(task, logger: logging.Logger):
         if infer:
             workflow = [
                 {"id": "aragorn.lookup"},
-                # {"id": "aragorn.overlay_connect_knodes"},
+                {"id": "aragorn.omnicorp"},
                 {"id": "aragorn.score"},
                 {"id": "sort_results_score"},
                 {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
@@ -99,14 +99,14 @@ async def aragorn(task, logger: logging.Logger):
         elif pathfinder:
             workflow = [
                 {"id": "aragorn.lookup"},
-                # {"id": "aragorn.overlay_connect_knodes"},
+                {"id": "aragorn.omnicorp"},
                 {"id": "aragorn.score"},
                 {"id": "filter_kgraph_orphans"},
             ]
         else:
             workflow = [
                 {"id": "aragorn.lookup"},
-                # {"id": "aragorn.overlay_connect_knodes"},
+                {"id": "aragorn.omnicorp"},
                 {"id": "aragorn.score"},
                 {"id": "sort_results_score"},
                 {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
