@@ -73,7 +73,7 @@ async def run_query(
     logger.setLevel(level_number)
     logger.addHandler(log_handler)
 
-    logger.info(f"Sending {query_id} to {target} with log level {level_number}")
+    logger.info(f"Sending {query_id} to {target}")
 
     with tracer.start_as_current_span("") as span:
         span_carrier = {}

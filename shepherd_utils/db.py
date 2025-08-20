@@ -1,5 +1,6 @@
 """Postgres DB Manager."""
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Union
@@ -7,17 +8,38 @@ from typing import Any, Dict, List, Union
 import orjson
 import redis.asyncio as aioredis
 import zstandard
+from psycopg import OperationalError
 from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
 
+PG_RETRIES = 5
+
+CONNINFO = (
+    f"postgresql://postgres:{settings.postgres_password}@"
+    f"{settings.postgres_host}:{settings.postgres_port}/"
+    f"postgres"  # Add database name
+    f"?keepalives_idle=120"      # Start keepalive after 2 minutes
+    f"&keepalives_interval=30"   # Send keepalive every 30 seconds
+    f"&keepalives_count=3"       # Mark dead after 3 failed keepalives
+    f"&connect_timeout=10"       # Connection timeout
+)
+
+
+async def check_connection(conn):
+    """Check if the postgres connection is still alive."""
+    if conn.closed:
+        raise OperationalError("Connection is closed.")
+
+
 pool = AsyncConnectionPool(
-    conninfo=f"postgresql://postgres:{settings.postgres_password}@{settings.postgres_host}:{settings.postgres_port}",
+    conninfo=CONNINFO,
     timeout=60,
     min_size=5,
     max_size=20,
-    max_idle=120,
+    max_idle=300,
     max_lifetime=3600,
+    check=check_connection,
     # initialize with the connection closed
     open=False,
 )
@@ -236,22 +258,28 @@ async def add_callback_id(
     logger: logging.Logger,
 ):
     """Add a callback->query mapping."""
-    try:
-        async with pool.connection(60) as conn:
-            await conn.execute(
-                """
-            INSERT INTO callbacks (query_id, callback_id) VALUES (
-                %s, %s
-            )
-            """,
-                (
-                    query_id,
-                    callback_id,
-                ),
-            )
-            await conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to save callback: {e}")
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                await conn.execute(
+                    """
+                INSERT INTO callbacks (query_id, callback_id) VALUES (
+                    %s, %s
+                )
+                """,
+                    (
+                        query_id,
+                        callback_id,
+                    ),
+                )
+                await conn.commit()
+        except OperationalError as e:
+            logger.error(f"Connection error on attempt {attempt}: {e}")
+            logger.info(f"Pool stats: {pool.get_stats()}")
+            await asyncio.sleep(0.1 * (2 ** attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to save callback: {e}")
 
 
 async def remove_callback_id(
@@ -259,17 +287,23 @@ async def remove_callback_id(
     logger: logging.Logger,
 ):
     """Once a callback has been processed, remove it."""
-    try:
-        async with pool.connection(60) as conn:
-            await conn.execute(
-                """
-            DELETE FROM callbacks WHERE callback_id = %s
-            """,
-                (callback_id,),
-            )
-            await conn.commit()
-    except Exception as e:
-        logger.error("Failed to remove callback after processing.")
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                await conn.execute(
+                    """
+                DELETE FROM callbacks WHERE callback_id = %s
+                """,
+                    (callback_id,),
+                )
+                await conn.commit()
+        except OperationalError as e:
+            logger.error(f"Connection error removing callback id after attempt {attempt}: {e}")
+            logger.info(f"Pool stats: {pool.get_stats()}")
+            await asyncio.sleep(0.1 * (2 ** attempt))
+            continue
+        except Exception as e:
+            logger.error("Failed to remove callback after processing.")
 
 
 async def get_running_callbacks(
@@ -278,18 +312,24 @@ async def get_running_callbacks(
 ) -> List[str]:
     """Get all currently running callbacks for a single query."""
     running_lookups = []
-    try:
-        async with pool.connection(60) as conn:
-            cursor = await conn.execute(
-                """
-            SELECT callback_id FROM callbacks WHERE query_id = %s
-            """,
-                (query_id,),
-            )
-            rows = await cursor.fetchall()
-            running_lookups = rows
-    except Exception as e:
-        logger.error(f"Failed to get running lookups: {e}")
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT callback_id FROM callbacks WHERE query_id = %s
+                """,
+                    (query_id,),
+                )
+                rows = await cursor.fetchall()
+                running_lookups = rows
+        except OperationalError as e:
+            logger.error(f"Connection error getting running callbacks after attempt {attempt}: {e}")
+            logger.info(f"Pool stats: {pool.get_stats()}")
+            await asyncio.sleep(0.1 * (2 ** attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get running lookups: {e}")
     return running_lookups
 
 
@@ -299,19 +339,25 @@ async def get_callback_query_id(
 ) -> Union[str, None]:
     """Given a callback id, get the associated query id."""
     query_id = None
-    try:
-        async with pool.connection(60) as conn:
-            cursor = await conn.execute(
-                """
-            SELECT query_id FROM callbacks WHERE callback_id = %s            
-            """,
-                (callback_id,),
-            )
-            row = await cursor.fetchone()
-            if row is not None:
-                query_id = row[0]
-    except Exception as e:
-        logger.error(f"Failed to get a query id from callback: {e}")
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT query_id FROM callbacks WHERE callback_id = %s
+                """,
+                    (callback_id,),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    query_id = row[0]
+        except OperationalError as e:
+            logger.error(f"Connection error getting query id from callback after attempt {attempt}: {e}")
+            logger.info(f"Pool stats: {pool.get_stats()}")
+            await asyncio.sleep(0.1 * (2 ** attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get a query id from callback: {e}")
     return query_id
 
 
@@ -321,18 +367,24 @@ async def get_query_state(
 ):
     """Get the query state."""
     query_state = None
-    try:
-        async with pool.connection(60) as conn:
-            cursor = await conn.execute(
-                """
-            SELECT * FROM shepherd_brain WHERE qid = %s
-            """,
-                (query_id,),
-            )
-            row = await cursor.fetchone()
-            query_state = row
-    except Exception as e:
-        logger.error(f"Failed to get query state: {e}")
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT * FROM shepherd_brain WHERE qid = %s
+                """,
+                    (query_id,),
+                )
+                row = await cursor.fetchone()
+                query_state = row
+        except OperationalError as e:
+            logger.error(f"Connection error getting query state after attempt {attempt}: {e}")
+            logger.info(f"Pool stats: {pool.get_stats()}")
+            await asyncio.sleep(0.1 * (2 ** attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get query state: {e}")
     return query_state
 
 
@@ -342,17 +394,23 @@ async def set_query_completed(
     logger: logging.Logger,
 ):
     """This query is done."""
-    try:
-        async with pool.connection(60) as conn:
-            await conn.execute(
-                """
-            UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s
-            """,
-                (
-                    status,
-                    query_id,
-                ),
-            )
-            await conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to successfully complete query in db: {e}")
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                await conn.execute(
+                    """
+                UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s
+                """,
+                    (
+                        status,
+                        query_id,
+                    ),
+                )
+                await conn.commit()
+        except OperationalError as e:
+            logger.error(f"Connection error setting query completed after attempt {attempt}: {e}")
+            logger.info(f"Pool stats: {pool.get_stats()}")
+            await asyncio.sleep(0.1 * (2 ** attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to successfully complete query in db: {e}")
