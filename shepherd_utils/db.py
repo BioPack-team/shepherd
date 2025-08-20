@@ -19,10 +19,10 @@ CONNINFO = (
     f"postgresql://postgres:{settings.postgres_password}@"
     f"{settings.postgres_host}:{settings.postgres_port}/"
     f"postgres"  # Add database name
-    f"?keepalives_idle=120"      # Start keepalive after 2 minutes
-    f"&keepalives_interval=30"   # Send keepalive every 30 seconds
-    f"&keepalives_count=3"       # Mark dead after 3 failed keepalives
-    f"&connect_timeout=10"       # Connection timeout
+    f"?keepalives_idle=120"  # Start keepalive after 2 minutes
+    f"&keepalives_interval=30"  # Send keepalive every 30 seconds
+    f"&keepalives_count=3"  # Mark dead after 3 failed keepalives
+    f"&connect_timeout=10"  # Connection timeout
 )
 
 
@@ -276,7 +276,7 @@ async def add_callback_id(
         except OperationalError as e:
             logger.error(f"Connection error on attempt {attempt}: {e}")
             logger.info(f"Pool stats: {pool.get_stats()}")
-            await asyncio.sleep(0.1 * (2 ** attempt))
+            await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error(f"Failed to save callback: {e}")
@@ -298,9 +298,11 @@ async def remove_callback_id(
                 )
                 await conn.commit()
         except OperationalError as e:
-            logger.error(f"Connection error removing callback id after attempt {attempt}: {e}")
+            logger.error(
+                f"Connection error removing callback id after attempt {attempt}: {e}"
+            )
             logger.info(f"Pool stats: {pool.get_stats()}")
-            await asyncio.sleep(0.1 * (2 ** attempt))
+            await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error("Failed to remove callback after processing.")
@@ -324,9 +326,11 @@ async def get_running_callbacks(
                 rows = await cursor.fetchall()
                 running_lookups = rows
         except OperationalError as e:
-            logger.error(f"Connection error getting running callbacks after attempt {attempt}: {e}")
+            logger.error(
+                f"Connection error getting running callbacks after attempt {attempt}: {e}"
+            )
             logger.info(f"Pool stats: {pool.get_stats()}")
-            await asyncio.sleep(0.1 * (2 ** attempt))
+            await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error(f"Failed to get running lookups: {e}")
@@ -352,9 +356,11 @@ async def get_callback_query_id(
                 if row is not None:
                     query_id = row[0]
         except OperationalError as e:
-            logger.error(f"Connection error getting query id from callback after attempt {attempt}: {e}")
+            logger.error(
+                f"Connection error getting query id from callback after attempt {attempt}: {e}"
+            )
             logger.info(f"Pool stats: {pool.get_stats()}")
-            await asyncio.sleep(0.1 * (2 ** attempt))
+            await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error(f"Failed to get a query id from callback: {e}")
@@ -379,9 +385,11 @@ async def get_query_state(
                 row = await cursor.fetchone()
                 query_state = row
         except OperationalError as e:
-            logger.error(f"Connection error getting query state after attempt {attempt}: {e}")
+            logger.error(
+                f"Connection error getting query state after attempt {attempt}: {e}"
+            )
             logger.info(f"Pool stats: {pool.get_stats()}")
-            await asyncio.sleep(0.1 * (2 ** attempt))
+            await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error(f"Failed to get query state: {e}")
@@ -408,9 +416,11 @@ async def set_query_completed(
                 )
                 await conn.commit()
         except OperationalError as e:
-            logger.error(f"Connection error setting query completed after attempt {attempt}: {e}")
+            logger.error(
+                f"Connection error setting query completed after attempt {attempt}: {e}"
+            )
             logger.info(f"Pool stats: {pool.get_stats()}")
-            await asyncio.sleep(0.1 * (2 ** attempt))
+            await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error(f"Failed to successfully complete query in db: {e}")
