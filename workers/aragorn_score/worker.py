@@ -5,14 +5,16 @@ import copy
 import json
 import logging
 import math
+import os
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from itertools import combinations
 
 import numpy as np
 
-from shepherd_utils.db import get_message, get_query_state, save_message
+from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, wrap_up_task
 
@@ -21,7 +23,7 @@ STREAM = "aragorn.score"
 # Consumer group, most likely you don't need to change this.
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
 
@@ -1174,14 +1176,8 @@ def get_edge_support_kg(edge_id, kg, aux_graphs, edge_kg=None):
     return edge_kg
 
 
-async def aragorn_score(task, logger: logging.Logger):
+def aragorn_score(in_message, logger: logging.Logger):
     """Use Aragorn Ranking to give all results a score."""
-    start = time.time()
-    # given a task, get the message from the db
-    response_id = task[1]["response_id"]
-    workflow = json.loads(task[1]["workflow"])
-    in_message = await get_message(response_id, logger)
-
     # save the logs for the response (if any)
     if "logs" not in in_message or in_message["logs"] is None:
         in_message["logs"] = []
@@ -1218,28 +1214,40 @@ async def aragorn_score(task, logger: logging.Logger):
 
     # return the result to the caller
     logger.info("Score complete. Returning")
-
-    await save_message(response_id, in_message, logger)
-
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-
-    logger.info(f"Finished task {task[0]} in {time.time() - start}")
-
-
-async def process_task(task, parent_ctx, logger, limiter):
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await aragorn_score(task, logger)
-    finally:
-        span.end()
-        limiter.release()
+    return in_message
 
 
 async def poll_for_tasks():
+    loop = asyncio.get_running_loop()
+    cpu_count = os.cpu_count()
+    cpu_count = cpu_count if cpu_count is not None else 1
+    cpu_count = min(cpu_count, TASK_LIMIT)
+    executor = ProcessPoolExecutor(max_workers=cpu_count)
     async for task, parent_ctx, logger, limiter in get_tasks(
         STREAM, GROUP, CONSUMER, TASK_LIMIT
     ):
-        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+        span = tracer.start_span(STREAM, context=parent_ctx)
+        start = time.time()
+        # given a task, get the message from the db
+        response_id = task[1]["response_id"]
+        workflow = json.loads(task[1]["workflow"])
+        message = await get_message(response_id, logger)
+        scored_message = await loop.run_in_executor(
+            executor,
+            aragorn_score,
+            message,
+            logger,
+        )
+        if scored_message is None:
+            logger.error("Failed to score message. Returning unscored.")
+            scored_message = message
+        await save_message(response_id, scored_message, logger)
+
+        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+
+        logger.info(f"Finished task {task[0]} in {time.time() - start}")
+        span.end()
+        limiter.release()
 
 
 if __name__ == "__main__":
