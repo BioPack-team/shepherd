@@ -1,6 +1,7 @@
 """Merge two TRAPI messages together."""
 
 import asyncio
+import copy
 import logging
 import uuid
 from collections import defaultdict
@@ -26,6 +27,87 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
+
+
+def combine_unique_dicts(list1, list2):
+    """Combine two lists of dicts, keeping only unique dictionaries"""
+    def make_hashable(d):
+        """Convert lists to tuples to make dict hashable"""
+        hashable_items = []
+        for key, value in d.items():
+            if isinstance(value, list):
+                hashable_items.append((key, tuple(value)))
+            elif isinstance(value, dict):
+                # Handle nested dicts recursively
+                hashable_items.append((key, frozenset(make_hashable(value))))
+            else:
+                hashable_items.append((key, value))
+        return tuple(sorted(hashable_items))
+    seen = set()
+    result = []
+
+    for d in list1 + list2:  # This processes ALL items from BOTH lists
+        dict_signature = make_hashable(d)
+        if dict_signature not in seen:
+            seen.add(dict_signature)
+            result.append(d)  # Adds to result if not seen before
+
+    return result
+
+
+def merge_kgraph(og_message, new_message):
+    """Merge two TRAPI kgraphs together."""
+    merged_kgraph = copy.deepcopy(og_message)
+    for key, value in new_message["nodes"].items():
+        existing = og_message["nodes"].get(key, None)
+        if existing is not None:
+            # merge
+            if value["name"]:
+                merged_kgraph["nodes"][key]["name"] = value["name"]
+            if value["categories"]:
+                if existing["categories"]:
+                    all_categories = merged_kgraph["nodes"][key]["categories"] + value["categories"]
+                    merged_kgraph["nodes"][key]["categories"] = list(set(all_categories))
+                else:
+                    merged_kgraph["nodes"][key]["categories"] = value["categories"]
+            if value["attributes"]:
+                if existing["attributes"]:
+                    merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(existing["attributes"], value["attributes"])
+                else:
+                    merged_kgraph["nodes"][key]["attributes"] = value["attributes"]
+        else:
+            merged_kgraph["nodes"][key] = value
+
+    for key, value in new_message["edges"].items():
+        existing = og_message["edges"].get(key, None)
+        if existing is not None:
+            # merge
+            if value["attributes"]:
+                if existing["attributes"]:
+                    new_attributes = []
+                    # just filtering out the new knowledge_level and agent_type attributes
+                    for attribute in value["attributes"]:
+                        if attribute["attribute_type_id"] not in (
+                            "biolink:knowledge_level",
+                            "biolink:agent_type",
+                        ):
+                            # don't add any new KL/AT
+                            new_attributes.append(attribute)
+                    merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(existing["attributes"], value["attributes"])
+                else:
+                    merged_kgraph["edges"][key]["attributes"] = value["attributes"]
+
+            if value["sources"]:
+                if existing["sources"]:
+                    new_sources = combine_unique_dicts(existing["sources"], value["sources"])
+                    # TODO: there might need to be some sort of upstream resource id merging to do past this?
+                    merged_kgraph["edges"][key]["sources"] = new_sources
+                else:
+                    merged_kgraph["edges"][key]["sources"] = value["sources"]
+        else:
+            merged_kgraph["edges"][key] = value
+
+    return merged_kgraph
 
 
 def get_edgeset(result):
@@ -289,11 +371,12 @@ def merge_messages(
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
     for result_message in result_messages:
-        pydantic_kgraph.update(
+        result_kgraph = (
             result_message["message"]["knowledge_graph"]
             if result_message["message"].get("knowledge_graph") is not None
             else {"nodes": {}, "edges": {}}
         )
+        pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph)
     # Construct the final result message, currently empty
     result = {
         "message": {
@@ -355,6 +438,11 @@ async def poll_for_tasks():
         # given a task, get the message from the db
         original_query = await get_message(query_id, logger)
         if original_query is None:
+            await remove_lock(response_id, CONSUMER, logger)
+            await remove_callback_id(callback_id, logger)
+            limiter.release()
+            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+            span.end()
             raise Exception("Failed to get original query")
         original_query_graph = original_query["message"]["query_graph"]
         lookup_query_graph = await get_message(f"{query_id}_lookup_query_graph", logger)
