@@ -99,18 +99,18 @@ async def aragorn_lookup(task, logger: logging.Logger):
     else:
         expanded_messages = expand_aragorn_query(message)
         requests = []
+        # put lookup query graph in redis
+        await save_message(
+            f"{query_id}_lookup_query_graph",
+            expanded_messages[0]["message"]["query_graph"],
+            logger,
+        )
         # send all messages to retriever
         async with httpx.AsyncClient(timeout=100) as client:
             for expanded_message in expanded_messages:
                 callback_id = str(uuid.uuid4())[:8]
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
-                # put lookup query graph in redis
-                await save_message(
-                    f"{callback_id}_query_graph",
-                    expanded_message["message"]["query_graph"],
-                    logger,
-                )
 
                 expanded_message["callback"] = (
                     f"{settings.callback_host}/callback/{callback_id}"

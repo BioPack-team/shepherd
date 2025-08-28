@@ -357,7 +357,7 @@ async def poll_for_tasks():
         if original_query is None:
             raise Exception("Failed to get original query")
         original_query_graph = original_query["message"]["query_graph"]
-        lookup_query_graph = await get_message(f"{callback_id}_query_graph", logger)
+        lookup_query_graph = await get_message(f"{query_id}_lookup_query_graph", logger)
         callback_response = await get_message(callback_id, logger)
         lock_time = time.time()
         original_response = await get_message(response_id, logger)
