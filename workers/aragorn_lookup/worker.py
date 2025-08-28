@@ -87,7 +87,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
         await add_callback_id(query_id, callback_id, logger)
         # put lookup query graph in redis
         await save_message(
-            f"{callback_id}_query_graph", message["message"]["query_graph"], logger
+            f"{query_id}_lookup_query_graph", message["message"]["query_graph"], logger
         )
         message["callback"] = f"{settings.callback_host}/callback/{callback_id}"
 
