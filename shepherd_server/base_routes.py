@@ -149,8 +149,8 @@ async def run_async_query(
     return Response(f"Query {query_id} received.", 200)
 
 
-@base_router.post("/callback/{callback_id}", status_code=200, include_in_schema=False)
 async def callback(
+    target: ARATargetEnum,
     callback_id: str,
     response: dict,
 ) -> Response:
@@ -191,6 +191,7 @@ async def callback(
     await add_task(
         "merge_message",
         {
+            "target": target,
             "query_id": query_id,
             "response_id": response_id,
             "callback_id": callback_id,

@@ -89,7 +89,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
         await save_message(
             f"{query_id}_lookup_query_graph", message["message"]["query_graph"], logger
         )
-        message["callback"] = f"{settings.callback_host}/callback/{callback_id}"
+        message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
 
         async with httpx.AsyncClient(timeout=100) as client:
             await client.post(
@@ -113,7 +113,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 await add_callback_id(query_id, callback_id, logger)
 
                 expanded_message["callback"] = (
-                    f"{settings.callback_host}/callback/{callback_id}"
+                    f"{settings.callback_host}/aragorn/callback/{callback_id}"
                 )
 
                 logger.debug(

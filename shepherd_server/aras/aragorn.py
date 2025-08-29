@@ -10,6 +10,7 @@ from shepherd_server.base_routes import (
     default_input_query,
     run_async_query,
     run_sync_query,
+    callback,
 )
 from shepherd_server.openapi import construct_open_api_schema
 
@@ -29,6 +30,15 @@ async def async_query(
     query: dict = Body(..., example=default_input_query),
 ) -> Response:
     response = await run_async_query(ARATargetEnum.ARAGORN, query)
+    return response
+
+
+@ARAGORN.post("/callback/{callback_id}", status_code=200, include_in_schema=False)
+async def handle_callback(
+    callback_id: str,
+    response: dict,
+) -> Response:
+    response = await callback(ARATargetEnum.ARAGORN, callback_id, response)
     return response
 
 

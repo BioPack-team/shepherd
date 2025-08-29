@@ -131,7 +131,7 @@ def create_aux_graph(analysis):
     return aux_graph_id, aux_graph
 
 
-def add_knowledge_edge(result_message, aux_graph_ids, answer):
+def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
     """Create a new knowledge edge in the result message, with the aux graph ids as support."""
     # Find the subject, object, and predicate of the original query
     query_graph = result_message["message"]["query_graph"]
@@ -160,7 +160,7 @@ def add_knowledge_edge(result_message, aux_graph_ids, answer):
         qualifiers = None
     # Create a new knowledge edge
     new_edge_id = str(uuid.uuid4())
-    source = "infores:shepherd"
+    source = f"infores:shepherd-{target}"
     new_edge = {
         "subject": qnode_subject,
         "object": qnode_object,
@@ -189,7 +189,7 @@ def add_knowledge_edge(result_message, aux_graph_ids, answer):
     return new_edge_id
 
 
-def merge_answer(result_message, answer, results, qnode_ids):
+def merge_answer(target, result_message, answer, results, qnode_ids):
     """Given a set of results and the node identifiers of the original qgraph,
     create a single message.
     result_message has to contain the original query graph
@@ -262,13 +262,13 @@ def merge_answer(result_message, answer, results, qnode_ids):
     if len(aux_graph_ids) > 0:
         # only do this if there are creative results.  There could just be a lookup
         for nid in answer:
-            knowledge_edge_id = add_knowledge_edge(result_message, aux_graph_ids, nid)
+            knowledge_edge_id = add_knowledge_edge(target, result_message, aux_graph_ids, nid)
             knowledge_edge_ids.append(knowledge_edge_id)
 
     # 5. create an analysis with an edge binding from the original creative query edge to the new knowledge edge
     qedge_id = list(result_message["message"]["query_graph"]["edges"].keys())[0]
     analysis = {
-        "resource_id": "infores:shepherd",
+        "resource_id": f"infores:shepherd-{target}",
         "edge_bindings": {
             qedge_id: [{"id": kid, "attributes": []} for kid in knowledge_edge_ids]
         },
@@ -335,7 +335,7 @@ def group_results_by_qnode(merge_qnode, result_message, lookup_results):
     return grouped_results
 
 
-def merge_results_by_node(result_message, merge_qnode, lookup_results):
+def merge_results_by_node(target, result_message, merge_qnode, lookup_results):
     """This assumes a single result message, with a single merged KG.  The goal is to take all results that share a
     binding for merge_qnode and combine them into a single result.
     Assumes that the results are not scored."""
@@ -347,7 +347,7 @@ def merge_results_by_node(result_message, merge_qnode, lookup_results):
     new_results = []
     for r in grouped_results:
         new_result = merge_answer(
-            result_message, r, grouped_results[r], original_qnodes
+            target, result_message, r, grouped_results[r], original_qnodes
         )
         new_results.append(new_result)
     result_message["message"]["results"] = new_results
@@ -365,6 +365,7 @@ def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
 
 
 def merge_messages(
+    target: str,
     original_query_graph: Dict[str, Any],
     lookup_query_graph: Dict[str, Any],
     result_messages: List[Dict[str, Any]],
@@ -415,7 +416,7 @@ def merge_messages(
             )
 
     answer_node_id = get_answer_node(original_query_graph)
-    mergedresults = merge_results_by_node(result, answer_node_id, lookup_results)
+    mergedresults = merge_results_by_node(target, result, answer_node_id, lookup_results)
     return mergedresults
 
 
@@ -432,6 +433,7 @@ async def poll_for_tasks():
         query_id = task[1]["query_id"]
         response_id = task[1]["response_id"]
         callback_id = task[1]["callback_id"]
+        target = task[1]["target"]
         got_lock = await acquire_lock(response_id, CONSUMER, logger)
         logger.info(f"[{callback_id}] Obtained lock.")
 
@@ -456,6 +458,7 @@ async def poll_for_tasks():
         merged_message = await loop.run_in_executor(
             executor,
             merge_messages,
+            target,
             original_query_graph,
             lookup_query_graph,
             [original_response, callback_response],
