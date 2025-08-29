@@ -1,8 +1,9 @@
 """CATRAX entry module."""
 
 import asyncio
+import json
 import logging
-
+import requests
 import time
 import uuid
 from shepherd_utils.db import get_message, save_message
@@ -25,14 +26,26 @@ async def catrax(task, logger: logging.Logger):
         message = await get_message(query_id, logger)
         logger.info(f"Get the message from db {message}")
 
+        catrax_url = "https://arax.ncats.io/api/arax/v1.4/query"
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(catrax_url, json=message, headers=headers)
+
+        logger.info(f"Status Code from CATRAX response: {response.status_code}")
+        result = response.json()
+
+
+
     except Exception as e:
         logger.error(f"Error occurred in CATRAX entry module: {e}")
+        result = {"status": "error", "error": str(e)}
 
     response_id = task[1]["response_id"]
 
-    await save_message(response_id, message, logger)
+    await save_message(response_id, result, logger)
 
-    await wrap_up_task(STREAM, GROUP, task, [], logger)
+    workflow = [{"id": "catrax"}]
+
+    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
 
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
