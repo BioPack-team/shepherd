@@ -242,3 +242,20 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+
+
+  ######### CATRAX
+  catrax:
+    container_name: catrax
+    build:
+      context: .
+      dockerfile: workers/catrax/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
