@@ -31,6 +31,7 @@ tracer = setup_tracer(STREAM)
 
 def combine_unique_dicts(list1, list2):
     """Combine two lists of dicts, keeping only unique dictionaries"""
+
     def make_hashable(d):
         """Convert lists to tuples to make dict hashable"""
         hashable_items = []
@@ -43,6 +44,7 @@ def combine_unique_dicts(list1, list2):
             else:
                 hashable_items.append((key, value))
         return tuple(sorted(hashable_items))
+
     seen = set()
     result = []
 
@@ -66,13 +68,19 @@ def merge_kgraph(og_message, new_message):
                 merged_kgraph["nodes"][key]["name"] = value["name"]
             if value["categories"]:
                 if existing["categories"]:
-                    all_categories = merged_kgraph["nodes"][key]["categories"] + value["categories"]
-                    merged_kgraph["nodes"][key]["categories"] = list(set(all_categories))
+                    all_categories = (
+                        merged_kgraph["nodes"][key]["categories"] + value["categories"]
+                    )
+                    merged_kgraph["nodes"][key]["categories"] = list(
+                        set(all_categories)
+                    )
                 else:
                     merged_kgraph["nodes"][key]["categories"] = value["categories"]
             if value["attributes"]:
                 if existing["attributes"]:
-                    merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(existing["attributes"], value["attributes"])
+                    merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(
+                        existing["attributes"], value["attributes"]
+                    )
                 else:
                     merged_kgraph["nodes"][key]["attributes"] = value["attributes"]
         else:
@@ -93,13 +101,17 @@ def merge_kgraph(og_message, new_message):
                         ):
                             # don't add any new KL/AT
                             new_attributes.append(attribute)
-                    merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(existing["attributes"], value["attributes"])
+                    merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(
+                        existing["attributes"], value["attributes"]
+                    )
                 else:
                     merged_kgraph["edges"][key]["attributes"] = value["attributes"]
 
             if value["sources"]:
                 if existing["sources"]:
-                    new_sources = combine_unique_dicts(existing["sources"], value["sources"])
+                    new_sources = combine_unique_dicts(
+                        existing["sources"], value["sources"]
+                    )
                     # TODO: there might need to be some sort of upstream resource id merging to do past this?
                     merged_kgraph["edges"][key]["sources"] = new_sources
                 else:
@@ -262,7 +274,9 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
     if len(aux_graph_ids) > 0:
         # only do this if there are creative results.  There could just be a lookup
         for nid in answer:
-            knowledge_edge_id = add_knowledge_edge(target, result_message, aux_graph_ids, nid)
+            knowledge_edge_id = add_knowledge_edge(
+                target, result_message, aux_graph_ids, nid
+            )
             knowledge_edge_ids.append(knowledge_edge_id)
 
     # 5. create an analysis with an edge binding from the original creative query edge to the new knowledge edge
@@ -416,7 +430,9 @@ def merge_messages(
             )
 
     answer_node_id = get_answer_node(original_query_graph)
-    mergedresults = merge_results_by_node(target, result, answer_node_id, lookup_results)
+    mergedresults = merge_results_by_node(
+        target, result, answer_node_id, lookup_results
+    )
     return mergedresults
 
 
@@ -441,7 +457,9 @@ async def poll_for_tasks():
             # given a task, get the message from the db
             original_query = await get_message(query_id, logger)
             if original_query is None:
-                logger.error(f"Failed to get original query for {query_id}. Discarding callback response.")
+                logger.error(
+                    f"Failed to get original query for {query_id}. Discarding callback response."
+                )
                 await remove_lock(response_id, CONSUMER, logger)
                 await remove_callback_id(callback_id, logger)
                 limiter.release()
@@ -449,7 +467,9 @@ async def poll_for_tasks():
                 span.end()
                 continue
             original_query_graph = original_query["message"]["query_graph"]
-            lookup_query_graph = await get_message(f"{query_id}_lookup_query_graph", logger)
+            lookup_query_graph = await get_message(
+                f"{query_id}_lookup_query_graph", logger
+            )
             callback_response = await get_message(callback_id, logger)
             lock_time = time.time()
             original_response = await get_message(response_id, logger)
@@ -470,7 +490,9 @@ async def poll_for_tasks():
             # remove lock so others can now modify message
             await remove_lock(response_id, CONSUMER, logger)
         else:
-            logger.error(f"Failed to obtain lock for {query_id}. Discarding callback response.")
+            logger.error(
+                f"Failed to obtain lock for {query_id}. Discarding callback response."
+            )
         await remove_callback_id(callback_id, logger)
         limiter.release()
         await mark_task_as_complete(STREAM, GROUP, task[0], logger)
