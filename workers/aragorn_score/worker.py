@@ -1232,17 +1232,19 @@ async def poll_for_tasks():
         response_id = task[1]["response_id"]
         workflow = json.loads(task[1]["workflow"])
         message = await get_message(response_id, logger)
-        scored_message = await loop.run_in_executor(
-            executor,
-            aragorn_score,
-            message,
-            logger,
-        )
-        if scored_message is None:
-            logger.error("Failed to score message. Returning unscored.")
-            scored_message = message
-        await save_message(response_id, scored_message, logger)
-
+        if message is not None:
+            scored_message = await loop.run_in_executor(
+                executor,
+                aragorn_score,
+                message,
+                logger,
+            )
+            if scored_message is None:
+                logger.error("Failed to score message. Returning unscored.")
+                scored_message = message
+            await save_message(response_id, scored_message, logger)
+        else:
+            logger.error(f"Failed to get {response_id} for scoring.")
         await wrap_up_task(STREAM, GROUP, task, workflow, logger)
 
         logger.info(f"Finished task {task[0]} in {time.time() - start}")

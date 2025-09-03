@@ -435,41 +435,42 @@ async def poll_for_tasks():
         callback_id = task[1]["callback_id"]
         target = task[1]["target"]
         got_lock = await acquire_lock(response_id, CONSUMER, logger)
-        logger.info(f"[{callback_id}] Obtained lock.")
+        if got_lock:
+            logger.info(f"[{callback_id}] Obtained lock.")
 
-        # given a task, get the message from the db
-        original_query = await get_message(query_id, logger)
-        if original_query is None:
+            # given a task, get the message from the db
+            original_query = await get_message(query_id, logger)
+            if original_query is None:
+                logger.error(f"Failed to get original query for {query_id}. Discarding callback response.")
+                await remove_lock(response_id, CONSUMER, logger)
+                await remove_callback_id(callback_id, logger)
+                limiter.release()
+                await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+                span.end()
+                continue
+            original_query_graph = original_query["message"]["query_graph"]
+            lookup_query_graph = await get_message(f"{query_id}_lookup_query_graph", logger)
+            callback_response = await get_message(callback_id, logger)
+            lock_time = time.time()
+            original_response = await get_message(response_id, logger)
+            # do message merging
+            merged_message = await loop.run_in_executor(
+                executor,
+                merge_messages,
+                target,
+                original_query_graph,
+                lookup_query_graph,
+                [original_response, callback_response],
+            )
+            # save merged message back to db
+            await save_message(response_id, merged_message, logger)
+            logger.info(
+                f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
+            )
+            # remove lock so others can now modify message
             await remove_lock(response_id, CONSUMER, logger)
-            await remove_callback_id(callback_id, logger)
-            limiter.release()
-            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-            span.end()
-            raise Exception("Failed to get original query")
-        original_query_graph = original_query["message"]["query_graph"]
-        lookup_query_graph = await get_message(f"{query_id}_lookup_query_graph", logger)
-        callback_response = await get_message(callback_id, logger)
-        lock_time = time.time()
-        original_response = await get_message(response_id, logger)
-        # do message merging
-        # gonna stub this for now
-        # merged_message = callback_response
-        # TODO: make the following work
-        merged_message = await loop.run_in_executor(
-            executor,
-            merge_messages,
-            target,
-            original_query_graph,
-            lookup_query_graph,
-            [original_response, callback_response],
-        )
-        # save merged message back to db
-        await save_message(response_id, merged_message, logger)
-        logger.info(
-            f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
-        )
-        # remove lock so others can now modify message
-        await remove_lock(response_id, CONSUMER, logger)
+        else:
+            logger.error(f"Failed to obtain lock for {query_id}. Discarding callback response.")
         await remove_callback_id(callback_id, logger)
         limiter.release()
         await mark_task_as_complete(STREAM, GROUP, task[0], logger)
