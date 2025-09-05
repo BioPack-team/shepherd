@@ -15,6 +15,7 @@ from shepherd_server.openapi import construct_open_api_schema
 
 ARAX = FastAPI(title="Shepherd ARAX")
 
+
 @ARAX.post("/query")
 async def sync_query(
     query: dict = Body(..., example=default_input_query),
@@ -22,12 +23,14 @@ async def sync_query(
     response = await run_sync_query(ARATargetEnum.ARAX, query)
     return response
 
+
 @ARAX.post("/asyncquery")
 async def async_query(
     query: dict = Body(..., example=default_input_query),
 ) -> Response:
     response = await run_async_query(ARATargetEnum.ARAX, query)
     return response
+
 
 ARAX.include_router(base_router, prefix="")
 
