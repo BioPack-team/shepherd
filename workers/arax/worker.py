@@ -24,6 +24,7 @@ async def arax(task, logger: logging.Logger):
         query_id = task[1]["query_id"]
         logger.info(f"Getting message from db for query id {query_id}")
         message = await get_message(query_id, logger)
+        message["submitter"] = "Shepherd"
         logger.info(f"Get the message from db {message}")
 
         arax_url = "https://arax.ncats.io/api/arax/v1.4/query"
