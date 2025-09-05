@@ -244,12 +244,12 @@ services:
       - ./.env:/app/.env
 
 
-  ######### CATRAX
-  catrax:
-    container_name: catrax
+  ######### ARAX
+  arax:
+    container_name: arax
     build:
       context: .
-      dockerfile: workers/catrax/Dockerfile
+      dockerfile: workers/arax/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:

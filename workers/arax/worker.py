@@ -1,4 +1,4 @@
-"""CATRAX entry module."""
+"""ARAX entry module."""
 
 import asyncio
 import json
@@ -11,14 +11,14 @@ from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
-STREAM = "catrax"
+STREAM = "arax"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
-async def catrax(task, logger: logging.Logger):
+async def arax(task, logger: logging.Logger):
     try:
         start = time.time()
         query_id = task[1]["query_id"]
@@ -26,24 +26,24 @@ async def catrax(task, logger: logging.Logger):
         message = await get_message(query_id, logger)
         logger.info(f"Get the message from db {message}")
 
-        catrax_url = "https://arax.ncats.io/api/arax/v1.4/query"
+        arax_url = "https://arax.ncats.io/api/arax/v1.4/query"
         headers = {"Content-Type": "application/json"}
-        response = requests.post(catrax_url, json=message, headers=headers)
+        response = requests.post(arax_url, json=message, headers=headers)
 
-        logger.info(f"Status Code from CATRAX response: {response.status_code}")
+        logger.info(f"Status Code from ARAX response: {response.status_code}")
         result = response.json()
 
 
 
     except Exception as e:
-        logger.error(f"Error occurred in CATRAX entry module: {e}")
+        logger.error(f"Error occurred in ARAX entry module: {e}")
         result = {"status": "error", "error": str(e)}
 
     response_id = task[1]["response_id"]
 
     await save_message(response_id, result, logger)
 
-    workflow = [{"id": "catrax"}]
+    workflow = [{"id": "arax"}]
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
 
@@ -53,7 +53,7 @@ async def catrax(task, logger: logging.Logger):
 async def process_task(task, parent_ctx, logger, limiter):
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await catrax(task, logger)
+        await arax(task, logger)
     except Exception as e:
         logger.error(f"Something went wrong: {e}")
     finally:

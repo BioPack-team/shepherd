@@ -18,14 +18,14 @@ COPY ./pyproject.toml .
 RUN pip install .
 
 # ... existing code ...
-COPY ./workers/catrax/requirements.txt .
+COPY ./workers/arax/requirements.txt .
 RUN pip install -r requirements.txt
 
 # switch to the non-root user (nru). defined in the base image
 USER nru
 
 # Copy in files
-COPY ./workers/catrax ./
+COPY ./workers/arax ./
 
 # Set up base for command and any variables
 # that shouldn't be modified
