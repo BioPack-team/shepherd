@@ -34,8 +34,6 @@ async def arax(task, logger: logging.Logger):
         logger.info(f"Status Code from ARAX response: {response.status_code}")
         result = response.json()
 
-
-
     except Exception as e:
         logger.error(f"Error occurred in ARAX entry module: {e}")
         result = {"status": "error", "error": str(e)}

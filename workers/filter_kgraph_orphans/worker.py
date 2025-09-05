@@ -5,9 +5,15 @@ import json
 import logging
 import time
 import uuid
+
 from shepherd_utils.db import get_message, save_message
-from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.shared import (
+    get_tasks,
+    recursive_get_auxgraph_edges,
+    recursive_get_edge_support_graphs,
+    wrap_up_task,
+)
 
 # Queue name
 STREAM = "filter_kgraph_orphans"
@@ -18,6 +24,10 @@ tracer = setup_tracer(STREAM)
 
 
 async def filter_kgraph_orphans(task, logger: logging.Logger):
+    """
+    Given a TRAPI message, remove all kgraph nodes and edges that aren't referenced
+    in any results.
+    """
     start = time.time()
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
@@ -25,54 +35,59 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
     message = await get_message(response_id, logger)
     try:
         results = message.get("message", {}).get("results", [])
+        message_auxgraphs = message.get("message", {}).get("auxiliary_graphs", {})
+        kg_edges = (
+            message.get("message", {}).get("knowledge_graph", {}).get("edges", {})
+        )
         nodes = set()
         edges = set()
         auxgraphs = set()
+        temp_auxgraphs = set()
+        temp_edges = set()
         # 1. Result node bindings
         for result in results:
-            for qnode, knodes in result.get("node_bindings", {}).items():
+            for _, knodes in result.get("node_bindings", {}).items():
                 nodes.update([k["id"] for k in knodes])
         # 2. Result.Analysis edge bindings
         for result in results:
             for analysis in result.get("analyses", []):
-                for qedge, kedges in analysis.get("edge_bindings", {}).items():
-                    edges.update([k["id"] for k in kedges])
+                for _, kedges in analysis.get("edge_bindings", {}).items():
+                    temp_edges.update([k["id"] for k in kedges])
         # 3. Result.Analysis support graphs
         for result in results:
             for analysis in result.get("analyses", []):
                 for auxgraph in analysis.get("support_graphs", []):
-                    auxgraphs.add(auxgraph)
+                    temp_auxgraphs.add(auxgraph)
         # 4. Support graphs from edges in 2
-        for edge in edges:
-            for attribute in (
-                message.get("message", {})
-                .get("knowledge_graph", {})
-                .get("edges", {})
-                .get(edge, {})
-                .get("attributes", {})
-            ):
-                if attribute.get("attribute_type_id", None) == "biolink:support_graphs":
-                    auxgraphs.update(attribute.get("value", []))
+        for edge in temp_edges:
+            try:
+                edges, auxgraphs, nodes = recursive_get_edge_support_graphs(
+                    edge,
+                    edges,
+                    auxgraphs,
+                    kg_edges,
+                    message_auxgraphs,
+                    nodes,
+                )
+            except KeyError as e:
+                logger.warning(f"Failed to get edge support graph {edge}: {e}")
+                continue
         # 5. For all the auxgraphs collect their edges and nodes
-        for auxgraph in auxgraphs:
-            aux_edges = (
-                message.get("message", {})
-                .get("auxiliary_graphs", {})
-                .get(auxgraph, {})
-                .get("edges", [])
-            )
-            for aux_edge in aux_edges:
-                if aux_edge not in message["message"]["knowledge_graph"]["edges"]:
-                    logger.warning(f"aux_edge {aux_edge} not in knowledge_graph.edges")
-                    continue
-                edges.add(aux_edge)
-                nodes.add(
-                    message["message"]["knowledge_graph"]["edges"][aux_edge]["subject"]
+        for auxgraph in temp_auxgraphs:
+            try:
+                edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
+                    auxgraph,
+                    edges,
+                    auxgraphs,
+                    kg_edges,
+                    message_auxgraphs,
+                    nodes,
                 )
-                nodes.add(
-                    message["message"]["knowledge_graph"]["edges"][aux_edge]["object"]
-                )
-        # now remove all knowledge_graph nodes and edges that are not in our nodes and edges sets.
+            except KeyError as e:
+                logger.warning(f"Failed to get auxgraph edges {auxgraph}: {e}")
+                continue
+        # now remove all knowledge_graph nodes and edges that are
+        # not in our nodes and edges sets.
         kg_nodes = (
             message.get("message", {}).get("knowledge_graph", {}).get("nodes", {})
         )

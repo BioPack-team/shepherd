@@ -7,6 +7,7 @@ import uuid
 from typing import Optional, Tuple
 
 from fastapi import APIRouter, Body, Response
+from fastapi.responses import JSONResponse
 from opentelemetry import trace
 from opentelemetry.propagate import inject
 
@@ -141,17 +142,30 @@ async def run_sync_query(
 async def run_async_query(
     target: ARATargetEnum,
     query: dict = Body(..., example=default_input_query),
-) -> Response:
+) -> JSONResponse:
     """Handle asynchronous TRAPI queries."""
     callback_url = query.get("callback")
     if callback_url is None:
-        return Response("Missing callback url.", 422)
+        return JSONResponse(
+            content={
+                "status": "Failed",
+                "description": "callback URL missing",
+            },
+            status_code=422,
+        )
     query_id, _, _ = await run_query(target, query, callback_url)
-    return Response(f"Query {query_id} received.", 200)
+    return JSONResponse(
+        content={
+            "status": "Accepted",
+            "description": f"Query commenced. Will send result to {callback_url}",
+            "job_id": query_id,
+        },
+        status_code=200,
+    )
 
 
-@base_router.post("/callback/{callback_id}", status_code=200, include_in_schema=False)
 async def callback(
+    target: ARATargetEnum,
     callback_id: str,
     response: dict,
 ) -> Response:
@@ -192,6 +206,7 @@ async def callback(
     await add_task(
         "merge_message",
         {
+            "target": target,
             "query_id": query_id,
             "response_id": response_id,
             "callback_id": callback_id,

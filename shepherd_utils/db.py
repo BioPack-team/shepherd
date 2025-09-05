@@ -182,8 +182,7 @@ async def get_message(
             logger.debug(f"Decompression took {time.time() - start_decomp}")
     except Exception as e:
         # failed to get message from db
-        # TODO: do something more severe
-        pass
+        logger.error(f"Failed to get {message_id} from db: {e}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
 

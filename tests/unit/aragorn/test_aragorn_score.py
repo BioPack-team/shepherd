@@ -16,25 +16,10 @@ async def test_aragorn_ranker(redis_mock, mocker):
     mock_callback_response.return_value = copy.deepcopy(response_1)
     logger = logging.getLogger(__name__)
 
-    await aragorn_score(
-        [
-            "test",
-            {
-                "query_id": "test",
-                "response_id": "test_response",
-                "workflow": json.dumps(
-                    [
-                        {"id": "aragorn.score"},
-                    ]
-                ),
-                "log_level": "20",
-                "otel": json.dumps({}),
-            },
-        ],
+    message = aragorn_score(
+        copy.deepcopy(response_1),
         logger,
     )
-
-    message = await get_message("test_response", logger)
 
     assert len(message["message"]["results"]) == 2
     assert "score" in message["message"]["results"][0]["analyses"][0]
