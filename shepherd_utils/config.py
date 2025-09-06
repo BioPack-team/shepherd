@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     callback_host: str = "http://127.0.0.1:5439"
     kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
+    arax_url: str = "https://arax.ncats.io/api/arax/v1.4/query"
+
 
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"

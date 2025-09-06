@@ -1,11 +1,11 @@
 """ARAX entry module."""
 
 import asyncio
-import json
 import logging
 import requests
 import time
 import uuid
+from shepherd_utils.config import settings
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
@@ -27,9 +27,8 @@ async def arax(task, logger: logging.Logger):
         message["submitter"] = "Shepherd"
         logger.info(f"Get the message from db {message}")
 
-        arax_url = "https://arax.ncats.io/api/arax/v1.4/query"
         headers = {"Content-Type": "application/json"}
-        response = requests.post(arax_url, json=message, headers=headers)
+        response = requests.post(settings.arax_url, json=message, headers=headers)
 
         logger.info(f"Status Code from ARAX response: {response.status_code}")
         result = response.json()
