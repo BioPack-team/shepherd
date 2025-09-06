@@ -36,7 +36,9 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
     try:
         results = message.get("message", {}).get("results", [])
         message_auxgraphs = message.get("message", {}).get("auxiliary_graphs", {})
-        kg_edges = message.get("message", {}).get("knowledge_graph", {}).get("edges", {})
+        kg_edges = (
+            message.get("message", {}).get("knowledge_graph", {}).get("edges", {})
+        )
         nodes = set()
         edges = set()
         auxgraphs = set()

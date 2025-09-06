@@ -33,6 +33,7 @@ base_router = APIRouter()
 
 class ARATargetEnum(str, Enum):
     ARAGORN = "aragorn"
+    ARAX = "arax"
     EXAMPLE = "example"
 
 

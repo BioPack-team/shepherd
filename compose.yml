@@ -242,3 +242,20 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+
+
+  ######### ARAX
+  arax:
+    container_name: arax
+    build:
+      context: .
+      dockerfile: workers/arax/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env

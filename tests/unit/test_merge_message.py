@@ -23,6 +23,7 @@ async def test_message_merge(redis_mock, mocker):
     original_response = generate_response()
 
     merged_message = merge_messages(
+        "test_ara",
         lookup_query_graph,
         original_query_graph,
         result_messages=[original_response, callback_response],

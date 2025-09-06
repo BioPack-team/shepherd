@@ -17,6 +17,7 @@ from starlette.responses import HTMLResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from shepherd_server.aras.aragorn import ARAGORN
+from shepherd_server.aras.arax import ARAX
 from shepherd_server.base_routes import base_router
 from shepherd_server.openapi import construct_open_api_schema
 from shepherd_utils.broker import add_task
@@ -48,6 +49,7 @@ APP = FastAPI(
 APP.include_router(base_router, prefix="")
 
 APP.mount("/aragorn", ARAGORN)
+APP.mount("/arax", ARAX)
 
 APP.add_middleware(
     CORSMiddleware,
