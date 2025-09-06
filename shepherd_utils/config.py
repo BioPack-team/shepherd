@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
     arax_url: str = "https://arax.ncats.io/api/arax/v1.4/query"
 
-
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
