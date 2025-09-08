@@ -40,30 +40,38 @@ def add_hub_node(G: nx.Graph, hub_name: str = "Hub") -> nx.Graph:
     return H
 
 
-def filter_graph_by_weight(G: nx.Graph, weight_cutoff: float) -> nx.Graph:
+def filter_graph_by_weight(
+    G: nx.Graph, 
+    weight_cutoff: float, 
+    keep_above: bool = True
+) -> nx.Graph:
     """
-    Returns a new graph containing only the edges with weight >= weight_cutoff.
+    Returns a new graph filtered by edge weight.
     
     Parameters:
         G (nx.Graph): Input graph (must have 'weight' attribute on edges)
-        weight_cutoff (float): Minimum weight threshold to keep an edge
+        weight_cutoff (float): Threshold to filter edges
+        keep_above (bool): 
+            - True  → keep edges with weight >= cutoff
+            - False → keep edges with weight <= cutoff
     
     Returns:
         nx.Graph: Filtered graph
     """
     # Create a new graph of the same type
     H = G.__class__()
-    H.add_nodes_from(G.nodes(data=True))  # preserve nodes and their attributes
-    
-    # Add edges that meet cutoff
+    H.add_nodes_from(G.nodes(data=True))  # preserve nodes and attributes
+
     for u, v, data in G.edges(data=True):
-        if data.get("weight", 0) >= weight_cutoff:
+        weight = data.get("weight", 0)
+        if keep_above and weight >= weight_cutoff:
             H.add_edge(u, v, **data)
-    
+        elif not keep_above and weight <= weight_cutoff:
+            H.add_edge(u, v, **data)
+
     return H
 
 
-# TODO - not tested
 def apply_to_graph(G: nx.Graph, func: Callable[[nx.Graph], nx.Graph]) -> nx.Graph:
     """
     Applies a user-provided function to a copy of the input graph and returns the result.
