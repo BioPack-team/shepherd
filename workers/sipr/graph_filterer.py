@@ -14,8 +14,8 @@ import random
 
 # methods
 # TODO - not tested
-def remove_isolated(graph: nx.Graph) -> nx.Graph:
-    H = graph.copy()
+def remove_isolated(input_graph: nx.Graph) -> nx.Graph:
+    H = input_graph.copy()
     H.remove_nodes_from(list(nx.isolates(H)))
     return H
 
@@ -76,6 +76,10 @@ def filter_graph_by_weight(
         elif not keep_above and weight <= weight_cutoff:
             H.add_edge(u, v, **data)
 
+    # remove unconnected nodes
+    H = remove_isolated(input_graph=H)
+
+    # return
     return H
 
 
@@ -94,7 +98,7 @@ def apply_to_graph(input_graph: nx.Graph, func: Callable[[nx.Graph], nx.Graph]) 
     return func(G_copy)
 
 
-def apply_list_to_graph(G: nx.Graph, funcs: List[Callable[[nx.Graph], nx.Graph]]) -> nx.Graph:
+def apply_list_to_graph(input_graph: nx.Graph, funcs: List[Callable[[nx.Graph], nx.Graph]]) -> nx.Graph:
     """
     Applies a list of functions serially to a copy of the input graph.
     
@@ -113,6 +117,7 @@ def apply_list_to_graph(G: nx.Graph, funcs: List[Callable[[nx.Graph], nx.Graph]]
 
 
 # main (mostly for very basic testing)
+# TODO - to test, do `python3 graph_filterer.py`
 # TODO -> unit testing
 if __name__ == "__main__":
     # TEST - filter by edge weight method
@@ -132,6 +137,7 @@ if __name__ == "__main__":
     H = filter_graph_by_weight(input_graph=G, weight_cutoff=cutoff)
 
     print(f"\nFiltered graph edges (weight >= {cutoff}):")
+    print("filtered original graph from node count: {} to : {}".format(len(list(G.nodes())), len(list(H.nodes()))))
     for u, v, d in H.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
 
@@ -140,6 +146,7 @@ if __name__ == "__main__":
     H1 = apply_to_graph(input_graph=G, func=lambda g: filter_graph_by_weight(input_graph=g, weight_cutoff=cutoff, keep_above=False))
 
     print(f"\nFiltered graph edges (weight <= {cutoff}):")
+    print("filtered original graph from node count: {} to : {}".format(len(list(G.nodes())), len(list(H1.nodes()))))
     for u, v, d in H1.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
 
@@ -149,9 +156,10 @@ if __name__ == "__main__":
         lambda g: filter_graph_by_weight(input_graph=g, weight_cutoff=0.5, keep_above=True),
         lambda g: filter_graph_by_weight(input_graph=g, weight_cutoff=0.7, keep_above=False),
     ]
-    H2 = apply_list_to_graph(G, funcs=funcs)
+    H2 = apply_list_to_graph(input_graph=G, funcs=funcs)
 
     print(f"\nFiltered graph edges (weight between 0.5 and 0.7):")
+    print("filtered original graph from node count: {} to : {}".format(len(list(G.nodes())), len(list(H2.nodes()))))
     for u, v, d in H2.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
 
