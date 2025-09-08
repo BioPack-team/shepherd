@@ -83,6 +83,7 @@ def apply_to_graph(G: nx.Graph, func: Callable[[nx.Graph], nx.Graph]) -> nx.Grap
 # main (mostly for very basic testing)
 # TODO -> unit testing
 if __name__ == "__main__":
+    # TEST - filter by edge weight method
     # Step 1: Create a random graph with 10 nodes
     G = nx.erdos_renyi_graph(n=10, p=0.4, seed=42)  # 40% chance of edge
 
@@ -102,6 +103,13 @@ if __name__ == "__main__":
     for u, v, d in H.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
 
+    # TEST - test the general appy method
+    cutoff = 0.7
+    H1 = apply_to_graph(G, lambda g: filter_graph_by_weight(g, cutoff))
+
+    print(f"\nFiltered graph edges (weight >= {cutoff}):")
+    for u, v, d in H1.edges(data=True):
+        print(f"{u}-{v}: {d['weight']}")
 
 
 # sample output
