@@ -6,13 +6,20 @@
 
 # imports
 import networkx as nx
-from typing import Callable
+from typing import Callable, List
 import random
 
 # constants
 
 
 # methods
+# TODO - not tested
+def remove_isolated(graph: nx.Graph) -> nx.Graph:
+    H = graph.copy()
+    H.remove_nodes_from(list(nx.isolates(H)))
+    return H
+
+
 # TODO - not tested
 def add_hub_node(G: nx.Graph, hub_name: str = "Hub") -> nx.Graph:
     """
@@ -87,6 +94,23 @@ def apply_to_graph(G: nx.Graph, func: Callable[[nx.Graph], nx.Graph]) -> nx.Grap
     return func(G_copy)
 
 
+def apply_list_to_graph(G: nx.Graph, funcs: List[Callable[[nx.Graph], nx.Graph]]) -> nx.Graph:
+    """
+    Applies a list of functions serially to a copy of the input graph.
+    
+    Parameters:
+        G (nx.Graph): Input graph
+        funcs (List[Callable]): List of functions, each taking and returning a nx.Graph
+    
+    Returns:
+        nx.Graph: The modified graph after all functions are applied
+    """
+    H = G.copy()
+    for func in funcs:
+        H = func(H)
+    return H
+
+
 
 # main (mostly for very basic testing)
 # TODO -> unit testing
@@ -112,12 +136,25 @@ if __name__ == "__main__":
         print(f"{u}-{v}: {d['weight']}")
 
     # TEST - test the general appy method
-    cutoff = 0.7
-    H1 = apply_to_graph(G, lambda g: filter_graph_by_weight(g, cutoff))
+    cutoff = 0.2
+    H1 = apply_to_graph(G, lambda g: filter_graph_by_weight(g, cutoff, keep_above=False))
 
-    print(f"\nFiltered graph edges (weight >= {cutoff}):")
+    print(f"\nFiltered graph edges (weight <= {cutoff}):")
     for u, v, d in H1.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
+
+
+    # TEST - test the general appy method with list of functions
+    funcs = [
+        lambda g: filter_graph_by_weight(g, 0.5, keep_above=True),
+        lambda g: filter_graph_by_weight(g, 0.7, keep_above=False),
+    ]
+    H2 = apply_list_to_graph(G, funcs)
+
+    print(f"\nFiltered graph edges (weight between 0.5 and 0.7):")
+    for u, v, d in H2.edges(data=True):
+        print(f"{u}-{v}: {d['weight']}")
+
 
 
 # sample output
