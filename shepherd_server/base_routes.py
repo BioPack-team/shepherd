@@ -35,6 +35,7 @@ class ARATargetEnum(str, Enum):
     ARAGORN = "aragorn"
     ARAX = "arax"
     EXAMPLE = "example"
+    SIPR = "sipr"
 
 
 default_input_query: dict = {

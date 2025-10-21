@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     lookup_timeout: int = 240
     callback_host: str = "http://127.0.0.1:5439"
     kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
+    sync_kg_retrieval_url: str = "https://strider.renci.org/query"
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
     arax_url: str = "https://arax.ncats.io/api/arax/v1.4/query"
 
