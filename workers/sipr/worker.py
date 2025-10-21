@@ -38,7 +38,7 @@ async def get_neighborhood(id_list: list[str], depth: int, logger):
         i = 0
         curie_num = 100
         while i < len(query_nodes):
-            step = write_trapi(query_nodes[i:i + curie_num], hop_num)
+            step = write_trapi(query_nodes[i : i + curie_num], hop_num)
             response = await run_trapi(step, logger)
             candidate_list, filtered_response = get_nodes(response, query_nodes, logger)
             trapi_responses.append(filtered_response)
@@ -60,19 +60,29 @@ def get_nodes(response, query_nodes, logger):
     for edge_id, edge in response["message"]["knowledge_graph"]["edges"].items():
         all_nodes.add(edge["subject"])
         all_nodes.add(edge["object"])
-        if edge["predicate"] != "biolink:subclass_of" and edge["predicate"] != "biolink:related_to":
-            if not edge["subject"].startswith("HP:") or not edge["object"].startswith("HP:"):
-                initial_filtered_graph["message"]["knowledge_graph"]["edges"][edge_id] = edge
-                initial_filtered_graph["message"]["knowledge_graph"]["nodes"][edge["subject"]] = response["message"]["knowledge_graph"]["nodes"][edge["subject"]]
-                initial_filtered_graph["message"]["knowledge_graph"]["nodes"][edge["object"]] = response["message"]["knowledge_graph"]["nodes"][edge["object"]]
+        if (
+            edge["predicate"] != "biolink:subclass_of"
+            and edge["predicate"] != "biolink:related_to"
+        ):
+            if not edge["subject"].startswith("HP:") or not edge["object"].startswith(
+                "HP:"
+            ):
+                initial_filtered_graph["message"]["knowledge_graph"]["edges"][
+                    edge_id
+                ] = edge
+                initial_filtered_graph["message"]["knowledge_graph"]["nodes"][
+                    edge["subject"]
+                ] = response["message"]["knowledge_graph"]["nodes"][edge["subject"]]
+                initial_filtered_graph["message"]["knowledge_graph"]["nodes"][
+                    edge["object"]
+                ] = response["message"]["knowledge_graph"]["nodes"][edge["object"]]
     ppr = distribute_weights([initial_filtered_graph], query_nodes, logger)
     node_scores = list(ppr.items())
     node_scores = sorted(node_scores, key=lambda x: x[1], reverse=True)
-    filtered_nodes = list(filter(lambda x: not x[0].startswith("HP:"), node_scores))[:15]
-    filtered_nodes = {
-        node_id: score
-        for node_id, score in filtered_nodes
-    }
+    filtered_nodes = list(filter(lambda x: not x[0].startswith("HP:"), node_scores))[
+        :15
+    ]
+    filtered_nodes = {node_id: score for node_id, score in filtered_nodes}
     final_filtered_graph = {
         "message": {
             "knowledge_graph": {
@@ -81,25 +91,36 @@ def get_nodes(response, query_nodes, logger):
             }
         }
     }
-    for edge_id, edge in initial_filtered_graph["message"]["knowledge_graph"]["edges"].items():
+    for edge_id, edge in initial_filtered_graph["message"]["knowledge_graph"][
+        "edges"
+    ].items():
         if filtered_nodes.get(edge["subject"]) or filtered_nodes.get(edge["object"]):
             node_prefixes.add(edge["subject"].split(":")[0])
             node_prefixes.add(edge["object"].split(":")[0])
             final_filtered_graph["message"]["knowledge_graph"]["edges"][edge_id] = edge
-            final_filtered_graph["message"]["knowledge_graph"]["nodes"][edge["subject"]] = response["message"]["knowledge_graph"]["nodes"][edge["subject"]]
-            final_filtered_graph["message"]["knowledge_graph"]["nodes"][edge["object"]] = response["message"]["knowledge_graph"]["nodes"][edge["object"]]
+            final_filtered_graph["message"]["knowledge_graph"]["nodes"][
+                edge["subject"]
+            ] = response["message"]["knowledge_graph"]["nodes"][edge["subject"]]
+            final_filtered_graph["message"]["knowledge_graph"]["nodes"][
+                edge["object"]
+            ] = response["message"]["knowledge_graph"]["nodes"][edge["object"]]
     return list(filtered_nodes.keys()), final_filtered_graph
 
 
 def write_trapi(id_list, hop_num):
     object_categories = ["biolink:NamedThing"]
     if hop_num == 1:
-        object_categories = ["biolink:ChemicalEntity", "biolink:Disease", "biolink:BiologicalProcessOrActivity", "biolink:Gene", "biolink:Protein", "biolink:OrganismalEntity"]
+        object_categories = [
+            "biolink:ChemicalEntity",
+            "biolink:Disease",
+            "biolink:BiologicalProcessOrActivity",
+            "biolink:Gene",
+            "biolink:Protein",
+            "biolink:OrganismalEntity",
+        ]
     qg = {
         "nodes": {
-            "n0": {
-                "ids": id_list
-            },
+            "n0": {"ids": id_list},
             "n1": {
                 "categories": object_categories,
             },
@@ -109,7 +130,7 @@ def write_trapi(id_list, hop_num):
                 "subject": "n0",
                 "object": "n1",
             }
-        }
+        },
     }
     query = {
         "message": {
@@ -147,15 +168,18 @@ async def run_trapi(query, logger):
 def distribute_weights(trapi_responses, target_nodes, logger):
     G = nx.DiGraph()
     for response in trapi_responses:
-        kg = response['message']['knowledge_graph']
+        kg = response["message"]["knowledge_graph"]
 
-        #%%
+        # %%
 
-        edges = [(e['subject'], e['object'], {'id': eid, 'edge': e}) for eid, e in kg['edges'].items()]
+        edges = [
+            (e["subject"], e["object"], {"id": eid, "edge": e})
+            for eid, e in kg["edges"].items()
+        ]
 
         G.add_edges_from(edges)
 
-    #%%
+    # %%
     # Personalization vector (bias toward some nodes)
     # Example: bias toward node "A"
     personalization = None
@@ -216,15 +240,21 @@ async def sipr(task, logger: logging.Logger):
             }
             for trapi_response in trapi_responses:
                 # grab kg node from trapi messages
-                if trapi_response["message"]["knowledge_graph"]["nodes"].get(in_node) is not None:
-                    kg_node = trapi_response["message"]["knowledge_graph"]["nodes"][in_node]
+                if (
+                    trapi_response["message"]["knowledge_graph"]["nodes"].get(in_node)
+                    is not None
+                ):
+                    kg_node = trapi_response["message"]["knowledge_graph"]["nodes"][
+                        in_node
+                    ]
                     break
             final_message["message"]["knowledge_graph"]["nodes"][in_node] = kg_node
         node_bindings = [
             {
                 "attributes": [],
                 "id": node_id,
-            } for node_id in nodes
+            }
+            for node_id in nodes
         ]
         for node, score in node_scores:
             if score < 0.001:
@@ -236,8 +266,13 @@ async def sipr(task, logger: logging.Logger):
             }
             for trapi_response in trapi_responses:
                 # grab kg node from trapi messages
-                if trapi_response["message"]["knowledge_graph"]["nodes"].get(node) is not None:
-                    kg_node = trapi_response["message"]["knowledge_graph"]["nodes"][node]
+                if (
+                    trapi_response["message"]["knowledge_graph"]["nodes"].get(node)
+                    is not None
+                ):
+                    kg_node = trapi_response["message"]["knowledge_graph"]["nodes"][
+                        node
+                    ]
                     break
             final_message["message"]["knowledge_graph"]["nodes"][node] = kg_node
             new_edge_ids = []
@@ -254,29 +289,32 @@ async def sipr(task, logger: logging.Logger):
                 {
                     "attributes": [],
                     "id": edge_id,
-                } for edge_id in new_edge_ids
+                }
+                for edge_id in new_edge_ids
             ]
-            final_message["message"]["results"].append({
-                "analyses": [
-                    {
-                        "edge_bindings": {
-                            "e0": edge_bindings,
-                        },
-                        "resource_id": "infores:shepherd_sipr",
-                        "score": score,
-                        "support_graphs": [],
-                    }
-                ],
-                "node_bindings": {
-                    "SN": node_bindings,
-                    "ON": [
+            final_message["message"]["results"].append(
+                {
+                    "analyses": [
                         {
-                            "attributes": [],
-                            "id": node,
-                        },
+                            "edge_bindings": {
+                                "e0": edge_bindings,
+                            },
+                            "resource_id": "infores:shepherd_sipr",
+                            "score": score,
+                            "support_graphs": [],
+                        }
                     ],
-                },
-            })
+                    "node_bindings": {
+                        "SN": node_bindings,
+                        "ON": [
+                            {
+                                "attributes": [],
+                                "id": node,
+                            },
+                        ],
+                    },
+                }
+            )
 
         await save_message(response_id, final_message, logger)
 

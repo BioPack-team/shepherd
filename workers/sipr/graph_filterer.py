@@ -1,4 +1,3 @@
-
 # code to filter a input graph to a smaller graph
 # takes in common. graph object and spits out other graph object
 #
@@ -25,43 +24,41 @@ def add_hub_node(G: nx.Graph, hub_name: str = "Hub") -> nx.Graph:
     """
     Takes in a NetworkX Graph, adds a hub node connected to all existing nodes,
     and returns the modified graph.
-    
+
     Parameters:
         G (nx.Graph): Input graph
         hub_name (str): Name of the hub node (default "Hub")
-    
+
     Returns:
         nx.Graph: Modified graph with the hub node
     """
     # Make a copy so we don’t mutate the original graph
     H = G.copy()
-    
+
     # Add the hub node
     H.add_node(hub_name)
-    
+
     # Connect hub to all other nodes
     for node in H.nodes():
         if node != hub_name:
             H.add_edge(hub_name, node)
-    
+
     return H
 
 
 def filter_graph_by_weight(
-    input_graph: nx.Graph, 
-    weight_cutoff: float, 
-    keep_above: bool = True
+    input_graph: nx.Graph, weight_cutoff: float, keep_above: bool = True
 ) -> nx.Graph:
     """
     Returns a new graph filtered by edge weight.
-    
+
     Parameters:
         G (nx.Graph): Input graph (must have 'weight' attribute on edges)
         weight_cutoff (float): Threshold to filter edges
-        keep_above (bool): 
+        keep_above (bool):
             - True  → keep edges with weight >= cutoff
             - False → keep edges with weight <= cutoff
-    
+
     Returns:
         nx.Graph: Filtered graph
     """
@@ -83,14 +80,16 @@ def filter_graph_by_weight(
     return H
 
 
-def apply_to_graph(input_graph: nx.Graph, func: Callable[[nx.Graph], nx.Graph]) -> nx.Graph:
+def apply_to_graph(
+    input_graph: nx.Graph, func: Callable[[nx.Graph], nx.Graph]
+) -> nx.Graph:
     """
     Applies a user-provided function to a copy of the input graph and returns the result.
-    
+
     Parameters:
         G (nx.Graph): Input graph
         func (Callable): A function that takes a nx.Graph and returns a nx.Graph
-    
+
     Returns:
         nx.Graph: The modified graph
     """
@@ -98,14 +97,16 @@ def apply_to_graph(input_graph: nx.Graph, func: Callable[[nx.Graph], nx.Graph]) 
     return func(G_copy)
 
 
-def apply_list_to_graph(input_graph: nx.Graph, funcs: List[Callable[[nx.Graph], nx.Graph]]) -> nx.Graph:
+def apply_list_to_graph(
+    input_graph: nx.Graph, funcs: List[Callable[[nx.Graph], nx.Graph]]
+) -> nx.Graph:
     """
     Applies a list of functions serially to a copy of the input graph.
-    
+
     Parameters:
         G (nx.Graph): Input graph
         funcs (List[Callable]): List of functions, each taking and returning a nx.Graph
-    
+
     Returns:
         nx.Graph: The modified graph after all functions are applied
     """
@@ -113,7 +114,6 @@ def apply_list_to_graph(input_graph: nx.Graph, funcs: List[Callable[[nx.Graph], 
     for func in funcs:
         H = func(H)
     return H
-
 
 
 # main (mostly for very basic testing)
@@ -137,32 +137,51 @@ if __name__ == "__main__":
     H = filter_graph_by_weight(input_graph=G, weight_cutoff=cutoff)
 
     print(f"\nFiltered graph edges (weight >= {cutoff}):")
-    print("filtered original graph from node count: {} to : {}".format(len(list(G.nodes())), len(list(H.nodes()))))
+    print(
+        "filtered original graph from node count: {} to : {}".format(
+            len(list(G.nodes())), len(list(H.nodes()))
+        )
+    )
     for u, v, d in H.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
 
     # TEST - test the general appy method
     cutoff = 0.2
-    H1 = apply_to_graph(input_graph=G, func=lambda g: filter_graph_by_weight(input_graph=g, weight_cutoff=cutoff, keep_above=False))
+    H1 = apply_to_graph(
+        input_graph=G,
+        func=lambda g: filter_graph_by_weight(
+            input_graph=g, weight_cutoff=cutoff, keep_above=False
+        ),
+    )
 
     print(f"\nFiltered graph edges (weight <= {cutoff}):")
-    print("filtered original graph from node count: {} to : {}".format(len(list(G.nodes())), len(list(H1.nodes()))))
+    print(
+        "filtered original graph from node count: {} to : {}".format(
+            len(list(G.nodes())), len(list(H1.nodes()))
+        )
+    )
     for u, v, d in H1.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
 
-
     # TEST - test the general appy method with list of functions
     funcs = [
-        lambda g: filter_graph_by_weight(input_graph=g, weight_cutoff=0.5, keep_above=True),
-        lambda g: filter_graph_by_weight(input_graph=g, weight_cutoff=0.7, keep_above=False),
+        lambda g: filter_graph_by_weight(
+            input_graph=g, weight_cutoff=0.5, keep_above=True
+        ),
+        lambda g: filter_graph_by_weight(
+            input_graph=g, weight_cutoff=0.7, keep_above=False
+        ),
     ]
     H2 = apply_list_to_graph(input_graph=G, funcs=funcs)
 
     print(f"\nFiltered graph edges (weight between 0.5 and 0.7):")
-    print("filtered original graph from node count: {} to : {}".format(len(list(G.nodes())), len(list(H2.nodes()))))
+    print(
+        "filtered original graph from node count: {} to : {}".format(
+            len(list(G.nodes())), len(list(H2.nodes()))
+        )
+    )
     for u, v, d in H2.edges(data=True):
         print(f"{u}-{v}: {d['weight']}")
-
 
 
 # sample output
