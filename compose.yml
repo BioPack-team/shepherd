@@ -259,6 +259,37 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+
+######### BTE
+  bte:
+    container_name: bte
+    build:
+      context: .
+      dockerfile: workers/bte/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  
+  bte_lookup:
+    container_name: bte_lookup
+    build:
+      context: .
+      dockerfile: workers/bte_lookup/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
   
   ######### SIPR
   sipr:

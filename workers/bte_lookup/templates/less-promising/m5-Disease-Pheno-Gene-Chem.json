@@ -1,0 +1,39 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "on": {
+                    "categories":["biolink:Disease"]
+               },
+                "nA": {
+                    "categories":["biolink:PhenotypicFeature"],
+                    "is_set": true
+                },
+                "nB": {
+                    "categories":["biolink:Gene"],
+                    "is_set": true
+                },
+                "sn": {
+                    "categories":["biolink:ChemicalEntity"]
+                }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "on",
+                    "object": "nA",
+                    "predicates": ["biolink:has_phenotype"]
+                },
+                "eB": {
+                    "subject": "nA",
+                    "object": "nB",
+                    "predicates": ["biolink:regulated_by", "biolink:affected_by"]
+                },
+                "eC": {
+                    "subject": "nB",
+                    "object": "sn",
+                    "predicates": ["biolink:regulated_by", "biolink:affected_by"]
+                }
+            }
+        }
+    }
+}
