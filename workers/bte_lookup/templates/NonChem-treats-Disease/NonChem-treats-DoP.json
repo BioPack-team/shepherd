@@ -1,0 +1,22 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "sn": {
+                    "categories":
+                    ["biolink:Procedure", "biolink:Treatment", "biolink:ClinicalIntervention"]
+                },
+                "on": {
+                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "sn",
+                    "object": "on",
+                    "predicates": ["biolink:treats"]
+                }
+            }
+        }
+    }
+}

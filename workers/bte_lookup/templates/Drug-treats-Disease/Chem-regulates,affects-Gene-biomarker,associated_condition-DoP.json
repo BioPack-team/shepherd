@@ -1,0 +1,33 @@
+{
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "sn": {
+                    "categories":["biolink:ChemicalEntity"]
+                },
+                "nA": {
+                    "categories":["biolink:Gene"],
+                    "is_set": true
+                },
+                "on": {
+                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
+               }
+            },
+            "edges": {
+                "eA": {
+                    "subject": "sn",
+                    "object": "nA",
+                    "predicates": ["biolink:regulates", "biolink:affects"]
+                },
+                "eB": {
+                    "subject": "nA",
+                    "object": "on",
+                    "predicates": [
+                        "biolink:gene_associated_with_condition",
+                        "biolink:biomarker_for"
+                    ]
+                }
+            }
+        }
+    }
+}
