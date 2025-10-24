@@ -186,8 +186,6 @@ def get_params(
     Optional[str],
     Optional[str],
     Optional[str],
-    Optional[str],
-    Optional[str],
     dict[str, str],
 ]:
     """Obtain some important parameters from the query graph."""
@@ -215,10 +213,8 @@ def get_params(
     return (
         subject_type,
         subject_curie,
-        edge["subject"],
         object_type,
         object_curie,
-        edge["object"],
         predicate,
         qualifiers,
     )
@@ -244,7 +240,9 @@ def match_templates(
     if predicate is not None:
         predicates.add(predicate.removeprefix("biolink:"))
 
-    with open(Path(__file__).parent / "template_groups.json", "r", encoding="utf-8") as file:
+    with open(
+        Path(__file__).parent / "template_groups.json", "r", encoding="utf-8"
+    ) as file:
         templateGroups = parse_obj_as(list[TemplateGroup], json.load(file))
 
     template_paths = {
@@ -283,13 +281,9 @@ def fill_templates(
         with open(path, "r") as file:
             template = json.load(file)
         if subject_curie is not None:
-            template["message"]["query_graph"]["nodes"][
-                "sn"
-            ]["ids"] = [subject_curie]
+            template["message"]["query_graph"]["nodes"]["sn"]["ids"] = [subject_curie]
         if object_curie is not None:
-            template["message"]["query_graph"]["nodes"][
-                "on"
-            ]["ids"] = [object_curie]
+            template["message"]["query_graph"]["nodes"]["on"]["ids"] = [object_curie]
         filled_templates.append(template)
         if query_body.get("log_level") is not None:
             template["log_level"] = query_body["log_level"]
@@ -313,7 +307,11 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
     )
 
     matched_template_paths = match_templates(
-        subject_type, object_type, predicate, qualifiers, logger,
+        subject_type,
+        object_type,
+        predicate,
+        qualifiers,
+        logger,
     )
 
     templates = fill_templates(
