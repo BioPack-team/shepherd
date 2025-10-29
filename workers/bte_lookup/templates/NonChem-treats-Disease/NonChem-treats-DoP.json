@@ -1,22 +1,25 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "sn": {
-                    "categories":
-                    ["biolink:Procedure", "biolink:Treatment", "biolink:ClinicalIntervention"]
-                },
-                "on": {
-                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
-               }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "sn",
-                    "object": "on",
-                    "predicates": ["biolink:treats"]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": [
+          "biolink:Procedure",
+          "biolink:Treatment",
+          "biolink:ClinicalIntervention"
+        ]
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "$target",
+        "predicates": ["biolink:treats"]
+      }
     }
+  }
 }

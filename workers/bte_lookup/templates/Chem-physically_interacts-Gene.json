@@ -1,21 +1,21 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "sn": {
-                    "categories":["biolink:ChemicalEntity"]
-                },
-                "on": {
-                    "categories":["biolink:Gene", "biolink:Protein"]
-               }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "sn",
-                    "object": "on",
-                    "predicates": ["biolink:physically_interacts_with"]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["biolink:ChemicalEntity"]
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:Gene", "biolink:Protein"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "$target",
+        "predicates": ["biolink:physically_interacts_with"]
+      }
     }
+  }
 }

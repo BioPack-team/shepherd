@@ -1,21 +1,21 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "sn": {
-                    "categories":["biolink:Treatment"]
-                },
-                "on": {
-                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
-               }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "sn",
-                    "object": "on",
-                    "predicates": ["biolink:related_to"]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["biolink:Treatment"]
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "$target",
+        "predicates": ["biolink:related_to"]
+      }
     }
+  }
 }

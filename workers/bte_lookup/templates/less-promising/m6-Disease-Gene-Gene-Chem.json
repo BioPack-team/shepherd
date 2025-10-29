@@ -1,39 +1,39 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "on": {
-                    "categories":["biolink:Disease"]
-               },
-                "nA": {
-                    "categories":["biolink:Gene"],
-                    "is_set": true
-                },
-                "nB": {
-                    "categories":["biolink:Gene"],
-                    "is_set": true
-                },
-                "sn": {
-                    "categories":["biolink:ChemicalEntity"]
-                }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "on",
-                    "object": "nA",
-                    "predicates": ["biolink:caused_by"]
-                },
-                "eB": {
-                    "subject": "nA",
-                    "object": "nB",
-                    "predicates": ["biolink:physically_interacts_with"]
-                },
-                "eC": {
-                    "subject": "nB",
-                    "object": "sn",
-                    "predicates": ["biolink:regulated_by", "biolink:affected_by"]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:Disease"]
+      },
+      "nA": {
+        "categories": ["biolink:Gene"],
+        "is_set": true
+      },
+      "nB": {
+        "categories": ["biolink:Gene"],
+        "is_set": true
+      },
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["biolink:ChemicalEntity"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$target",
+        "object": "nA",
+        "predicates": ["biolink:caused_by"]
+      },
+      "eB": {
+        "subject": "nA",
+        "object": "nB",
+        "predicates": ["biolink:physically_interacts_with"]
+      },
+      "eC": {
+        "subject": "nB",
+        "object": "$source",
+        "predicates": ["biolink:regulated_by", "biolink:affected_by"]
+      }
     }
+  }
 }

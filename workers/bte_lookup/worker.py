@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from string import Template
 from typing import Any, Dict, Optional
 
 import httpx
@@ -186,6 +187,8 @@ def get_params(
     Optional[str],
     Optional[str],
     Optional[str],
+    Optional[str],
+    Optional[str],
     dict[str, str],
 ]:
     """Obtain some important parameters from the query graph."""
@@ -211,8 +214,10 @@ def get_params(
         }
 
     return (
+        edge["subject"],
         subject_type,
         subject_curie,
+        edge["object"],
         object_type,
         object_curie,
         predicate,
@@ -273,20 +278,44 @@ def match_templates(
 def fill_templates(
     paths: list[Path],
     query_body: Dict,
+    subject_key: Optional[str],
     subject_curie: Optional[str],
+    object_key: Optional[str],
     object_curie: Optional[str],
 ) -> list[Dict]:
     filled_templates: list[Dict] = []
     for path in paths:
-        with open(path, "r") as file:
-            template = json.load(file)
-        if subject_curie is not None:
-            template["message"]["query_graph"]["nodes"]["sn"]["ids"] = [subject_curie]
-        if object_curie is not None:
-            template["message"]["query_graph"]["nodes"]["on"]["ids"] = [object_curie]
-        filled_templates.append(template)
-        if query_body.get("log_level") is not None:
-            template["log_level"] = query_body["log_level"]
+        with open(path, "r", encoding="utf-8") as file:
+            template = Template(file.read())
+        if subject_curie:
+            qs = template.substitute(
+                source=subject_key,
+                target=object_key,
+                source_id=subject_curie,
+                target_id="",
+            )
+        else:
+            qs = template.substitute(
+                source=subject_key,
+                target=object_key,
+                target_id=object_curie,
+                source_id="",
+            )
+        query = json.loads(qs)
+        if subject_curie:
+            del query["query_graph"]["nodes"][object_key]["ids"]
+        else:
+            del query["query_graph"]["nodes"][subject_key]["ids"]
+        message = {
+            "message": query,
+            "parameters": query_body.get("parameters") or {},
+        }
+        if "log_level" in query_body:
+            message["log_level"] = query_body["log_level"]
+        if message["message"].get("knowledge_graph") is not None:
+            del message["message"]["knowledge_graph"]
+        message["workflow"] = [{"id": "lookup"}]
+        filled_templates.append(message)
 
     return filled_templates
 
@@ -302,9 +331,16 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
     query_graph = query_dict["message"].get("query_graph")
     if query_graph is None:
         return []
-    subject_type, subject_curie, object_type, object_curie, predicate, qualifiers = (
-        get_params(query_graph)
-    )
+    (
+        subject_key,
+        subject_type,
+        subject_curie,
+        object_key,
+        object_type,
+        object_curie,
+        predicate,
+        qualifiers,
+    ) = get_params(query_graph)
 
     matched_template_paths = match_templates(
         subject_type,
@@ -314,19 +350,16 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
         logger,
     )
 
-    templates = fill_templates(
-        matched_template_paths, query_dict, subject_curie, object_curie
+    filled_templates = fill_templates(
+        matched_template_paths,
+        query_dict,
+        subject_key,
+        subject_curie,
+        object_key,
+        object_curie,
     )
 
-    final_templates = []
-
-    for template in templates:
-        if template["message"].get("knowledge_graph") is not None:
-            del template["message"]["knowledge_graph"]
-        template["workflow"] = [{"id": "lookup"}]
-        final_templates.append(template)
-
-    return final_templates
+    return filled_templates
 
 
 async def process_task(task, parent_ctx, logger, limiter):

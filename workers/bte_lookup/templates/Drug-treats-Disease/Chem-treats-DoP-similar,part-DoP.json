@@ -1,33 +1,30 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "sn": {
-                    "categories":["biolink:ChemicalEntity"]
-                },
-                "nA": {
-                    "categories":["biolink:DiseaseOrPhenotypicFeature"],
-                    "is_set": true
-                },
-                "on": {
-                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
-               }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "sn",
-                    "object": "nA",
-                    "predicates": ["biolink:treats"]
-                },
-                "eB": {
-                    "subject": "on",
-                    "object": "nA",
-                    "predicates": [
-                        "biolink:similar_to", 
-                        "biolink:has_part"
-                    ]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["biolink:ChemicalEntity"]
+      },
+      "nA": {
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"],
+        "is_set": true
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "nA",
+        "predicates": ["biolink:treats"]
+      },
+      "eB": {
+        "subject": "$target",
+        "object": "nA",
+        "predicates": ["biolink:similar_to", "biolink:has_part"]
+      }
     }
+  }
 }

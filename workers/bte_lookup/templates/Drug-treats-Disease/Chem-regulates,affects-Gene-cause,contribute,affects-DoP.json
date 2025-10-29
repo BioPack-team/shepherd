@@ -1,34 +1,34 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "sn": {
-                    "categories":["biolink:ChemicalEntity"]
-                },
-                "nA": {
-                    "categories":["biolink:Gene"],
-                    "is_set": true
-                },
-                "on": {
-                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
-               }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "sn",
-                    "object": "nA",
-                    "predicates": ["biolink:regulates", "biolink:affects"]
-                },
-                "eB": {
-                    "subject": "nA",
-                    "object": "on",
-                    "predicates": [
-                        "biolink:affects",
-                        "biolink:causes",
-                        "biolink:contributes_to"
-                    ]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["biolink:ChemicalEntity"]
+      },
+      "nA": {
+        "categories": ["biolink:Gene"],
+        "is_set": true
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "nA",
+        "predicates": ["biolink:regulates", "biolink:affects"]
+      },
+      "eB": {
+        "subject": "nA",
+        "object": "$target",
+        "predicates": [
+          "biolink:affects",
+          "biolink:causes",
+          "biolink:contributes_to"
+        ]
+      }
     }
+  }
 }
