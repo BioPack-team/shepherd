@@ -1,35 +1,34 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "sn": {
-                    "categories":
-                    ["Procedure"]
-                },
-                "on": {
-                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
-               }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "sn",
-                    "object": "on",
-                    "qualifier_constraints": [
-                        {
-                            "qualifier_set": [
-                                {
-                                    "qualifier_type_id": "biolink:object_direction_qualifier",
-                                    "qualifier_value": "decreased"
-                                },
-                                {
-                                    "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                    "qualifier_value": "likelihood"
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["Procedure"]
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "$target",
+        "qualifier_constraints": [
+          {
+            "qualifier_set": [
+              {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "decreased"
+              },
+              {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "likelihood"
+              }
+            ]
+          }
+        ]
+      }
     }
+  }
 }

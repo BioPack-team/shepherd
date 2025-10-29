@@ -1,33 +1,37 @@
 {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "sn": {
-                    "categories":["biolink:ChemicalEntity"]
-                },
-                "nA": {
-                    "categories":["biolink:Gene"],
-                    "is_set": true
-                },
-                "on": {
-                    "categories":["biolink:DiseaseOrPhenotypicFeature"]
-               }
-            },
-            "edges": {
-                "eA": {
-                    "subject": "sn",
-                    "object": "nA",
-                    "predicates": ["biolink:physically_interacts_with", "biolink:correlated_with", "biolink:associated_with"]
-                },
-                "eB": {
-                    "subject": "nA",
-                    "object": "on",
-                    "predicates": [
-                        "biolink:gene_associated_with_condition",
-                        "biolink:biomarker_for"
-                    ]
-                }
-            }
-        }
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["biolink:ChemicalEntity"]
+      },
+      "nA": {
+        "categories": ["biolink:Gene"],
+        "is_set": true
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "nA",
+        "predicates": [
+          "biolink:physically_interacts_with",
+          "biolink:correlated_with",
+          "biolink:associated_with"
+        ]
+      },
+      "eB": {
+        "subject": "nA",
+        "object": "$target",
+        "predicates": [
+          "biolink:gene_associated_with_condition",
+          "biolink:biomarker_for"
+        ]
+      }
     }
+  }
 }
