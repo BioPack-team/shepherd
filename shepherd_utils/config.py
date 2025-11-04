@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
     sync_kg_retrieval_url: str = "https://strider.renci.org/query"
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
-    arax_url: str = "https://arax.ncats.io/api/arax/v1.4/query"
+    arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
 
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
