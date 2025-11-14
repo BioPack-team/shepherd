@@ -207,6 +207,11 @@ async def sipr(task, logger: logging.Logger):
         response_id = task[1]["response_id"]
         message = await get_message(query_id, logger)
 
+        # check if query is an Set Input Query
+        for node in message["message"]["query_graph"]["nodes"].values():
+            if node.get("set_interpretation") != "MANY":
+                raise NotImplementedError
+
         # graph retrieval
         # TODO: make this smarter
         nodes = list(message["message"]["query_graph"]["nodes"]["SN"]["ids"])
@@ -317,6 +322,9 @@ async def sipr(task, logger: logging.Logger):
             )
 
         await save_message(response_id, final_message, logger)
+
+    except NotImplementedError:
+        logger.info("SIPR only supports Set Input Queries.")
 
     except Exception as e:
         logger.error(f"Something bad happened! {e}")

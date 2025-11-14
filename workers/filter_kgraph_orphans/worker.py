@@ -87,6 +87,11 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
                 logger.warning(f"Failed to get auxgraph edges {auxgraph}: {e}")
                 continue
         # now remove all knowledge_graph nodes and edges that are
+        message["message"] = message.get("message") or {}
+        message["message"]["knowledge_graph"] = message["message"].get("knowledge_graph") or {
+            "nodes": {},
+            "edges": {},
+        }
         # not in our nodes and edges sets.
         kg_nodes = (
             message.get("message", {}).get("knowledge_graph", {}).get("nodes", {})
@@ -123,7 +128,7 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
     except KeyError as e:
         # can't find the right structure of message
         logger.error(f"Error filtering kgraph orphans: {e}")
-        return message, 400
+        # return message, 400
 
     # save merged message back to db
     await save_message(response_id, message, logger)

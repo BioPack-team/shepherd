@@ -41,11 +41,16 @@ async def finish_query(task, logger: logging.Logger):
             message = await get_message(response_id, logger)
             logs = await get_logs(response_id, logger)
             message["logs"] = logs
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    callback_url,
-                    json=message,
-                )
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    response = await client.post(
+                        callback_url,
+                        json=message,
+                    )
+                    response.raise_for_status()
+                    logger.info(f"Sent response back to {callback_url}")
+            except Exception as e:
+                logger.error(f"Failed to send callback to {callback_url}: {e}")
 
         await set_query_completed(query_id, "OK", logger)
 

@@ -135,6 +135,7 @@ async def save_message(
     callback_id: str,
     response: dict[str, Any],
     logger: logging.Logger,
+    num_tries: int = 0,
 ):
     """
     Add a callback response to the db.
@@ -154,12 +155,18 @@ async def save_message(
         # print(f"Putting {query_id} on {ara_target} stream")
         await client.set(callback_id, compressed)
         await client.aclose()
+        logger.debug(f"Saving message took {time.time() - start} seconds")
     except Exception as e:
         # failed to put message in db
-        # TODO: do something more severe
-        logger.error(f"Failed to put it on there {e}")
-        pass
-    logger.debug(f"Saving message took {time.time() - start} seconds")
+        if num_tries < 4:
+            num_tries += 1
+            logger.warning(f"Failed to save message {num_tries} times. Trying again...")
+            await asyncio.sleep(0.5)
+            await save_message(callback_id, response, logger, num_tries)
+        else:
+            # TODO: do something more severe
+            logger.error(f"Failed to save a message into redis: {e}")
+            pass
 
 
 async def get_message(

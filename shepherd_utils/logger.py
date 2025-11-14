@@ -1,11 +1,10 @@
 """Set up logging."""
 
-from collections import deque
-from datetime import datetime
 import logging
 import logging.config
 import os
-import yaml
+from collections import deque
+from datetime import datetime
 
 
 class ReasonerLogEntryFormatter(logging.Formatter):
@@ -62,15 +61,67 @@ class QueryLogger(object):
 
     @property
     def log_handler(self):
+        """Return the internal log handler."""
         return self._log_handler
+
+
+def get_logging_config():
+    """
+    Returns logging configuration.
+    File handler is only included when running locally (not in Kubernetes).
+    """
+    # Check if running in Kubernetes
+    is_kubernetes = bool(os.getenv("KUBERNETES_SERVICE_HOST"))
+
+    # Base handlers that are always included
+    handlers = {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "DEBUG",
+            "formatter": "default",
+        }
+    }
+
+    # Add file handler only for local development
+    if not is_kubernetes:
+        # create the logs folder
+        os.makedirs("logs", exist_ok=True)
+        handlers["file"] = {
+            "class": "logging.handlers.RotatingFileHandler",
+            "level": "DEBUG",
+            "formatter": "default",
+            "filename": "./logs/shepherd.log",
+            "mode": "a",
+            "encoding": "utf-8",
+            "maxBytes": 100000000,
+            "backupCount": 9,
+        }
+
+    # Determine which handlers to use for the logger
+    logger_handlers = ["console", "file"] if not is_kubernetes else ["console"]
+
+    logging_config = {
+        "version": 1,
+        "formatters": {
+            "default": {
+                "format": "[%(asctime)s: %(levelname)s/%(name)s]: %(message)s"
+            }
+        },
+        "handlers": handlers,
+        "loggers": {
+            "shepherd": {
+                "level": "DEBUG",
+                "handlers": logger_handlers,
+            }
+        },
+        "incremental": False,
+        "disable_existing_loggers": False,
+    }
+
+    return logging_config
 
 
 def setup_logging():
     """Set up logging."""
-    os.makedirs("logs", exist_ok=True)
-
-    with open(
-        os.path.join(os.path.dirname(__file__), "logging_setup.yml"), "r"
-    ) as stream:
-        config = yaml.load(stream.read(), Loader=yaml.SafeLoader)
+    config = get_logging_config()
     logging.config.dictConfig(config)
