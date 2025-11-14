@@ -78,6 +78,8 @@ async def bte_lookup(task, logger: logging.Logger):
     query_id = task[1]["query_id"]
     workflow = json.loads(task[1]["workflow"])
     message = await get_message(query_id, logger)
+    message["parameters"] = message.get("parameters") or {}
+    message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
     try:
         infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     except Exception as e:
@@ -96,8 +98,6 @@ async def bte_lookup(task, logger: logging.Logger):
             f"{query_id}_lookup_query_graph", message["message"]["query_graph"], logger
         )
         message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
-        message["parameters"] = message.get("parameters") or {}
-        message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
 
         async with httpx.AsyncClient(timeout=100) as client:
             await client.post(
@@ -144,7 +144,7 @@ async def bte_lookup(task, logger: logging.Logger):
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
-    MAX_QUERY_TIME = 300
+    MAX_QUERY_TIME = message["parameters"]["timeout"]
     start_time = time.time()
     running_callback_ids = [""]
     while time.time() - start_time < MAX_QUERY_TIME:
