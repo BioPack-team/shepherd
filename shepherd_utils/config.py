@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_password: str = "supersecretpassword"
 
-    lookup_timeout: int = 240
+    lookup_timeout: int = 210
     callback_host: str = "http://127.0.0.1:5439"
     kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
     sync_kg_retrieval_url: str = "https://strider.renci.org/query"

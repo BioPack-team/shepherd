@@ -90,6 +90,8 @@ async def aragorn_lookup(task, logger: logging.Logger):
             f"{query_id}_lookup_query_graph", message["message"]["query_graph"], logger
         )
         message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
+        message["parameters"] = message.get("parameters") or {}
+        message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
 
         async with httpx.AsyncClient(timeout=100) as client:
             await client.post(
@@ -241,6 +243,7 @@ def expand_aragorn_query(input_message):
         }
         if "log_level" in input_message:
             message["log_level"] = input_message["log_level"]
+        message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
         messages.append(message)
     return messages
 

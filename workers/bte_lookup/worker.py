@@ -96,6 +96,8 @@ async def bte_lookup(task, logger: logging.Logger):
             f"{query_id}_lookup_query_graph", message["message"]["query_graph"], logger
         )
         message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
+        message["parameters"] = message.get("parameters") or {}
+        message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
 
         async with httpx.AsyncClient(timeout=100) as client:
             await client.post(
@@ -314,6 +316,7 @@ def fill_templates(
             message["log_level"] = query_body["log_level"]
         if message["message"].get("knowledge_graph") is not None:
             del message["message"]["knowledge_graph"]
+        message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
         message["workflow"] = [{"id": "lookup"}]
         filled_templates.append(message)
 
