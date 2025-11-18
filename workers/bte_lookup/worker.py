@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from string import Template
 from typing import Any, Dict, Optional
@@ -15,8 +16,10 @@ from pydantic import BaseModel, parse_obj_as
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_callback_id,
+    cleanup_callbacks,
     get_message,
     get_running_callbacks,
+    remove_callback_id,
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
@@ -72,14 +75,49 @@ def examine_query(message):
     return infer, question_node, answer_node, pathfinder
 
 
+@dataclass
+class AsyncResponse:
+    status_code: int
+    success: bool
+    callback_id: str
+    error: Optional[str] = None
+
+
+async def run_async_lookup(
+    client: httpx.AsyncClient,
+    message: dict,
+    callback_id: str,
+) -> AsyncResponse:
+    """Return an async lookup response with callback id."""
+    try:
+        response = await client.post(
+            settings.kg_retrieval_url,
+            json=message,
+        )
+        return AsyncResponse(
+            status_code=response.status_code,
+            success=response.status_code == 200,
+            callback_id=callback_id,
+        )
+    except Exception as e:
+        return AsyncResponse(
+            status_code=500,
+            success=False,
+            callback_id=callback_id,
+            error=str(e),
+        )
+
+
 async def bte_lookup(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     workflow = json.loads(task[1]["workflow"])
     message = await get_message(query_id, logger)
-    message["parameters"] = message.get("parameters") or {}
-    message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
+    parameters = message.get("parameters") or {}
+    parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
+    parameters["tiers"] = parameters.get("tiers") or [0]
+    message["parameters"] = parameters
     try:
         infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     except Exception as e:
@@ -119,7 +157,7 @@ async def bte_lookup(task, logger: logging.Logger):
             logger,
         )
         # send all messages to retriever
-        async with httpx.AsyncClient(timeout=100) as client:
+        async with httpx.AsyncClient(timeout=20) as client:
             for expanded_message in expanded_messages:
                 callback_id = str(uuid.uuid4())[:8]
                 # Put callback UID and query ID in postgres
@@ -132,15 +170,21 @@ async def bte_lookup(task, logger: logging.Logger):
                 logger.debug(
                     f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
                 )
-                request = client.post(
-                    settings.kg_retrieval_url,
-                    json=expanded_message,
-                )
-                requests.append(request)
+                requests.append(run_async_lookup(client, expanded_message, callback_id))
                 # Then we can retrieve all callback ids from query id to see which are still
                 # being looked up
             # fire all the lookups at the same time
-            await asyncio.gather(*requests)
+            responses = await asyncio.gather(*requests, return_exceptions=True)
+
+            for response in responses:
+                if isinstance(response, Exception):
+                    logger.error(f"Failed to do lookup and unable to remove callback id: {response}")
+                elif isinstance(response, AsyncResponse):
+                    if not response.success:
+                        logger.error(f"Failed to do lookup, removing callback id: {response.error}")
+                        await remove_callback_id(response.callback_id, logger)
+                else:
+                    logger.error(f"Failed to do lookup and unable to remove callback id: {response}")
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
@@ -162,9 +206,9 @@ async def bte_lookup(task, logger: logging.Logger):
 
     if time.time() - start_time > MAX_QUERY_TIME:
         logger.warning(
-            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries still running..."
+            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
         )
-    # TODO: clean up any on-going queries so they don't get merged in after we've already moved on and potentially overwrite with an old message
+        await cleanup_callbacks(query_id, logger)
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
@@ -310,13 +354,13 @@ def fill_templates(
             del query["query_graph"]["nodes"][subject_key]["ids"]
         message = {
             "message": query,
-            "parameters": query_body.get("parameters") or {},
+            "parameters": query_body["parameters"],
         }
         if "log_level" in query_body:
             message["log_level"] = query_body["log_level"]
         if message["message"].get("knowledge_graph") is not None:
             del message["message"]["knowledge_graph"]
-        message["parameters"]["timeout"] = message["parameters"].get("timeout", settings.lookup_timeout)
+        message["parameters"] = query_body["parameters"]
         message["workflow"] = [{"id": "lookup"}]
         filled_templates.append(message)
 
