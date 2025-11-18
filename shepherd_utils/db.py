@@ -34,9 +34,9 @@ async def check_connection(conn):
 
 pool = AsyncConnectionPool(
     conninfo=CONNINFO,
-    timeout=60,
+    timeout=10,
     min_size=5,
-    max_size=20,
+    max_size=10,
     max_idle=300,
     max_lifetime=3600,
     check=check_connection,
@@ -279,6 +279,7 @@ async def add_callback_id(
                     ),
                 )
                 await conn.commit()
+            break
         except OperationalError as e:
             logger.error(f"Connection error on attempt {attempt}: {e}")
             logger.info(f"Pool stats: {pool.get_stats()}")
@@ -303,6 +304,7 @@ async def remove_callback_id(
                     (callback_id,),
                 )
                 await conn.commit()
+            break
         except OperationalError as e:
             logger.error(
                 f"Connection error removing callback id after attempt {attempt}: {e}"
@@ -311,7 +313,7 @@ async def remove_callback_id(
             await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
-            logger.error("Failed to remove callback after processing.")
+            logger.error(f"Failed to remove callback after processing: {e}")
 
 
 async def get_running_callbacks(
@@ -331,6 +333,7 @@ async def get_running_callbacks(
                 )
                 rows = await cursor.fetchall()
                 running_lookups = rows
+            break
         except OperationalError as e:
             logger.error(
                 f"Connection error getting running callbacks after attempt {attempt}: {e}"
@@ -341,6 +344,33 @@ async def get_running_callbacks(
         except Exception as e:
             logger.error(f"Failed to get running lookups: {e}")
     return running_lookups
+
+
+async def cleanup_callbacks(
+    query_id: str,
+    logger: logging.Logger,
+):
+    """Remove any current running callbacks."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                await conn.execute(
+                    """
+                DELETE FROM callbacks WHERE query_id = %s
+                """,
+                    (query_id,),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            logger.error(
+                f"Connection error deleting callbacks after attempt {attempt}: {e}"
+            )
+            logger.info(f"Pool stats: {pool.get_stats()}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to remove running lookups: {e}")
 
 
 async def get_callback_query_id(
@@ -361,6 +391,7 @@ async def get_callback_query_id(
                 row = await cursor.fetchone()
                 if row is not None:
                     query_id = row[0]
+            break
         except OperationalError as e:
             logger.error(
                 f"Connection error getting query id from callback after attempt {attempt}: {e}"
@@ -390,6 +421,7 @@ async def get_query_state(
                 )
                 row = await cursor.fetchone()
                 query_state = row
+            break
         except OperationalError as e:
             logger.error(
                 f"Connection error getting query state after attempt {attempt}: {e}"
@@ -421,6 +453,7 @@ async def set_query_completed(
                     ),
                 )
                 await conn.commit()
+            break
         except OperationalError as e:
             logger.error(
                 f"Connection error setting query completed after attempt {attempt}: {e}"
