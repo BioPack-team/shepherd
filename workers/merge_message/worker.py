@@ -2,24 +2,23 @@
 
 import asyncio
 import copy
+import json
 import logging
+import os
+import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
-import json
-import os
-import time
-from typing import Union, Dict, Any, List
+from typing import Any, Dict, List, Union
 
-from shepherd_utils.broker import mark_task_as_complete, acquire_lock, remove_lock
+from shepherd_utils.broker import acquire_lock, mark_task_as_complete, remove_lock
 from shepherd_utils.db import (
     get_message,
-    get_query_state,
-    save_message,
     remove_callback_id,
+    save_message,
 )
-from shepherd_utils.shared import get_tasks
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.shared import get_tasks
 
 # Queue name
 STREAM = "merge_message"
@@ -29,15 +28,30 @@ TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
 
-def combine_unique_dicts(list1, list2):
+def combine_unique_dicts(list1, list2, logger: logging.Logger):
     """Combine two lists of dicts, keeping only unique dictionaries"""
+
+    def make_list_hashable(l):
+        """Convert list to tuples."""
+        frozen_items = []
+        for item in l:
+            if isinstance(item, list):
+                frozen_items.append(make_list_hashable(item))
+            elif isinstance(item, dict):
+                frozen_items.append(make_hashable(item))
+            else:
+                frozen_items.append(item)
+        return tuple(sorted(frozen_items))
 
     def make_hashable(d):
         """Convert lists to tuples to make dict hashable"""
         hashable_items = []
         for key, value in d.items():
             if isinstance(value, list):
-                hashable_items.append((key, tuple(value)))
+                if all(isinstance(item, str) for item in value):
+                    hashable_items.append((key, tuple(value)))
+                else:
+                    make_list_hashable(value)
             elif isinstance(value, dict):
                 # Handle nested dicts recursively
                 hashable_items.append((key, frozenset(make_hashable(value))))
@@ -50,14 +64,17 @@ def combine_unique_dicts(list1, list2):
 
     for d in list1 + list2:  # This processes ALL items from BOTH lists
         dict_signature = make_hashable(d)
-        if dict_signature not in seen:
-            seen.add(dict_signature)
-            result.append(d)  # Adds to result if not seen before
+        try:
+            if dict_signature not in seen:
+                seen.add(dict_signature)
+                result.append(d)  # Adds to result if not seen before
+        except Exception:
+            logger.error(f"Failed to hash this: {dict_signature}")
 
     return result
 
 
-def merge_kgraph(og_message, new_message):
+def merge_kgraph(og_message, new_message, logger: logging.Logger):
     """Merge two TRAPI kgraphs together."""
     merged_kgraph = copy.deepcopy(og_message)
     for key, value in new_message["nodes"].items():
@@ -79,7 +96,7 @@ def merge_kgraph(og_message, new_message):
             if value["attributes"]:
                 if existing["attributes"]:
                     merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"], value["attributes"]
+                        existing["attributes"], value["attributes"], logger,
                     )
                 else:
                     merged_kgraph["nodes"][key]["attributes"] = value["attributes"]
@@ -102,7 +119,7 @@ def merge_kgraph(og_message, new_message):
                             # don't add any new KL/AT
                             new_attributes.append(attribute)
                     merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"], value["attributes"]
+                        existing["attributes"], value["attributes"], logger,
                     )
                 else:
                     merged_kgraph["edges"][key]["attributes"] = value["attributes"]
@@ -110,7 +127,7 @@ def merge_kgraph(og_message, new_message):
             if value["sources"]:
                 if existing["sources"]:
                     new_sources = combine_unique_dicts(
-                        existing["sources"], value["sources"]
+                        existing["sources"], value["sources"], logger,
                     )
                     # TODO: there might need to be some sort of upstream resource id merging to do past this?
                     merged_kgraph["edges"][key]["sources"] = new_sources
@@ -383,6 +400,7 @@ def merge_messages(
     original_query_graph: Dict[str, Any],
     lookup_query_graph: Dict[str, Any],
     result_messages: List[Dict[str, Any]],
+    logger: logging.Logger,
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
     for result_message in result_messages:
@@ -391,7 +409,7 @@ def merge_messages(
             if result_message["message"].get("knowledge_graph") is not None
             else {"nodes": {}, "edges": {}}
         )
-        pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph)
+        pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, logger)
     # Construct the final result message, currently empty
     result = {
         "message": {
@@ -481,6 +499,7 @@ async def poll_for_tasks():
                 original_query_graph,
                 lookup_query_graph,
                 [original_response, callback_response],
+                logger,
             )
             # save merged message back to db
             await save_message(response_id, merged_message, logger)
