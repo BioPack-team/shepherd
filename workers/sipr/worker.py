@@ -208,9 +208,14 @@ async def sipr(task, logger: logging.Logger):
         message = await get_message(query_id, logger)
 
         # check if query is an Set Input Query
+        is_set_input_query = False
         for node in message["message"]["query_graph"]["nodes"].values():
-            if node.get("set_interpretation") != "MANY":
-                raise NotImplementedError
+            if node.get("set_interpretation") == "MANY":
+                is_set_input_query = True
+                break
+
+        if not is_set_input_query:
+            raise NotImplementedError
 
         # graph retrieval
         # TODO: make this smarter
