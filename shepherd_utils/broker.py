@@ -88,6 +88,8 @@ async def get_task(stream, group, consumer, logger: logging.Logger):
 
     except Exception as e:
         logger.info(f"Failed to get task for {stream}, {e}")
+        # wait a second before trying again, handle intermittent disconnections
+        await asyncio.sleep(1)
         pass
     return None
 

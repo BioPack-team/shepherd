@@ -1,11 +1,13 @@
 """Shared Shepherd Utility Functions."""
 
 import asyncio
+import copy
 import json
 import logging
+from typing import AsyncGenerator, Dict, List, Tuple
+
 from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
-from typing import AsyncGenerator, Dict, List, Tuple, Union
 
 from .broker import add_task, get_task, mark_task_as_complete
 from .config import settings
@@ -181,3 +183,120 @@ def validate_message(message, logger):
     if not valid:
         with open("invalid_message.json", "w", encoding="utf-8") as f:
             json.dump(message, f, indent=2)
+
+
+def combine_unique_dicts(list1, list2, logger: logging.Logger):
+    """Combine two lists of dicts, keeping only unique dictionaries"""
+
+    def make_list_hashable(l):
+        """Convert list to tuples."""
+        frozen_items = []
+        for item in l:
+            if isinstance(item, list):
+                frozen_items.append(make_list_hashable(item))
+            elif isinstance(item, dict):
+                frozen_items.append(make_hashable(item))
+            else:
+                frozen_items.append(item)
+        return tuple(sorted(frozen_items))
+
+    def make_hashable(d):
+        """Convert lists to tuples to make dict hashable"""
+        hashable_items = []
+        for key, value in d.items():
+            if isinstance(value, list):
+                if all(isinstance(item, str) for item in value):
+                    hashable_items.append((key, tuple(value)))
+                else:
+                    make_list_hashable(value)
+            elif isinstance(value, dict):
+                # Handle nested dicts recursively
+                hashable_items.append((key, frozenset(make_hashable(value))))
+            else:
+                hashable_items.append((key, value))
+        return tuple(sorted(hashable_items))
+
+    seen = set()
+    result = []
+
+    for d in list1 + list2:  # This processes ALL items from BOTH lists
+        dict_signature = make_hashable(d)
+        try:
+            if dict_signature not in seen:
+                seen.add(dict_signature)
+                result.append(d)  # Adds to result if not seen before
+        except Exception:
+            logger.error(f"Failed to hash this: {dict_signature}")
+
+    return result
+
+
+def merge_kgraph(og_message, new_message, logger: logging.Logger):
+    """Merge two TRAPI kgraphs together."""
+    merged_kgraph = copy.deepcopy(og_message)
+    for key, value in new_message["nodes"].items():
+        existing = og_message["nodes"].get(key, None)
+        if existing is not None:
+            # merge
+            if value["name"]:
+                merged_kgraph["nodes"][key]["name"] = value["name"]
+            if value["categories"]:
+                if existing["categories"]:
+                    all_categories = (
+                        merged_kgraph["nodes"][key]["categories"] + value["categories"]
+                    )
+                    merged_kgraph["nodes"][key]["categories"] = list(
+                        set(all_categories)
+                    )
+                else:
+                    merged_kgraph["nodes"][key]["categories"] = value["categories"]
+            if value["attributes"]:
+                if existing["attributes"]:
+                    merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(
+                        existing["attributes"],
+                        value["attributes"],
+                        logger,
+                    )
+                else:
+                    merged_kgraph["nodes"][key]["attributes"] = value["attributes"]
+        else:
+            merged_kgraph["nodes"][key] = value
+
+    for key, value in new_message["edges"].items():
+        existing = og_message["edges"].get(key, None)
+        if existing is not None:
+            # merge
+            if value["attributes"]:
+                if existing["attributes"]:
+                    new_attributes = []
+                    # just filtering out the new knowledge_level and agent_type attributes
+                    for attribute in value["attributes"]:
+                        if attribute["attribute_type_id"] not in (
+                            "biolink:knowledge_level",
+                            "biolink:agent_type",
+                        ):
+                            # don't add any new KL/AT
+                            new_attributes.append(attribute)
+                    merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(
+                        existing["attributes"],
+                        value["attributes"],
+                        logger,
+                    )
+                else:
+                    merged_kgraph["edges"][key]["attributes"] = value["attributes"]
+
+            if value["sources"]:
+                if existing["sources"]:
+                    new_sources = combine_unique_dicts(
+                        existing["sources"],
+                        value["sources"],
+                        logger,
+                    )
+                    # TODO: there might need to be some sort of upstream resource id merging to do past this?
+                    merged_kgraph["edges"][key]["sources"] = new_sources
+                else:
+                    merged_kgraph["edges"][key]["sources"] = value["sources"]
+        else:
+            merged_kgraph["edges"][key] = value
+
+    return merged_kgraph

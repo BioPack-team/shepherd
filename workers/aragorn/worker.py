@@ -31,12 +31,22 @@ def examine_query(message):
         qedges = message.get("message", {}).get("query_graph", {}).get("edges", {})
     except:
         qedges = {}
+    try:
+        # this can still fail if the input looks like e.g.:
+        #  "query_graph": None
+        qpaths = message.get("message", {}).get("query_graph", {}).get("paths", {})
+    except:
+        qpaths = {}
+    if len(qpaths) > 1:
+        raise Exception("Only a single path is supported", 400)
+    if (len(qpaths) > 0) and (len(qedges) > 0):
+        raise Exception("Mixed mode pathfinder queries are not supported", 400)
+    pathfinder = len(qpaths) == 1
     n_infer_edges = 0
     for edge_id in qedges:
         if qedges.get(edge_id, {}).get("knowledge_type", "lookup") == "inferred":
             n_infer_edges += 1
-    pathfinder = n_infer_edges == 3
-    if n_infer_edges > 1 and n_infer_edges and not pathfinder:
+    if n_infer_edges > 1 and n_infer_edges:
         raise Exception("Only a single infer edge is supported", 400)
     if (n_infer_edges > 0) and (n_infer_edges < len(qedges)):
         raise Exception("Mixed infer and lookup queries not supported", 400)
@@ -98,9 +108,9 @@ async def aragorn(task, logger: logging.Logger):
             ]
         elif pathfinder:
             workflow = [
-                {"id": "aragorn.lookup"},
-                {"id": "aragorn.omnicorp"},
-                {"id": "aragorn.score"},
+                {"id": "aragorn.pathfinder"},
+                # {"id": "aragorn.omnicorp"},
+                # {"id": "aragorn.score"},
                 {"id": "filter_kgraph_orphans"},
             ]
         else:
