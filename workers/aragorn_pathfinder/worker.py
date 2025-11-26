@@ -107,7 +107,12 @@ async def get_normalized_curies(curies, logger: logging.Logger):
         try:
             normalizer_response = await client.post(
                 url=settings.node_norm + "get_normalized_nodes",
-                json={"curies": list(curies), "conflate": True, "description": False, "drug_chemical_conflate": True},
+                json={
+                    "curies": list(curies),
+                    "conflate": True,
+                    "description": False,
+                    "drug_chemical_conflate": True,
+                },
             )
             normalizer_response.raise_for_status()
             return normalizer_response.json()
@@ -152,9 +157,13 @@ async def shadowfax(task, logger: logging.Logger):
             logger.error("Pathfinder queries do not support multiple constraints.")
             return message, 500
         if len(constraints) > 0:
-            intermediate_categories = constraints[0].get("intermediate_categories", None) or []
+            intermediate_categories = (
+                constraints[0].get("intermediate_categories", None) or []
+            )
         if len(intermediate_categories) > 1:
-            logger.error("Pathfinder queries do not support multiple intermediate categories")
+            logger.error(
+                "Pathfinder queries do not support multiple intermediate categories"
+            )
             return message, 500
     else:
         intermediate_categories = ["biolink:NamedThing"]
@@ -163,12 +172,30 @@ async def shadowfax(task, logger: logging.Logger):
     if normalized_pinned_ids is None:
         normalized_pinned_ids = {}
 
-    source_node = normalized_pinned_ids.get(pinned_node_ids[0], {"id": {"identifier": pinned_node_ids[0]}})["id"]["identifier"]
-    source_category = normalized_pinned_ids.get(pinned_node_ids[0], {"type": ["biolink:NamedThing"]})["type"][0]
-    source_equivalent_ids = [i["identifier"] for i in normalized_pinned_ids.get(pinned_node_ids[0], {"equivalent_identifiers": []})["equivalent_identifiers"]]
-    target_node = normalized_pinned_ids.get(pinned_node_ids[1], {"id": {"identifier": pinned_node_ids[1]}})["id"]["identifier"]
-    target_equivalent_ids = [i["identifier"] for i in normalized_pinned_ids.get(pinned_node_ids[1], {"equivalent_identifiers": []})["equivalent_identifiers"]]
-    target_category = normalized_pinned_ids.get(pinned_node_ids[1], {"type": ["biolink:NamedThing"]})["type"][0]
+    source_node = normalized_pinned_ids.get(
+        pinned_node_ids[0], {"id": {"identifier": pinned_node_ids[0]}}
+    )["id"]["identifier"]
+    source_category = normalized_pinned_ids.get(
+        pinned_node_ids[0], {"type": ["biolink:NamedThing"]}
+    )["type"][0]
+    source_equivalent_ids = [
+        i["identifier"]
+        for i in normalized_pinned_ids.get(
+            pinned_node_ids[0], {"equivalent_identifiers": []}
+        )["equivalent_identifiers"]
+    ]
+    target_node = normalized_pinned_ids.get(
+        pinned_node_ids[1], {"id": {"identifier": pinned_node_ids[1]}}
+    )["id"]["identifier"]
+    target_equivalent_ids = [
+        i["identifier"]
+        for i in normalized_pinned_ids.get(
+            pinned_node_ids[1], {"equivalent_identifiers": []}
+        )["equivalent_identifiers"]
+    ]
+    target_category = normalized_pinned_ids.get(
+        pinned_node_ids[1], {"type": ["biolink:NamedThing"]}
+    )["type"][0]
 
     # Find shared publications between input nodes
     source_pubs = len(get_the_pmids([source_node]))
@@ -183,7 +210,11 @@ async def shadowfax(task, logger: logging.Logger):
     for pub in pairwise_pubs:
         curie_list = get_the_curies(pub)
         for curie in curie_list:
-            if curie not in [source_node, target_node] and curie not in source_equivalent_ids and curie not in target_equivalent_ids:
+            if (
+                curie not in [source_node, target_node]
+                and curie not in source_equivalent_ids
+                and curie not in target_equivalent_ids
+            ):
                 curies.add(curie)
 
     if len(curies) == 0:
@@ -198,18 +229,30 @@ async def shadowfax(task, logger: logging.Logger):
     curie_info = defaultdict(dict)
     for curie, normalizer_info in normalizer_response.items():
         if normalizer_info:
-            if (normalizer_info.get("information_content", 101) > INFORMATION_CONTENT_THRESHOLD) and curie not in blocklist:
-                curie_info[curie]["categories"] = normalizer_info.get("type", ["biolink:NamedThing"])
+            if (
+                normalizer_info.get("information_content", 101)
+                > INFORMATION_CONTENT_THRESHOLD
+            ) and curie not in blocklist:
+                curie_info[curie]["categories"] = normalizer_info.get(
+                    "type", ["biolink:NamedThing"]
+                )
                 cooc = len(get_the_pmids([curie, source_node, target_node]))
                 num_pubs = len(get_the_pmids([curie]))
                 curie_info[curie]["pubs"] = num_pubs
                 curie_info[curie]["score"] = max(
                     0,
-                    ((cooc / TOTAL_PUBS) - (source_pubs / TOTAL_PUBS) * (target_pubs / TOTAL_PUBS) * (num_pubs / TOTAL_PUBS))
+                    (
+                        (cooc / TOTAL_PUBS)
+                        - (source_pubs / TOTAL_PUBS)
+                        * (target_pubs / TOTAL_PUBS)
+                        * (num_pubs / TOTAL_PUBS)
+                    ),
                 )
 
     # Find the nodes with most significant co-occurrence
-    pruned_curies = sorted(curie_info.keys(), key=lambda x: curie_info[x]["score"])[:CURIE_PRUNING_LIMIT]
+    pruned_curies = sorted(curie_info.keys(), key=lambda x: curie_info[x]["score"])[
+        :CURIE_PRUNING_LIMIT
+    ]
 
     node_category_mapping = defaultdict(list)
     node_category_mapping[source_category].append(source_node)
@@ -219,29 +262,38 @@ async def shadowfax(task, logger: logging.Logger):
 
     lookup_nodes = {}
     for category, category_curies in node_category_mapping.items():
-        lookup_nodes[category.removeprefix("biolink:")] = {"ids": category_curies, "categories": [category]}
+        lookup_nodes[category.removeprefix("biolink:")] = {
+            "ids": category_curies,
+            "categories": [category],
+        }
 
     # Create queries matching each category to each other
     lookup_queries = []
     for subject_index, subject_category in enumerate(lookup_nodes.keys()):
         for object_category in list(lookup_nodes.keys())[(subject_index + 1) :]:
-            lookup_edge = {"subject": subject_category, "object": object_category, "predicates": ["biolink:related_to"]}
+            lookup_edge = {
+                "subject": subject_category,
+                "object": object_category,
+                "predicates": ["biolink:related_to"],
+            }
             m = {
                 "message": {
                     "query_graph": {
-                        "nodes": {subject_category: lookup_nodes[subject_category], object_category: lookup_nodes[object_category]},
+                        "nodes": {
+                            subject_category: lookup_nodes[subject_category],
+                            object_category: lookup_nodes[object_category],
+                        },
                         "edges": {"e0": lookup_edge},
                     }
                 },
-                "parameters": {
-                    "timeout": 120,
-                    "tiers": [0]
-                },
+                "parameters": {"timeout": 120, "tiers": [0]},
             }
             lookup_queries.append(m)
     lookup_messages = []
     logger.debug(f"Sending {len(lookup_queries)} requests to lookup.")
-    for lookup_message in await asyncio.gather(*[generate_from_lookup(lookup_query, logger) for lookup_query in lookup_queries]):
+    for lookup_message in await asyncio.gather(
+        *[generate_from_lookup(lookup_query, logger) for lookup_query in lookup_queries]
+    ):
         if lookup_message:
             lookup_message["query_graph"] = {"nodes": {}, "edges": {}}
             lookup_messages.append(lookup_message)
@@ -254,7 +306,9 @@ async def shadowfax(task, logger: logging.Logger):
         # Results do not concatenate when they have different qnode ids
         try:
             logger.debug(f"Got back {len(lookup_message.get('results', 0))} results.")
-            merged_kgraph = merge_kgraph(merged_kgraph, lookup_message["knowledge_graph"], logger)
+            merged_kgraph = merge_kgraph(
+                merged_kgraph, lookup_message["knowledge_graph"], logger
+            )
             merged_aux_graphs.update(lookup_message["auxiliary_graphs"])
         except KeyError as e:
             logger.error(f"Failed to merge message: {lookup_message}: {e}")
@@ -284,7 +338,9 @@ async def shadowfax(task, logger: logging.Logger):
         else:
             path_graph.add_edge(e_subject, e_object, keys=[edge_key])
 
-    paths = networkx.all_simple_paths(path_graph, source_node, target_node, NUM_TOTAL_HOPS)
+    paths = networkx.all_simple_paths(
+        path_graph, source_node, target_node, NUM_TOTAL_HOPS
+    )
     num_paths = 0
     result_paths = []
     for path in paths:
@@ -294,7 +350,9 @@ async def shadowfax(task, logger: logging.Logger):
             if curie not in [source_node, target_node]:
                 # Handles constraints, behavior may change depending decision
                 # handling multiple constraints
-                if intermediate_categories[0] in merged_kgraph["nodes"].get(curie, {}).get("categories", []):
+                if intermediate_categories[0] in merged_kgraph["nodes"].get(
+                    curie, {}
+                ).get("categories", []):
                     fits_constraint = True
         if fits_constraint:
             result_paths.append(path)
@@ -302,7 +360,10 @@ async def shadowfax(task, logger: logging.Logger):
     # logger.info(f"Got {num_paths} paths.")
 
     result = {
-        "node_bindings": {pinned_node_keys[0]: [{"id": source_node, "attributes": []}], pinned_node_keys[1]: [{"id": target_node, "attributes": []}]},
+        "node_bindings": {
+            pinned_node_keys[0]: [{"id": source_node, "attributes": []}],
+            pinned_node_keys[1]: [{"id": target_node, "attributes": []}],
+        },
         "analyses": [],
     }
 
@@ -323,13 +384,15 @@ async def shadowfax(task, logger: logging.Logger):
                 single_edges, single_support_graphs, single_nodes = set(), set(), set()
                 # get nodes and edges from path
                 try:
-                    single_edges, single_support_graphs, single_nodes = recursive_get_edge_support_graphs(
-                        kedge_key,
-                        single_edges,
-                        single_support_graphs,
-                        merged_kgraph["edges"],
-                        merged_aux_graphs,
-                        single_nodes,
+                    single_edges, single_support_graphs, single_nodes = (
+                        recursive_get_edge_support_graphs(
+                            kedge_key,
+                            single_edges,
+                            single_support_graphs,
+                            merged_kgraph["edges"],
+                            merged_aux_graphs,
+                            single_nodes,
+                        )
                     )
                 except KeyError as e:
                     logger.warning(e)
@@ -337,18 +400,28 @@ async def shadowfax(task, logger: logging.Logger):
                 for single_support_graph in single_support_graphs:
                     # map support graphs to component nodes
                     for edge_id in merged_aux_graphs[single_support_graph]["edges"]:
-                        support_node_graph_mapping[merged_kgraph["edges"][edge_id]["subject"]].add(single_support_graph)
-                        support_node_graph_mapping[merged_kgraph["edges"][edge_id]["object"]].add(single_support_graph)
+                        support_node_graph_mapping[
+                            merged_kgraph["edges"][edge_id]["subject"]
+                        ].add(single_support_graph)
+                        support_node_graph_mapping[
+                            merged_kgraph["edges"][edge_id]["object"]
+                        ].add(single_support_graph)
                 for edge_id in single_edges:
-                    support_node_edge_mapping[merged_kgraph["edges"][edge_id]["subject"]].add(edge_id)
-                    support_node_edge_mapping[merged_kgraph["edges"][edge_id]["object"]].add(edge_id)
+                    support_node_edge_mapping[
+                        merged_kgraph["edges"][edge_id]["subject"]
+                    ].add(edge_id)
+                    support_node_edge_mapping[
+                        merged_kgraph["edges"][edge_id]["object"]
+                    ].add(edge_id)
                     hop_edge_map[hop_count].add(edge_id)
                 check = True
                 for path_node in single_nodes:
                     if path_node != node and path_node in path_nodes:
                         # if a node is repeated, remove all associated edges from path
                         check = False
-                        for single_support_graph in support_node_graph_mapping[path_node]:
+                        for single_support_graph in support_node_graph_mapping[
+                            path_node
+                        ]:
                             if single_support_graph in path_support_graphs:
                                 path_support_graphs.remove(single_support_graph)
                         for edge_id in support_node_edge_mapping[path_node]:
@@ -364,7 +437,13 @@ async def shadowfax(task, logger: logging.Logger):
                     path_edges.update(single_edges)
                     path_support_graphs.update(single_support_graphs)
                     # Don't add the current node in since we have more edges for this hop
-                    path_nodes.update({single_node for single_node in single_nodes if (single_node != node and single_node != next_node)})
+                    path_nodes.update(
+                        {
+                            single_node
+                            for single_node in single_nodes
+                            if (single_node != node and single_node != next_node)
+                        }
+                    )
                     single_aux_edges.add(kedge_key)
 
             # Now add node in to check for repeats later
@@ -390,7 +469,10 @@ async def shadowfax(task, logger: logging.Logger):
             sha256.update(bytes(x, encoding="utf-8"))
         aux_graph_key = sha256.hexdigest()
         if aux_graph_key not in aux_edges_keys:
-            merged_aux_graphs[aux_graph_key] = {"edges": list(aux_edges), "attributes": []}
+            merged_aux_graphs[aux_graph_key] = {
+                "edges": list(aux_edges),
+                "attributes": [],
+            }
             aux_edges_keys.append(aux_graph_key)
 
         analysis = {
@@ -403,10 +485,10 @@ async def shadowfax(task, logger: logging.Logger):
 
     result_message = {
         "message": {
-            "query_graph":  message["message"]["query_graph"],
+            "query_graph": message["message"]["query_graph"],
             "knowledge_graph": merged_kgraph,
             "results": [result],
-            "auxiliary_graphs": merged_aux_graphs
+            "auxiliary_graphs": merged_aux_graphs,
         }
     }
 

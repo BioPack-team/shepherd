@@ -178,13 +178,19 @@ async def bte_lookup(task, logger: logging.Logger):
 
             for response in responses:
                 if isinstance(response, Exception):
-                    logger.error(f"Failed to do lookup and unable to remove callback id: {response}")
+                    logger.error(
+                        f"Failed to do lookup and unable to remove callback id: {response}"
+                    )
                 elif isinstance(response, AsyncResponse):
                     if not response.success:
-                        logger.error(f"Failed to do lookup, removing callback id: {response.error}")
+                        logger.error(
+                            f"Failed to do lookup, removing callback id: {response.error}"
+                        )
                         await remove_callback_id(response.callback_id, logger)
                 else:
-                    logger.error(f"Failed to do lookup and unable to remove callback id: {response}")
+                    logger.error(
+                        f"Failed to do lookup and unable to remove callback id: {response}"
+                    )
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time

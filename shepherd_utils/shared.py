@@ -253,7 +253,9 @@ def merge_kgraph(og_message, new_message, logger: logging.Logger):
             if value["attributes"]:
                 if existing["attributes"]:
                     merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"], value["attributes"], logger,
+                        existing["attributes"],
+                        value["attributes"],
+                        logger,
                     )
                 else:
                     merged_kgraph["nodes"][key]["attributes"] = value["attributes"]
@@ -276,7 +278,9 @@ def merge_kgraph(og_message, new_message, logger: logging.Logger):
                             # don't add any new KL/AT
                             new_attributes.append(attribute)
                     merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"], value["attributes"], logger,
+                        existing["attributes"],
+                        value["attributes"],
+                        logger,
                     )
                 else:
                     merged_kgraph["edges"][key]["attributes"] = value["attributes"]
@@ -284,7 +288,9 @@ def merge_kgraph(og_message, new_message, logger: logging.Logger):
             if value["sources"]:
                 if existing["sources"]:
                     new_sources = combine_unique_dicts(
-                        existing["sources"], value["sources"], logger,
+                        existing["sources"],
+                        value["sources"],
+                        logger,
                     )
                     # TODO: there might need to be some sort of upstream resource id merging to do past this?
                     merged_kgraph["edges"][key]["sources"] = new_sources

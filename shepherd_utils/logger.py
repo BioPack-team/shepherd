@@ -103,9 +103,7 @@ def get_logging_config():
     logging_config = {
         "version": 1,
         "formatters": {
-            "default": {
-                "format": "[%(asctime)s: %(levelname)s/%(name)s]: %(message)s"
-            }
+            "default": {"format": "[%(asctime)s: %(levelname)s/%(name)s]: %(message)s"}
         },
         "handlers": handlers,
         "loggers": {
