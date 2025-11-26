@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     sync_kg_retrieval_url: str = "https://strider.renci.org/query"
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
+    node_norm: str = "https://nodenormalization-sri.renci.org/"
+
+    pathfinder_redis_host: str = "host.docker.internal"
+    pathfinder_redis_port: int = 6383
+    pathfinder_redis_password: str = "supersecretpassword"
+    pathfinder_pmid_db: int = 1
+    pathfinder_curies_db: int = 2
 
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"

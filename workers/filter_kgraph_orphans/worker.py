@@ -53,6 +53,8 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
             for analysis in result.get("analyses", []):
                 for _, kedges in analysis.get("edge_bindings", {}).items():
                     temp_edges.update([k["id"] for k in kedges])
+                for _, path_graphs in analysis.get('path_bindings', {}).items():
+                    temp_auxgraphs.update(a["id"] for a in path_graphs)
         # 3. Result.Analysis support graphs
         for result in results:
             for analysis in result.get("analyses", []):
@@ -86,12 +88,14 @@ async def filter_kgraph_orphans(task, logger: logging.Logger):
             except KeyError as e:
                 logger.warning(f"Failed to get auxgraph edges {auxgraph}: {e}")
                 continue
-        # now remove all knowledge_graph nodes and edges that are
+
+        # make sure message and knowledge graph exist
         message["message"] = message.get("message") or {}
         message["message"]["knowledge_graph"] = message["message"].get("knowledge_graph") or {
             "nodes": {},
             "edges": {},
         }
+        # now remove all knowledge_graph nodes and edges that are
         # not in our nodes and edges sets.
         kg_nodes = (
             message.get("message", {}).get("knowledge_graph", {}).get("nodes", {})
