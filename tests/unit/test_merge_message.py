@@ -22,11 +22,14 @@ async def test_message_merge(redis_mock, mocker):
     callback_response = copy.deepcopy(response_2)
     original_response = generate_response()
 
+    logger = logging.getLogger(__name__)
+
     merged_message = merge_messages(
         "test_ara",
         lookup_query_graph,
         original_query_graph,
         result_messages=[original_response, callback_response],
+        logger=logger,
     )
 
     assert len(merged_message["message"]["results"]) == 3

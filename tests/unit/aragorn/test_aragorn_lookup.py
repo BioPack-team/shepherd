@@ -21,7 +21,8 @@ async def test_aragorn_creative_lookup(redis_mock, mocker):
     )
     mock_running_callbacks.return_value = []
     mock_response = mocker.Mock()
-    mocker.patch("httpx.AsyncClient.post", return_value=mock_response)
+    mock_response.status_code = 200
+    mock_httpx = mocker.patch("httpx.AsyncClient.post", return_value=mock_response)
     logger = logging.getLogger(__name__)
 
     await aragorn_lookup(
@@ -39,6 +40,8 @@ async def test_aragorn_creative_lookup(redis_mock, mocker):
         ],
         logger,
     )
+
+    assert mock_httpx.called
 
     # Get the task that the ara should have put on the queue
     task = await get_task("aragorn.score", "consumer", "test", logger)
