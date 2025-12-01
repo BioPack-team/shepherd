@@ -137,16 +137,15 @@ async def shadowfax(task, logger: logging.Logger):
     message["parameters"] = parameters
 
     qgraph = message["message"]["query_graph"]
-    pinned_node_ids_set = set()
     pinned_node_keys = []
+    pinned_node_ids = []
     for node_key, node in qgraph["nodes"].items():
         pinned_node_keys.append(node_key)
         if node.get("ids", None) is not None:
-            pinned_node_ids_set.add(node["ids"][0])
-    if len(pinned_node_ids_set) != 2:
+            pinned_node_ids.append(node["ids"][0])
+    if len(set(pinned_node_ids)) != 2:
         logger.error("Pathfinder queries require two pinned nodes.")
         return message, 500
-    pinned_node_ids = list(pinned_node_ids_set)
 
     intermediate_categories = []
     path_key = next(iter(qgraph["paths"].keys()))
