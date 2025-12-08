@@ -314,9 +314,9 @@ def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
                     value["sources"],
                     [
                         {
-                        "resource_id": source,
-                        "resource_role": "aggregator_knowledge_source",
-                        "upstream_resource_ids": ["infores:retriever"]
+                            "resource_id": source,
+                            "resource_role": "aggregator_knowledge_source",
+                            "upstream_resource_ids": ["infores:retriever"],
                         }
                     ],
                     logger,

@@ -101,7 +101,7 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
             {
                 "resource_id": source,
                 "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "upstream_resource_ids": [],
             }
         ],
     }
@@ -317,19 +317,38 @@ def merge_messages(
     result["message"]["knowledge_graph"] = pydantic_kgraph
     for result_message in [response, new_response]:
         if "auxiliary_graphs" in result_message["message"]:
-            for aux_id, aux_dict in result_message["message"]["auxiliary_graphs"].items():
+            for aux_id, aux_dict in result_message["message"][
+                "auxiliary_graphs"
+            ].items():
                 if aux_id in result["message"]["auxiliary_graphs"]:
                     for key, val in aux_dict.items():
                         if key in result["message"]["auxiliary_graphs"][aux_id]:
-                            if isinstance(result["message"]["auxiliary_graphs"][aux_id][key], list):
+                            if isinstance(
+                                result["message"]["auxiliary_graphs"][aux_id][key], list
+                            ):
                                 # combine both lists and then list/set it for uniqueness
-                                result["message"]["auxiliary_graphs"][aux_id][key] = list(set(result["message"]["auxiliary_graphs"][aux_id][key] + val))
+                                result["message"]["auxiliary_graphs"][aux_id][key] = (
+                                    list(
+                                        set(
+                                            result["message"]["auxiliary_graphs"][
+                                                aux_id
+                                            ][key]
+                                            + val
+                                        )
+                                    )
+                                )
                             else:
-                                logger.warning(f"Message had an invalid aux graph property: {key}")
+                                logger.warning(
+                                    f"Message had an invalid aux graph property: {key}"
+                                )
                         else:
-                            result["message"]["auxiliary_graphs"][aux_id][key] = copy.deepcopy(val)
+                            result["message"]["auxiliary_graphs"][aux_id][key] = (
+                                copy.deepcopy(val)
+                            )
                 else:
-                    result["message"]["auxiliary_graphs"][aux_id] = copy.deepcopy(aux_dict)
+                    result["message"]["auxiliary_graphs"][aux_id] = copy.deepcopy(
+                        aux_dict
+                    )
     # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
     lookup_results = []  # in case we don't have any
     lookup_results = (

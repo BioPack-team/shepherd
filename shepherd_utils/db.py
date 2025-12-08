@@ -239,9 +239,7 @@ async def save_logs(
             new_logs.reverse()
             existing_logs.extend(new_logs)
         await client.set(
-            response_id,
-            orjson.dumps(existing_logs),
-            ex=settings.redis_ttl
+            response_id, orjson.dumps(existing_logs), ex=settings.redis_ttl
         )
         await client.aclose()
     except Exception as e:
