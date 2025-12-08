@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, Union
 
 from shepherd_utils.broker import acquire_lock, mark_task_as_complete, remove_lock
 from shepherd_utils.db import (
@@ -98,7 +98,11 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
         ],
         # Shepherd is the primary ks because shepherd inferred the existence of this edge.
         "sources": [
-            {"resource_id": source, "resource_role": "primary_knowledge_source"}
+            {
+                "resource_id": source,
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+            }
         ],
     }
     if qualifiers is not None:
@@ -263,7 +267,6 @@ def merge_results_by_node(target, result_message, merge_qnode, lookup_results):
         merge_qnode, result_message, lookup_results
     )
     original_qnodes = result_message["message"]["query_graph"]["nodes"].keys()
-    # TODO : I'm sure there's a better way to handle this with asyncio
     new_results = []
     for r in grouped_results:
         new_result = merge_answer(
@@ -287,18 +290,19 @@ def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
 def merge_messages(
     target: str,
     original_query_graph: Dict[str, Any],
-    lookup_query_graph: Dict[str, Any],
-    result_messages: List[Dict[str, Any]],
+    response: Dict[str, Any],
+    new_response: Dict[str, Any],
     logger: logging.Logger,
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
-    for result_message in result_messages:
+    for result_message in [response, new_response]:
         result_kgraph = (
             result_message["message"]["knowledge_graph"]
             if result_message["message"].get("knowledge_graph") is not None
             else {"nodes": {}, "edges": {}}
         )
-        pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, logger)
+        source = f"infores:shepherd-{target}"
+        pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, source, logger)
     # Construct the final result message, currently empty
     result = {
         "message": {
@@ -311,36 +315,39 @@ def merge_messages(
     }
     result["message"]["query_graph"] = original_query_graph
     result["message"]["knowledge_graph"] = pydantic_kgraph
-    for result_message in result_messages:
+    for result_message in [response, new_response]:
         if "auxiliary_graphs" in result_message["message"]:
-            result["message"]["auxiliary_graphs"].update(
-                result_message["message"]["auxiliary_graphs"]
-                if result_message["message"]["auxiliary_graphs"] is not None
-                else {}
-            )
+            for aux_id, aux_dict in result_message["message"]["auxiliary_graphs"].items():
+                if aux_id in result["message"]["auxiliary_graphs"]:
+                    for key, val in aux_dict.items():
+                        if key in result["message"]["auxiliary_graphs"][aux_id]:
+                            if isinstance(result["message"]["auxiliary_graphs"][aux_id][key], list):
+                                # combine both lists and then list/set it for uniqueness
+                                result["message"]["auxiliary_graphs"][aux_id][key] = list(set(result["message"]["auxiliary_graphs"][aux_id][key] + val))
+                            else:
+                                logger.warning(f"Message had an invalid aux graph property: {key}")
+                        else:
+                            result["message"]["auxiliary_graphs"][aux_id][key] = copy.deepcopy(val)
+                else:
+                    result["message"]["auxiliary_graphs"][aux_id] = copy.deepcopy(aux_dict)
     # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
     lookup_results = []  # in case we don't have any
-    for result_message in result_messages:
-        if queries_equivalent(
-            result_message["message"]["query_graph"], lookup_query_graph
-        ):
-            lookup_results = (
-                result_message["message"]["results"]
-                if result_message["message"].get("results") is not None
-                else []
-            )
-        else:
-            result["message"]["results"].extend(
-                result_message["message"]["results"]
-                if result_message["message"].get("results") is not None
-                else []
-            )
+    lookup_results = (
+        response["message"]["results"]
+        if response["message"].get("results") is not None
+        else []
+    )
+    result["message"]["results"].extend(
+        new_response["message"]["results"]
+        if new_response["message"].get("results") is not None
+        else []
+    )
 
     answer_node_id = get_answer_node(original_query_graph)
-    mergedresults = merge_results_by_node(
+    merged_messages = merge_results_by_node(
         target, result, answer_node_id, lookup_results
     )
-    return mergedresults
+    return merged_messages
 
 
 async def poll_for_tasks():
@@ -374,9 +381,6 @@ async def poll_for_tasks():
                 span.end()
                 continue
             original_query_graph = original_query["message"]["query_graph"]
-            lookup_query_graph = await get_message(
-                f"{query_id}_lookup_query_graph", logger
-            )
             callback_response = await get_message(callback_id, logger)
             lock_time = time.time()
             original_response = await get_message(response_id, logger)
@@ -386,8 +390,8 @@ async def poll_for_tasks():
                 merge_messages,
                 target,
                 original_query_graph,
-                lookup_query_graph,
-                [original_response, callback_response],
+                original_response,
+                callback_response,
                 logger,
             )
             # save merged message back to db
