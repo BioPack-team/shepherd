@@ -26,9 +26,9 @@ async def test_message_merge(redis_mock, mocker):
 
     merged_message = merge_messages(
         "test_ara",
-        lookup_query_graph,
         original_query_graph,
-        result_messages=[original_response, callback_response],
+        original_response,
+        callback_response,
         logger=logger,
     )
 

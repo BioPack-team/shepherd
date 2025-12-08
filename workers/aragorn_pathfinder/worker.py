@@ -136,6 +136,8 @@ async def shadowfax(task, logger: logging.Logger):
     parameters["tiers"] = parameters.get("tiers") or [0]
     message["parameters"] = parameters
 
+    source = "infores:shepherd-aragorn"
+
     qgraph = message["message"]["query_graph"]
     pinned_node_keys = []
     pinned_node_ids = []
@@ -202,7 +204,9 @@ async def shadowfax(task, logger: logging.Logger):
     pairwise_pubs = get_the_pmids([source_node, target_node])
     if source_pubs == 0 or target_pubs == 0 or len(pairwise_pubs) == 0:
         logger.info("No publications found.")
-        return message, 200
+        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+        logger.info(f"Task took {time.time() - start}")
+        return
 
     # Find other nodes from those shared publications
     curies = set()
@@ -218,12 +222,16 @@ async def shadowfax(task, logger: logging.Logger):
 
     if len(curies) == 0:
         logger.info("No curies found.")
-        return message, 200
+        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+        logger.info(f"Task took {time.time() - start}")
+        return
 
     normalizer_response = await get_normalized_curies(list(curies), logger)
     if normalizer_response is None:
         logger.error("Failed to get a good response from Node Normalizer")
-        return message, 500
+        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+        logger.info(f"Task took {time.time() - start}")
+        return
 
     curie_info = defaultdict(dict)
     for curie, normalizer_info in normalizer_response.items():
@@ -306,7 +314,7 @@ async def shadowfax(task, logger: logging.Logger):
         try:
             logger.debug(f"Got back {len(lookup_message.get('results', 0))} results.")
             merged_kgraph = merge_kgraph(
-                merged_kgraph, lookup_message["knowledge_graph"], logger
+                merged_kgraph, lookup_message["knowledge_graph"], source, logger
             )
             merged_aux_graphs.update(lookup_message["auxiliary_graphs"])
         except KeyError as e:
@@ -475,7 +483,7 @@ async def shadowfax(task, logger: logging.Logger):
             aux_edges_keys.append(aux_graph_key)
 
         analysis = {
-            "resource_id": "infores:aragorn",
+            "resource_id": source,
             "path_bindings": {
                 path_key: [{"id": aux_graph_key, "attributes": []}],
             },

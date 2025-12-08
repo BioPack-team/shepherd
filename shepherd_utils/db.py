@@ -105,8 +105,16 @@ async def add_query(
             connection_pool=data_db_pool,
         )
         # print(f"Putting {query_id} on {ara_target} stream")
-        await client.set(query_id, zstandard.compress(orjson.dumps(query)))
-        await client.set(response_id, zstandard.compress(orjson.dumps(query)))
+        await client.set(
+            query_id,
+            zstandard.compress(orjson.dumps(query)),
+            ex=settings.redis_ttl,
+        )
+        await client.set(
+            response_id,
+            zstandard.compress(orjson.dumps(query)),
+            ex=settings.redis_ttl,
+        )
         await client.aclose()
     except Exception as e:
         # failed to put message in db
@@ -153,7 +161,11 @@ async def save_message(
             connection_pool=data_db_pool,
         )
         # print(f"Putting {query_id} on {ara_target} stream")
-        await client.set(callback_id, compressed)
+        await client.set(
+            callback_id,
+            compressed,
+            ex=settings.redis_ttl,
+        )
         await client.aclose()
         logger.debug(f"Saving message took {time.time() - start} seconds")
     except Exception as e:
@@ -226,7 +238,9 @@ async def save_logs(
             new_logs = list(handler.contents())
             new_logs.reverse()
             existing_logs.extend(new_logs)
-        await client.set(response_id, orjson.dumps(existing_logs))
+        await client.set(
+            response_id, orjson.dumps(existing_logs), ex=settings.redis_ttl
+        )
         await client.aclose()
     except Exception as e:
         logger.error(f"Failed to save logs for response {response_id}: {e}")

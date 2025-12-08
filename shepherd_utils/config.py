@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     sync_kg_retrieval_url: str = "https://strider.renci.org/query"
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
-    node_norm: str = "https://nodenormalization-sri.renci.org/"
+    node_norm: str = "https://biothings.ci.transltr.io/nodenorm/api/"
 
     pathfinder_redis_host: str = "host.docker.internal"
     pathfinder_redis_port: int = 6383
@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
+
+    # ttl in seconds
+    redis_ttl: int = 1210000
 
     class Config:
         env_file = ".env"

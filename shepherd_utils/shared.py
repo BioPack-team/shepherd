@@ -162,6 +162,16 @@ def recursive_get_auxgraph_edges(
     return edges, auxgraphs, nodes
 
 
+def is_support_edge(edge) -> bool:
+    """Checks if a given edge is a support edge."""
+    if "attributes" not in edge:
+        return False
+    for attribute in edge["attributes"]:
+        if attribute["attribute_type_id"] == "biolink:support_graphs":
+            return True
+    return False
+
+
 def validate_message(message, logger):
     """Validate a given message for missing nodes."""
     valid = True
@@ -231,7 +241,7 @@ def combine_unique_dicts(list1, list2, logger: logging.Logger):
     return result
 
 
-def merge_kgraph(og_message, new_message, logger: logging.Logger):
+def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
     """Merge two TRAPI kgraphs together."""
     merged_kgraph = copy.deepcopy(og_message)
     for key, value in new_message["nodes"].items():
@@ -298,5 +308,19 @@ def merge_kgraph(og_message, new_message, logger: logging.Logger):
                     merged_kgraph["edges"][key]["sources"] = value["sources"]
         else:
             merged_kgraph["edges"][key] = value
+
+            if value["sources"] and not is_support_edge(value):
+                new_sources = combine_unique_dicts(
+                    value["sources"],
+                    [
+                        {
+                            "resource_id": source,
+                            "resource_role": "aggregator_knowledge_source",
+                            "upstream_resource_ids": ["infores:retriever"],
+                        }
+                    ],
+                    logger,
+                )
+                merged_kgraph["edges"][key]["sources"] = new_sources
 
     return merged_kgraph
