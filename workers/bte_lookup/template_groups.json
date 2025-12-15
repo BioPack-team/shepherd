@@ -11,7 +11,6 @@
     "predicate": ["treats", "ameliorates"],
     "object": ["Disease", "PhenotypicFeature", "DiseaseOrPhenotypicFeature"],
     "templates": [
-      "Chem-treats-DoP.json",
       "Chem-treats-PhenoOfDisease.json",
       "Chem-regulates,affects-Gene-biomarker,associated_condition-DoP.json"
     ],
@@ -33,7 +32,6 @@
     },
     "object": ["Gene", "Protein"],
     "templates": [
-      "Chem-increasesGene.json",
       "Chem-IncreaseAnotherGeneThatUpregs-Gene.json",
       "Chem-DecreaseAnotherGeneThatDownregs-Gene.json",
       "Chem-physically_interacts-GeneThatUpregs-Gene.json",
@@ -56,7 +54,6 @@
     },
     "object": ["Gene", "Protein"],
     "templates": [
-      "Chem-decreasesGene.json",
       "Chem-IncreaseAnotherGeneThatDownregs-Gene.json",
       "Chem-DecreaseAnotherGeneThatUpregs-Gene.json",
       "Chem-physically_interacts-GeneThatDownregs-Gene.json",

@@ -223,8 +223,17 @@ def queries_equivalent(query1, query2):
         for node in q["nodes"].values():
             if "is_set" in node and node["is_set"] is False:
                 del node["is_set"]
+            if (
+                ("set_interpretation" in node and node["set_interpretation"] == "BATCH") or
+                ("set_interpretation" in node and node["set_interpretation"] is None)
+            ):
+                del node["set_interpretation"]
             if "constraints" in node and len(node["constraints"]) == 0:
                 del node["constraints"]
+            if "member_ids" in node and len(node["member_ids"]) == 0:
+                del node["member_ids"]
+            if "ids" in node and node["ids"] is None:
+                del node["ids"]
         for edge in q["edges"].values():
             if (
                 "attribute_constraints" in edge
@@ -236,6 +245,14 @@ def queries_equivalent(query1, query2):
                 and len(edge["qualifier_constraints"]) == 0
             ):
                 del edge["qualifier_constraints"]
+            if "knowledge_type" in edge:
+                del edge["knowledge_type"]
+            # handle treats and treats_or_applied_or_studied_to_treat
+            for pred_indx, predicate in enumerate(edge["predicates"]):
+                if (
+                    predicate == "biolink:treats"
+                ):
+                    edge["predicates"][pred_indx] = "biolink:treats_or_applied_or_studied_to_treat"
     return q1 == q2
 
 
@@ -350,17 +367,20 @@ def merge_messages(
                         aux_dict
                     )
     # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
-    lookup_results = []  # in case we don't have any
     lookup_results = (
         response["message"]["results"]
         if response["message"].get("results") is not None
         else []
     )
-    result["message"]["results"].extend(
-        new_response["message"]["results"]
-        if new_response["message"].get("results") is not None
-        else []
-    )
+    is_direct_lookup = queries_equivalent(new_response["message"]["query_graph"], original_query_graph)
+    if is_direct_lookup:
+        lookup_results.extend(new_response["message"]["results"])
+    else:
+        result["message"]["results"].extend(
+            new_response["message"]["results"]
+            if new_response["message"].get("results") is not None
+            else []
+        )
 
     answer_node_id = get_answer_node(original_query_graph)
     merged_messages = merge_results_by_node(
