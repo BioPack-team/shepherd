@@ -224,9 +224,8 @@ def queries_equivalent(query1, query2):
             if "is_set" in node and node["is_set"] is False:
                 del node["is_set"]
             if (
-                ("set_interpretation" in node and node["set_interpretation"] == "BATCH") or
-                ("set_interpretation" in node and node["set_interpretation"] is None)
-            ):
+                "set_interpretation" in node and node["set_interpretation"] == "BATCH"
+            ) or ("set_interpretation" in node and node["set_interpretation"] is None):
                 del node["set_interpretation"]
             if "constraints" in node and len(node["constraints"]) == 0:
                 del node["constraints"]
@@ -249,10 +248,10 @@ def queries_equivalent(query1, query2):
                 del edge["knowledge_type"]
             # handle treats and treats_or_applied_or_studied_to_treat
             for pred_indx, predicate in enumerate(edge["predicates"]):
-                if (
-                    predicate == "biolink:treats"
-                ):
-                    edge["predicates"][pred_indx] = "biolink:treats_or_applied_or_studied_to_treat"
+                if predicate == "biolink:treats":
+                    edge["predicates"][
+                        pred_indx
+                    ] = "biolink:treats_or_applied_or_studied_to_treat"
     return q1 == q2
 
 
@@ -372,7 +371,9 @@ def merge_messages(
         if response["message"].get("results") is not None
         else []
     )
-    is_direct_lookup = queries_equivalent(new_response["message"]["query_graph"], original_query_graph)
+    is_direct_lookup = queries_equivalent(
+        new_response["message"]["query_graph"], original_query_graph
+    )
     if is_direct_lookup:
         lookup_results.extend(new_response["message"]["results"])
     else:
