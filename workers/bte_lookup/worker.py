@@ -397,8 +397,18 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
         object_key,
         object_curie,
     )
+    for qedge in query_graph["edges"].values():
+        del qedge["knowledge_type"]
 
-    return filled_templates
+    expanded_queries = [
+        {
+            "message": {"query_graph": query_graph},
+            "parameters": query_dict["parameters"],
+        }
+    ]
+    expanded_queries.extend(filled_templates)
+
+    return expanded_queries
 
 
 async def process_task(task, parent_ctx, logger, limiter):
