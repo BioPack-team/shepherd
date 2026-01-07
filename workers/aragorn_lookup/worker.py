@@ -253,14 +253,19 @@ def get_rule_key(
         if len(qualifier_constraints) < 1:
             return json.dumps(keydict)
         if len(qualifier_constraints) > 1:
-            logger.warning("Got more than one qualifier_constraints dict, just using the first one.")
+            logger.warning(
+                "Got more than one qualifier_constraints dict, just using the first one."
+            )
         qualifier_set = qualifier_constraints[0].get("qualifier_set", [])
         if len(qualifier_set) < 1:
             return json.dumps(keydict)
         for qualifier in qualifier_set:
             if qualifier.get("qualifier_type_id") == "biolink:object_aspect_qualifier":
                 keydict["object_aspect_qualifier"] = qualifier.get("qualifier_value")
-            elif qualifier.get("qualifier_type_id") == "biolink:object_direction_qualifier":
+            elif (
+                qualifier.get("qualifier_type_id")
+                == "biolink:object_direction_qualifier"
+            ):
                 keydict["object_direction_qualifier"] = qualifier.get("qualifier_value")
     return json.dumps(keydict, sort_keys=True)
 
