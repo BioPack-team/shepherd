@@ -3602,7 +3602,7 @@
           }
       }
   ],
-  "{\"predicate\": \"biolink:affects\", \"qualifier_constraints\": [{\"qualifier_set\": [{\"qualifier_type_id\": \"biolink:object_aspect_qualifier\", \"qualifier_value\": \"activity\"}, {\"qualifier_type_id\": \"biolink:object_direction_qualifier\", \"qualifier_value\": \"increased\"}]}]}": [
+  "{\"object_aspect_qualifier\": \"activity\", \"object_direction_qualifier\": \"increased\", \"predicate\": \"biolink:affects\"}": [
       {
           "Rule": "?a  decreased_abundance_biolink:affects  ?b  ?a  increased_activity_or_abundance_biolink:affects  ?b   => ?a  increased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000279586",
@@ -5508,7 +5508,7 @@
           }
       }
   ],
-  "{\"predicate\": \"biolink:affects\", \"qualifier_constraints\": [{\"qualifier_set\": [{\"qualifier_type_id\": \"biolink:object_aspect_qualifier\", \"qualifier_value\": \"activity\"}, {\"qualifier_type_id\": \"biolink:object_direction_qualifier\", \"qualifier_value\": \"decreased\"}]}]}": [
+  "{\"object_aspect_qualifier\": \"activity\", \"object_direction_qualifier\": \"decreased\", \"predicate\": \"biolink:affects\"}": [
       {
           "Rule": "?a  decreased_activity_or_abundance_biolink:affects  ?b  ?a  increased_molecular_interaction_biolink:affects  ?b   => ?a  decreased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000033348",
@@ -7192,7 +7192,7 @@
           }
       }
   ],
-  "{\"predicate\": \"biolink:affects\", \"qualifier_constraints\": [{\"qualifier_set\": [{\"qualifier_type_id\": \"biolink:object_aspect_qualifier\", \"qualifier_value\": \"activity_or_abundance\"}, {\"qualifier_type_id\": \"biolink:object_direction_qualifier\", \"qualifier_value\": \"increased\"}]}]}": [
+  "{\"object_aspect_qualifier\": \"activity_or_abundance\", \"object_direction_qualifier\": \"increased\", \"predicate\": \"biolink:affects\"}": [
       {
           "Rule": "?a  biolink:contributes_to  ?f  ?f  increased_activity_or_abundance_biolink:affects  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000551544",
@@ -8984,7 +8984,7 @@
           }
       }
   ],
-  "{\"predicate\": \"biolink:affects\", \"qualifier_constraints\": [{\"qualifier_set\": [{\"qualifier_type_id\": \"biolink:object_aspect_qualifier\", \"qualifier_value\": \"activity_or_abundance\"}, {\"qualifier_type_id\": \"biolink:object_direction_qualifier\", \"qualifier_value\": \"decreased\"}]}]}": [
+  "{\"object_aspect_qualifier\": \"activity_or_abundance\", \"object_direction_qualifier\": \"decreased\", \"predicate\": \"biolink:affects\"}": [
       {
           "Rule": "?b  biolink:biomarker_for  ?f  ?a  decreased_activity_or_abundance_biolink:affects  ?f   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.009918784",

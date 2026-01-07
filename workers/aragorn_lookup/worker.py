@@ -136,7 +136,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 json=message,
             )
     else:
-        expanded_messages = expand_aragorn_query(message)
+        expanded_messages = expand_aragorn_query(message, logger)
         requests = []
         # send all messages to lookup service
         async with httpx.AsyncClient(timeout=20) as client:
@@ -212,6 +212,11 @@ def get_infer_parameters(input_message):
     target: the query node id of the target node
     source_input: True if the source node is the input node, False if the target node is the input node
     """
+    predicate = ""
+    qualifiers = {}
+    source = ""
+    target = ""
+    query_edge = ""
     for edge_id, edge in input_message["message"]["query_graph"]["edges"].items():
         source = edge["subject"]
         target = edge["object"]
@@ -234,13 +239,34 @@ def get_infer_parameters(input_message):
     return input_id, predicate, qualifiers, source, source_input, target, query_edge
 
 
-def get_rule_key(predicate, qualifiers):
-    keydict = {"predicate": predicate}
-    keydict.update(qualifiers)
+def get_rule_key(
+    predicate: str,
+    qualifiers: dict[str, list],
+    logger: logging.Logger,
+) -> str:
+    """Given some query parameters, construct a string key for expanded queries lookup."""
+    keydict: dict[str, str] = {"predicate": predicate}
+    if len(qualifiers.keys()) > 0:
+        # this is a bunch of logic to parse the dict of list of dicts of lists
+        # We're currently expecting it to be a specific format with specific keys
+        qualifier_constraints = qualifiers.get("qualifier_constraints", [])
+        if len(qualifier_constraints) < 1:
+            return json.dumps(keydict)
+        if len(qualifier_constraints) > 1:
+            logger.warning("Got more than one qualifier_constraints dict, just using the first one.")
+        qualifier_set = qualifier_constraints[0].get("qualifier_set", [])
+        if len(qualifier_set) < 1:
+            return json.dumps(keydict)
+        for qualifier in qualifier_set:
+            if qualifier.get("qualifier_type_id") == "biolink:object_aspect_qualifier":
+                keydict["object_aspect_qualifier"] = qualifier.get("qualifier_value")
+            elif qualifier.get("qualifier_type_id") == "biolink:object_direction_qualifier":
+                keydict["object_direction_qualifier"] = qualifier.get("qualifier_value")
     return json.dumps(keydict, sort_keys=True)
 
 
-def expand_aragorn_query(input_message):
+def expand_aragorn_query(input_message, logger: logging.Logger):
+    """Given a query, split it into many related similar queries."""
     # Contract:
     # 1. there is a single edge in the query graph
     # 2. The edge is marked inferred.
@@ -249,7 +275,7 @@ def expand_aragorn_query(input_message):
     input_id, predicate, qualifiers, source, source_input, target, qedge_id = (
         get_infer_parameters(input_message)
     )
-    key = get_rule_key(predicate, qualifiers)
+    key = get_rule_key(predicate, qualifiers, logger)
     # We want to run the non-inferred version of the query as well
     qg = copy.deepcopy(input_message["message"]["query_graph"])
     for eid, edge in qg["edges"].items():
