@@ -18,33 +18,49 @@ TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
-async def arax(task, logger: logging.Logger):
+def is_pathfinder_query(message):
     try:
-        start = time.time()
-        query_id = task[1]["query_id"]
-        logger.info(f"Getting message from db for query id {query_id}")
-        message = await get_message(query_id, logger)
-        message["submitter"] = "Shepherd"
-        logger.info(f"Get the message from db {message}")
+        # this can still fail if the input looks like e.g.:
+        #  "query_graph": None
+        qedges = message.get("message", {}).get("query_graph", {}).get("edges", {})
+    except:
+        qedges = {}
+    try:
+        # this can still fail if the input looks like e.g.:
+        #  "query_graph": None
+        qpaths = message.get("message", {}).get("query_graph", {}).get("paths", {})
+    except:
+        qpaths = {}
+    if len(qpaths) > 1:
+        raise Exception("Only a single path is supported", 400)
+    if (len(qpaths) > 0) and (len(qedges) > 0):
+        raise Exception("Mixed mode pathfinder queries are not supported", 400)
+    return len(qpaths) == 1
 
-        headers = {"Content-Type": "application/json"}
-        response = requests.post(settings.arax_url, json=message, headers=headers)
 
-        logger.info(f"Status Code from ARAX response: {response.status_code}")
-        result = response.json()
-
-    except Exception as e:
-        logger.error(f"Error occurred in ARAX entry module: {e}")
-        result = {"status": "error", "error": str(e)}
-
-    response_id = task[1]["response_id"]
-
-    await save_message(response_id, result, logger)
-
-    workflow = [{"id": "arax"}]
+async def arax(task, logger: logging.Logger):
+    start = time.time()
+    query_id = task[1]["query_id"]
+    logger.info(f"Getting message from db for query id {query_id}")
+    message = await get_message(query_id, logger)
+    if is_pathfinder_query(message):
+        workflow = [{"id": "arax.pathfinder"}]
+    else:
+        try:
+            workflow = [{"id": "arax"}]
+            message["submitter"] = "Shepherd"
+            logger.info(f"Get the message from db {message}")
+            headers = {"Content-Type": "application/json"}
+            response = requests.post(settings.arax_url, json=message, headers=headers)
+            logger.info(f"Status Code from ARAX response: {response.status_code}")
+            result = response.json()
+        except Exception as e:
+            logger.error(f"Error occurred calling ARAX service: {e}")
+            result = {"status": "error", "error": str(e)}
+        response_id = task[1]["response_id"]
+        await save_message(response_id, result, logger)
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
@@ -61,7 +77,7 @@ async def process_task(task, parent_ctx, logger, limiter):
 
 async def poll_for_tasks():
     async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
+            STREAM, GROUP, CONSUMER, TASK_LIMIT
     ):
         asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
 

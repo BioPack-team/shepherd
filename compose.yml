@@ -273,6 +273,22 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+  arax_pathfinder:
+    container_name: arax_pathfinder
+    build:
+      context: .
+      dockerfile: workers/arax_pathfinder/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - /Users/facadmin/PycharmProjects/shepherd/curie_ngd_v1.0_KG2.10.2.sqlite:/data/curie_ngd.sqlite:ro
+      - /Users/facadmin/PycharmProjects/shepherd/kg2c_v1.0_KG2.10.2.sqlite:/data/kg2c.sqlite:ro
 
 ######### BTE
   bte:
