@@ -90,7 +90,9 @@ async def pathfinder(task, logger: logging.Logger):
             logger.error("Pathfinder queries do not support multiple constraints.")
             return message, 500
         if len(constraints) > 0:
-            intermediate_categories = (constraints[0].get("intermediate_categories", None) or [])
+            intermediate_categories = (
+                constraints[0].get("intermediate_categories", None) or []
+            )
         if len(intermediate_categories) > 1:
             logger.error(
                 "Pathfinder queries do not support multiple intermediate categories"
@@ -131,9 +133,9 @@ async def pathfinder(task, logger: logging.Logger):
             res.append(
                 {
                     "id": result["id"],
-                    "analyses": result['analyses'],
-                    "node_bindings": result['node_bindings'],
-                    "essence": "result"
+                    "analyses": result["analyses"],
+                    "node_bindings": result["node_bindings"],
+                    "essence": "result",
                 }
             )
         if aux_graphs is None:
@@ -167,7 +169,7 @@ async def process_task(task, parent_ctx, logger, limiter):
 
 async def poll_for_tasks():
     async for task, parent_ctx, logger, limiter in get_tasks(
-            STREAM, GROUP, CONSUMER, TASK_LIMIT
+        STREAM, GROUP, CONSUMER, TASK_LIMIT
     ):
         asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
 
