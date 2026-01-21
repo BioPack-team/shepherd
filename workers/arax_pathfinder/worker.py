@@ -32,9 +32,8 @@ tracer = setup_tracer(STREAM)
 NUM_TOTAL_HOPS = 4
 MAX_PATHFINDER_PATHS = 500
 
-
-
 OUT_PATH = Path("general_concepts.json")
+
 
 def download_file(url: str, out_path: Path, overwrite: bool = False) -> Path:
     out_path = Path(out_path)
@@ -54,10 +53,10 @@ def download_file(url: str, out_path: Path, overwrite: bool = False) -> Path:
 def get_blocked_list():
     download_file(settings.arax_blocked_list_url, OUT_PATH, False)
 
-    with open(OUT_PATH, 'r') as file:
+    with open(OUT_PATH, "r") as file:
         json_block_list = json.load(file)
-    synonyms = set(s.lower() for s in json_block_list['synonyms'])
-    return set(json_block_list['curies']), synonyms
+    synonyms = set(s.lower() for s in json_block_list["synonyms"])
+    return set(json_block_list["curies"]), synonyms
 
 
 async def pathfinder(task, logger: logging.Logger):
@@ -91,9 +90,7 @@ async def pathfinder(task, logger: logging.Logger):
             logger.error("Pathfinder queries do not support multiple constraints.")
             return message, 500
         if len(constraints) > 0:
-            intermediate_categories = (
-                    constraints[0].get("intermediate_categories", None) or []
-            )
+            intermediate_categories = (constraints[0].get("intermediate_categories", None) or [])
         if len(intermediate_categories) > 1:
             logger.error(
                 "Pathfinder queries do not support multiple intermediate categories"
@@ -110,7 +107,7 @@ async def pathfinder(task, logger: logging.Logger):
         settings.node_degree_addr,
         blocked_curies,
         blocked_synonyms,
-        logger
+        logger,
     )
 
     biolink_cache_dir = "/tmp/biolink"
@@ -131,12 +128,14 @@ async def pathfinder(task, logger: logging.Logger):
         )
         res = []
         if result is not None:
-            res.append({
-                "id": result["id"],
-                "analyses": result['analyses'],
-                "node_bindings": result['node_bindings'],
-                "essence": "result"
-            })
+            res.append(
+                {
+                    "id": result["id"],
+                    "analyses": result['analyses'],
+                    "node_bindings": result['node_bindings'],
+                    "essence": "result"
+                }
+            )
         if aux_graphs is None:
             aux_graphs = {}
         if knowledge_graph is None:
@@ -146,8 +145,10 @@ async def pathfinder(task, logger: logging.Logger):
         message["message"]["results"] = res
         await save_message(response_id, message, logger)
     except Exception as e:
-        logger.error(f"PathFinder failed to find paths between {pinned_node_keys[0]} and {pinned_node_keys[1]}. "
-                     f"Error message is: {e}")
+        logger.error(
+            f"PathFinder failed to find paths between {pinned_node_keys[0]} and {pinned_node_keys[1]}. "
+            f"Error message is: {e}"
+        )
         message = {"status": "error", "error": str(e)}
         await save_message(response_id, message, logger)
 
