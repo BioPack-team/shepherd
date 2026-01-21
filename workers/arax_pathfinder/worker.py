@@ -31,12 +31,9 @@ tracer = setup_tracer(STREAM)
 
 NUM_TOTAL_HOPS = 4
 MAX_PATHFINDER_PATHS = 500
-BIOLINK_VERSION = "4.2.5"
 
-RAW_URL = (
-    "https://raw.githubusercontent.com/RTXteam/RTX/master/"
-    "code/ARAX/KnowledgeSources/general_concepts.json"
-)
+
+
 OUT_PATH = Path("general_concepts.json")
 
 def download_file(url: str, out_path: Path, overwrite: bool = False) -> Path:
@@ -55,7 +52,7 @@ def download_file(url: str, out_path: Path, overwrite: bool = False) -> Path:
 
 
 def get_blocked_list():
-    download_file(RAW_URL, OUT_PATH, False)
+    download_file(settings.arax_blocked_list_url, OUT_PATH, False)
 
     with open(OUT_PATH, 'r') as file:
         json_block_list = json.load(file)
@@ -108,17 +105,17 @@ async def pathfinder(task, logger: logging.Logger):
     blocked_curies, blocked_synonyms = get_blocked_list()
     pathfinder = Pathfinder(
         "MLRepo",
-        "https://kg2cploverdb.test.transltr.io",
-        "mysql:arax-databases-mysql.rtx.ai:public_ro:curie_ngd_v1_0_kg2_10_2",
-        "mysql:arax-databases-mysql.rtx.ai:public_ro:kg2c_v1_0_kg2_10_2",
+        settings.plover_url,
+        settings.curie_ngd_addr,
+        settings.node_degree_addr,
         blocked_curies,
         blocked_synonyms,
         logger
     )
 
-    biolink_dir = "/tmp/biolink"
-    Path(biolink_dir).mkdir(parents=True, exist_ok=True)
-    biolink_helper = BiolinkHelper(BIOLINK_VERSION, biolink_dir)
+    biolink_cache_dir = "/tmp/biolink"
+    Path(biolink_cache_dir).mkdir(parents=True, exist_ok=True)
+    biolink_helper = BiolinkHelper(settings.arax_biolink_version, biolink_cache_dir)
     descendants = set(biolink_helper.get_descendants(intermediate_categories[0]))
 
     try:

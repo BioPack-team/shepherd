@@ -22,7 +22,19 @@ class Settings(BaseSettings):
     kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
     sync_kg_retrieval_url: str = "https://strider.renci.org/query"
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
+
+    # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
+    plover_url: str = "https://kg2cploverdb.test.transltr.io"
+    curie_ngd_addr: str = "mysql:arax-databases-mysql.rtx.ai:public_ro:curie_ngd_v1_0_kg2_10_2"
+    node_degree_addr: str = "mysql:arax-databases-mysql.rtx.ai:public_ro:kg2c_v1_0_kg2_10_2"
+    arax_biolink_version: str = "4.2.5"
+    arax_blocked_list_url: str = (
+        "https://raw.githubusercontent.com/RTXteam/RTX/master/"
+        "code/ARAX/KnowledgeSources/general_concepts.json"
+    )
+    # End of ARAX configs
+
     node_norm: str = "https://biothings.ci.transltr.io/nodenorm/api/"
 
     pathfinder_redis_host: str = "host.docker.internal"
