@@ -109,8 +109,8 @@ async def pathfinder(task, logger: logging.Logger):
     pathfinder = Pathfinder(
         "MLRepo",
         "https://kg2cploverdb.test.transltr.io",
-        "sqlite:/data/curie_ngd.sqlite",
-        "sqlite:/data/kg2c.sqlite",
+        "mysql:arax-databases-mysql.rtx.ai:public_ro:curie_ngd_v1_0_kg2_10_2",
+        "mysql:arax-databases-mysql.rtx.ai:public_ro:kg2c_v1_0_kg2_10_2",
         blocked_curies,
         blocked_synonyms,
         logger
