@@ -30,7 +30,10 @@ TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 NUM_TOTAL_HOPS = 4
+MAX_HOPS_TO_EXPLORE = 6
 MAX_PATHFINDER_PATHS = 500
+PRUNE_TOP_K = 30
+NODE_DEGREE_THRESHOLD = 30000
 
 OUT_PATH = Path("general_concepts.json")
 
@@ -124,8 +127,10 @@ async def pathfinder(task, logger: logging.Logger):
             pinned_node_keys[0],
             pinned_node_keys[1],
             NUM_TOTAL_HOPS,
-            NUM_TOTAL_HOPS,
+            MAX_HOPS_TO_EXPLORE,
             MAX_PATHFINDER_PATHS,
+            PRUNE_TOP_K,
+            NODE_DEGREE_THRESHOLD,
             descendants,
         )
         res = []
