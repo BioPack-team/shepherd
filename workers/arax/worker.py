@@ -9,6 +9,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.inject_shepherd_arax_provenance import add_shepherd_arax_to_edge_sources
 
 # Queue name
 STREAM = "arax"
@@ -54,6 +55,7 @@ async def arax(task, logger: logging.Logger):
             response = requests.post(settings.arax_url, json=message, headers=headers)
             logger.info(f"Status Code from ARAX response: {response.status_code}")
             result = response.json()
+            result = add_shepherd_arax_to_edge_sources(result)
         except Exception as e:
             logger.error(f"Error occurred calling ARAX service: {e}")
             result = {"status": "error", "error": str(e)}

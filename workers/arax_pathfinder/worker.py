@@ -10,6 +10,7 @@ from pathlib import Path
 from pathfinder.Pathfinder import Pathfinder
 from biolink_helper_pkg import BiolinkHelper
 
+from shepherd_utils.inject_shepherd_arax_provenance import add_shepherd_arax_to_edge_sources
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     get_message,
@@ -150,6 +151,9 @@ async def pathfinder(task, logger: logging.Logger):
         message["message"]["knowledge_graph"] = knowledge_graph
         message["message"]["auxiliary_graphs"] = aux_graphs
         message["message"]["results"] = res
+
+        message = add_shepherd_arax_to_edge_sources(message)
+
         await save_message(response_id, message, logger)
     except Exception as e:
         logger.error(
