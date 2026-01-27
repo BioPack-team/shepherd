@@ -90,6 +90,14 @@ async def run_async_lookup(
 ) -> AsyncResponse:
     """Return an async lookup response with callback id."""
     try:
+        if "submitter" not in message:
+            message["submitter"] = (
+                "infores:shepherd-bte:{maturity}@{location}@{url}".format(
+                    maturity=settings.server_maturity,
+                    location=settings.server_location,
+                    url=settings.server_url,
+                )
+            )
         response = await client.post(
             settings.kg_retrieval_url,
             json=message,
