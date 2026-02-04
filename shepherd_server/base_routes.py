@@ -84,14 +84,39 @@ async def run_query(
         # adds otel trace to carrier for next worker
         inject(span_carrier)
 
+    supported_workflow_operations = set(
+        [
+            "aragorn.lookup",
+            "aragorn.pathfinder",
+            "aragorn.omnicorp",
+            "aragorn.score",
+            "arax.pathfinder",
+            "arax.rank",
+            "bte.lookup",
+            "sort_results_score",
+            "filter_results_top_n",
+            "filter_kgraph_ophans",
+        ]
+    )
+    workflow = None
+    if "workflow" in query and query["workflow"] is not None:
+        workflow = query["workflow"]
+        if not isinstance(workflow, list):
+            raise TypeError("Query workflow must be a list.")
+        for operation in workflow:
+            if operation.get("id") not in supported_workflow_operations:
+                raise KeyError(f"Workflow operation {operation} is not supported.")
+
     # save query to db
     try:
+
         await add_query(query_id, response_id, query, callback_url, logger)
         await add_task(
             target,
             {
                 "query_id": query_id,
                 "response_id": response_id,
+                "workflow": json.dumps(workflow),
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
             },

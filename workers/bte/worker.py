@@ -1,9 +1,11 @@
 """BTE ARA module."""
 
 import asyncio
+import json
 import logging
 import time
 import uuid
+
 from shepherd_utils.db import get_message
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, wrap_up_task
@@ -63,6 +65,7 @@ async def bte(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
+    workflow = json.loads(task[1]["workflow"])
     message = await get_message(query_id, logger)
     try:
         infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
@@ -73,23 +76,7 @@ async def bte(task, logger: logging.Logger):
         # BTE doesn't currently handle Pathfinder queries
         return None, 500
 
-    supported_workflow_operations = set(
-        [
-            "bte.lookup",
-            "aragorn.omnicorp",
-            "aragorn.score",
-            "sort_results_score",
-            "filter_results_top_n",
-            "filter_kgraph_ophans",
-        ]
-    )
-    workflow = None
-    if "workflow" in message:
-        workflow = message["workflow"]
-        for workflow_op in workflow:
-            if workflow_op not in supported_workflow_operations:
-                logger.error(f"Unsupported workflow operation: {workflow_op}")
-    else:
+    if workflow is None:
         if infer:
             workflow = [
                 {"id": "bte.lookup"},

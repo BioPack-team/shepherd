@@ -116,7 +116,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
-    parameters["tiers"] = parameters.get("tiers") or [0]
+    parameters["tiers"] = parameters.get("tiers") or [1]
     message["parameters"] = parameters
     try:
         infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
