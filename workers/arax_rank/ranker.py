@@ -209,9 +209,10 @@ class ARAXRanker:
                         break
             
             if is_manual_agent:
-                edge["confidence"] = EDGE_CONFIDENCE_MANUAL_AGENT
+                edge["confidence"] = float(EDGE_CONFIDENCE_MANUAL_AGENT)
             else:
-                edge["confidence"] = self._calculate_edge_confidence(edge_key, edge)
+                # Ensure native Python float for JSON serialization
+                edge["confidence"] = float(self._calculate_edge_confidence(edge_key, edge))
 
     def _calculate_edge_confidence(self, edge_key: str, edge: Dict) -> float:
         """
@@ -588,10 +589,10 @@ class ARAXRanker:
             Round 3: 0.99958 + (1-0.99958) * 0.85 = 0.999937
             Round 4: 0.999937 + (1-0.999937) * 0.68 = 0.99997984
         """
-        result = base
+        result = float(base)
         for score in sorted(scores, reverse=True):
-            result = result + (1 - result) * score
-        return result
+            result = result + (1 - result) * float(score)
+        return float(result)
 
     def _score_results(self, msg: Dict) -> None:
         """
@@ -637,6 +638,8 @@ class ARAXRanker:
             final_score = float(score)
             if final_score < 0.001:
                 final_score += 0.001
+            # Round to reasonable precision and ensure native Python float
+            final_score = float(round(final_score, 6))
             
             if result.get("analyses"):
                 result["analyses"][0]["score"] = final_score
@@ -897,7 +900,7 @@ class ARAXRanker:
         # Reinsert adjusted scores
         for result, score in zip(results, scores_without_ties):
             if result.get("analyses"):
-                result["analyses"][0]["score"] = score
+                result["analyses"][0]["score"] = float(score)
 
     @staticmethod
     def _break_ties(scores: List[float]) -> List[float]:
@@ -928,7 +931,8 @@ class ARAXRanker:
                 adjusted_scores[i] = max(new_score, 0)
         
         # Final bounds check (ARAX_ranker.py line 258)
-        return [round(max(min(score, 1), 0), 3) for score in adjusted_scores]
+        # Ensure native Python floats for JSON serialization
+        return [float(round(max(min(score, 1), 0), 3)) for score in adjusted_scores]
 
 
 def arax_rank(message: Dict[str, Any], logger: logging.Logger) -> Dict[str, Any]:
