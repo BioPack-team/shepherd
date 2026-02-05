@@ -56,6 +56,7 @@ data_db_pool = aioredis.BlockingConnectionPool(
     socket_keepalive=True,
     socket_keepalive_options={},
     health_check_interval=30,
+    retry_on_timeout=True,
 )
 
 logs_db_pool = aioredis.BlockingConnectionPool(
@@ -70,7 +71,11 @@ logs_db_pool = aioredis.BlockingConnectionPool(
     socket_keepalive=True,
     socket_keepalive_options={},
     health_check_interval=30,
+    retry_on_timeout=True,
 )
+
+data_db_client = aioredis.Redis(connection_pool=data_db_pool)
+logs_db_client = aioredis.Redis(connection_pool=logs_db_pool)
 
 
 async def initialize_db() -> None:
@@ -101,21 +106,17 @@ async def add_query(
     """
     start = time.time()
     try:
-        client = await aioredis.Redis(
-            connection_pool=data_db_pool,
-        )
         # print(f"Putting {query_id} on {ara_target} stream")
-        await client.set(
+        await data_db_client.set(
             query_id,
             zstandard.compress(orjson.dumps(query)),
             ex=settings.redis_ttl,
         )
-        await client.set(
+        await data_db_client.set(
             response_id,
             zstandard.compress(orjson.dumps(query)),
             ex=settings.redis_ttl,
         )
-        await client.aclose()
     except Exception as e:
         # failed to put message in db
         # TODO: do something more severe
@@ -157,16 +158,12 @@ async def save_message(
         start_comp = time.time()
         compressed = zstandard.compress(orjson.dumps(response))
         logger.info(f"Compression took {time.time() - start_comp}")
-        client = await aioredis.Redis(
-            connection_pool=data_db_pool,
-        )
         # print(f"Putting {query_id} on {ara_target} stream")
-        await client.set(
+        await data_db_client.set(
             callback_id,
             compressed,
             ex=settings.redis_ttl,
         )
-        await client.aclose()
         logger.debug(f"Saving message took {time.time() - start} seconds")
     except Exception as e:
         # failed to put message in db
@@ -189,12 +186,8 @@ async def get_message(
     message = {}
     start = time.time()
     try:
-        client = await aioredis.Redis(
-            connection_pool=data_db_pool,
-        )
         # print(f"Putting {query_id} on {ara_target} stream")
-        message = await client.get(message_id)
-        await client.aclose()
+        message = await data_db_client.get(message_id)
         if message is not None:
             start_decomp = time.time()
             message = orjson.loads(zstandard.decompress(message))
@@ -217,10 +210,7 @@ async def save_logs(
         response_id (str): UID for a query response
     """
     try:
-        client = await aioredis.Redis(
-            connection_pool=logs_db_pool,
-        )
-        existing_logs = await client.get(response_id)
+        existing_logs = await logs_db_client.get(response_id)
         if existing_logs is None:
             existing_logs = []
         else:
@@ -238,10 +228,9 @@ async def save_logs(
             new_logs = list(handler.contents())
             new_logs.reverse()
             existing_logs.extend(new_logs)
-        await client.set(
+        await logs_db_client.set(
             response_id, orjson.dumps(existing_logs), ex=settings.redis_ttl
         )
-        await client.aclose()
     except Exception as e:
         logger.error(f"Failed to save logs for response {response_id}: {e}")
 
@@ -257,11 +246,7 @@ async def get_logs(
         response_id (str): UID for a query response
     """
     try:
-        client = await aioredis.Redis(
-            connection_pool=logs_db_pool,
-        )
-        logs = await client.get(response_id)
-        await client.aclose()
+        logs = await logs_db_client.get(response_id)
         if logs is not None:
             logs = orjson.loads(logs)
             return logs
