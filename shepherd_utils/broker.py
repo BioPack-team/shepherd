@@ -119,7 +119,6 @@ async def acquire_lock(
     logger: logging.Logger,
 ):
     """Acquire a redis lock for a given row."""
-    client = None
     pubsub = None
     got_lock = False
     try:
