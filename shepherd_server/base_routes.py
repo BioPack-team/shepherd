@@ -96,6 +96,8 @@ async def run_query(
             "sort_results_score",
             "filter_results_top_n",
             "filter_kgraph_ophans",
+            "score_paths",
+            "filter_analyses_top_n"
         ]
     )
     workflow = None
@@ -139,7 +141,7 @@ async def run_sync_query(
     query_id, response_id, logger = await run_query(target, query_dict)
     start = time.time()
     now = start
-    while now <= start + 360:
+    while now <= start + 3600:
         now = time.time()
         # poll for completed status
         query_state = await get_query_state(query_id, logger)

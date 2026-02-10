@@ -10,7 +10,7 @@ from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
-STREAM = "filter_results_top_n"
+STREAM = "filter_analyses_top_n"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100

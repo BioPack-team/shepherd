@@ -11,7 +11,7 @@ from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
-STREAM = "sort_results_score"
+STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
@@ -27,9 +27,7 @@ async def score_paths(task, logger: logging.Logger):
     current_op = workflow[0]
     try:
         for ind, result in enumerate(message["message"]["results"]):
-            analyses = [{**analysis, "score": analysis.get("score", 0) or 0} for analysis in result["analyses"]]
-            shuffle(analyses)
-            message["message"]["results"][ind]["analyses"] = analyses
+            message["message"]["results"][ind]["analyses"] = [{**analysis, "score": analysis.get("score", 0) or 0} for analysis in result["analyses"]]
     except KeyError as e:
         # can't find the right structure of message
         err = f"Error scoring paths: {e}"
