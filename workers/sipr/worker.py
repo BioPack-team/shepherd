@@ -129,6 +129,7 @@ def write_trapi(id_list, hop_num):
             "e0": {
                 "subject": "n0",
                 "object": "n1",
+                "predicates": ["biolink:related_to"]
             }
         },
     }
