@@ -146,9 +146,9 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
 
-                expanded_message["callback"] = (
-                    f"{settings.callback_host}/aragorn/callback/{callback_id}"
-                )
+                expanded_message[
+                    "callback"
+                ] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
 
                 logger.debug(
                     f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
@@ -277,9 +277,15 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
     # 2. The edge is marked inferred.
     # 3. Either the source or the target has IDs, but not both.
     # 4. The number of ids on the query node is 1.
-    input_id, predicate, qualifiers, source, source_input, target, qedge_id = (
-        get_infer_parameters(input_message)
-    )
+    (
+        input_id,
+        predicate,
+        qualifiers,
+        source,
+        source_input,
+        target,
+        qedge_id,
+    ) = get_infer_parameters(input_message)
     key = get_rule_key(predicate, qualifiers, logger)
     # We want to run the non-inferred version of the query as well
     qg = copy.deepcopy(input_message["message"]["query_graph"])
