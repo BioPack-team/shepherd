@@ -28,11 +28,24 @@ async def sort_results_score(task, logger: logging.Logger):
     aord = current_op.get("ascending_or_descending", "descending")
     reverse = aord == "descending"
     try:
-        message["message"]["results"] = sorted(
-            results,
-            key=lambda x: max([y.get("score", 0) for y in x["analyses"]]),
-            reverse=reverse,
-        )
+        for ind, result in enumerate(message["message"]["results"]):
+            message["message"]["results"][ind]["analyses"] = sorted(
+                result["analyses"],
+                key=lambda x: x.get("score", 0),
+                reverse=reverse,
+            )
+        if reverse:
+            message["message"]["results"] = sorted(
+                results,
+                key=lambda x: x["analyses"][0].get("score", 0),
+                reverse=reverse,
+            )
+        else:
+            message["message"]["results"] = sorted(
+                results,
+                key=lambda x: x["analyses"][-1].get("score", 0),
+                reverse=reverse,
+            )
     except KeyError as e:
         # can't find the right structure of message
         err = f"Error sorting results: {e}"

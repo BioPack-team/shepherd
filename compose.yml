@@ -153,20 +153,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-  sort_analyses_score:
-    container_name: sort_analyses_score
-    build:
-      context: .
-      dockerfile: workers/sort_analyses_score/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      shepherd_db:
-        condition: service_healthy
-      shepherd_broker:
-        condition: service_healthy
-    volumes:
-      - ./logs:/app/logs
-      - ./.env:/app/.env
   score_paths:
     container_name: score_paths
     build:
