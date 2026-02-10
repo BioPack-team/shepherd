@@ -97,6 +97,9 @@ async def aragorn(task, logger: logging.Logger):
                 {"id": "aragorn.pathfinder"},
                 # {"id": "aragorn.omnicorp"},
                 # {"id": "aragorn.score"},
+                {"id": "score_paths"},
+                {"id": "sort_analyses_score"},
+                {"id": "filter_analyses_score"},
                 {"id": "filter_kgraph_orphans"},
             ]
         else:
