@@ -27,7 +27,10 @@ async def score_paths(task, logger: logging.Logger):
     current_op = workflow[0]
     try:
         for ind, result in enumerate(message["message"]["results"]):
-            message["message"]["results"][ind]["analyses"] = [{**analysis, "score": analysis.get("score", 0) or 0} for analysis in result["analyses"]]
+            message["message"]["results"][ind]["analyses"] = [
+                {**analysis, "score": analysis.get("score", 0) or 0}
+                for analysis in result["analyses"]
+            ]
     except KeyError as e:
         # can't find the right structure of message
         err = f"Error scoring paths: {e}"
