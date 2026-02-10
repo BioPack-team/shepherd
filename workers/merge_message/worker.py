@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+import traceback
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -425,17 +426,22 @@ async def poll_for_tasks():
             lock_time = time.time()
             original_response = await get_message(response_id, logger)
             # do message merging
-            merged_message = await loop.run_in_executor(
-                executor,
-                merge_messages,
-                target,
-                original_query_graph,
-                original_response,
-                callback_response,
-                logger,
-            )
-            # save merged message back to db
-            await save_message(response_id, merged_message, logger)
+            try:
+                merged_message = await loop.run_in_executor(
+                    executor,
+                    merge_messages,
+                    target,
+                    original_query_graph,
+                    original_response,
+                    callback_response,
+                    logger,
+                )
+                # save merged message back to db
+                await save_message(response_id, merged_message, logger)
+            except Exception:
+                logger.error(
+                    f"[{callback_id}] Error merging message: {traceback.format_exc()}"
+                )
             logger.info(
                 f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
             )
