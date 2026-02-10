@@ -20,6 +20,7 @@ services:
     container_name: shepherd_db
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
+    command: postgres -c max_connections=200
     build:
       context: .
       dockerfile: shepherd_db/Dockerfile
@@ -129,6 +130,48 @@ services:
     build:
       context: .
       dockerfile: workers/finish_query/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  filter_analyses_top_n:
+    container_name: filter_analyses_top_n
+    build:
+      context: .
+      dockerfile: workers/filter_analyses_top_n/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  sort_analyses_score:
+    container_name: sort_analyses_score
+    build:
+      context: .
+      dockerfile: workers/sort_analyses_score/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  score_paths:
+    container_name: score_paths
+    build:
+      context: .
+      dockerfile: workers/score_paths/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
