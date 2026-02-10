@@ -457,6 +457,7 @@ class Ranker:
         return answers
 
     def probes(self):
+
         # Identify Probes
         #################
         # Q Graph Connectivity Matrix
@@ -911,6 +912,7 @@ class Ranker:
                 or attr_type_id == "biolink:supporting_document"
                 or attr_type_id == "biolink:publications"
             ):
+
                 # Parse pubs to handle all the cases we have observed
                 pubs = attribute.get("value", [])
 
@@ -943,6 +945,7 @@ class Ranker:
                 or "fisher_exact_p" in orig_attr_name
                 or "gwas_pvalue" in orig_attr_name
             ):
+
                 p_value = attribute.get("value", None)
 
                 # Some times the reported p_value is a list like [p_value]
@@ -964,6 +967,7 @@ class Ranker:
                 edge_pred == "biolink:occurs_together_in_literature_with"
                 and attr_type_id == "biolink:has_count"
             ):
+
                 # We assume this is from a literature co-occurrence source
                 # (like omnicorp)
                 num_pubs = attribute.get("value", 0)
@@ -1067,6 +1071,7 @@ class Ranker:
             }
 
         if usable_edge_attr["affinity"] is not None:
+
             property_w = get_source_sigmoid(
                 usable_edge_attr["affinity"],
                 edge_source,

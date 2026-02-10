@@ -343,14 +343,14 @@ def merge_messages(
                                 result["message"]["auxiliary_graphs"][aux_id][key], list
                             ):
                                 # combine both lists and then list/set it for uniqueness
-                                result["message"]["auxiliary_graphs"][aux_id][
-                                    key
-                                ] = list(
-                                    set(
-                                        result["message"]["auxiliary_graphs"][aux_id][
-                                            key
-                                        ]
-                                        + val
+                                result["message"]["auxiliary_graphs"][aux_id][key] = (
+                                    list(
+                                        set(
+                                            result["message"]["auxiliary_graphs"][
+                                                aux_id
+                                            ][key]
+                                            + val
+                                        )
                                     )
                                 )
                             else:
@@ -358,9 +358,9 @@ def merge_messages(
                                     f"Message had an invalid aux graph property: {key}"
                                 )
                         else:
-                            result["message"]["auxiliary_graphs"][aux_id][
-                                key
-                            ] = copy.deepcopy(val)
+                            result["message"]["auxiliary_graphs"][aux_id][key] = (
+                                copy.deepcopy(val)
+                            )
                 else:
                     result["message"]["auxiliary_graphs"][aux_id] = copy.deepcopy(
                         aux_dict

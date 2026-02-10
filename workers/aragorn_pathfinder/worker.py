@@ -391,17 +391,15 @@ async def shadowfax(task, logger: logging.Logger):
                 single_edges, single_support_graphs, single_nodes = set(), set(), set()
                 # get nodes and edges from path
                 try:
-                    (
-                        single_edges,
-                        single_support_graphs,
-                        single_nodes,
-                    ) = recursive_get_edge_support_graphs(
-                        kedge_key,
-                        single_edges,
-                        single_support_graphs,
-                        merged_kgraph["edges"],
-                        merged_aux_graphs,
-                        single_nodes,
+                    single_edges, single_support_graphs, single_nodes = (
+                        recursive_get_edge_support_graphs(
+                            kedge_key,
+                            single_edges,
+                            single_support_graphs,
+                            merged_kgraph["edges"],
+                            merged_aux_graphs,
+                            single_nodes,
+                        )
                     )
                 except KeyError as e:
                     logger.warning(e)

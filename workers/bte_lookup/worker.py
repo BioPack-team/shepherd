@@ -149,9 +149,9 @@ async def bte_lookup(task, logger: logging.Logger):
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
 
-                expanded_message[
-                    "callback"
-                ] = f"{settings.callback_host}/bte/callback/{callback_id}"
+                expanded_message["callback"] = (
+                    f"{settings.callback_host}/bte/callback/{callback_id}"
+                )
 
                 logger.debug(
                     f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
