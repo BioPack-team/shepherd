@@ -30,8 +30,8 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
-NUM_TOTAL_HOPS = 3
-MAX_HOPS_TO_EXPLORE = 3
+NUM_TOTAL_HOPS = 4
+MAX_HOPS_TO_EXPLORE = 4
 MAX_PATHFINDER_PATHS = 500
 PRUNE_TOP_K = 50
 NODE_DEGREE_THRESHOLD = 30000
@@ -88,7 +88,7 @@ async def pathfinder(task, logger: logging.Logger):
     intermediate_categories = []
     path_key = next(iter(qgraph["paths"].keys()))
     qpath = qgraph["paths"][path_key]
-    if qpath.get("constraints", None) is not None:
+    if qpath.get("constraints", None) is not None and len(qpath.get("constraints", [])) > 0:
         constraints = qpath["constraints"]
         if len(constraints) > 1:
             logger.error("Pathfinder queries do not support multiple constraints.")
@@ -122,6 +122,8 @@ async def pathfinder(task, logger: logging.Logger):
     descendants = set(biolink_helper.get_descendants(intermediate_categories[0]))
 
     try:
+        start = time.perf_counter()
+        logger.info("Starting pathfinder.get_paths()")
         result, aux_graphs, knowledge_graph = pathfinder.get_paths(
             pinned_node_ids[0],
             pinned_node_ids[1],
@@ -134,6 +136,8 @@ async def pathfinder(task, logger: logging.Logger):
             NODE_DEGREE_THRESHOLD,
             descendants,
         )
+        elapsed = time.perf_counter() - start
+        logger.info(f"pathfinder.get_paths() finished in {elapsed:.3f} seconds")
         res = []
         if result is not None:
             res.append(

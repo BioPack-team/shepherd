@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
-    plover_url: str = "https://kg2cploverdb.test.transltr.io"
+    plover_url: str = "https://kg2cplover3.rtx.ai:9990"
     curie_ngd_addr: str = (
         "mysql:arax-databases-mysql.rtx.ai:public_ro:curie_ngd_v1_0_kg2_10_2"
     )
