@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     callback_host: str = "http://127.0.0.1:5439"
     kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
     sync_kg_retrieval_url: str = "https://strider.renci.org/query"
+    default_data_tier: int = 0
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
 
     # ARAX configs
