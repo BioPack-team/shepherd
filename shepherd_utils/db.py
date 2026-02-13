@@ -28,8 +28,7 @@ CONNINFO = (
 
 async def check_connection(conn):
     """Check if the postgres connection is still alive."""
-    if conn.closed:
-        raise OperationalError("Connection is closed.")
+    await conn.execute("SELECT 1")
 
 
 pool = AsyncConnectionPool(
