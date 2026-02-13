@@ -66,6 +66,42 @@ services:
     environment:
       - COLLECTOR_OTLP_ENABLED=true
       - LOG_LEVEL=error
+  
+  gandalf:
+    container_name: gandalf
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: workers/gandalf/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./workers/gandalf/debug:/app/debug
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - ./gandalf_mmap:/app/gandalf_mmap
+    
+  gandalf_rehydrate:
+    container_name: gandalf_rehydrate
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: workers/gandalf_rehydrate/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./workers/gandalf_rehydrate/debug:/app/debug
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - ./gandalf_mmap:/app/gandalf_mmap
 
 
   ########## Shared Workers
