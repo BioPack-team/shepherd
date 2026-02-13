@@ -98,7 +98,7 @@ async def run_query(
             "filter_results_top_n",
             "filter_kgraph_ophans",
             "score_paths",
-            "filter_analyses_top_n"
+            "filter_analyses_top_n",
         ]
     )
     workflow = None

@@ -426,9 +426,7 @@ def merge_messages(
 
             analysis = {
                 "resource_id": source,
-                "path_bindings": {
-                    path_id: [{"id": aux_id}]
-                },
+                "path_bindings": {path_id: [{"id": aux_id}]},
             }
             if score is not None:
                 analysis["score"] = score
@@ -456,9 +454,7 @@ def merge_messages(
             "analyses": analyses,
         }
 
-        result["message"]["results"] = [
-            pathfinder_result
-        ]
+        result["message"]["results"] = [pathfinder_result]
 
         return result
 

@@ -62,7 +62,7 @@ async def example_lookup(task, logger: logging.Logger):
                     await save_message(
                         f"{callback_id}_query_graph",
                         response["message"]["query_graph"],
-                        logger
+                        logger,
                     )
                 except Exception as e:
                     logger.error(
@@ -83,7 +83,9 @@ async def example_lookup(task, logger: logging.Logger):
             results = await asyncio.gather(*requests, return_exceptions=True)
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    logger.error(f"Task {task[0]}: Callback request {i} failed: {result}")
+                    logger.error(
+                        f"Task {task[0]}: Callback request {i} failed: {result}"
+                    )
     except httpx.HTTPError as e:
         logger.error(f"Task {task[0]}: HTTP client error during callbacks: {e}")
     except Exception as e:
@@ -99,9 +101,7 @@ async def example_lookup(task, logger: logging.Logger):
                 # see if there are existing lookups going
                 running_callback_ids = await get_running_callbacks(query_id, logger)
             except Exception as e:
-                logger.error(
-                    f"Task {task[0]}: Failed to check running callbacks: {e}"
-                )
+                logger.error(f"Task {task[0]}: Failed to check running callbacks: {e}")
                 # Brief backoff then retry the check rather than giving up
                 await asyncio.sleep(5)
                 continue
@@ -113,9 +113,7 @@ async def example_lookup(task, logger: logging.Logger):
 
             await asyncio.sleep(1)
     except asyncio.CancelledError:
-        logger.warning(
-            f"Task {task[0]}: Cancelled while waiting for callbacks."
-        )
+        logger.warning(f"Task {task[0]}: Cancelled while waiting for callbacks.")
 
     # Always wrap up the task to ACK it in the broker
     try:
@@ -139,9 +137,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
             workflow = json.loads(task[1])["workflow"]
             await wrap_up_task(STREAM, GROUP, task, workflow, logger)
         except Exception as wrap_err:
-            logger.error(
-                f"Task {task[0]}: Also failed wrap up after error: {wrap_err}"
-            )
+            logger.error(f"Task {task[0]}: Also failed wrap up after error: {wrap_err}")
     finally:
         span.end()
         limiter.release()

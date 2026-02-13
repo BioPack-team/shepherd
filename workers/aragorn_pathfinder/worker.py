@@ -85,18 +85,14 @@ async def shadowfax(task, logger: logging.Logger):
         "message": {
             "query_graph": {
                 "nodes": {
-                    pinned_node_keys[0]: {
-                        "ids": [pinned_node_ids[0]]
-                    },
+                    pinned_node_keys[0]: {"ids": [pinned_node_ids[0]]},
                     "intermediate_0": {
                         "categories": intermediate_categories,
                     },
                     "intermediate_1": {
                         "categories": intermediate_categories,
                     },
-                    pinned_node_keys[1]: {
-                        "ids": [pinned_node_ids[1]]
-                    },
+                    pinned_node_keys[1]: {"ids": [pinned_node_ids[1]]},
                 },
                 "edges": {
                     "e0": {
@@ -113,7 +109,7 @@ async def shadowfax(task, logger: logging.Logger):
                         "subject": "intermediate_1",
                         "object": pinned_node_keys[1],
                         "predicates": ["biolink:related_to"],
-                    }
+                    },
                 },
             },
         },
@@ -122,9 +118,7 @@ async def shadowfax(task, logger: logging.Logger):
     callback_id = str(uuid.uuid4())[:8]
     # Put callback UID and query ID in postgres
     await add_callback_id(query_id, callback_id, logger)
-    logger.debug(
-        """Sending pathfinder lookup query to gandalf."""
-    )
+    logger.debug("""Sending pathfinder lookup query to gandalf.""")
 
     await save_message(callback_id, threehop, logger)
 

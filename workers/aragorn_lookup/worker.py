@@ -149,9 +149,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 callback_id = str(uuid.uuid4())[:8]
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
-                logger.debug(
-                    """Sending lookup query to gandalf."""
-                )
+                logger.debug("""Sending lookup query to gandalf.""")
 
                 await save_message(callback_id, expanded_message, logger)
 
@@ -185,7 +183,9 @@ async def aragorn_lookup(task, logger: logging.Logger):
                     logger.debug(
                         f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
                     )
-                    requests.append(run_async_lookup(client, expanded_message, callback_id))
+                    requests.append(
+                        run_async_lookup(client, expanded_message, callback_id)
+                    )
                     # Then we can retrieve all callback ids from query id to see which are still
                     # being looked up
                 # fire all the lookups at the same time
