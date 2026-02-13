@@ -309,7 +309,7 @@ def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
         else:
             merged_kgraph["edges"][key] = value
 
-            if value["sources"] and not is_support_edge(value):
+            if value.get("sources") and not is_support_edge(value):
                 new_sources = combine_unique_dicts(
                     value["sources"],
                     [

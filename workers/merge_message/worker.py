@@ -312,13 +312,13 @@ def merge_messages(
     logger: logging.Logger,
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
+    source = f"infores:shepherd-{target}"
     for result_message in [response, new_response]:
         result_kgraph = (
             result_message["message"]["knowledge_graph"]
             if result_message["message"].get("knowledge_graph") is not None
             else {"nodes": {}, "edges": {}}
         )
-        source = f"infores:shepherd-{target}"
         pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, source, logger)
     # Construct the final result message, currently empty
     result = {
@@ -366,29 +366,99 @@ def merge_messages(
                     result["message"]["auxiliary_graphs"][aux_id] = copy.deepcopy(
                         aux_dict
                     )
-    # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
-    lookup_results = (
-        response["message"]["results"]
-        if response["message"].get("results") is not None
-        else []
-    )
-    is_direct_lookup = queries_equivalent(
-        new_response["message"]["query_graph"], original_query_graph
-    )
-    if is_direct_lookup:
-        lookup_results.extend(new_response["message"]["results"])
-    else:
-        result["message"]["results"].extend(
-            new_response["message"]["results"]
-            if new_response["message"].get("results") is not None
+
+    # Determine type of message
+    if "edges" in original_query_graph:
+        # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
+        lookup_results = (
+            response["message"]["results"]
+            if response["message"].get("results") is not None
             else []
         )
+        is_direct_lookup = queries_equivalent(
+            new_response["message"]["query_graph"], original_query_graph
+        )
+        if is_direct_lookup:
+            lookup_results.extend(new_response["message"]["results"])
+        else:
+            result["message"]["results"].extend(
+                new_response["message"]["results"]
+                if new_response["message"].get("results") is not None
+                else []
+            )
 
-    answer_node_id = get_answer_node(original_query_graph)
-    merged_messages = merge_results_by_node(
-        target, result, answer_node_id, lookup_results
-    )
-    return merged_messages
+        answer_node_id = get_answer_node(original_query_graph)
+        merged_messages = merge_results_by_node(
+            target, result, answer_node_id, lookup_results
+        )
+
+        return merged_messages
+    elif "paths" in original_query_graph:
+        # Pathfinder query
+        path_id, og_path = next(iter(original_query_graph["paths"].items()))
+        subject_node_id = og_path.get("subject")
+        object_node_id = og_path.get("object")
+        if subject_node_id is None or object_node_id is None:
+            raise KeyError("Missing either subject or object from path.")
+        aux_counter = 0
+        score = 0
+        analyses = []
+        for new_result in new_response["message"]["results"]:
+            path_edge_ids = set()
+            for analysis in new_result.get("analyses", []):
+                edge_bindings = analysis.get("edge_bindings", {})
+                for qg_edge_key, bindings in edge_bindings.items():
+                    for binding in bindings:
+                        path_edge_ids.add(binding["id"])
+                score = new_result.get("score")
+
+            if not path_edge_ids:
+                continue
+
+            aux_id = f"a_{aux_counter}"
+            aux_counter += 1
+
+            # Add new aux graph to message
+            result["message"]["auxiliary_graphs"][aux_id] = {
+                "edges": list(path_edge_ids),
+                "attributes": [],
+            }
+
+            analysis = {
+                "resource_id": source,
+                "path_bindings": {path_id: [{"id": aux_id}]},
+            }
+            if score is not None:
+                analysis["score"] = score
+            analyses.append(analysis)
+
+        # --- Resolve the pinned node IDs from any old result's node_bindings ---
+        # (They should all bind the same start/end IDs since they're pinned)
+        start_kg_id = None
+        end_kg_id = None
+        for new_result in new_response["message"]["results"]:
+            nb = new_result.get("node_bindings", {})
+            if subject_node_id in nb and nb[subject_node_id]:
+                start_kg_id = nb[subject_node_id][0]["id"]
+            if object_node_id in nb and nb[object_node_id]:
+                end_kg_id = nb[object_node_id][0]["id"]
+            if start_kg_id and end_kg_id:
+                break
+
+        # --- Assemble the single Pathfinder result ---
+        pathfinder_result = {
+            "node_bindings": {
+                subject_node_id: [{"id": start_kg_id, "attributes": []}],
+                object_node_id: [{"id": end_kg_id, "attributes": []}],
+            },
+            "analyses": analyses,
+        }
+
+        result["message"]["results"] = [pathfinder_result]
+
+        return result
+
+    raise TypeError("Unsupported query type.")
 
 
 async def poll_for_tasks():

@@ -18,7 +18,7 @@ SIPR = FastAPI(title="Shepherd SIPR")
 
 @SIPR.post("/query")
 async def sync_query(
-    query: dict = Body(..., example=default_input_query),
+    query: dict = Body(..., examples=[default_input_query]),
 ) -> Response:
     response = await run_sync_query(ARATargetEnum.SIPR, query)
     return response
@@ -26,7 +26,7 @@ async def sync_query(
 
 @SIPR.post("/asyncquery")
 async def async_query(
-    query: dict = Body(..., example=default_input_query),
+    query: dict = Body(..., examples=[default_input_query]),
 ) -> Response:
     response = await run_async_query(ARATargetEnum.SIPR, query)
     return response

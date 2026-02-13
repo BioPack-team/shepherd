@@ -42,7 +42,25 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        worker: [aragorn, aragorn_lookup, aragorn_pathfinder, aragorn_omnicorp, aragorn_score, arax, bte, bte_lookup, sipr, filter_kgraph_orphans, filter_results_top_n, finish_query, merge_message, sort_results_score]
+        worker: 
+          - aragorn
+          - aragorn_lookup
+          - aragorn_omnicorp
+          - aragorn_pathfinder
+          - aragorn_score
+          - arax
+          - bte
+          - bte_lookup
+          - filter_analyses_top_n
+          - filter_kgraph_orphans
+          - filter_results_top_n
+          - finish_query
+          - gandalf
+          - gandalf_rehydrate
+          - merge_message
+          - score_paths
+          - sipr
+          - sort_results_score
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4

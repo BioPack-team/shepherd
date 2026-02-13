@@ -1,14 +1,15 @@
+"""Base API routes that all Shepherd ARAs can use."""
+
 import asyncio
-from enum import Enum
 import json
 import logging
 import time
 import uuid
+from enum import Enum
 from typing import Optional, Tuple
 
 from fastapi import APIRouter, Body, Response
 from fastapi.responses import JSONResponse
-from opentelemetry import trace
 from opentelemetry.propagate import inject
 
 from shepherd_utils.broker import add_task
@@ -79,7 +80,7 @@ async def run_query(
 
     logger.info(f"Sending {query_id} to {target}")
 
-    with tracer.start_as_current_span("") as span:
+    with tracer.start_as_current_span(""):
         span_carrier = {}
         # adds otel trace to carrier for next worker
         inject(span_carrier)
@@ -96,6 +97,8 @@ async def run_query(
             "sort_results_score",
             "filter_results_top_n",
             "filter_kgraph_ophans",
+            "score_paths",
+            "filter_analyses_top_n",
         ]
     )
     workflow = None
@@ -131,7 +134,7 @@ async def run_query(
 
 async def run_sync_query(
     target: ARATargetEnum,
-    query: dict = Body(..., example=default_input_query),
+    query: dict = Body(..., examples=[default_input_query]),
 ) -> dict:
     """Handle synchronous TRAPI queries."""
     # query_dict = query.dict()
@@ -168,7 +171,7 @@ async def run_sync_query(
 
 async def run_async_query(
     target: ARATargetEnum,
-    query: dict = Body(..., example=default_input_query),
+    query: dict = Body(..., examples=[default_input_query]),
 ) -> JSONResponse:
     """Handle asynchronous TRAPI queries."""
     callback_url = query.get("callback")
@@ -221,6 +224,13 @@ async def callback(
     logger.info(f"Got original query id: {query_id}")
     if query_id is None:
         return Response("Couldn't find original query.", 500)
+    # if len(response["message"]["results"]) > 0:
+    #     with open(
+    #         f"shepherd_server/debug/{query_id}_{callback_id}_response.json",
+    #         "w",
+    #         encoding="utf-8",
+    #     ) as f:
+    #         json.dump(response, f, indent=2)
     query_state = await get_query_state(query_id, logger)
     if query_state is None:
         return Response("Failed to get query state.", 500)
@@ -249,7 +259,7 @@ async def query_status(
     qid: str,
 ) -> dict:
     """Handle query status requests."""
-    # get query status from db
+    # TODO: get query status from db
     return {
         "status": "Queued",
         "description": "Query is currently waiting to be run.",

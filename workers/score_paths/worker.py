@@ -5,53 +5,38 @@ import json
 import logging
 import time
 import uuid
+from random import shuffle
 from shepherd_utils.db import get_message, save_message, get_query_state
 from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
-STREAM = "sort_results_score"
+STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
-async def sort_results_score(task, logger: logging.Logger):
+async def score_paths(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
     workflow = json.loads(task[1]["workflow"])
     message = await get_message(response_id, logger)
-    results = message["message"].get("results", [])
     current_op = workflow[0]
-    aord = current_op.get("ascending_or_descending", "descending")
-    reverse = aord == "descending"
     try:
         for ind, result in enumerate(message["message"]["results"]):
-            message["message"]["results"][ind]["analyses"] = sorted(
-                result["analyses"],
-                key=lambda x: x.get("score", 0),
-                reverse=reverse,
-            )
-        if reverse:
-            message["message"]["results"] = sorted(
-                results,
-                key=lambda x: x["analyses"][0].get("score", 0),
-                reverse=reverse,
-            )
-        else:
-            message["message"]["results"] = sorted(
-                results,
-                key=lambda x: x["analyses"][-1].get("score", 0),
-                reverse=reverse,
-            )
+            message["message"]["results"][ind]["analyses"] = [
+                {**analysis, "score": analysis.get("score", 0) or 0}
+                for analysis in result["analyses"]
+            ]
     except KeyError as e:
         # can't find the right structure of message
-        err = f"Error sorting results: {e}"
+        err = f"Error scoring paths: {e}"
         logger.error(err)
         raise KeyError(err)
-    logger.info("Returning sorted results.")
+    logger.info("Returning scored paths.")
 
     # save merged message back to db
     await save_message(response_id, message, logger)
@@ -63,7 +48,7 @@ async def sort_results_score(task, logger: logging.Logger):
 async def process_task(task, parent_ctx, logger, limiter):
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await sort_results_score(task, logger)
+        await score_paths(task, logger)
     finally:
         span.end()
         limiter.release()

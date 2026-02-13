@@ -10,14 +10,14 @@ from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
-STREAM = "sort_results_score"
+STREAM = "filter_analyses_top_n"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
-async def sort_results_score(task, logger: logging.Logger):
+async def filter_analyses_top_n(task, logger: logging.Logger):
     start = time.time()
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
@@ -25,33 +25,18 @@ async def sort_results_score(task, logger: logging.Logger):
     message = await get_message(response_id, logger)
     results = message["message"].get("results", [])
     current_op = workflow[0]
-    aord = current_op.get("ascending_or_descending", "descending")
-    reverse = aord == "descending"
+    if current_op is None:
+        logger.error(f"Unable to find operation {STREAM} in workflow")
+        raise Exception(f"Operation {STREAM} is not in workflow")
+    n = current_op.get("max_analyses", 1000)
     try:
         for ind, result in enumerate(message["message"]["results"]):
-            message["message"]["results"][ind]["analyses"] = sorted(
-                result["analyses"],
-                key=lambda x: x.get("score", 0),
-                reverse=reverse,
-            )
-        if reverse:
-            message["message"]["results"] = sorted(
-                results,
-                key=lambda x: x["analyses"][0].get("score", 0),
-                reverse=reverse,
-            )
-        else:
-            message["message"]["results"] = sorted(
-                results,
-                key=lambda x: x["analyses"][-1].get("score", 0),
-                reverse=reverse,
-            )
+            message["message"]["results"][ind]["analyses"] = result["analyses"][:n]
     except KeyError as e:
         # can't find the right structure of message
-        err = f"Error sorting results: {e}"
-        logger.error(err)
-        raise KeyError(err)
-    logger.info("Returning sorted results.")
+        logger.error(f"Error filtering results: {e}")
+        return message, 400
+    logger.info("Returning filtered results.")
 
     # save merged message back to db
     await save_message(response_id, message, logger)
@@ -63,7 +48,7 @@ async def sort_results_score(task, logger: logging.Logger):
 async def process_task(task, parent_ctx, logger, limiter):
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await sort_results_score(task, logger)
+        await filter_analyses_top_n(task, logger)
     finally:
         span.end()
         limiter.release()

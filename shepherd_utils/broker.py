@@ -44,9 +44,7 @@ broker_client = aioredis.Redis(connection_pool=broker_redis_pool)
 lock_client = aioredis.Redis(connection_pool=lock_redis_pool)
 
 
-async def create_consumer_group(
-    stream, group, logger: logging.Logger
-):
+async def create_consumer_group(stream, group, logger: logging.Logger):
     """Ensure a redis consumer group exists."""
     try:
         await broker_client.xgroup_create(stream, group, "0", mkstream=True)
