@@ -87,6 +87,8 @@ async def run_query(
 
     supported_workflow_operations = set(
         [
+            "lookup",  # just for O&O ranker comparison work
+            "score",  # Ditto
             "aragorn.lookup",
             "aragorn.pathfinder",
             "aragorn.omnicorp",
