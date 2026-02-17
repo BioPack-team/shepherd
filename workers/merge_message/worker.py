@@ -10,6 +10,7 @@ import traceback
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from itertools import combinations
 from typing import Any, Dict, Union
 
 from shepherd_utils.broker import acquire_lock, mark_task_as_complete, remove_lock
@@ -19,7 +20,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, merge_kgraph
+from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
 
 # Queue name
 STREAM = "merge_message"
@@ -304,6 +305,124 @@ def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
     return answer_node
 
 
+def has_unique_nodes(result):
+    """Given a result, return True if all nodes are unique, False otherwise"""
+    seen = set()
+    for qnode, knodes in result["node_bindings"].items():
+        knode_ids = frozenset([knode["id"] for knode in knodes])
+        if knode_ids in seen:
+            return False
+        seen.add(knode_ids)
+    return True
+
+
+def filter_repeated_nodes(response, logger: logging.Logger):
+    """We have some rules that include e.g. 2 chemicals.
+    We don't want responses in which those two are the same.
+    If you have A-B-A-C then what shows up in the ui is B-A-C which makes no sense.
+    """
+    original_result_count = len(response["message"].get("results", []))
+    if original_result_count == 0:
+        return
+    results = list(filter(lambda x: has_unique_nodes(x), response["message"]["results"]))
+    response["message"]["results"] = results
+    if len(results) != original_result_count:
+        filter_kgraph_orphans(response, logger)
+
+
+def get_promiscuous_qnodes(response):
+    """We have some rules like A<-treats-B-part_of->C<-part_of-D.  Figure out if this
+    qgraph is like that and return C if it is"""
+    qgraph = response["message"]["query_graph"]
+    if len(qgraph["edges"]) < 3:
+        return []
+    # for this to be a problem, we need 2 edges that share a subject or an object,
+    # and have the same predicates and qualifiers.
+    subjects = defaultdict(list)
+    objects = defaultdict(list)
+    for qedge_id, qedge in qgraph["edges"].items():
+        subjects[qedge["subject"]].append(qedge_id)
+        objects[qedge["object"]].append(qedge_id)
+    center_nodes = []
+    for nodelist in (subjects, objects):
+        for node, edges in nodelist.items():
+            if len(edges) < 2:
+                continue
+            for eid1, eid2 in combinations(edges, 2):
+                e1 = qgraph["edges"][eid1]
+                e2 = qgraph["edges"][eid2]
+                if e1["predicates"] == e2["predicates"]:
+                    if e1.get("qualifiers", []) == e2.get("qualifiers", []):
+                        center_nodes.append(node)
+    return center_nodes
+
+
+def remove_promiscuous_knode_results(MAX_C, qnode, response):
+    """Given a response and a qnode, look at all the results and count how many of the
+    results have the same knode bound to that qnode.
+    If that number is greater than MAX_C, remove those results."""
+    still_going = True
+    # This is written as a loop with the idea that once we've removed one
+    # promiscuous node, it might require recalculating everything since the results
+    # change. In retrospect, that might not be true because we are specifiying the
+    # qnode. I'm still think it's possible (but perhaps unlikely) if there are
+    # multiple knodes bound to the same qnode.
+    while still_going:
+        still_going = False
+        # How many distinct results have the same bozo in this spot?
+        prom_counter = defaultdict(list)
+        for result_i, result in enumerate(response["message"]["results"]):
+            for binding in result["node_bindings"][qnode]:
+                knode = binding["id"]
+                prom_counter[knode].append(result_i)
+        # now figure out the most common knode
+        max_knode = None
+        max_count = 0
+        for knode, mapped_result_indices in prom_counter.items():
+            if len(mapped_result_indices) > max_count:
+                max_knode = knode
+                max_count = len(mapped_result_indices)
+        # Now remove all the results with that knode (if it occurs in more than
+        # MAX_C results)
+        if max_count > MAX_C:
+            still_going = True
+            # These are the indices of the results that we want to remove
+            mapped_result_indices = prom_counter[max_knode]
+            # Remove them from right to left, otherwise the indices change on you
+            for index in reversed(mapped_result_indices):
+                del response["message"]["results"][index]
+
+
+def filter_promiscuous_results(response, logger: logging.Logger):
+    """We have some rules like A<-treats-B-part_of->C<-part_of-D.
+    This is saying B treats A, and D is like B (because they are both part of C).
+    This isn't the worst rule in the world, we find it statistically useful.  But,
+    there are Cs that contain lllllooooootttttssss of stuff, and it creates a lot of
+    bad results. Not only are they bad, but they are basically the same in terms of
+    score, so we create a lot of ties. We are taking some approaches to fixing this
+    in ranking, but really the results are just terrible, let's get rid of them,
+    but distinguish cases where the rule is doing something interesting from when
+    it is not. And note that "part_of" is not the only rule that follows this
+    similarity-style pattern.   The difference is basically how many times C occurs.
+    What we'd really like to do is not use promiscuous nodes in the C spot (or other
+    places really).  But we don't have a promiscuity score for the nodes, and can't
+    really get one.
+    """
+    # First, we need to know if we have too many results, and if it's the right
+    # kind of query
+    MAX_C = 10
+    if len(response["message"]["results"]) < MAX_C:
+        return
+    prom_qnodes = get_promiscuous_qnodes(response)
+    # This is a dictionary from bound knodes to the index of their result
+    # There should only be one such node
+    for qnode in prom_qnodes:
+        # It's possible that there are multiple knodes that could be filtered.  But
+        # when we filter out the first one then the indices of the rest will change.
+        # So we need to do this one at a time.
+        remove_promiscuous_knode_results(MAX_C, qnode, response)
+
+
 def merge_messages(
     target: str,
     original_query_graph: Dict[str, Any],
@@ -313,6 +432,8 @@ def merge_messages(
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
     source = f"infores:shepherd-{target}"
+    filter_repeated_nodes(new_response, logger)
+    filter_promiscuous_results(new_response, logger)
     for result_message in [response, new_response]:
         result_kgraph = (
             result_message["message"]["knowledge_graph"]
