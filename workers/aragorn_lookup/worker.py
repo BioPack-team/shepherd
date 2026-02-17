@@ -134,11 +134,30 @@ async def aragorn_lookup(task, logger: logging.Logger):
         # with open("./debug/direct_query.json", "w", encoding="utf-8") as f:
         #     json.dump(message, f, indent=2)
 
-        async with httpx.AsyncClient(timeout=100) as client:
-            await client.post(
-                settings.kg_retrieval_url,
-                json=message,
+        if use_gandalf:
+            logger.debug("""Sending lookup query to gandalf.""")
+
+            await save_message(callback_id, message, logger)
+
+            await add_task(
+                "gandalf",
+                {
+                    "target": "aragorn",
+                    "query_id": query_id,
+                    "response_id": response_id,
+                    "callback_id": callback_id,
+                    "log_level": task[1].get("log_level", 20),
+                    "otel": task[1]["otel"],
+                },
+                logger,
             )
+        else:
+            logger.debug(f"""Sending lookup query to {settings.kg_retrieval_url}.""")
+            async with httpx.AsyncClient(timeout=100) as client:
+                await client.post(
+                    settings.kg_retrieval_url,
+                    json=message,
+                )
     else:
         expanded_messages = expand_aragorn_query(message, logger)
         # with open("./debug/expanded_messages.json", "w", encoding="utf-8") as f:
