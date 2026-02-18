@@ -63,6 +63,47 @@ def get_blocked_list():
     return set(json_block_list["curies"]), synonyms
 
 
+def execute_pathfinding_sync(pinned_node_ids, pinned_node_keys, intermediate_categories, logger):
+
+    blocked_curies, blocked_synonyms = get_blocked_list()
+
+    pathfinder_instance = Pathfinder(
+        "MLRepo",
+        settings.plover_url,
+        settings.curie_ngd_addr,
+        settings.node_degree_addr,
+        blocked_curies,
+        blocked_synonyms,
+        logger,
+    )
+
+    biolink_cache_dir = "/tmp/biolink"
+    Path(biolink_cache_dir).mkdir(parents=True, exist_ok=True)
+    biolink_helper = BiolinkHelper(settings.arax_biolink_version, biolink_cache_dir)
+    descendants = set(biolink_helper.get_descendants(intermediate_categories[0]))
+
+    start = time.perf_counter()
+    logger.info("Starting pathfinder.get_paths() in worker thread")
+
+    result, aux_graphs, knowledge_graph = pathfinder_instance.get_paths(
+        pinned_node_ids[0],
+        pinned_node_ids[1],
+        pinned_node_keys[0],
+        pinned_node_keys[1],
+        NUM_TOTAL_HOPS,
+        MAX_HOPS_TO_EXPLORE,
+        MAX_PATHFINDER_PATHS,
+        PRUNE_TOP_K,
+        NODE_DEGREE_THRESHOLD,
+        descendants,
+    )
+
+    elapsed = time.perf_counter() - start
+    logger.info(f"pathfinder.get_paths() finished in {elapsed:.3f} seconds")
+
+    return result, aux_graphs, knowledge_graph
+
+
 async def pathfinder(task, logger: logging.Logger):
     start = time.time()
     query_id = task[1]["query_id"]
@@ -105,39 +146,15 @@ async def pathfinder(task, logger: logging.Logger):
     else:
         intermediate_categories = ["biolink:NamedThing"]
 
-    blocked_curies, blocked_synonyms = get_blocked_list()
-    pathfinder = Pathfinder(
-        "MLRepo",
-        settings.plover_url,
-        settings.curie_ngd_addr,
-        settings.node_degree_addr,
-        blocked_curies,
-        blocked_synonyms,
-        logger,
-    )
-
-    biolink_cache_dir = "/tmp/biolink"
-    Path(biolink_cache_dir).mkdir(parents=True, exist_ok=True)
-    biolink_helper = BiolinkHelper(settings.arax_biolink_version, biolink_cache_dir)
-    descendants = set(biolink_helper.get_descendants(intermediate_categories[0]))
-
     try:
-        start = time.perf_counter()
-        logger.info("Starting pathfinder.get_paths()")
-        result, aux_graphs, knowledge_graph = pathfinder.get_paths(
-            pinned_node_ids[0],
-            pinned_node_ids[1],
-            pinned_node_keys[0],
-            pinned_node_keys[1],
-            NUM_TOTAL_HOPS,
-            MAX_HOPS_TO_EXPLORE,
-            MAX_PATHFINDER_PATHS,
-            PRUNE_TOP_K,
-            NODE_DEGREE_THRESHOLD,
-            descendants,
+        result, aux_graphs, knowledge_graph = await asyncio.to_thread(
+            execute_pathfinding_sync,
+            pinned_node_ids,
+            pinned_node_keys,
+            intermediate_categories,
+            logger
         )
-        elapsed = time.perf_counter() - start
-        logger.info(f"pathfinder.get_paths() finished in {elapsed:.3f} seconds")
+
         res = []
         if result is not None:
             res.append(
