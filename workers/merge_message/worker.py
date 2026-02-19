@@ -301,6 +301,9 @@ def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
     qnodes = query_graph.get("nodes", {})
     for qnode_id, qnode in qnodes.items():
         if qnode.get("ids") is None:
+            if answer_node is not None:
+                # if there are multiple unpinned nodes
+                return None
             answer_node = qnode_id
     return answer_node
 
@@ -509,9 +512,13 @@ def merge_messages(
             )
 
         answer_node_id = get_answer_node(original_query_graph)
-        merged_messages = merge_results_by_node(
-            target, result, answer_node_id, lookup_results
-        )
+        if answer_node_id is None:
+            # This was a direct lookup outside of a creative query, just return it
+            merged_messages = new_response
+        else:
+            merged_messages = merge_results_by_node(
+                target, result, answer_node_id, lookup_results
+            )
 
         return merged_messages
     elif "paths" in original_query_graph:

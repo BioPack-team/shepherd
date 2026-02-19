@@ -4,7 +4,7 @@ contact:
   x-id: https://github.com/maximusunc
   x-role: responsible developer
 description: '<img src="/static/favicon.png" width="200px"><br /><br />Shepherd: Translator Autonomous Relay Agent Platform'
-version: 0.6.3
+version: 0.6.4
 servers:
 - description: Default server
   url: https://shepherd.renci.org
