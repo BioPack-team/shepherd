@@ -133,6 +133,14 @@ async def aragorn_lookup(task, logger: logging.Logger):
         message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
         # with open("./debug/direct_query.json", "w", encoding="utf-8") as f:
         #     json.dump(message, f, indent=2)
+        if "submitter" not in message:
+            message["submitter"] = (
+                "infores:shepherd-bte:{maturity}@{location}@{url}".format(
+                    maturity=settings.server_maturity,
+                    location=settings.server_location,
+                    url=settings.server_url,
+                )
+            )
 
         if use_gandalf:
             logger.debug("""Sending lookup query to gandalf.""")
@@ -166,6 +174,15 @@ async def aragorn_lookup(task, logger: logging.Logger):
         if use_gandalf:
             for expanded_message in expanded_messages:
                 callback_id = str(uuid.uuid4())[:8]
+                if "submitter" not in expanded_message:
+                    expanded_message["submitter"] = (
+                        "infores:shepherd-aragorn:{maturity}@{location}@{url}".format(
+                            maturity=settings.server_maturity,
+                            location=settings.server_location,
+                            url=settings.server_url,
+                        )
+                    )
+
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
                 logger.debug("""Sending lookup query to gandalf.""")
