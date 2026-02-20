@@ -28,7 +28,7 @@ async def sort_results_score(task, logger: logging.Logger):
     aord = current_op.get("ascending_or_descending", "descending")
     reverse = aord == "descending"
     try:
-        for ind, result in enumerate(message["message"]["results"]):
+        for ind, result in enumerate(results):
             message["message"]["results"][ind]["analyses"] = sorted(
                 result["analyses"],
                 key=lambda x: x.get("score", 0),
