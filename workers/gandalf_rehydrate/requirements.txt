@@ -1,1 +1,1 @@
-gandalf-csr>=0.1.6
+gandalf-csr>=0.1.7
