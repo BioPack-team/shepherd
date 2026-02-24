@@ -1,4 +1,4 @@
-"""Example ARA module."""
+"""Path scoring module"""
 
 import asyncio
 import json
@@ -139,6 +139,7 @@ async def score_paths(task, logger: logging.Logger):
     response_id = task[1]["response_id"]
     workflow = json.loads(task[1]["workflow"])
     message = await get_message(response_id, logger)
+
     current_op = workflow[0]
 
     try:
@@ -146,9 +147,7 @@ async def score_paths(task, logger: logging.Logger):
             source_qnode = qpath["subject"]
             target_qnode = qpath["object"]
 
-            for ind, result in enumerate(message["message"]["results"]):
-                # Fatal at the result level: if we can't find source/target
-                # node bindings the result is malformed, skip it
+            for ind, result in enumerate(message["message"].get("results", [])):
                 try:
                     source = result["node_bindings"][source_qnode][0]["id"]
                     target = result["node_bindings"][target_qnode][0]["id"]
@@ -158,9 +157,8 @@ async def score_paths(task, logger: logging.Logger):
                     )
                     continue
 
-                # Pass 1: collect all sentences for this result
-                tasks = []
-                for ana_ind, analysis in enumerate(result["analyses"]):
+                embed_tasks = []
+                for ana_ind, analysis in enumerate(result.get("analyses", [])):
                     try:
                         path_id = analysis["path_bindings"][qpath_id][0]["id"]
                         sentence = convert_path_to_sentence(
@@ -170,7 +168,7 @@ async def score_paths(task, logger: logging.Logger):
                             message["message"]["knowledge_graph"],
                             logger,
                         )
-                        tasks.append((ana_ind, sentence))
+                        embed_tasks.append((ana_ind, sentence))
                     except KeyError as e:
                         logger.error(
                             f"Result {ind}, analysis {ana_ind}: missing key {e}, skipping analysis."
@@ -182,13 +180,13 @@ async def score_paths(task, logger: logging.Logger):
                         )
                         continue
 
-                if not tasks:
+                if not embed_tasks:
                     logger.warning(
                         f"Result {ind}: no valid analyses to score, skipping."
                     )
                     continue
 
-                all_sentences = [t[1] for t in tasks]
+                all_sentences = [embed_task[1] for embed_task in embed_tasks]
                 try:
                     logger.info(f"Generating embeddings using device {device}")
                     all_embeddings = model.encode(
@@ -203,7 +201,7 @@ async def score_paths(task, logger: logging.Logger):
                     ] = 0.0
                     continue
 
-                for (ana_ind, _), embedding in zip(tasks, all_embeddings):
+                for (ana_ind, _), embedding in zip(embed_tasks, all_embeddings):
                     try:
                         probs = clf.predict_proba(embedding.reshape(1, -1))[:, 1]
                         message["message"]["results"][ind]["analyses"][ana_ind][

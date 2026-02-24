@@ -16,7 +16,7 @@ COPY ./pyproject.toml .
 RUN pip install .
 
 COPY ./workers/score_paths/requirements.txt .
-RUN pip install --timeout=3000 --retries=5 -r requirements.txt
+RUN pip install --timeout=300 --retries=5 -r requirements.txt
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('cambridgeltl/SapBERT-from-PubMedBERT-fulltext')"
 
 # Copy in files and make sure they are readable
