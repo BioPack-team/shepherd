@@ -99,11 +99,12 @@ async def shadowfax(task, logger: logging.Logger):
                         "subject": pinned_node_keys[0],
                         "object": "intermediate_0",
                         "predicates": [
+                            "biolink:physically_interacts_with",
+                            "biolink:genetically_interacts_with",
                             "biolink:contributes_to",
                             "biolink:contribution_from",
                             "biolink:affects",
                             "biolink:affected_by",
-                            "biolink:interacts_with",
                             "biolink:acts_upstream_of",
                             "biolink:has_upstream_actor",
                             "biolink:enables",
@@ -119,18 +120,20 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translates_to",
                             "biolink:translation_of",
                             "biolink:has_gene_product",
-                            "biolink:gene_product_of"
+                            "biolink:gene_product_of",
+                            "biolink:genetically_associated_with"
                         ],
                     },
                     "e1": {
                         "subject": "intermediate_0",
                         "object": "intermediate_1",
                         "predicates": [
+                            "biolink:physically_interacts_with",
+                            "biolink:genetically_interacts_with",
                             "biolink:contributes_to",
                             "biolink:contribution_from",
                             "biolink:affects",
                             "biolink:affected_by",
-                            "biolink:interacts_with",
                             "biolink:acts_upstream_of",
                             "biolink:has_upstream_actor",
                             "biolink:enables",
@@ -146,18 +149,20 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translates_to",
                             "biolink:translation_of",
                             "biolink:has_gene_product",
-                            "biolink:gene_product_of"
+                            "biolink:gene_product_of",
+                            "biolink:genetically_associated_with"
                         ],
                     },
                     "e2": {
                         "subject": "intermediate_1",
                         "object": pinned_node_keys[1],
                         "predicates": [
+                            "biolink:physically_interacts_with",
+                            "biolink:genetically_interacts_with",
                             "biolink:contributes_to",
                             "biolink:contribution_from",
                             "biolink:affects",
                             "biolink:affected_by",
-                            "biolink:interacts_with",
                             "biolink:acts_upstream_of",
                             "biolink:has_upstream_actor",
                             "biolink:enables",
@@ -173,7 +178,8 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translates_to",
                             "biolink:translation_of",
                             "biolink:has_gene_product",
-                            "biolink:gene_product_of"
+                            "biolink:gene_product_of",
+                            "biolink:genetically_associated_with"
                         ],
                     },
                 },
