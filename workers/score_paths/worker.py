@@ -245,5 +245,5 @@ async def poll_for_tasks():
 
 
 if __name__ == "__main__":
-    clf.load_model("workers/score_paths/model_weights/sapbert_classifier_weights.json")
+    clf.load_model("model_weights/sapbert_classifier_weights.json")
     asyncio.run(poll_for_tasks())
