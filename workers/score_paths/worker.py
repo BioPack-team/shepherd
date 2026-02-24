@@ -8,6 +8,7 @@ import uuid
 from xgboost import XGBClassifier
 from sentence_transformers import SentenceTransformer
 from bmt import Toolkit
+import torch
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
@@ -21,7 +22,8 @@ TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 clf = XGBClassifier()
 bmt = Toolkit()
-model = SentenceTransformer("cambridgeltl/SapBERT-from-PubMedBERT-fulltext")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = SentenceTransformer("cambridgeltl/SapBERT-from-PubMedBERT-fulltext", device=device)
 
 def get_most_specific_category(categories, logger):
     valid = []
@@ -188,6 +190,7 @@ async def score_paths(task, logger: logging.Logger):
 
                 all_sentences = [t[1] for t in tasks]
                 try:
+                    logger.info(f"Generating embeddings using device {device}")
                     all_embeddings = model.encode(
                         all_sentences, batch_size=32, show_progress_bar=False
                     )
