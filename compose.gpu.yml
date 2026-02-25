@@ -1,0 +1,9 @@
+services:
+  score_paths:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

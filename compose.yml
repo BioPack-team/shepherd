@@ -203,14 +203,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
 
   ######### Example ARA
   example_ara:

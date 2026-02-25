@@ -22,7 +22,7 @@ TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 clf = XGBClassifier()
 bmt = Toolkit()
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device, embedding_batch_size = ("cuda", 256) if torch.cuda.is_available() else ("cpu", 32)
 model = SentenceTransformer("cambridgeltl/SapBERT-from-PubMedBERT-fulltext", device=device)
 
 def get_most_specific_category(categories, logger):
@@ -188,9 +188,9 @@ async def score_paths(task, logger: logging.Logger):
 
                 all_sentences = [embed_task[1] for embed_task in embed_tasks]
                 try:
-                    logger.info(f"Generating embeddings using device {device}")
+                    logger.info(f"Generating embeddings using device {device} and batch size {embedding_batch_size}.")
                     all_embeddings = model.encode(
-                        all_sentences, batch_size=32, show_progress_bar=False
+                        all_sentences, batch_size=embedding_batch_size, show_progress_bar=False
                     )
                 except Exception as e:
                     logger.error(
@@ -200,7 +200,8 @@ async def score_paths(task, logger: logging.Logger):
                         "score"
                     ] = 0.0
                     continue
-
+                    
+                logger.info(f"Scoring paths from embeddings.")
                 for (ana_ind, _), embedding in zip(embed_tasks, all_embeddings):
                     try:
                         probs = clf.predict_proba(embedding.reshape(1, -1))[:, 1]
