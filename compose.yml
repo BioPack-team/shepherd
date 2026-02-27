@@ -204,7 +204,6 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env
 
-
   ######### Example ARA
   example_ara:
     container_name: example_ara
