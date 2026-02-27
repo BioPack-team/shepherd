@@ -22,7 +22,7 @@ TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 clf = XGBClassifier()
 bmt = Toolkit()
-device, embedding_batch_size = ("cuda", 256) if torch.cuda.is_available() else ("cpu", 32)
+device, embedding_batch_size = ("cuda", 128) if torch.cuda.is_available() else ("cpu", 32)
 model = SentenceTransformer("cambridgeltl/SapBERT-from-PubMedBERT-fulltext", device=device)
 
 def get_most_specific_category(categories, logger):
@@ -227,6 +227,9 @@ async def score_paths(task, logger: logging.Logger):
     await save_message(response_id, message, logger)
 
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
