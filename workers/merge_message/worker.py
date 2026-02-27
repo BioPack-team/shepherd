@@ -327,7 +327,9 @@ def filter_repeated_nodes(response, logger: logging.Logger):
     original_result_count = len(response["message"].get("results", []))
     if original_result_count == 0:
         return
-    results = list(filter(lambda x: has_unique_nodes(x), response["message"]["results"]))
+    results = list(
+        filter(lambda x: has_unique_nodes(x), response["message"]["results"])
+    )
     response["message"]["results"] = results
     if len(results) != original_result_count:
         filter_kgraph_orphans(response, logger)
