@@ -120,6 +120,14 @@ async def aragorn_lookup(task, logger: logging.Logger):
     parameters["tiers"] = parameters.get("tiers") or [settings.default_data_tier]
     use_gandalf = parameters.get("gandalf", False)
     message["parameters"] = parameters
+    if "submitter" not in message:
+        message["submitter"] = (
+            "infores:shepherd-aragorn:{maturity}@{location}@{url}".format(
+                maturity=settings.server_maturity,
+                location=settings.server_location,
+                url=settings.server_url,
+            )
+        )
     try:
         infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     except Exception as e:
@@ -166,6 +174,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
         if use_gandalf:
             for expanded_message in expanded_messages:
                 callback_id = str(uuid.uuid4())[:8]
+
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
                 logger.debug("""Sending lookup query to gandalf.""")
@@ -345,6 +354,7 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
         {
             "message": {"query_graph": qg},
             "parameters": input_message["parameters"],
+            "submitter": input_message["submitter"],
         }
     ]
     # If we don't have any AMIE expansions, this will just generate the direct query
@@ -371,6 +381,7 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
         if "log_level" in input_message:
             message["log_level"] = input_message["log_level"]
         message["parameters"] = input_message["parameters"]
+        message["submitter"] = input_message["submitter"]
         messages.append(message)
     return messages
 

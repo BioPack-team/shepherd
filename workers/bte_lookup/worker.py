@@ -118,6 +118,14 @@ async def bte_lookup(task, logger: logging.Logger):
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
     parameters["tiers"] = parameters.get("tiers") or [settings.default_data_tier]
     message["parameters"] = parameters
+    if "submitter" not in message:
+        message["submitter"] = (
+            "infores:shepherd-bte:{maturity}@{location}@{url}".format(
+                maturity=settings.server_maturity,
+                location=settings.server_location,
+                url=settings.server_url,
+            )
+        )
     try:
         infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     except Exception as e:
@@ -354,6 +362,7 @@ def fill_templates(
             del message["message"]["knowledge_graph"]
         message["parameters"] = query_body["parameters"]
         message["workflow"] = [{"id": "lookup"}]
+        message["submitter"] = query_body["submitter"]
         filled_templates.append(message)
 
     return filled_templates
@@ -404,6 +413,7 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
         {
             "message": {"query_graph": query_graph},
             "parameters": query_dict["parameters"],
+            "submitter": query_dict["submitter"],
         }
     ]
     expanded_queries.extend(filled_templates)
