@@ -339,6 +339,21 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env
 
+  arax_rank:
+    container_name: arax_rank
+    build:
+      context: .
+      dockerfile: workers/arax_rank/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
 ######### BTE
   bte:
     container_name: bte

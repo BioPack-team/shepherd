@@ -1,6 +1,7 @@
 """Gandalf lookup module for Shepherd workflow runner."""
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -160,6 +161,15 @@ if __name__ == "__main__":
     logger.info("Initializing Biolink Model Toolkit...")
     bmt = Toolkit()
     logger.info("BMT initialized.")
+
+    # Freeze all objects allocated so far (graph + BMT) into a permanent
+    # generation that the cyclic GC will never scan.  This makes Gen 2
+    # collections cheap because they skip the large CSR arrays.
+    gc.collect()
+    gc.freeze()
+    # Raise thresholds so Gen 2 collections are less frequent even for
+    # the (now-small) unfrozen query-time object set.
+    gc.set_threshold(50_000, 50, 50)
 
     logger.info(f"Starting Gandalf worker (consumer={CONSUMER})...")
     asyncio.run(poll_for_tasks(graph, bmt))
