@@ -119,7 +119,7 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translates_to",
                             "biolink:translation_of",
                             "biolink:has_gene_product",
-                            "biolink:gene_product_of"
+                            "biolink:gene_product_of",
                         ],
                     },
                     "e1": {
@@ -146,7 +146,7 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translates_to",
                             "biolink:translation_of",
                             "biolink:has_gene_product",
-                            "biolink:gene_product_of"
+                            "biolink:gene_product_of",
                         ],
                     },
                     "e2": {
@@ -173,7 +173,7 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translates_to",
                             "biolink:translation_of",
                             "biolink:has_gene_product",
-                            "biolink:gene_product_of"
+                            "biolink:gene_product_of",
                         ],
                     },
                 },

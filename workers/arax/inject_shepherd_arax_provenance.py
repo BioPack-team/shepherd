@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-
 SHEPHERD_ARAX_SOURCE = {
     "resource_id": "infores:shepherd-arax",
     "resource_role": "aggregator_knowledge_source",
