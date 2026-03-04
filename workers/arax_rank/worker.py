@@ -20,7 +20,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 
 from ranker import arax_rank
 
@@ -92,40 +92,55 @@ async def poll_for_tasks() -> None:
     cpu_count = min(cpu_count, TASK_LIMIT)
     executor = ProcessPoolExecutor(max_workers=cpu_count)
 
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        span = tracer.start_span(STREAM, context=parent_ctx)
-        start = time.time()
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                start = time.time()
+                span = tracer.start_span(STREAM, context=parent_ctx)
 
-        # Get task details
-        response_id = task[1]["response_id"]
-        workflow = json.loads(task[1]["workflow"])
+                try:
+                    # Get task details
+                    response_id = task[1]["response_id"]
 
-        # Get message from Redis
-        message = await get_message(response_id, logger)
+                    # Get message from Redis
+                    message = await get_message(response_id, logger)
 
-        if message is not None:
-            # Run ranking in process pool for CPU-intensive operations
-            ranked_message = await loop.run_in_executor(
-                executor,
-                rank_message,
-                message,
-                logger,
-            )
-            if ranked_message is None:
-                logger.error("Ranking returned None. Returning original message.")
-                ranked_message = message
-            await save_message(response_id, ranked_message, logger)
-        else:
-            logger.error(f"Failed to get {response_id} for ranking.")
+                    if message is not None:
+                        # Run ranking in process pool for CPU-intensive operations
+                        ranked_message = await loop.run_in_executor(
+                            executor,
+                            rank_message,
+                            message,
+                            logger,
+                        )
+                        if ranked_message is None:
+                            logger.error("Ranking returned None. Returning original message.")
+                            ranked_message = message
+                        await save_message(response_id, ranked_message, logger)
+                    else:
+                        logger.error(f"Failed to get {response_id} for ranking.")
 
-        # Pass to next operation in workflow
-        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-
-        logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
-        span.end()
-        limiter.release()
+                    # Always wrap up the task to ACK it in the broker
+                    try:
+                        await wrap_up_task(STREAM, GROUP, task, logger)
+                    except Exception as e:
+                        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+                except asyncio.CancelledError:
+                    logger.warning(f"Task {task[0]} was cancelled")
+                except Exception as e:
+                    logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+                    await handle_task_failure(STREAM, GROUP, task, logger)
+                finally:
+                    logger.info(f"Finished task {task[0]} in {time.time() - start}")
+                    span.end()
+                    limiter.release()
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

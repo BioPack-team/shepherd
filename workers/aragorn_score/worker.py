@@ -16,7 +16,7 @@ import numpy as np
 
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 
 # Queue name
 STREAM = "aragorn.score"
@@ -1218,38 +1218,55 @@ def aragorn_score(in_message, logger: logging.Logger):
 
 
 async def poll_for_tasks():
+    """On initialization, poll indefinitely for available tasks."""
     loop = asyncio.get_running_loop()
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
     executor = ProcessPoolExecutor(max_workers=cpu_count)
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        span = tracer.start_span(STREAM, context=parent_ctx)
-        start = time.time()
-        # given a task, get the message from the db
-        response_id = task[1]["response_id"]
-        workflow = json.loads(task[1]["workflow"])
-        message = await get_message(response_id, logger)
-        if message is not None:
-            scored_message = await loop.run_in_executor(
-                executor,
-                aragorn_score,
-                message,
-                logger,
-            )
-            if scored_message is None:
-                logger.error("Failed to score message. Returning unscored.")
-                scored_message = message
-            await save_message(response_id, scored_message, logger)
-        else:
-            logger.error(f"Failed to get {response_id} for scoring.")
-        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-
-        logger.info(f"Finished task {task[0]} in {time.time() - start}")
-        span.end()
-        limiter.release()
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                start = time.time()
+                span = tracer.start_span(STREAM, context=parent_ctx)
+                try:
+                    # given a task, get the message from the db
+                    response_id = task[1]["response_id"]
+                    message = await get_message(response_id, logger)
+                    if message is not None:
+                        scored_message = await loop.run_in_executor(
+                            executor,
+                            aragorn_score,
+                            message,
+                            logger,
+                        )
+                        if scored_message is None:
+                            logger.error("Failed to score message. Returning unscored.")
+                            scored_message = message
+                        await save_message(response_id, scored_message, logger)
+                    else:
+                        logger.error(f"Failed to get {response_id} for scoring.")
+                    # Always wrap up the task to ACK it in the broker
+                    try:
+                        await wrap_up_task(STREAM, GROUP, task, logger)
+                    except Exception as e:
+                        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+                except asyncio.CancelledError:
+                    logger.warning(f"Task {task[0]} was cancelled")
+                except Exception as e:
+                    logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+                    await handle_task_failure(STREAM, GROUP, task, logger)
+                finally:
+                    logger.info(f"Finished task {task[0]} in {time.time() - start}")
+                    span.end()
+                    limiter.release()
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

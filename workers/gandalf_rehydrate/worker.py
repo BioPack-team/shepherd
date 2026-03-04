@@ -18,7 +18,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 
 # Queue name
 STREAM = "gandalf.rehydrate"
@@ -80,47 +80,57 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1)
 
-    async for task, parent_ctx, task_logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        span = tracer.start_span(STREAM, context=parent_ctx)
-        start = time.time()
-        task_logger.info("Got task for Gandalf Rehydration")
-        workflow = json.loads(task[1]["workflow"])
-        response_id = task[1]["response_id"]
+    while True:
         try:
-            message = await get_message(response_id, task_logger)
-            if message is None:
-                task_logger.error(f"Failed to get {response_id} for rehydration.")
-                continue
+            async for task, parent_ctx, task_logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                span = tracer.start_span(STREAM, context=parent_ctx)
+                start = time.time()
+                task_logger.info("Got task for Gandalf Rehydration")
+                workflow = json.loads(task[1]["workflow"])
+                response_id = task[1]["response_id"]
+                try:
+                    message = await get_message(response_id, task_logger)
+                    if message is None:
+                        task_logger.error(f"Failed to get {response_id} for rehydration.")
+                        continue
 
-            hydrated_response = await loop.run_in_executor(
-                executor,
-                gandalf_rehydration,
-                graph,
-                bmt,
-                message,
-                task_logger,
-            )
+                    hydrated_response = await loop.run_in_executor(
+                        executor,
+                        gandalf_rehydration,
+                        graph,
+                        bmt,
+                        message,
+                        task_logger,
+                    )
 
-            if DEBUG_RESPONSES and len(hydrated_response["message"]["results"]) > 0:
-                debug_dir = Path("debug")
-                debug_dir.mkdir(exist_ok=True)
-                debug_path = debug_dir / f"{response_id}_response.json"
-                with open(debug_path, "w", encoding="utf-8") as f:
-                    json.dump(hydrated_response, f, indent=2)
+                    if DEBUG_RESPONSES and len(hydrated_response["message"]["results"]) > 0:
+                        debug_dir = Path("debug")
+                        debug_dir.mkdir(exist_ok=True)
+                        debug_path = debug_dir / f"{response_id}_response.json"
+                        with open(debug_path, "w", encoding="utf-8") as f:
+                            json.dump(hydrated_response, f, indent=2)
 
-            task_logger.info(f"Saving response {response_id} to redis")
-            await save_message(response_id, hydrated_response, task_logger)
-            task_logger.info(f"Saved response {response_id} to redis")
+                    await save_message(response_id, hydrated_response, task_logger)
+                    # Always wrap up the task to ACK it in the broker
+                    try:
+                        await wrap_up_task(STREAM, GROUP, task, logger)
+                    except Exception as e:
+                        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
 
-        except Exception:
-            task_logger.exception(f"Task {task[0]} failed")
-        finally:
-            await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-            task_logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
-            span.end()
-            limiter.release()
+                except Exception:
+                    task_logger.exception(f"Task {task[0]} failed")
+                    await handle_task_failure(STREAM, GROUP, task, logger)
+                finally:
+                    task_logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+                    span.end()
+                    limiter.release()
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

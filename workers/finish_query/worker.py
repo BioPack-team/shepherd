@@ -23,13 +23,16 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
+CALLBACK_RETRIES = 3
 
 
 async def finish_query(task, logger: logging.Logger):
+    """Do all the wrap up necessary for a query."""
     start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
+    status = task[1].get("status", "OK")
     query_state = await get_query_state(query_id, logger)
 
     if query_state is None:
@@ -41,37 +44,59 @@ async def finish_query(task, logger: logging.Logger):
             message = await get_message(response_id, logger)
             logs = await get_logs(response_id, logger)
             message["logs"] = logs
-            try:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    response = await client.post(
-                        callback_url,
-                        json=message,
-                    )
-                    response.raise_for_status()
-                    logger.info(f"Sent response back to {callback_url}")
-            except Exception as e:
-                logger.error(f"Failed to send callback to {callback_url}: {e}")
+            for attempt in range(CALLBACK_RETRIES):
+                try:
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        response = await client.post(
+                            callback_url,
+                            json=message,
+                        )
+                        response.raise_for_status()
+                        logger.info(f"Sent response back to {callback_url}")
+                        break
+                except Exception as e:
+                    logger.error(f"Failed to send callback to {callback_url}: {e}")
+                    await asyncio.sleep(1 * (2**attempt))
 
-        await set_query_completed(query_id, "OK", logger)
+        await set_query_completed(query_id, status, logger)
 
-    await mark_task_as_complete(STREAM, GROUP, task[0], logger)
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
-async def process_task(task, parent_ctx, logger, limiter):
+async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
+    """Process a given task and ACK in redis."""
+    start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await finish_query(task, logger)
+    except asyncio.CancelledError:
+        logger.warning(f"Task {task[0]} was cancelled")
+    except Exception as e:
+        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
     finally:
+        # Always wrap up the task to ACK it in the broker
+        try:
+            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+        except Exception as e:
+            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
         span.end()
         limiter.release()
+        logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+    """On initialization, poll indefinitely for available tasks."""
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":
