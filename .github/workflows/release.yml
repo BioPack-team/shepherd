@@ -49,6 +49,7 @@ jobs:
           - aragorn_pathfinder
           - aragorn_score
           - arax
+          - arax_rank
           - bte
           - bte_lookup
           - filter_analyses_top_n
