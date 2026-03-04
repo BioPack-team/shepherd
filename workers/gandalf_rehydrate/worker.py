@@ -93,7 +93,9 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                 try:
                     message = await get_message(response_id, task_logger)
                     if message is None:
-                        task_logger.error(f"Failed to get {response_id} for rehydration.")
+                        task_logger.error(
+                            f"Failed to get {response_id} for rehydration."
+                        )
                         continue
 
                     hydrated_response = await loop.run_in_executor(
@@ -105,7 +107,10 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                         task_logger,
                     )
 
-                    if DEBUG_RESPONSES and len(hydrated_response["message"]["results"]) > 0:
+                    if (
+                        DEBUG_RESPONSES
+                        and len(hydrated_response["message"]["results"]) > 0
+                    ):
                         debug_dir = Path("debug")
                         debug_dir.mkdir(exist_ok=True)
                         debug_path = debug_dir / f"{response_id}_response.json"
@@ -123,7 +128,9 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                     task_logger.exception(f"Task {task[0]} failed")
                     await handle_task_failure(STREAM, GROUP, task, logger)
                 finally:
-                    task_logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+                    task_logger.info(
+                        f"Finished task {task[0]} in {time.time() - start:.2f}s"
+                    )
                     span.end()
                     limiter.release()
         except asyncio.CancelledError:

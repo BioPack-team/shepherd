@@ -328,10 +328,12 @@ async def sipr(task, logger: logging.Logger):
     except NotImplementedError:
         logger.info("SIPR only supports Set Input Queries.")
 
-    task[1]["workflow"] = json.dumps([
-        {"id": "sipr"},
-        {"id": "sort_results_score"},
-    ])
+    task[1]["workflow"] = json.dumps(
+        [
+            {"id": "sipr"},
+            {"id": "sort_results_score"},
+        ]
+    )
 
 
 async def process_task(task, parent_ctx, logger, limiter):

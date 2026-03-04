@@ -116,7 +116,9 @@ async def poll_for_tasks() -> None:
                             logger,
                         )
                         if ranked_message is None:
-                            logger.error("Ranking returned None. Returning original message.")
+                            logger.error(
+                                "Ranking returned None. Returning original message."
+                            )
                             ranked_message = message
                         await save_message(response_id, ranked_message, logger)
                     else:
@@ -130,7 +132,10 @@ async def poll_for_tasks() -> None:
                 except asyncio.CancelledError:
                     logger.warning(f"Task {task[0]} was cancelled")
                 except Exception as e:
-                    logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+                    logger.error(
+                        f"Task {task[0]} failed with unhandled error: {e}",
+                        exc_info=True,
+                    )
                     await handle_task_failure(STREAM, GROUP, task, logger)
                 finally:
                     logger.info(f"Finished task {task[0]} in {time.time() - start}")

@@ -1256,7 +1256,10 @@ async def poll_for_tasks():
                 except asyncio.CancelledError:
                     logger.warning(f"Task {task[0]} was cancelled")
                 except Exception as e:
-                    logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+                    logger.error(
+                        f"Task {task[0]} failed with unhandled error: {e}",
+                        exc_info=True,
+                    )
                     await handle_task_failure(STREAM, GROUP, task, logger)
                 finally:
                     logger.info(f"Finished task {task[0]} in {time.time() - start}")

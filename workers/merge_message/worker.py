@@ -657,13 +657,18 @@ async def poll_for_tasks():
                             f"Failed to obtain lock for {query_id}. Discarding callback response."
                         )
                 except Exception as e:
-                    logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+                    logger.error(
+                        f"Task {task[0]} failed with unhandled error: {e}",
+                        exc_info=True,
+                    )
                 finally:
                     try:
                         await mark_task_as_complete(STREAM, GROUP, task[0], logger)
                     except Exception as e:
                         logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-                    logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+                    logger.info(
+                        f"Finished task {task[0]} in {time.time() - start:.2f}s"
+                    )
                     span.end()
                     limiter.release()
         except asyncio.CancelledError:

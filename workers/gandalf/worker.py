@@ -123,10 +123,15 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                         task_logger,
                     )
 
-                    if DEBUG_RESPONSES and len(lookup_response["message"]["results"]) > 0:
+                    if (
+                        DEBUG_RESPONSES
+                        and len(lookup_response["message"]["results"]) > 0
+                    ):
                         debug_dir = Path("debug")
                         debug_dir.mkdir(exist_ok=True)
-                        debug_path = debug_dir / f"{query_id}_{callback_id}_response.json"
+                        debug_path = (
+                            debug_dir / f"{query_id}_{callback_id}_response.json"
+                        )
                         with open(debug_path, "w", encoding="utf-8") as f:
                             json.dump(lookup_response, f, indent=2)
 
@@ -153,7 +158,9 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                         await mark_task_as_complete(STREAM, GROUP, task[0], logger)
                     except Exception as e:
                         logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-                    task_logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+                    task_logger.info(
+                        f"Finished task {task[0]} in {time.time() - start:.2f}s"
+                    )
                     span.end()
                     limiter.release()
         except asyncio.CancelledError:
