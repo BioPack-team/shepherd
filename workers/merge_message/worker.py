@@ -235,6 +235,8 @@ def queries_equivalent(query1, query2):
                 del node["member_ids"]
             if "ids" in node and node["ids"] is None:
                 del node["ids"]
+            if "categories" in node and node["categories"] is None:
+                del node["categories"]
         for edge in q["edges"].values():
             if (
                 "attribute_constraints" in edge
