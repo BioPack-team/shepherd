@@ -82,75 +82,92 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1)
 
-    async for task, parent_ctx, task_logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        span = tracer.start_span(STREAM, context=parent_ctx)
-        start = time.time()
+    while True:
         try:
-            task_logger.info("Got task for Gandalf")
-            response_id = task[1]["response_id"]
-            callback_id = task[1]["callback_id"]
-            target = task[1].get("target", "unknown")
+            async for task, parent_ctx, task_logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                span = tracer.start_span(STREAM, context=parent_ctx)
+                start = time.time()
+                try:
+                    task_logger.info("Got task for Gandalf")
+                    response_id = task[1]["response_id"]
+                    callback_id = task[1]["callback_id"]
+                    target = task[1].get("target", "unknown")
 
-            task_logger.info("Getting message")
-            message = await get_message(callback_id, task_logger)
-            if message is None:
-                task_logger.error(f"Failed to get {response_id} for lookup.")
-                continue
+                    task_logger.info("Getting message")
+                    message = await get_message(callback_id, task_logger)
+                    if message is None:
+                        task_logger.error(f"Failed to get {response_id} for lookup.")
+                        continue
 
-            query_id = await get_callback_query_id(callback_id, task_logger)
-            task_logger.info(f"Got original query id: {query_id}")
-            if query_id is None:
-                task_logger.error("Failed to get original query id.")
-                continue
+                    query_id = await get_callback_query_id(callback_id, task_logger)
+                    task_logger.info(f"Got original query id: {query_id}")
+                    if query_id is None:
+                        task_logger.error("Failed to get original query id.")
+                        continue
 
-            query_state = await get_query_state(query_id, task_logger)
-            if query_state is None:
-                task_logger.error("Failed to get query state.")
-                continue
+                    query_state = await get_query_state(query_id, task_logger)
+                    if query_state is None:
+                        task_logger.error("Failed to get query state.")
+                        continue
 
-            response_id = query_state[7]
+                    response_id = query_state[7]
 
-            lookup_response = await loop.run_in_executor(
-                executor,
-                gandalf_lookup,
-                graph,
-                bmt,
-                message,
-                task_logger,
-            )
+                    lookup_response = await loop.run_in_executor(
+                        executor,
+                        gandalf_lookup,
+                        graph,
+                        bmt,
+                        message,
+                        task_logger,
+                    )
 
-            if DEBUG_RESPONSES and len(lookup_response["message"]["results"]) > 0:
-                debug_dir = Path("debug")
-                debug_dir.mkdir(exist_ok=True)
-                debug_path = debug_dir / f"{query_id}_{callback_id}_response.json"
-                with open(debug_path, "w", encoding="utf-8") as f:
-                    json.dump(lookup_response, f, indent=2)
+                    if (
+                        DEBUG_RESPONSES
+                        and len(lookup_response["message"]["results"]) > 0
+                    ):
+                        debug_dir = Path("debug")
+                        debug_dir.mkdir(exist_ok=True)
+                        debug_path = (
+                            debug_dir / f"{query_id}_{callback_id}_response.json"
+                        )
+                        with open(debug_path, "w", encoding="utf-8") as f:
+                            json.dump(lookup_response, f, indent=2)
 
-            task_logger.info(f"Saving callback {callback_id} to redis")
-            await save_message(callback_id, lookup_response, task_logger)
-            task_logger.info(f"Saved callback {callback_id} to redis")
+                    task_logger.info(f"Saving callback {callback_id} to redis")
+                    await save_message(callback_id, lookup_response, task_logger)
+                    task_logger.info(f"Saved callback {callback_id} to redis")
 
-            await add_task(
-                "merge_message",
-                {
-                    "target": target,
-                    "query_id": query_id,
-                    "response_id": response_id,
-                    "callback_id": callback_id,
-                    "log_level": task[1].get("log_level", 20),
-                    "otel": task[1]["otel"],
-                },
-                task_logger,
-            )
-        except Exception:
-            task_logger.exception(f"Task {task[0]} failed")
-        finally:
-            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-            task_logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
-            span.end()
-            limiter.release()
+                    await add_task(
+                        "merge_message",
+                        {
+                            "target": target,
+                            "query_id": query_id,
+                            "response_id": response_id,
+                            "callback_id": callback_id,
+                            "log_level": task[1].get("log_level", 20),
+                            "otel": task[1]["otel"],
+                        },
+                        task_logger,
+                    )
+                except Exception:
+                    task_logger.exception(f"Task {task[0]} failed")
+                finally:
+                    try:
+                        await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+                    except Exception as e:
+                        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+                    task_logger.info(
+                        f"Finished task {task[0]} in {time.time() - start:.2f}s"
+                    )
+                    span.end()
+                    limiter.release()
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

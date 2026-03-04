@@ -75,10 +75,11 @@ async def wrap_up_task(
     stream: str,
     group: str,
     task: Tuple[str, dict],
-    workflow: List[dict],
     logger: logging.Logger,
 ):
     """Call the next task and mark this one as complete."""
+    workflow = json.loads(task[1]["workflow"])
+    logger.info(workflow)
     # remove the operation we just did
     if stream == workflow[0]["id"]:
         # make sure the worker is in the workflow
@@ -104,6 +105,30 @@ async def wrap_up_task(
 
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
+
+
+async def handle_task_failure(
+    stream: str,
+    group: str,
+    task: Tuple[str, dict],
+    logger: logging.Logger,
+) -> None:
+    """Handle any full query failures."""
+    await mark_task_as_complete(stream, group, task[0], logger)
+    await save_logs(task[1]["response_id"], logger)
+    logger.error("Sending task straight to finish_query.")
+    await add_task(
+        "finish_query",
+        {
+            "query_id": task[1]["query_id"],
+            "response_id": task[1]["response_id"],
+            "workflow": "[]",
+            "log_level": task[1].get("log_level", 20),
+            "otel": task[1]["otel"],
+            "status": "ERROR",
+        },
+        logger,
+    )
 
 
 def recursive_get_edge_support_graphs(

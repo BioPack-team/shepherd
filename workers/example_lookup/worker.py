@@ -9,14 +9,16 @@ from pathlib import Path
 
 import httpx
 
+from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_callback_id,
+    cleanup_callbacks,
     get_message,
     get_running_callbacks,
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 
 # Queue name
 STREAM = "example.lookup"
@@ -31,15 +33,11 @@ async def example_lookup(task, logger: logging.Logger):
 
     Just sends a test response back to the server callback endpoint.
     """
-    start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
-    workflow = json.loads(task[1]["workflow"])
-    try:
-        message = await get_message(query_id, logger)
-    except Exception as e:
-        logger.error(f"Task {task[0]}: Failed to get message for query {query_id}: {e}")
-        raise
+    message = await get_message(query_id, logger)
+    parameters = message.get("parameters") or {}
+    parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
 
     # Do query expansion or whatever lookup process
     # We're going to stub a response
@@ -93,57 +91,56 @@ async def example_lookup(task, logger: logging.Logger):
 
     # this worker might have a timeout set for if the lookups don't finish within a
     # certain amount of time
-    MAX_QUERY_TIME = 300
+    MAX_QUERY_TIME = message["parameters"]["timeout"]
     start_time = time.time()
-    try:
-        while time.time() - start_time < MAX_QUERY_TIME:
-            try:
-                # see if there are existing lookups going
-                running_callback_ids = await get_running_callbacks(query_id, logger)
-            except Exception as e:
-                logger.error(f"Task {task[0]}: Failed to check running callbacks: {e}")
-                # Brief backoff then retry the check rather than giving up
-                await asyncio.sleep(5)
-                continue
-            # logger.info(f"Got back {len(running_callback_ids)} running lookups")
-            # if there aren't, lookup is complete and we need to pass on to next
-            # workflow operation
-            if len(running_callback_ids) == 0:
-                break
+    running_callback_ids = [""]
+    while time.time() - start_time < MAX_QUERY_TIME:
+        try:
+            # see if there are existing lookups going
+            running_callback_ids = await get_running_callbacks(query_id, logger)
+        except Exception:
+            # Brief backoff then retry the check rather than giving up
+            await asyncio.sleep(5)
+            continue
+        # if there aren't, lookup is complete and we need to pass on to next
+        # workflow operation
+        if len(running_callback_ids) == 0:
+            break
 
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]}: Cancelled while waiting for callbacks.")
+        await asyncio.sleep(1)
 
-    # Always wrap up the task to ACK it in the broker
-    try:
-        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-    except Exception as e:
-        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-        raise
-    logger.info(f"Finished task {task[0]} in {time.time() - start}")
+    if time.time() - start_time > MAX_QUERY_TIME:
+        logger.warning(
+            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
+        )
+        # logger.warning(f"Running callbacks: {running_callback_ids}")
+        await cleanup_callbacks(query_id, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
+    """Process a given task and ACK in redis."""
+    start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await example_lookup(task, logger)
+        # Always wrap up the task to ACK it in the broker
+        try:
+            await wrap_up_task(STREAM, GROUP, task, logger)
+        except Exception as e:
+            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
     except asyncio.CancelledError:
         logger.warning(f"Task {task[0]} was cancelled")
     except Exception as e:
         logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        # Attempt to ACK the task so it doesn't get redelivered forever
-        try:
-            workflow = json.loads(task[1])["workflow"]
-            await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-        except Exception as wrap_err:
-            logger.error(f"Task {task[0]}: Also failed wrap up after error: {wrap_err}")
+        await handle_task_failure(STREAM, GROUP, task, logger)
     finally:
         span.end()
         limiter.release()
+        logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
+    """On initialization, poll indefinitely for available tasks."""
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
