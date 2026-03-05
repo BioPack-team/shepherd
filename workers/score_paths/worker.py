@@ -157,6 +157,7 @@ async def score_paths(task, logger: logging.Logger):
                     continue
 
                 embed_tasks = []
+                embedding_index = []
                 for analysis_ind, analysis in enumerate(result.get("analyses", [])):
                     try:
                         path_id = analysis["path_bindings"][qpath_id][0]["id"]
@@ -168,6 +169,7 @@ async def score_paths(task, logger: logging.Logger):
                             logger,
                         )
                         embed_tasks.append(sentence)
+                        embedding_index.append(analysis_ind)
                     except KeyError as e:
                         logger.error(
                             f"Result {ind}, analysis {analysis_ind}: missing key {e}, skipping analysis."
@@ -200,7 +202,7 @@ async def score_paths(task, logger: logging.Logger):
                     continue
                     
                 logger.info(f"Scoring paths from embeddings.")
-                for analysis_ind, embedding in enumerate(all_embeddings):
+                for analysis_ind, embedding in zip(embedding_index, all_embeddings):
                     try:
                         probs = clf.predict_proba(embedding.reshape(1, -1))[:, 1]
                         message["message"]["results"][ind]["analyses"][analysis_ind][
