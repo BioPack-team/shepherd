@@ -158,7 +158,7 @@ async def score_paths(task, logger: logging.Logger):
                     continue
 
                 embed_tasks = []
-                for ana_ind, analysis in enumerate(result.get("analyses", [])):
+                for analysis_ind, analysis in enumerate(result.get("analyses", [])):
                     try:
                         path_id = analysis["path_bindings"][qpath_id][0]["id"]
                         sentence = convert_path_to_sentence(
@@ -168,15 +168,15 @@ async def score_paths(task, logger: logging.Logger):
                             message["message"]["knowledge_graph"],
                             logger,
                         )
-                        embed_tasks.append((ana_ind, sentence))
+                        embed_tasks.append(sentence)
                     except KeyError as e:
                         logger.error(
-                            f"Result {ind}, analysis {ana_ind}: missing key {e}, skipping analysis."
+                            f"Result {ind}, analysis {analysis_ind}: missing key {e}, skipping analysis."
                         )
                         continue
                     except ValueError as e:
                         logger.error(
-                            f"Result {ind}, analysis {ana_ind}: could not build sentence."
+                            f"Result {ind}, analysis {analysis_ind}: could not build sentence."
                         )
                         continue
 
@@ -196,23 +196,22 @@ async def score_paths(task, logger: logging.Logger):
                     logger.error(
                         f"Result {ind}: embedding failed due to {e}."
                     )
-                    message["message"]["results"][ind]["analyses"][ana_ind][
-                        "score"
-                    ] = 0.0
+                    for analysis in message["message"]["results"][ind]["analyses"]:
+                        analysis["score"] = 0.0
                     continue
                     
                 logger.info(f"Scoring paths from embeddings.")
-                for (ana_ind, _), embedding in zip(embed_tasks, all_embeddings):
+                for analysis_ind, embedding in enumerate(all_embeddings):
                     try:
                         probs = clf.predict_proba(embedding.reshape(1, -1))[:, 1]
-                        message["message"]["results"][ind]["analyses"][ana_ind][
+                        message["message"]["results"][ind]["analyses"][analysis_ind][
                             "score"
                         ] = float(probs[0])
                     except Exception as e:
                         logger.error(
-                            f"Result {ind}, analysis {ana_ind}: scoring failed due to {e}."
+                            f"Result {ind}, analysis {analysis_ind}: scoring failed due to {e}."
                         )
-                        message["message"]["results"][ind]["analyses"][ana_ind][
+                        message["message"]["results"][ind]["analyses"][analysis_ind][
                             "score"
                         ] = 0.0
                         continue
@@ -229,6 +228,7 @@ async def score_paths(task, logger: logging.Logger):
     await wrap_up_task(STREAM, GROUP, task, workflow, logger)
 
     if torch.cuda.is_available():
+        # Torch keeps vram allocated unless we clear cache.
         torch.cuda.empty_cache()
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
