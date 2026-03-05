@@ -130,7 +130,6 @@ def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
             f" {knowledge_graph['nodes'][path_node]['name']} (a {node_cat.name})"
         )
 
-    logger.debug(f"Generated sentence: {path_sentence}")
     return path_sentence
 
 async def score_paths(task, logger: logging.Logger):
