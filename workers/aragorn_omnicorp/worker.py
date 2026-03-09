@@ -25,6 +25,11 @@ async def aragorn_omnicorp(task, logger: logging.Logger):
     response_id = task[1]["response_id"]
     message = await get_message(response_id, logger)
 
+    workflow = None
+    if "workflow" in message:
+        workflow = message["workflow"]
+        del message["workflow"]
+
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
             settings.omnicorp_url,
@@ -33,6 +38,8 @@ async def aragorn_omnicorp(task, logger: logging.Logger):
         response.raise_for_status()
 
         response = response.json()
+        if workflow is not None:
+            response["workflow"] = workflow
         await save_message(response_id, response, logger)
 
 
