@@ -50,7 +50,6 @@ async def arax(task, logger: logging.Logger):
         await wrap_up_task(STREAM, GROUP, task, workflow, logger)
     else:
         try:
-            workflow = [{"id": "arax"}]
             message["submitter"] = "Shepherd"
             logger.info(f"Get the message from db {message}")
             headers = {"Content-Type": "application/json"}
@@ -64,7 +63,6 @@ async def arax(task, logger: logging.Logger):
         response_id = task[1]["response_id"]
         await save_message(response_id, result, logger)
         task[1]["workflow"] = json.dumps([{"id": "arax"}])
-
 
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
