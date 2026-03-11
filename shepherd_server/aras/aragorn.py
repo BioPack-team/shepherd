@@ -19,7 +19,7 @@ ARAGORN = FastAPI(title="Shepherd Aragorn")
 
 @ARAGORN.post("/query")
 async def sync_query(
-    query: dict = Body(..., example=default_input_query),
+    query: dict = Body(..., examples=[default_input_query]),
 ) -> Response:
     response = await run_sync_query(ARATargetEnum.ARAGORN, query)
     return response
@@ -27,7 +27,7 @@ async def sync_query(
 
 @ARAGORN.post("/asyncquery")
 async def async_query(
-    query: dict = Body(..., example=default_input_query),
+    query: dict = Body(..., examples=[default_input_query]),
 ) -> Response:
     response = await run_async_query(ARATargetEnum.ARAGORN, query)
     return response

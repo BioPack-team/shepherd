@@ -23,7 +23,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.shared import add_task, get_tasks, handle_task_failure, wrap_up_task
 
 # Queue name
 STREAM = "aragorn.lookup"
@@ -46,7 +46,7 @@ def examine_query(message):
         # this can still fail if the input looks like e.g.:
         #  "query_graph": None
         qedges = message.get("message", {}).get("query_graph", {}).get("edges", {})
-    except:
+    except KeyError:
         qedges = {}
     n_infer_edges = 0
     for edge_id in qedges:
@@ -54,9 +54,9 @@ def examine_query(message):
             n_infer_edges += 1
     pathfinder = n_infer_edges == 3
     if n_infer_edges > 1 and n_infer_edges and not pathfinder:
-        raise Exception("Only a single infer edge is supported", 400)
+        raise Exception("Only a single infer edge is supported")
     if (n_infer_edges > 0) and (n_infer_edges < len(qedges)):
-        raise Exception("Mixed infer and lookup queries not supported", 400)
+        raise Exception("Mixed infer and lookup queries not supported")
     infer = n_infer_edges == 1
     if not infer:
         return infer, None, None, pathfinder
@@ -69,9 +69,9 @@ def examine_query(message):
         else:
             question_node = qnode_id
     if answer_node is None:
-        raise Exception("Both nodes of creative edge pinned", 400)
+        raise Exception("Both nodes of creative edge pinned")
     if question_node is None:
-        raise Exception("No nodes of creative edge pinned", 400)
+        raise Exception("No nodes of creative edge pinned")
     return infer, question_node, answer_node, pathfinder
 
 
@@ -109,15 +109,24 @@ async def run_async_lookup(
 
 
 async def aragorn_lookup(task, logger: logging.Logger):
-    start = time.time()
+    """Do Aragorn lookup operation."""
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
-    workflow = json.loads(task[1]["workflow"])
+    response_id = task[1]["response_id"]
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
     parameters["tiers"] = parameters.get("tiers") or [settings.default_data_tier]
+    use_gandalf = parameters.get("gandalf", False)
     message["parameters"] = parameters
+    if "submitter" not in message:
+        message["submitter"] = (
+            "infores:shepherd-aragorn:{maturity}@{location}@{url}".format(
+                maturity=settings.server_maturity,
+                location=settings.server_location,
+                url=settings.server_url,
+            )
+        )
     try:
         infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     except Exception as e:
@@ -129,51 +138,101 @@ async def aragorn_lookup(task, logger: logging.Logger):
         callback_id = str(uuid.uuid4())[:8]
         await add_callback_id(query_id, callback_id, logger)
         message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
+        # with open("./debug/direct_query.json", "w", encoding="utf-8") as f:
+        #     json.dump(message, f, indent=2)
 
-        async with httpx.AsyncClient(timeout=100) as client:
-            await client.post(
-                settings.kg_retrieval_url,
-                json=message,
+        if use_gandalf:
+            logger.debug("""Sending lookup query to gandalf.""")
+
+            await save_message(callback_id, message, logger)
+
+            await add_task(
+                "gandalf",
+                {
+                    "target": "aragorn",
+                    "query_id": query_id,
+                    "response_id": response_id,
+                    "callback_id": callback_id,
+                    "log_level": task[1].get("log_level", 20),
+                    "otel": task[1]["otel"],
+                },
+                logger,
             )
+        else:
+            logger.debug(f"""Sending lookup query to {settings.kg_retrieval_url}.""")
+            async with httpx.AsyncClient(timeout=100) as client:
+                await client.post(
+                    settings.kg_retrieval_url,
+                    json=message,
+                )
     else:
         expanded_messages = expand_aragorn_query(message, logger)
-        requests = []
-        # send all messages to lookup service
-        async with httpx.AsyncClient(timeout=20) as client:
+        # with open("./debug/expanded_messages.json", "w", encoding="utf-8") as f:
+        #     json.dump(expanded_messages, f, indent=2)
+
+        if use_gandalf:
             for expanded_message in expanded_messages:
                 callback_id = str(uuid.uuid4())[:8]
 
                 # Put callback UID and query ID in postgres
                 await add_callback_id(query_id, callback_id, logger)
+                logger.debug("""Sending lookup query to gandalf.""")
 
-                expanded_message["callback"] = (
-                    f"{settings.callback_host}/aragorn/callback/{callback_id}"
+                await save_message(callback_id, expanded_message, logger)
+
+                await add_task(
+                    "gandalf",
+                    {
+                        "target": "aragorn",
+                        "query_id": query_id,
+                        "response_id": response_id,
+                        "callback_id": callback_id,
+                        "log_level": task[1].get("log_level", 20),
+                        "otel": task[1]["otel"],
+                    },
+                    logger,
                 )
 
-                logger.debug(
-                    f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
-                )
-                requests.append(run_async_lookup(client, expanded_message, callback_id))
-                # Then we can retrieve all callback ids from query id to see which are still
-                # being looked up
-            # fire all the lookups at the same time
-            responses = await asyncio.gather(*requests, return_exceptions=True)
+        else:
+            requests = []
+            # send all messages to lookup service
+            async with httpx.AsyncClient(timeout=20) as client:
+                for expanded_message in expanded_messages:
+                    callback_id = str(uuid.uuid4())[:8]
 
-            for response in responses:
-                if isinstance(response, Exception):
-                    logger.error(
-                        f"Failed to do lookup and unable to remove callback id: {response}"
+                    # Put callback UID and query ID in postgres
+                    await add_callback_id(query_id, callback_id, logger)
+
+                    expanded_message["callback"] = (
+                        f"{settings.callback_host}/aragorn/callback/{callback_id}"
                     )
-                elif isinstance(response, AsyncResponse):
-                    if not response.success:
+
+                    logger.debug(
+                        f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
+                    )
+                    requests.append(
+                        run_async_lookup(client, expanded_message, callback_id)
+                    )
+                    # Then we can retrieve all callback ids from query id to see which are still
+                    # being looked up
+                # fire all the lookups at the same time
+                responses = await asyncio.gather(*requests, return_exceptions=True)
+
+                for response in responses:
+                    if isinstance(response, Exception):
                         logger.error(
-                            f"Failed to do lookup, removing callback id: {response.error}"
+                            f"Failed to do lookup and unable to remove callback id: {response}"
                         )
-                        await remove_callback_id(response.callback_id, logger)
-                else:
-                    logger.error(
-                        f"Failed to do lookup and unable to remove callback id: {response}"
-                    )
+                    elif isinstance(response, AsyncResponse):
+                        if not response.success:
+                            logger.error(
+                                f"Failed to do lookup, removing callback id: {response.error}"
+                            )
+                            await remove_callback_id(response.callback_id, logger)
+                    else:
+                        logger.error(
+                            f"Failed to do lookup and unable to remove callback id: {response}"
+                        )
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
@@ -181,9 +240,13 @@ async def aragorn_lookup(task, logger: logging.Logger):
     start_time = time.time()
     running_callback_ids = [""]
     while time.time() - start_time < MAX_QUERY_TIME:
-        # see if there are existing lookups going
-        running_callback_ids = await get_running_callbacks(query_id, logger)
-        # logger.info(f"Got back {len(running_callback_ids)} running lookups")
+        try:
+            # see if there are existing lookups going
+            running_callback_ids = await get_running_callbacks(query_id, logger)
+        except Exception:
+            # Brief backoff then retry the check rather than giving up
+            await asyncio.sleep(5)
+            continue
         # if there are, continue to wait
         if len(running_callback_ids) > 0:
             await asyncio.sleep(1)
@@ -197,10 +260,8 @@ async def aragorn_lookup(task, logger: logging.Logger):
         logger.warning(
             f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
         )
+        # logger.warning(f"Running callbacks: {running_callback_ids}")
         await cleanup_callbacks(query_id, logger)
-
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-    logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 def get_infer_parameters(input_message):
@@ -293,6 +354,7 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
         {
             "message": {"query_graph": qg},
             "parameters": input_message["parameters"],
+            "submitter": input_message["submitter"],
         }
     ]
     # If we don't have any AMIE expansions, this will just generate the direct query
@@ -319,24 +381,46 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
         if "log_level" in input_message:
             message["log_level"] = input_message["log_level"]
         message["parameters"] = input_message["parameters"]
+        message["submitter"] = input_message["submitter"]
         messages.append(message)
     return messages
 
 
-async def process_task(task, parent_ctx, logger, limiter):
+async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
+    """Process a given task and ACK in redis."""
+    start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await aragorn_lookup(task, logger)
+        # Always wrap up the task to ACK it in the broker
+        try:
+            await wrap_up_task(STREAM, GROUP, task, logger)
+        except Exception as e:
+            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+    except asyncio.CancelledError:
+        logger.warning(f"Task {task[0]} was cancelled")
+    except Exception as e:
+        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+        await handle_task_failure(STREAM, GROUP, task, logger)
     finally:
         span.end()
         limiter.release()
+        logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+    """On initialization, poll indefinitely for available tasks."""
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

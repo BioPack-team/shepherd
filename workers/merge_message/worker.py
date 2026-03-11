@@ -10,6 +10,7 @@ import traceback
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from itertools import combinations
 from typing import Any, Dict, Union
 
 from shepherd_utils.broker import acquire_lock, mark_task_as_complete, remove_lock
@@ -19,7 +20,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, merge_kgraph
+from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
 
 # Queue name
 STREAM = "merge_message"
@@ -234,6 +235,8 @@ def queries_equivalent(query1, query2):
                 del node["member_ids"]
             if "ids" in node and node["ids"] is None:
                 del node["ids"]
+            if "categories" in node and node["categories"] is None:
+                del node["categories"]
         for edge in q["edges"].values():
             if (
                 "attribute_constraints" in edge
@@ -300,8 +303,131 @@ def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
     qnodes = query_graph.get("nodes", {})
     for qnode_id, qnode in qnodes.items():
         if qnode.get("ids") is None:
+            if answer_node is not None:
+                # if there are multiple unpinned nodes
+                return None
             answer_node = qnode_id
     return answer_node
+
+
+def has_unique_nodes(result):
+    """Given a result, return True if all nodes are unique, False otherwise"""
+    seen = set()
+    for qnode, knodes in result["node_bindings"].items():
+        knode_ids = frozenset([knode["id"] for knode in knodes])
+        if knode_ids in seen:
+            return False
+        seen.add(knode_ids)
+    return True
+
+
+def filter_repeated_nodes(response, logger: logging.Logger):
+    """We have some rules that include e.g. 2 chemicals.
+    We don't want responses in which those two are the same.
+    If you have A-B-A-C then what shows up in the ui is B-A-C which makes no sense.
+    """
+    original_result_count = len(response["message"].get("results", []))
+    if original_result_count == 0:
+        return
+    results = list(
+        filter(lambda x: has_unique_nodes(x), response["message"]["results"])
+    )
+    response["message"]["results"] = results
+    if len(results) != original_result_count:
+        filter_kgraph_orphans(response, logger)
+
+
+def get_promiscuous_qnodes(response):
+    """We have some rules like A<-treats-B-part_of->C<-part_of-D.  Figure out if this
+    qgraph is like that and return C if it is"""
+    qgraph = response["message"]["query_graph"]
+    if len(qgraph["edges"]) < 3:
+        return []
+    # for this to be a problem, we need 2 edges that share a subject or an object,
+    # and have the same predicates and qualifiers.
+    subjects = defaultdict(list)
+    objects = defaultdict(list)
+    for qedge_id, qedge in qgraph["edges"].items():
+        subjects[qedge["subject"]].append(qedge_id)
+        objects[qedge["object"]].append(qedge_id)
+    center_nodes = []
+    for nodelist in (subjects, objects):
+        for node, edges in nodelist.items():
+            if len(edges) < 2:
+                continue
+            for eid1, eid2 in combinations(edges, 2):
+                e1 = qgraph["edges"][eid1]
+                e2 = qgraph["edges"][eid2]
+                if e1["predicates"] == e2["predicates"]:
+                    if e1.get("qualifiers", []) == e2.get("qualifiers", []):
+                        center_nodes.append(node)
+    return center_nodes
+
+
+def remove_promiscuous_knode_results(MAX_C, qnode, response):
+    """Given a response and a qnode, look at all the results and count how many of the
+    results have the same knode bound to that qnode.
+    If that number is greater than MAX_C, remove those results."""
+    still_going = True
+    # This is written as a loop with the idea that once we've removed one
+    # promiscuous node, it might require recalculating everything since the results
+    # change. In retrospect, that might not be true because we are specifiying the
+    # qnode. I'm still think it's possible (but perhaps unlikely) if there are
+    # multiple knodes bound to the same qnode.
+    while still_going:
+        still_going = False
+        # How many distinct results have the same bozo in this spot?
+        prom_counter = defaultdict(list)
+        for result_i, result in enumerate(response["message"]["results"]):
+            for binding in result["node_bindings"][qnode]:
+                knode = binding["id"]
+                prom_counter[knode].append(result_i)
+        # now figure out the most common knode
+        max_knode = None
+        max_count = 0
+        for knode, mapped_result_indices in prom_counter.items():
+            if len(mapped_result_indices) > max_count:
+                max_knode = knode
+                max_count = len(mapped_result_indices)
+        # Now remove all the results with that knode (if it occurs in more than
+        # MAX_C results)
+        if max_count > MAX_C:
+            still_going = True
+            # These are the indices of the results that we want to remove
+            mapped_result_indices = prom_counter[max_knode]
+            # Remove them from right to left, otherwise the indices change on you
+            for index in reversed(mapped_result_indices):
+                del response["message"]["results"][index]
+
+
+def filter_promiscuous_results(response, logger: logging.Logger):
+    """We have some rules like A<-treats-B-part_of->C<-part_of-D.
+    This is saying B treats A, and D is like B (because they are both part of C).
+    This isn't the worst rule in the world, we find it statistically useful.  But,
+    there are Cs that contain lllllooooootttttssss of stuff, and it creates a lot of
+    bad results. Not only are they bad, but they are basically the same in terms of
+    score, so we create a lot of ties. We are taking some approaches to fixing this
+    in ranking, but really the results are just terrible, let's get rid of them,
+    but distinguish cases where the rule is doing something interesting from when
+    it is not. And note that "part_of" is not the only rule that follows this
+    similarity-style pattern.   The difference is basically how many times C occurs.
+    What we'd really like to do is not use promiscuous nodes in the C spot (or other
+    places really).  But we don't have a promiscuity score for the nodes, and can't
+    really get one.
+    """
+    # First, we need to know if we have too many results, and if it's the right
+    # kind of query
+    MAX_C = 10
+    if len(response["message"]["results"]) < MAX_C:
+        return
+    prom_qnodes = get_promiscuous_qnodes(response)
+    # This is a dictionary from bound knodes to the index of their result
+    # There should only be one such node
+    for qnode in prom_qnodes:
+        # It's possible that there are multiple knodes that could be filtered.  But
+        # when we filter out the first one then the indices of the rest will change.
+        # So we need to do this one at a time.
+        remove_promiscuous_knode_results(MAX_C, qnode, response)
 
 
 def merge_messages(
@@ -312,13 +438,15 @@ def merge_messages(
     logger: logging.Logger,
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
+    source = f"infores:shepherd-{target}"
+    filter_repeated_nodes(new_response, logger)
+    filter_promiscuous_results(new_response, logger)
     for result_message in [response, new_response]:
         result_kgraph = (
             result_message["message"]["knowledge_graph"]
             if result_message["message"].get("knowledge_graph") is not None
             else {"nodes": {}, "edges": {}}
         )
-        source = f"infores:shepherd-{target}"
         pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, source, logger)
     # Construct the final result message, currently empty
     result = {
@@ -366,29 +494,103 @@ def merge_messages(
                     result["message"]["auxiliary_graphs"][aux_id] = copy.deepcopy(
                         aux_dict
                     )
-    # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
-    lookup_results = (
-        response["message"]["results"]
-        if response["message"].get("results") is not None
-        else []
-    )
-    is_direct_lookup = queries_equivalent(
-        new_response["message"]["query_graph"], original_query_graph
-    )
-    if is_direct_lookup:
-        lookup_results.extend(new_response["message"]["results"])
-    else:
-        result["message"]["results"].extend(
-            new_response["message"]["results"]
-            if new_response["message"].get("results") is not None
+
+    # Determine type of message
+    if "edges" in original_query_graph:
+        # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
+        lookup_results = (
+            response["message"]["results"]
+            if response["message"].get("results") is not None
             else []
         )
+        is_direct_lookup = queries_equivalent(
+            new_response["message"]["query_graph"], original_query_graph
+        )
+        if is_direct_lookup:
+            lookup_results.extend(new_response["message"]["results"])
+        else:
+            result["message"]["results"].extend(
+                new_response["message"]["results"]
+                if new_response["message"].get("results") is not None
+                else []
+            )
 
-    answer_node_id = get_answer_node(original_query_graph)
-    merged_messages = merge_results_by_node(
-        target, result, answer_node_id, lookup_results
-    )
-    return merged_messages
+        answer_node_id = get_answer_node(original_query_graph)
+        if answer_node_id is None:
+            # This was a direct lookup outside of a creative query, just return it
+            merged_messages = new_response
+        else:
+            merged_messages = merge_results_by_node(
+                target, result, answer_node_id, lookup_results
+            )
+
+        return merged_messages
+    elif "paths" in original_query_graph:
+        # Pathfinder query
+        path_id, og_path = next(iter(original_query_graph["paths"].items()))
+        subject_node_id = og_path.get("subject")
+        object_node_id = og_path.get("object")
+        if subject_node_id is None or object_node_id is None:
+            raise KeyError("Missing either subject or object from path.")
+        aux_counter = 0
+        score = 0
+        analyses = []
+        for new_result in new_response["message"]["results"]:
+            path_edge_ids = set()
+            for analysis in new_result.get("analyses", []):
+                edge_bindings = analysis.get("edge_bindings", {})
+                for qg_edge_key, bindings in edge_bindings.items():
+                    for binding in bindings:
+                        path_edge_ids.add(binding["id"])
+                score = new_result.get("score")
+
+            if not path_edge_ids:
+                continue
+
+            aux_id = f"a_{aux_counter}"
+            aux_counter += 1
+
+            # Add new aux graph to message
+            result["message"]["auxiliary_graphs"][aux_id] = {
+                "edges": list(path_edge_ids),
+                "attributes": [],
+            }
+
+            analysis = {
+                "resource_id": source,
+                "path_bindings": {path_id: [{"id": aux_id}]},
+            }
+            if score is not None:
+                analysis["score"] = score
+            analyses.append(analysis)
+
+        # --- Resolve the pinned node IDs from any old result's node_bindings ---
+        # (They should all bind the same start/end IDs since they're pinned)
+        start_kg_id = None
+        end_kg_id = None
+        for new_result in new_response["message"]["results"]:
+            nb = new_result.get("node_bindings", {})
+            if subject_node_id in nb and nb[subject_node_id]:
+                start_kg_id = nb[subject_node_id][0]["id"]
+            if object_node_id in nb and nb[object_node_id]:
+                end_kg_id = nb[object_node_id][0]["id"]
+            if start_kg_id and end_kg_id:
+                break
+
+        # --- Assemble the single Pathfinder result ---
+        pathfinder_result = {
+            "node_bindings": {
+                subject_node_id: [{"id": start_kg_id, "attributes": []}],
+                object_node_id: [{"id": end_kg_id, "attributes": []}],
+            },
+            "analyses": analyses,
+        }
+
+        result["message"]["results"] = [pathfinder_result]
+
+        return result
+
+    raise TypeError("Unsupported query type.")
 
 
 async def poll_for_tasks():
@@ -397,64 +599,85 @@ async def poll_for_tasks():
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
     executor = ProcessPoolExecutor(max_workers=cpu_count)
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, cpu_count
-    ):
-        span = tracer.start_span(STREAM, context=parent_ctx)
-        query_id = task[1]["query_id"]
-        response_id = task[1]["response_id"]
-        callback_id = task[1]["callback_id"]
-        target = task[1]["target"]
-        got_lock = await acquire_lock(response_id, CONSUMER, logger)
-        if got_lock:
-            logger.info(f"[{callback_id}] Obtained lock.")
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, cpu_count
+            ):
+                start = time.time()
+                span = tracer.start_span(STREAM, context=parent_ctx)
+                try:
+                    query_id = task[1]["query_id"]
+                    response_id = task[1]["response_id"]
+                    callback_id = task[1]["callback_id"]
+                    target = task[1]["target"]
+                    got_lock = await acquire_lock(response_id, CONSUMER, logger)
+                    if got_lock:
+                        logger.info(f"[{callback_id}] Obtained lock.")
 
-            # given a task, get the message from the db
-            original_query = await get_message(query_id, logger)
-            if original_query is None:
-                logger.error(
-                    f"Failed to get original query for {query_id}. Discarding callback response."
-                )
-                await remove_lock(response_id, CONSUMER, logger)
-                await remove_callback_id(callback_id, logger)
-                limiter.release()
-                await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-                span.end()
-                continue
-            original_query_graph = original_query["message"]["query_graph"]
-            callback_response = await get_message(callback_id, logger)
-            lock_time = time.time()
-            original_response = await get_message(response_id, logger)
-            # do message merging
-            try:
-                merged_message = await loop.run_in_executor(
-                    executor,
-                    merge_messages,
-                    target,
-                    original_query_graph,
-                    original_response,
-                    callback_response,
-                    logger,
-                )
-                # save merged message back to db
-                await save_message(response_id, merged_message, logger)
-            except Exception:
-                logger.error(
-                    f"[{callback_id}] Error merging message: {traceback.format_exc()}"
-                )
-            logger.info(
-                f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
-            )
-            # remove lock so others can now modify message
-            await remove_lock(response_id, CONSUMER, logger)
-        else:
-            logger.error(
-                f"Failed to obtain lock for {query_id}. Discarding callback response."
-            )
-        await remove_callback_id(callback_id, logger)
-        limiter.release()
-        await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-        span.end()
+                        # given a task, get the message from the db
+                        original_query = await get_message(query_id, logger)
+                        if original_query is None:
+                            logger.error(
+                                f"Failed to get original query for {query_id}. Discarding callback response."
+                            )
+                            await remove_lock(response_id, CONSUMER, logger)
+                            await remove_callback_id(callback_id, logger)
+                            limiter.release()
+                            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+                            span.end()
+                            continue
+                        original_query_graph = original_query["message"]["query_graph"]
+                        callback_response = await get_message(callback_id, logger)
+                        lock_time = time.time()
+                        original_response = await get_message(response_id, logger)
+                        # do message merging
+                        try:
+                            merged_message = await loop.run_in_executor(
+                                executor,
+                                merge_messages,
+                                target,
+                                original_query_graph,
+                                original_response,
+                                callback_response,
+                                logger,
+                            )
+                            # save merged message back to db
+                            await save_message(response_id, merged_message, logger)
+                        except Exception:
+                            logger.error(
+                                f"[{callback_id}] Error merging message: {traceback.format_exc()}"
+                            )
+                        logger.info(
+                            f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
+                        )
+                        # remove lock so others can now modify message
+                        await remove_lock(response_id, CONSUMER, logger)
+                        await remove_callback_id(callback_id, logger)
+                    else:
+                        logger.error(
+                            f"Failed to obtain lock for {query_id}. Discarding callback response."
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Task {task[0]} failed with unhandled error: {e}",
+                        exc_info=True,
+                    )
+                finally:
+                    try:
+                        await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+                    except Exception as e:
+                        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+                    logger.info(
+                        f"Finished task {task[0]} in {time.time() - start:.2f}s"
+                    )
+                    span.end()
+                    limiter.release()
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

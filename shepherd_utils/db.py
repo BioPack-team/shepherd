@@ -28,8 +28,7 @@ CONNINFO = (
 
 async def check_connection(conn):
     """Check if the postgres connection is still alive."""
-    if conn.closed:
-        raise OperationalError("Connection is closed.")
+    await conn.execute("SELECT 1")
 
 
 pool = AsyncConnectionPool(
@@ -185,16 +184,14 @@ async def get_message(
     """Get the message from db."""
     message = {}
     start = time.time()
-    try:
-        # print(f"Putting {query_id} on {ara_target} stream")
-        message = await data_db_client.get(message_id)
-        if message is not None:
-            start_decomp = time.time()
-            message = orjson.loads(zstandard.decompress(message))
-            logger.debug(f"Decompression took {time.time() - start_decomp}")
-    except Exception as e:
+    message = await data_db_client.get(message_id)
+    if message is None:
         # failed to get message from db
-        logger.error(f"Failed to get {message_id} from db: {e}")
+        raise Exception(f"Failed to get {message_id} from db: {e}")
+
+    start_decomp = time.time()
+    message = orjson.loads(zstandard.decompress(message))
+    logger.debug(f"Decompression took {time.time() - start_decomp}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
 
@@ -342,6 +339,7 @@ async def get_running_callbacks(
             continue
         except Exception as e:
             logger.error(f"Failed to get running lookups: {e}")
+            raise
     return running_lookups
 
 

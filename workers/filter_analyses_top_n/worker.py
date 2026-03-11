@@ -1,38 +1,40 @@
 """Example ARA module."""
 
 import asyncio
+import json
 import logging
-
 import time
 import uuid
-from shepherd_utils.db import get_message
+from shepherd_utils.db import get_message, save_message, get_query_state
 from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
-STREAM = "example"
+STREAM = "filter_analyses_top_n"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
-async def example_ara(task, logger: logging.Logger):
+async def filter_analyses_top_n(task, logger: logging.Logger):
+    """Filter results analyses to top n."""
     # given a task, get the message from the db
-    logger.info("Getting message from db")
-    message = await get_message(task[1]["query_id"], logger)
-    # logger.info(message)
-    logger.info(task)
+    response_id = task[1]["response_id"]
+    workflow = json.loads(task[1]["workflow"])
+    message = await get_message(response_id, logger)
+    results = message["message"].get("results", [])
+    current_op = workflow[0]
+    if current_op is None:
+        logger.error(f"Unable to find operation {STREAM} in workflow")
+        raise Exception(f"Operation {STREAM} is not in workflow")
+    n = current_op.get("max_analyses", 1000)
+    for ind, result in enumerate(results):
+        message["message"]["results"][ind]["analyses"] = result["analyses"][:n]
+    logger.info("Returning filtered results.")
 
-    workflow = [
-        {"id": "example.lookup"},
-        {"id": "example.score"},
-        {"id": "sort_results_score"},
-        {"id": "filter_results_top_n"},
-        {"id": "filter_kgraph_orphans"},
-    ]
-
-    task[1]["workflow"] = workflow
+    # save merged message back to db
+    await save_message(response_id, message, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
@@ -40,7 +42,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await example_ara(task, logger)
+        await filter_analyses_top_n(task, logger)
         # Always wrap up the task to ACK it in the broker
         try:
             await wrap_up_task(STREAM, GROUP, task, logger)
