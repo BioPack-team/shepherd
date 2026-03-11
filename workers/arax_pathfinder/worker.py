@@ -67,7 +67,9 @@ def get_blocked_list():
     return set(json_block_list["curies"]), synonyms
 
 
-def execute_pathfinding_sync(pinned_node_ids, pinned_node_keys, intermediate_categories, logger):
+def execute_pathfinding_sync(
+    pinned_node_ids, pinned_node_keys, intermediate_categories, logger
+):
 
     blocked_curies, blocked_synonyms = get_blocked_list()
 
@@ -132,7 +134,10 @@ async def pathfinder(task, logger: logging.Logger):
     intermediate_categories = []
     path_key = next(iter(qgraph["paths"].keys()))
     qpath = qgraph["paths"][path_key]
-    if qpath.get("constraints", None) is not None and len(qpath.get("constraints", [])) > 0:
+    if (
+        qpath.get("constraints", None) is not None
+        and len(qpath.get("constraints", [])) > 0
+    ):
         constraints = qpath["constraints"]
         if len(constraints) > 1:
             logger.error("Pathfinder queries do not support multiple constraints.")
@@ -155,7 +160,7 @@ async def pathfinder(task, logger: logging.Logger):
             pinned_node_ids,
             pinned_node_keys,
             intermediate_categories,
-            logger
+            logger,
         )
 
         res = []
