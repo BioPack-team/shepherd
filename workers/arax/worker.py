@@ -1,6 +1,7 @@
 """ARAX entry module."""
 
 import asyncio
+import json
 import logging
 import requests
 import time
@@ -46,6 +47,7 @@ async def arax(task, logger: logging.Logger):
     message = await get_message(query_id, logger)
     if is_pathfinder_query(message):
         workflow = [{"id": "arax.pathfinder"}]
+        await wrap_up_task(STREAM, GROUP, task, workflow, logger)
     else:
         try:
             workflow = [{"id": "arax"}]
@@ -61,8 +63,9 @@ async def arax(task, logger: logging.Logger):
             result = {"status": "error", "error": str(e)}
         response_id = task[1]["response_id"]
         await save_message(response_id, result, logger)
+        task[1]["workflow"] = json.dumps([{"id": "arax"}])
 
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
+
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
