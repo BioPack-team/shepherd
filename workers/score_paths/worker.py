@@ -173,11 +173,17 @@ async def score_paths(task, logger: logging.Logger):
                         logger.error(
                             f"Result {ind}, analysis {analysis_ind}: missing key {e}, skipping analysis."
                         )
+                        message["message"]["results"][ind]["analyses"][analysis_ind][
+                            "score"
+                        ] = 0.0
                         continue
                     except ValueError as e:
                         logger.error(
                             f"Result {ind}, analysis {analysis_ind}: could not build sentence."
                         )
+                        message["message"]["results"][ind]["analyses"][analysis_ind][
+                            "score"
+                        ] = 0.0
                         continue
 
                 if not sentences:
