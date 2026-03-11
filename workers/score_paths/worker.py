@@ -5,13 +5,16 @@ import json
 import logging
 import time
 import uuid
-from xgboost import XGBClassifier
-from sentence_transformers import SentenceTransformer
-from bmt import Toolkit
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import torch
+from bmt import Toolkit
+from sentence_transformers import SentenceTransformer
+
 from shepherd_utils.db import get_message, save_message
-from shepherd_utils.shared import get_tasks, wrap_up_task
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.shared import get_tasks, wrap_up_task
+from xgboost import XGBClassifier
 
 
 # Queue name
@@ -19,11 +22,6 @@ STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
-tracer = setup_tracer(STREAM)
-clf = XGBClassifier()
-bmt = Toolkit()
-device, embedding_batch_size = ("cuda", 128) if torch.cuda.is_available() else ("cpu", 32)
-model = SentenceTransformer("cambridgeltl/SapBERT-from-PubMedBERT-fulltext", device=device)
 
 def get_most_specific_category(categories, logger):
     valid = []
@@ -156,7 +154,8 @@ async def score_paths(task, logger: logging.Logger):
                     )
                     continue
 
-                embed_tasks = []
+                # Need to keep track of which analyses actually made sentences successfully
+                sentences = []
                 embedding_index = []
                 for analysis_ind, analysis in enumerate(result.get("analyses", [])):
                     try:
@@ -168,7 +167,7 @@ async def score_paths(task, logger: logging.Logger):
                             message["message"]["knowledge_graph"],
                             logger,
                         )
-                        embed_tasks.append(sentence)
+                        sentences.append(sentence)
                         embedding_index.append(analysis_ind)
                     except KeyError as e:
                         logger.error(
@@ -181,18 +180,26 @@ async def score_paths(task, logger: logging.Logger):
                         )
                         continue
 
-                if not embed_tasks:
+                if not sentences:
                     logger.warning(
                         f"Result {ind}: no valid analyses to score, skipping."
                     )
                     continue
 
-                all_sentences = [embed_task[1] for embed_task in embed_tasks]
                 try:
-                    logger.info(f"Generating embeddings using device {device} and batch size {embedding_batch_size}.")
-                    all_embeddings = model.encode(
-                        all_sentences, batch_size=embedding_batch_size, show_progress_bar=False
-                    )
+                    # Use lock to avoid data corruption (see here: https://github.com/huggingface/sentence-transformers/issues/794)
+                    logger.debug("Waiting for embedding model lock.")
+                    async with embedding_lock:
+                        logger.info(f"Generating embeddings using device {device} and batch size {embedding_batch_size}.")
+                        loop = asyncio.get_running_loop()
+                        embeddings = await loop.run_in_executor(
+                            executor,
+                            partial(
+                                model.encode,
+                                sentences,
+                                batch_size=embedding_batch_size,
+                            ),
+                        )
                 except Exception as e:
                     logger.error(
                         f"Result {ind}: embedding failed due to {e}."
@@ -202,7 +209,7 @@ async def score_paths(task, logger: logging.Logger):
                     continue
                     
                 logger.info(f"Scoring paths from embeddings.")
-                for analysis_ind, embedding in zip(embedding_index, all_embeddings):
+                for analysis_ind, embedding in zip(embedding_index, embeddings):
                     try:
                         probs = clf.predict_proba(embedding.reshape(1, -1))[:, 1]
                         message["message"]["results"][ind]["analyses"][analysis_ind][
@@ -244,6 +251,19 @@ async def process_task(task, parent_ctx, logger, limiter):
 
 
 async def poll_for_tasks():
+    global tracer, clf, bmt, model, device, embedding_batch_size, executor, embedding_lock
+    tracer = setup_tracer(STREAM)
+    clf = XGBClassifier()
+    clf.load_model("model_weights/sapbert_classifier_weights.json")
+    bmt = Toolkit()
+    device, embedding_batch_size = (
+        ("cuda", 128) if torch.cuda.is_available() else ("cpu", 32)
+    )
+    model = SentenceTransformer(
+        "cambridgeltl/SapBERT-from-PubMedBERT-fulltext", device=device
+    )
+    executor = ThreadPoolExecutor(max_workers=TASK_LIMIT)
+    embedding_lock = asyncio.Lock()
     async for task, parent_ctx, logger, limiter in get_tasks(
         STREAM, GROUP, CONSUMER, TASK_LIMIT
     ):
@@ -251,5 +271,4 @@ async def poll_for_tasks():
 
 
 if __name__ == "__main__":
-    clf.load_model("model_weights/sapbert_classifier_weights.json")
     asyncio.run(poll_for_tasks())
