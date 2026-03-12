@@ -18,6 +18,7 @@ from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import (
     add_task,
     get_tasks,
+    handle_task_failure,
     wrap_up_task,
 )
 
@@ -35,10 +36,8 @@ async def shadowfax(task, logger: logging.Logger):
     co-occurrence to find nodes that occur in publications with our input
     nodes, then finding paths that connect our input nodes through these
     intermediate nodes."""
-    start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
-    workflow = json.loads(task[1]["workflow"])
     response_id = task[1]["response_id"]
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
@@ -55,9 +54,7 @@ async def shadowfax(task, logger: logging.Logger):
             # TODO: silently only grabbing the first id
             pinned_node_ids.append(node["ids"][0])
     if len(set(pinned_node_ids)) != 2:
-        logger.error("Pathfinder queries require two pinned nodes.")
-        # TODO: Update to wrap up task
-        return message, 500
+        raise Exception("Pathfinder queries require two pinned nodes.")
 
     intermediate_categories = []
     path_key = next(iter(qgraph["paths"].keys()))
@@ -66,17 +63,15 @@ async def shadowfax(task, logger: logging.Logger):
         constraints = qpath["constraints"]
         # TODO: need to wrap up tasks
         if len(constraints) > 1:
-            logger.error("Pathfinder queries do not support multiple constraints.")
-            return message, 500
+            raise Exception("Pathfinder queries do not support multiple constraints.")
         if len(constraints) > 0:
             intermediate_categories = (
                 constraints[0].get("intermediate_categories", None) or []
             )
         if len(intermediate_categories) > 1:
-            logger.error(
+            raise Exception(
                 "Pathfinder queries do not support multiple intermediate categories"
             )
-            return message, 500
     else:
         intermediate_categories = ["biolink:NamedThing"]
 
@@ -190,9 +185,9 @@ async def shadowfax(task, logger: logging.Logger):
     callback_id = str(uuid.uuid4())[:8]
     # Put callback UID and query ID in postgres
     await add_callback_id(query_id, callback_id, logger)
-    logger.debug("""Sending pathfinder lookup query to gandalf.""")
 
     await save_message(callback_id, threehop, logger)
+    logger.debug("""Sending pathfinder lookup query to gandalf.""")
 
     await add_task(
         "gandalf",
@@ -212,44 +207,65 @@ async def shadowfax(task, logger: logging.Logger):
     MAX_QUERY_TIME = message["parameters"]["timeout"]
     start_time = time.time()
     running_callback_ids = [""]
-    while time.time() - start_time < MAX_QUERY_TIME:
-        # see if there are existing lookups going
-        running_callback_ids = await get_running_callbacks(query_id, logger)
-        # logger.info(f"Got back {len(running_callback_ids)} running lookups")
-        # if there are, continue to wait
-        if len(running_callback_ids) > 0:
-            await asyncio.sleep(1)
-            continue
-        # if there aren't, lookup is complete and we need to pass on to next workflow operation
-        if len(running_callback_ids) == 0:
-            logger.debug("Got all lookups back. Continuing...")
-            break
+    try:
+        while time.time() - start_time < MAX_QUERY_TIME:
+            # see if there are existing lookups going
+            running_callback_ids = await get_running_callbacks(query_id, logger)
+            # logger.info(f"Got back {len(running_callback_ids)} running lookups")
+            # if there are, continue to wait
+            if len(running_callback_ids) > 0:
+                await asyncio.sleep(1)
+                continue
+            # if there aren't, lookup is complete and we need to pass on to next workflow operation
+            if len(running_callback_ids) == 0:
+                logger.debug("Got all lookups back. Continuing...")
+                break
 
-    if time.time() - start_time > MAX_QUERY_TIME:
-        logger.warning(
-            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
-        )
-        logger.warning(f"Running callbacks: {running_callback_ids}")
-        await cleanup_callbacks(query_id, logger)
+        if time.time() - start_time > MAX_QUERY_TIME:
+            logger.warning(
+                f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
+            )
+            logger.warning(f"Running callbacks: {running_callback_ids}")
+            await cleanup_callbacks(query_id, logger)
+    except asyncio.CancelledError:
+        logger.warning(f"Task {task[0]}: Cancelled while waiting for callbacks")
 
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-    logger.info(f"Task took {time.time() - start}")
 
-
-async def process_task(task, parent_ctx, logger, limiter):
+async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
+    """Process a given task and ACK in redis."""
+    start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await shadowfax(task, logger)
+        # Always wrap up the task to ACK it in the broker
+        try:
+            await wrap_up_task(STREAM, GROUP, task, logger)
+        except Exception as e:
+            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+    except asyncio.CancelledError:
+        logger.warning(f"Task {task[0]} was cancelled")
+    except Exception as e:
+        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+        await handle_task_failure(STREAM, GROUP, task, logger)
     finally:
         span.end()
         limiter.release()
+        logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+    """On initialization, poll indefinitely for available tasks."""
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

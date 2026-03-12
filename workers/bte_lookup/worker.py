@@ -23,7 +23,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, wrap_up_task
+from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 
 # Queue name
 STREAM = "bte.lookup"
@@ -46,7 +46,7 @@ def examine_query(message):
         # this can still fail if the input looks like e.g.:
         #  "query_graph": None
         qedges = message.get("message", {}).get("query_graph", {}).get("edges", {})
-    except:
+    except KeyError:
         qedges = {}
     n_infer_edges = 0
     for edge_id in qedges:
@@ -54,9 +54,9 @@ def examine_query(message):
             n_infer_edges += 1
     pathfinder = n_infer_edges == 3
     if n_infer_edges > 1 and n_infer_edges and not pathfinder:
-        raise Exception("Only a single infer edge is supported", 400)
+        raise Exception("Only a single infer edge is supported")
     if (n_infer_edges > 0) and (n_infer_edges < len(qedges)):
-        raise Exception("Mixed infer and lookup queries not supported", 400)
+        raise Exception("Mixed infer and lookup queries not supported")
     infer = n_infer_edges == 1
     if not infer:
         return infer, None, None, pathfinder
@@ -69,9 +69,9 @@ def examine_query(message):
         else:
             question_node = qnode_id
     if answer_node is None:
-        raise Exception("Both nodes of creative edge pinned", 400)
+        raise Exception("Both nodes of creative edge pinned")
     if question_node is None:
-        raise Exception("No nodes of creative edge pinned", 400)
+        raise Exception("No nodes of creative edge pinned")
     return infer, question_node, answer_node, pathfinder
 
 
@@ -109,23 +109,25 @@ async def run_async_lookup(
 
 
 async def bte_lookup(task, logger: logging.Logger):
-    start = time.time()
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
-    workflow = json.loads(task[1]["workflow"])
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
     parameters["tiers"] = parameters.get("tiers") or [settings.default_data_tier]
     message["parameters"] = parameters
-    try:
-        infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
-    except Exception as e:
-        logger.error(e)
-        return None, 500
+    if "submitter" not in message:
+        message["submitter"] = (
+            "infores:shepherd-bte:{maturity}@{location}@{url}".format(
+                maturity=settings.server_maturity,
+                location=settings.server_location,
+                url=settings.server_url,
+            )
+        )
+    infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     if pathfinder:
         # BTE currently doesn't handle Pathfinder queries
-        return None, 500
+        raise Exception("BTE does not support Pathfinder type queries.")
 
     if not infer:
         # Put callback UID and query ID in postgres
@@ -184,9 +186,13 @@ async def bte_lookup(task, logger: logging.Logger):
     start_time = time.time()
     running_callback_ids = [""]
     while time.time() - start_time < MAX_QUERY_TIME:
-        # see if there are existing lookups going
-        running_callback_ids = await get_running_callbacks(query_id, logger)
-        # logger.info(f"Got back {len(running_callback_ids)} running lookups")
+        try:
+            # see if there are existing lookups going
+            running_callback_ids = await get_running_callbacks(query_id, logger)
+        except Exception:
+            # Brief backoff then retry the check rather than giving up
+            await asyncio.sleep(5)
+            continue
         # if there are, continue to wait
         if len(running_callback_ids) > 0:
             await asyncio.sleep(1)
@@ -201,9 +207,6 @@ async def bte_lookup(task, logger: logging.Logger):
             f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
         )
         await cleanup_callbacks(query_id, logger)
-
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-    logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 class TemplateGroup(BaseModel):
@@ -354,6 +357,7 @@ def fill_templates(
             del message["message"]["knowledge_graph"]
         message["parameters"] = query_body["parameters"]
         message["workflow"] = [{"id": "lookup"}]
+        message["submitter"] = query_body["submitter"]
         filled_templates.append(message)
 
     return filled_templates
@@ -404,6 +408,7 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
         {
             "message": {"query_graph": query_graph},
             "parameters": query_dict["parameters"],
+            "submitter": query_dict["submitter"],
         }
     ]
     expanded_queries.extend(filled_templates)
@@ -412,19 +417,40 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
 
 
 async def process_task(task, parent_ctx, logger, limiter):
+    """Process a given task and ACK in redis."""
+    start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await bte_lookup(task, logger)
+        try:
+            # Always wrap up the task to ACK it in the broker
+            await wrap_up_task(STREAM, GROUP, task, logger)
+        except Exception as e:
+            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+    except asyncio.CancelledError:
+        logger.warning(f"Task {task[0]} was cancelled.")
+    except Exception as e:
+        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+        await handle_task_failure(STREAM, GROUP, task, logger)
     finally:
         span.end()
         limiter.release()
+        logger.info(f"Task took {time.time() - start}")
 
 
 async def poll_for_tasks():
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+    """On initialization, poll indefinitely for available tasks."""
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":

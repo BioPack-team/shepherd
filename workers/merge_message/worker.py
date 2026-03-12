@@ -235,6 +235,8 @@ def queries_equivalent(query1, query2):
                 del node["member_ids"]
             if "ids" in node and node["ids"] is None:
                 del node["ids"]
+            if "categories" in node and node["categories"] is None:
+                del node["categories"]
         for edge in q["edges"].values():
             if (
                 "attribute_constraints" in edge
@@ -327,7 +329,9 @@ def filter_repeated_nodes(response, logger: logging.Logger):
     original_result_count = len(response["message"].get("results", []))
     if original_result_count == 0:
         return
-    results = list(filter(lambda x: has_unique_nodes(x), response["message"]["results"]))
+    results = list(
+        filter(lambda x: has_unique_nodes(x), response["message"]["results"])
+    )
     response["message"]["results"] = results
     if len(results) != original_result_count:
         filter_kgraph_orphans(response, logger)
@@ -595,64 +599,85 @@ async def poll_for_tasks():
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
     executor = ProcessPoolExecutor(max_workers=cpu_count)
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, cpu_count
-    ):
-        span = tracer.start_span(STREAM, context=parent_ctx)
-        query_id = task[1]["query_id"]
-        response_id = task[1]["response_id"]
-        callback_id = task[1]["callback_id"]
-        target = task[1]["target"]
-        got_lock = await acquire_lock(response_id, CONSUMER, logger)
-        if got_lock:
-            logger.info(f"[{callback_id}] Obtained lock.")
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, cpu_count
+            ):
+                start = time.time()
+                span = tracer.start_span(STREAM, context=parent_ctx)
+                try:
+                    query_id = task[1]["query_id"]
+                    response_id = task[1]["response_id"]
+                    callback_id = task[1]["callback_id"]
+                    target = task[1]["target"]
+                    got_lock = await acquire_lock(response_id, CONSUMER, logger)
+                    if got_lock:
+                        logger.info(f"[{callback_id}] Obtained lock.")
 
-            # given a task, get the message from the db
-            original_query = await get_message(query_id, logger)
-            if original_query is None:
-                logger.error(
-                    f"Failed to get original query for {query_id}. Discarding callback response."
-                )
-                await remove_lock(response_id, CONSUMER, logger)
-                await remove_callback_id(callback_id, logger)
-                limiter.release()
-                await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-                span.end()
-                continue
-            original_query_graph = original_query["message"]["query_graph"]
-            callback_response = await get_message(callback_id, logger)
-            lock_time = time.time()
-            original_response = await get_message(response_id, logger)
-            # do message merging
-            try:
-                merged_message = await loop.run_in_executor(
-                    executor,
-                    merge_messages,
-                    target,
-                    original_query_graph,
-                    original_response,
-                    callback_response,
-                    logger,
-                )
-                # save merged message back to db
-                await save_message(response_id, merged_message, logger)
-            except Exception:
-                logger.error(
-                    f"[{callback_id}] Error merging message: {traceback.format_exc()}"
-                )
-            logger.info(
-                f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
-            )
-            # remove lock so others can now modify message
-            await remove_lock(response_id, CONSUMER, logger)
-        else:
-            logger.error(
-                f"Failed to obtain lock for {query_id}. Discarding callback response."
-            )
-        await remove_callback_id(callback_id, logger)
-        limiter.release()
-        await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-        span.end()
+                        # given a task, get the message from the db
+                        original_query = await get_message(query_id, logger)
+                        if original_query is None:
+                            logger.error(
+                                f"Failed to get original query for {query_id}. Discarding callback response."
+                            )
+                            await remove_lock(response_id, CONSUMER, logger)
+                            await remove_callback_id(callback_id, logger)
+                            limiter.release()
+                            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+                            span.end()
+                            continue
+                        original_query_graph = original_query["message"]["query_graph"]
+                        callback_response = await get_message(callback_id, logger)
+                        lock_time = time.time()
+                        original_response = await get_message(response_id, logger)
+                        # do message merging
+                        try:
+                            merged_message = await loop.run_in_executor(
+                                executor,
+                                merge_messages,
+                                target,
+                                original_query_graph,
+                                original_response,
+                                callback_response,
+                                logger,
+                            )
+                            # save merged message back to db
+                            await save_message(response_id, merged_message, logger)
+                        except Exception:
+                            logger.error(
+                                f"[{callback_id}] Error merging message: {traceback.format_exc()}"
+                            )
+                        logger.info(
+                            f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
+                        )
+                        # remove lock so others can now modify message
+                        await remove_lock(response_id, CONSUMER, logger)
+                        await remove_callback_id(callback_id, logger)
+                    else:
+                        logger.error(
+                            f"Failed to obtain lock for {query_id}. Discarding callback response."
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Task {task[0]} failed with unhandled error: {e}",
+                        exc_info=True,
+                    )
+                finally:
+                    try:
+                        await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+                    except Exception as e:
+                        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+                    logger.info(
+                        f"Finished task {task[0]} in {time.time() - start:.2f}s"
+                    )
+                    span.end()
+                    limiter.release()
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":
