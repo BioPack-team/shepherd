@@ -40,7 +40,8 @@ def get_most_specific_category(categories, logger):
     for cat in valid:
         dominated = any(
             cat in bmt.get_ancestors(other, reflexive=False)
-            for other in valid if other != cat
+            for other in valid
+            if other != cat
         )
         if not dominated:
             most_specific.append(cat)
@@ -132,6 +133,7 @@ def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
 
     return path_sentence
 
+
 async def score_paths(task, logger: logging.Logger):
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
@@ -194,7 +196,9 @@ async def score_paths(task, logger: logging.Logger):
                     # Use lock to avoid data corruption (see here: https://github.com/huggingface/sentence-transformers/issues/794)
                     logger.debug("Waiting for embedding model lock.")
                     async with embedding_lock:
-                        logger.info(f"Generating embeddings using device {device} and batch size {embedding_batch_size}.")
+                        logger.info(
+                            f"Generating embeddings using device {device} and batch size {embedding_batch_size}."
+                        )
                         loop = asyncio.get_running_loop()
                         embeddings = await loop.run_in_executor(
                             executor,
@@ -205,9 +209,7 @@ async def score_paths(task, logger: logging.Logger):
                             ),
                         )
                 except Exception as e:
-                    logger.error(
-                        f"Result {ind}: embedding failed due to {e}."
-                    )
+                    logger.error(f"Result {ind}: embedding failed due to {e}.")
                     for analysis in message["message"]["results"][ind]["analyses"]:
                         analysis["score"] = 0.0
                     continue
