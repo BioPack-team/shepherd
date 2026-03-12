@@ -20,7 +20,7 @@ from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 1
 tracer = setup_tracer(STREAM)
 
 
