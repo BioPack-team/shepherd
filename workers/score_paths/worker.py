@@ -1,27 +1,28 @@
 """Path scoring module"""
 
 import asyncio
-import json
 import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+
 import torch
 from bmt import Toolkit
 from sentence_transformers import SentenceTransformer
+from xgboost import XGBClassifier
 
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, wrap_up_task
-from xgboost import XGBClassifier
-
+from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 
 # Queue name
 STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
+tracer = setup_tracer(STREAM)
+
 
 def get_most_specific_category(categories, logger):
     valid = []
@@ -45,6 +46,7 @@ def get_most_specific_category(categories, logger):
             most_specific.append(cat)
 
     return bmt.get_element(most_specific[0])
+
 
 def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
 
@@ -131,13 +133,9 @@ def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
     return path_sentence
 
 async def score_paths(task, logger: logging.Logger):
-    start = time.time()
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
-    workflow = json.loads(task[1]["workflow"])
     message = await get_message(response_id, logger)
-
-    current_op = workflow[0]
 
     try:
         for qpath_id, qpath in message["message"]["query_graph"]["paths"].items():
@@ -213,7 +211,7 @@ async def score_paths(task, logger: logging.Logger):
                     for analysis in message["message"]["results"][ind]["analyses"]:
                         analysis["score"] = 0.0
                     continue
-                    
+
                 logger.info(f"Scoring paths from embeddings.")
                 for analysis_ind, embedding in zip(embedding_index, embeddings):
                     try:
@@ -239,26 +237,34 @@ async def score_paths(task, logger: logging.Logger):
     # save merged message back to db
     await save_message(response_id, message, logger)
 
-    await wrap_up_task(STREAM, GROUP, task, workflow, logger)
-
     if torch.cuda.is_available():
         # Torch keeps vram allocated unless we clear cache.
         torch.cuda.empty_cache()
-    logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def process_task(task, parent_ctx, logger, limiter):
+    """Process a given task and ACK in redis."""
+    start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
         await score_paths(task, logger)
+        try:
+            await wrap_up_task(STREAM, GROUP, task, logger)
+        except Exception as e:
+            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+    except asyncio.CancelledError:
+        logger.warning(f"Task {task[0]} was cancelled.")
+    except Exception as e:
+        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+        await handle_task_failure(STREAM, GROUP, task, logger)
     finally:
         span.end()
         limiter.release()
+        logger.info(f"Task took {time.time() - start}")
 
 
 async def poll_for_tasks():
-    global tracer, clf, bmt, model, device, embedding_batch_size, executor, embedding_lock
-    tracer = setup_tracer(STREAM)
+    global clf, bmt, model, device, embedding_batch_size, executor, embedding_lock
     clf = XGBClassifier()
     clf.load_model("model_weights/sapbert_classifier_weights.json")
     bmt = Toolkit()
@@ -270,10 +276,17 @@ async def poll_for_tasks():
     )
     executor = ThreadPoolExecutor(max_workers=TASK_LIMIT)
     embedding_lock = asyncio.Lock()
-    async for task, parent_ctx, logger, limiter in get_tasks(
-        STREAM, GROUP, CONSUMER, TASK_LIMIT
-    ):
-        asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                STREAM, GROUP, CONSUMER, TASK_LIMIT
+            ):
+                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+        except asyncio.CancelledError:
+            logging.info("Poll loop cancelled, shutting down.")
+        except Exception as e:
+            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 if __name__ == "__main__":
