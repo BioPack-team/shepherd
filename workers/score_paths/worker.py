@@ -274,6 +274,7 @@ async def poll_for_tasks():
     model = SentenceTransformer(
         "cambridgeltl/SapBERT-from-PubMedBERT-fulltext", device=device
     )
+    model.encode()
     executor = ThreadPoolExecutor(max_workers=TASK_LIMIT)
     embedding_lock = asyncio.Lock()
     while True:
