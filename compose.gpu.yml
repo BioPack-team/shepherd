@@ -1,5 +1,8 @@
 services:
   score_paths:
+    build:
+      args:
+        DEVICE: gpu
     deploy:
       resources:
         reservations:

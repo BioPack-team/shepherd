@@ -4,20 +4,23 @@ FROM ghcr.io/translatorsri/renci-python-image:3.11.5
 # Add image info
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
+ARG DEVICE=gpu
+
 ENV PYTHONHASHSEED=0
 ENV HF_HOME=/app/hf_cache
 
 # set up requirements
 WORKDIR /app
 
-# Install requirements
+COPY ./workers/score_paths/requirements-cpu.txt ./workers/score_paths/requirements-gpu.txt ./
+RUN pip install --no-cache-dir --timeout=300 --retries=5 -r requirements-${DEVICE}.txt
+# pre-download the model
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('cambridgeltl/SapBERT-from-PubMedBERT-fulltext')"
+
+# Install shared utilities
 COPY ./shepherd_utils ./shepherd_utils
 COPY ./pyproject.toml .
 RUN pip install .
-
-COPY ./workers/score_paths/requirements.txt .
-RUN pip install --timeout=300 --retries=5 -r requirements.txt
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('cambridgeltl/SapBERT-from-PubMedBERT-fulltext')"
 
 # Copy in files and make sure they are readable
 COPY ./workers/score_paths .

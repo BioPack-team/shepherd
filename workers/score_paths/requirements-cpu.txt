@@ -1,0 +1,5 @@
+xgboost>=3.2.0
+sentence-transformers>=5.2.3
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.10.0
+bmt>=1.4.6

@@ -194,6 +194,8 @@ services:
     build:
       context: .
       dockerfile: workers/score_paths/Dockerfile
+      args:
+        DEVICE: cpu
     restart: unless-stopped
     depends_on:
       shepherd_db:
