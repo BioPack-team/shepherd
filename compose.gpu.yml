@@ -1,0 +1,12 @@
+services:
+  score_paths:
+    build:
+      args:
+        DEVICE: gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

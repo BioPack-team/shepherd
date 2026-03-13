@@ -144,7 +144,9 @@ async def run_sync_query(
     query_id, response_id, logger = await run_query(target, query_dict)
     start = time.time()
     now = start
-    while now <= start + 360:
+    timeout = query_dict.get("parameters", {}).get("timeout", 360)
+    logger.info(f"Query running with {timeout} second timeout.")
+    while now <= start + timeout:
         now = time.time()
         # poll for completed status
         query_state = await get_query_state(query_id, logger)

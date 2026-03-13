@@ -12,7 +12,10 @@ The main entrypoint is `./compose.yml` and will spin everything up.
 
 - In the root folder, run `docker compose up --build`
 
-If you want to add a new operation/worker, add a new service in `compose.yml` under `services`.
+If you would like to run workers with gpu access, you can use the `./compose.gpu.yml` override file. Otherwise, workers will be restricted to cpu only.
+- In the root folder, run `docker compose -f compose.yml -f compose.gpu.yml up --build`
+
+If you want to add a new operation/worker, add a new service in `compose.yml` under `services`. If you want to add a new operation/worker that can utilize a gpu, add the service without the gpu deployment into `compose.yml` and then use the override file `compose.gpu.yml` to add the gpu as a resource so it may be accessible within the container.
 
 ### Worker
 

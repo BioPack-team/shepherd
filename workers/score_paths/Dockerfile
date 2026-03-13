@@ -4,27 +4,30 @@ FROM ghcr.io/translatorsri/renci-python-image:3.11.5
 # Add image info
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
+ARG DEVICE=gpu
+
 ENV PYTHONHASHSEED=0
+ENV HF_HOME=/app/hf_cache
 
 # set up requirements
 WORKDIR /app
 
-# make sure all is writeable for the nru USER later on
-RUN chmod -R 777 .
+COPY ./workers/score_paths/requirements-cpu.txt ./workers/score_paths/requirements-gpu.txt ./
+RUN pip install --no-cache-dir --timeout=300 --retries=5 -r requirements-${DEVICE}.txt
+# pre-download the model
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('cambridgeltl/SapBERT-from-PubMedBERT-fulltext')"
 
-# Install requirements
+# Install shared utilities
 COPY ./shepherd_utils ./shepherd_utils
 COPY ./pyproject.toml .
 RUN pip install .
 
-COPY ./workers/score_paths/requirements.txt .
-RUN pip install -r requirements.txt
+# Copy in files and make sure they are readable
+COPY ./workers/score_paths .
+RUN chmod -R 777 .
 
 # switch to the non-root user (nru). defined in the base image
 USER nru
-
-# Copy in files
-COPY ./workers/score_paths .
 
 # Variables that can be overriden
 CMD ["python", "worker.py"]
