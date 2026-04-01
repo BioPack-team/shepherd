@@ -133,9 +133,7 @@ def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
         # path_sentence += (
         #     f" {knowledge_graph['nodes'][path_node]['name']} (a {node_cat.name})"
         # )
-        path_sentence += (
-            f" {knowledge_graph['nodes'][path_node]['name']} (a {node_cat.removeprefix('biolink:')})"
-        )
+        path_sentence += f" {knowledge_graph['nodes'][path_node]['name']} (a {node_cat.removeprefix('biolink:')})"
 
     return path_sentence
 
