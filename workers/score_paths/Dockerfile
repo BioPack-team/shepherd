@@ -27,6 +27,7 @@ COPY ./workers/score_paths .
 RUN chmod -R 777 .
 
 # switch to the non-root user (nru). defined in the base image
+ENV PYSTOW_HOME=/tmp/pystow
 USER nru
 
 # Variables that can be overriden

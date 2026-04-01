@@ -99,13 +99,15 @@ def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
                         path_predicate_list[hop_num].add(inv)
         current_node = next_node
 
-    source_cat = get_most_specific_category(
-        knowledge_graph["nodes"][source]["categories"], logger
-    )
+    # Use only first category listed. May require most specific category if category list is provided
+    # source_cat = get_most_specific_category(
+    #     knowledge_graph["nodes"][source]["categories"], logger
+    # )
+    source_cat = knowledge_graph["nodes"][source]["categories"][0]
     if not source_cat:
         raise ValueError(f"Could not determine category for source node {source}.")
-
-    path_sentence = f"{knowledge_graph['nodes'][source]['name']} (a {source_cat.name}) "
+    # path_sentence = f"{knowledge_graph['nodes'][source]['name']} (a {source_cat.name}) "
+    path_sentence = f"{knowledge_graph['nodes'][source]['name']} (a {source_cat.removeprefix('biolink:')}) "
     first_hop = True
     for path_node, hop_predicates in zip(path_node_list[1:], path_predicate_list):
         hop_preds = list(hop_predicates)
@@ -122,13 +124,17 @@ def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
             for hop_pred in hop_preds[:-1]:
                 path_sentence += f"{hop_pred} or "
             path_sentence += f"{hop_preds[-1]}]"
-        node_cat = get_most_specific_category(
-            knowledge_graph["nodes"][path_node]["categories"], logger
-        )
+        # node_cat = get_most_specific_category(
+        #     knowledge_graph["nodes"][path_node]["categories"], logger
+        # )
+        node_cat = knowledge_graph["nodes"][path_node]["categories"][0]
         if not node_cat:
             raise ValueError(f"Could not determine category for node {path_node}.")
+        # path_sentence += (
+        #     f" {knowledge_graph['nodes'][path_node]['name']} (a {node_cat.name})"
+        # )
         path_sentence += (
-            f" {knowledge_graph['nodes'][path_node]['name']} (a {node_cat.name})"
+            f" {knowledge_graph['nodes'][path_node]['name']} (a {node_cat.removeprefix('biolink:')})"
         )
 
     return path_sentence
