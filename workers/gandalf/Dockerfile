@@ -5,6 +5,7 @@ FROM ghcr.io/translatorsri/renci-python-image:3.11.5
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
+ENV PYSTOW_HOME=/tmp/pystow
 
 # set up requirements
 WORKDIR /app
@@ -21,7 +22,6 @@ COPY ./workers/gandalf/requirements.txt .
 RUN pip install -r requirements.txt
 
 # switch to the non-root user (nru). defined in the base image
-ENV PYSTOW_HOME=/tmp/pystow
 USER nru
 
 # Copy in files
