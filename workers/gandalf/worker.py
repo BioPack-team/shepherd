@@ -74,7 +74,29 @@ def load_graph(path: str, fmt: str = "auto") -> CSRGraph:
 def gandalf_lookup(graph, bmt, in_message, task_logger: logging.Logger):
     """Run a Gandalf lookup for a single task."""
     task_logger.info("Starting Gandalf lookup")
-    return lookup(graph, in_message, bmt=bmt)
+    max_node_degree = (
+        in_message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("max_node_degree", None)
+    )
+    min_information_content = (
+        in_message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("min_information_content", None)
+    )
+    dehydrated = (
+        in_message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("dehydrated", False)
+    )
+    return lookup(
+        graph,
+        in_message,
+        bmt=bmt,
+        max_node_degree=max_node_degree,
+        min_information_content=min_information_content,
+        dehydrated=dehydrated,
+    )
 
 
 async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):

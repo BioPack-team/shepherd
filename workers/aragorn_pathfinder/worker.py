@@ -76,6 +76,17 @@ async def shadowfax(task, logger: logging.Logger):
         intermediate_categories = ["biolink:NamedThing"]
 
     # Create 3-hop query
+    gandalf_parameters = {
+        "min_information_content": message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("min_information_content", 69),
+        "max_node_degree": message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("max_node_degree", 5000),
+        "dehydrated": message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("dehydrated", True),
+    }
     threehop = {
         "message": {
             "query_graph": {
@@ -180,6 +191,7 @@ async def shadowfax(task, logger: logging.Logger):
                 },
             },
         },
+        "parameters": {"gandalf_parameters": gandalf_parameters},
     }
 
     callback_id = str(uuid.uuid4())[:8]

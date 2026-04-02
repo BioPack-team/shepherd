@@ -21,6 +21,7 @@ COPY ./workers/gandalf_rehydrate/requirements.txt .
 RUN pip install -r requirements.txt
 
 # switch to the non-root user (nru). defined in the base image
+ENV PYSTOW_HOME=/tmp/pystow
 USER nru
 
 # Copy in files
