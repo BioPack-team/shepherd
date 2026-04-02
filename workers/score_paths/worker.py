@@ -23,6 +23,7 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 1
 tracer = setup_tracer(STREAM)
 
+
 def convert_path_to_sentence(source, target, path, knowledge_graph, logger):
 
     path_node_list = [source]
