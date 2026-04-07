@@ -22,7 +22,6 @@ async def example_ara(task, logger: logging.Logger):
     logger.info("Getting message from db")
     message = await get_message(task[1]["query_id"], logger)
     # logger.info(message)
-    logger.info(task)
 
     workflow = [
         {"id": "example.lookup"},

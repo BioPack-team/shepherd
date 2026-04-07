@@ -119,7 +119,6 @@ async def process_task(task, parent_ctx, logger, limiter):
     try:
         await aragorn(task, logger)
         try:
-            logger.info(task)
             await wrap_up_task(STREAM, GROUP, task, logger)
         except Exception as e:
             logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
