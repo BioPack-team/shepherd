@@ -4,20 +4,23 @@ import asyncio
 import copy
 import json
 import logging
+import multiprocessing
 import os
 import time
 import traceback
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
-from typing import Any, Dict, Union
+from typing import Any, Union
 
 from shepherd_utils.broker import acquire_lock, mark_task_as_complete, remove_lock
 from shepherd_utils.db import (
     get_message,
+    get_message_sync,
     remove_callback_id,
-    save_message,
+    save_message_sync,
 )
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
@@ -297,7 +300,7 @@ def merge_results_by_node(target, result_message, merge_qnode, lookup_results):
     return result_message
 
 
-def get_answer_node(query_graph: Dict[str, Any]) -> Union[str, None]:
+def get_answer_node(query_graph: dict[str, Any]) -> Union[str, None]:
     """From the original query graph, get the answer node id."""
     answer_node = None
     qnodes = query_graph.get("nodes", {})
@@ -432,9 +435,9 @@ def filter_promiscuous_results(response, logger: logging.Logger):
 
 def merge_messages(
     target: str,
-    original_query_graph: Dict[str, Any],
-    response: Dict[str, Any],
-    new_response: Dict[str, Any],
+    original_query_graph: dict[str, Any],
+    response: dict[str, Any],
+    new_response: dict[str, Any],
     logger: logging.Logger,
 ):
     pydantic_kgraph = {"nodes": {}, "edges": {}}
@@ -593,12 +596,73 @@ def merge_messages(
     raise TypeError("Unsupported query type.")
 
 
+# ---------------------------------------------------------------------------
+# Worker entry point
+#
+# Runs in a ProcessPoolExecutor worker. Fetches the three messages directly
+# from Redis using the sync client, performs the merge, and writes the result
+# back. Nothing large crosses the process boundary in either direction.
+# ---------------------------------------------------------------------------
+
+
+def _init_worker():
+    """Initializer run once per spawned worker process."""
+    import faulthandler
+
+    # Print C-level tracebacks to stderr on segfault / abort, so we get
+    # something actionable instead of a silent BrokenProcessPool.
+    faulthandler.enable()
+    # Minimal logging config so log calls inside the worker reach stderr,
+    # which the parent's container/log collector will pick up.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [worker %(process)d] %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def merge_messages_by_id(
+    target: str,
+    query_id: str,
+    response_id: str,
+    callback_id: str,
+) -> bool:
+    """Worker-side merge: fetch by id, merge, write back. No payloads cross IPC."""
+    worker_logger = logging.getLogger(f"merge_message.worker.{os.getpid()}")
+    try:
+        original_query = get_message_sync(query_id)
+        original_response = get_message_sync(response_id)
+        callback_response = get_message_sync(callback_id)
+    except KeyError as e:
+        worker_logger.error(f"Missing message in worker: {e}")
+        raise
+
+    original_query_graph = original_query["message"]["query_graph"]
+    merged_message = merge_messages(
+        target,
+        original_query_graph,
+        original_response,
+        callback_response,
+        worker_logger,
+    )
+    save_message_sync(response_id, merged_message)
+    return True
+
+
+def _make_executor(max_workers: int) -> ProcessPoolExecutor:
+    """Build a fresh ProcessPoolExecutor using the spawn start method."""
+    return ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_init_worker,
+    )
+
+
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
-    executor = ProcessPoolExecutor(max_workers=cpu_count)
+    executor = _make_executor(cpu_count)
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
@@ -615,35 +679,44 @@ async def poll_for_tasks():
                     if got_lock:
                         logger.info(f"[{callback_id}] Obtained lock.")
 
-                        # given a task, get the message from the db
-                        original_query = await get_message(query_id, logger)
-                        if original_query is None:
+                        # Sanity check: confirm the original query exists before
+                        # handing off to the worker. The worker will refetch it
+                        # itself, but we want a clean discard path here if it's
+                        # missing rather than letting the worker raise.
+                        try:
+                            await get_message(query_id, logger)
+                        except KeyError:
                             logger.error(
                                 f"Failed to get original query for {query_id}. Discarding callback response."
                             )
                             await remove_lock(response_id, CONSUMER, logger)
                             await remove_callback_id(callback_id, logger)
-                            limiter.release()
-                            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-                            span.end()
                             continue
-                        original_query_graph = original_query["message"]["query_graph"]
-                        callback_response = await get_message(callback_id, logger)
+
                         lock_time = time.time()
-                        original_response = await get_message(response_id, logger)
-                        # do message merging
+                        # Hand merge off to a worker. Only ids cross the
+                        # process boundary; the worker fetches and writes
+                        # the actual messages itself.
                         try:
-                            merged_message = await loop.run_in_executor(
+                            await loop.run_in_executor(
                                 executor,
-                                merge_messages,
+                                merge_messages_by_id,
                                 target,
-                                original_query_graph,
-                                original_response,
-                                callback_response,
-                                logger,
+                                query_id,
+                                response_id,
+                                callback_id,
                             )
-                            # save merged message back to db
-                            await save_message(response_id, merged_message, logger)
+                        except BrokenProcessPool:
+                            logger.error(
+                                f"[{callback_id}] Process pool is broken; recreating."
+                            )
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            executor = _make_executor(cpu_count)
+                            # The task itself is unfinished. We fall through
+                            # to release the lock and mark complete; the
+                            # callback is effectively dropped. If you want
+                            # at-least-once semantics, NACK back to the
+                            # stream here instead.
                         except Exception:
                             logger.error(
                                 f"[{callback_id}] Error merging message: {traceback.format_exc()}"
@@ -675,6 +748,8 @@ async def poll_for_tasks():
                     limiter.release()
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")
+            executor.shutdown(wait=False, cancel_futures=True)
+            return
         except Exception as e:
             logging.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
