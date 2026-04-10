@@ -12,6 +12,7 @@ from string import Template
 from typing import Optional
 
 import httpx
+from opentelemetry.propagate import inject
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
@@ -86,26 +87,42 @@ class AsyncResponse:
 async def run_async_lookup(
     client: httpx.AsyncClient,
     message: dict,
-    callback_id: str,
+    query_id: str,
+    logger: logging.Logger,
 ) -> AsyncResponse:
     """Return an async lookup response with callback id."""
-    try:
-        response = await client.post(
-            settings.kg_retrieval_url,
-            json=message,
+    callback_id = str(uuid.uuid4())[:8]
+    with tracer.start_as_current_span(f"aragorn.lookup.{callback_id}") as span:
+        lookup_carrier = {}
+        inject(lookup_carrier)
+        # Put callback UID and query ID in postgres
+        await add_callback_id(query_id, callback_id, json.dumps(lookup_carrier), logger)
+
+        message["callback"] = (
+            f"{settings.callback_host}/aragorn/callback/{callback_id}"
         )
-        return AsyncResponse(
-            status_code=response.status_code,
-            success=response.status_code == 200,
-            callback_id=callback_id,
+
+        logger.debug(
+            f"""Sending lookup query to {settings.kg_retrieval_url} with callback {message['callback']}"""
         )
-    except Exception as e:
-        return AsyncResponse(
-            status_code=500,
-            success=False,
-            callback_id=callback_id,
-            error=str(e),
-        )
+        try:
+            response = await client.post(
+                settings.kg_retrieval_url,
+                json=message,
+            )
+            return AsyncResponse(
+                status_code=response.status_code,
+                success=response.status_code == 200,
+                callback_id=callback_id,
+            )
+        except Exception as e:
+            span.record_exception(e)
+            return AsyncResponse(
+                status_code=500,
+                success=False,
+                callback_id=callback_id,
+                error=str(e),
+            )
 
 
 async def aragorn_lookup(task, logger: logging.Logger):
@@ -113,6 +130,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
+    otel = task[1]["otel"]
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
@@ -136,7 +154,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
     if not infer:
         # Put callback UID and query ID in postgres
         callback_id = str(uuid.uuid4())[:8]
-        await add_callback_id(query_id, callback_id, logger)
+        await add_callback_id(query_id, callback_id, otel, logger)
         message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
         # with open("./debug/direct_query.json", "w", encoding="utf-8") as f:
         #     json.dump(message, f, indent=2)
@@ -154,17 +172,18 @@ async def aragorn_lookup(task, logger: logging.Logger):
                     "response_id": response_id,
                     "callback_id": callback_id,
                     "log_level": task[1].get("log_level", 20),
-                    "otel": task[1]["otel"],
+                    "otel": otel,
                 },
                 logger,
             )
         else:
             logger.debug(f"""Sending lookup query to {settings.kg_retrieval_url}.""")
-            async with httpx.AsyncClient(timeout=100) as client:
-                await client.post(
-                    settings.kg_retrieval_url,
-                    json=message,
-                )
+            with tracer.start_as_current_span(f"aragorn.lookup.{callback_id}"):
+                async with httpx.AsyncClient(timeout=100) as client:
+                    await client.post(
+                        settings.kg_retrieval_url,
+                        json=message,
+                    )
     else:
         expanded_messages = expand_aragorn_query(message, logger)
         # with open("./debug/expanded_messages.json", "w", encoding="utf-8") as f:
@@ -175,7 +194,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 callback_id = str(uuid.uuid4())[:8]
 
                 # Put callback UID and query ID in postgres
-                await add_callback_id(query_id, callback_id, logger)
+                await add_callback_id(query_id, callback_id, otel, logger)
                 logger.debug("""Sending lookup query to gandalf.""")
 
                 await save_message(callback_id, expanded_message, logger)
@@ -188,7 +207,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
                         "response_id": response_id,
                         "callback_id": callback_id,
                         "log_level": task[1].get("log_level", 20),
-                        "otel": task[1]["otel"],
+                        "otel": otel,
                     },
                     logger,
                 )
@@ -198,20 +217,8 @@ async def aragorn_lookup(task, logger: logging.Logger):
             # send all messages to lookup service
             async with httpx.AsyncClient(timeout=20) as client:
                 for expanded_message in expanded_messages:
-                    callback_id = str(uuid.uuid4())[:8]
-
-                    # Put callback UID and query ID in postgres
-                    await add_callback_id(query_id, callback_id, logger)
-
-                    expanded_message["callback"] = (
-                        f"{settings.callback_host}/aragorn/callback/{callback_id}"
-                    )
-
-                    logger.debug(
-                        f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
-                    )
                     requests.append(
-                        run_async_lookup(client, expanded_message, callback_id)
+                        run_async_lookup(client, expanded_message, query_id, logger)
                     )
                     # Then we can retrieve all callback ids from query id to see which are still
                     # being looked up
@@ -258,7 +265,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
 
     if time.time() - start_time > MAX_QUERY_TIME:
         logger.warning(
-            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
+            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running...{running_callback_ids}"
         )
         # logger.warning(f"Running callbacks: {running_callback_ids}")
         await cleanup_callbacks(query_id, logger)
@@ -389,23 +396,22 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
     start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await aragorn_lookup(task, logger)
-        # Always wrap up the task to ACK it in the broker
+    with tracer.start_as_current_span(STREAM, context=parent_ctx):
         try:
-            await wrap_up_task(STREAM, GROUP, task, logger)
+            await aragorn_lookup(task, logger)
+            # Always wrap up the task to ACK it in the broker
+            try:
+                await wrap_up_task(STREAM, GROUP, task, logger)
+            except Exception as e:
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+        except asyncio.CancelledError:
+            logger.warning(f"Task {task[0]} was cancelled")
         except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Finished task {task[0]} in {time.time() - start}")
+            logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+            await handle_task_failure(STREAM, GROUP, task, logger)
+        finally:
+            limiter.release()
+            logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():

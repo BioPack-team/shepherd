@@ -17,5 +17,6 @@ CREATE TABLE IF NOT EXISTS shepherd_brain (
 
 CREATE TABLE IF NOT EXISTS callbacks (
   query_id varchar(255) REFERENCES shepherd_brain(qid),
-  callback_id varchar(255)
+  callback_id varchar(255),
+  otel_trace varchar(255)
 );

@@ -669,68 +669,71 @@ async def poll_for_tasks():
                 STREAM, GROUP, CONSUMER, cpu_count
             ):
                 start = time.time()
-                span = tracer.start_span(STREAM, context=parent_ctx)
                 try:
                     query_id = task[1]["query_id"]
                     response_id = task[1]["response_id"]
                     callback_id = task[1]["callback_id"]
                     target = task[1]["target"]
-                    got_lock = await acquire_lock(response_id, CONSUMER, logger)
-                    if got_lock:
-                        logger.info(f"[{callback_id}] Obtained lock.")
+                    with tracer.start_as_current_span(
+                        f"{STREAM}.{callback_id}",
+                        context=parent_ctx
+                    ):
+                        got_lock = await acquire_lock(response_id, CONSUMER, logger)
+                        if got_lock:
+                            logger.info(f"[{callback_id}] Obtained lock.")
 
-                        # Sanity check: confirm the original query exists before
-                        # handing off to the worker. The worker will refetch it
-                        # itself, but we want a clean discard path here if it's
-                        # missing rather than letting the worker raise.
-                        try:
-                            await get_message(query_id, logger)
-                        except KeyError:
-                            logger.error(
-                                f"Failed to get original query for {query_id}. Discarding callback response."
+                            # Sanity check: confirm the original query exists before
+                            # handing off to the worker. The worker will refetch it
+                            # itself, but we want a clean discard path here if it's
+                            # missing rather than letting the worker raise.
+                            try:
+                                await get_message(query_id, logger)
+                            except KeyError:
+                                logger.error(
+                                    f"Failed to get original query for {query_id}. Discarding callback response."
+                                )
+                                await remove_lock(response_id, CONSUMER, logger)
+                                await remove_callback_id(callback_id, logger)
+                                continue
+
+                            lock_time = time.time()
+                            # Hand merge off to a worker. Only ids cross the
+                            # process boundary; the worker fetches and writes
+                            # the actual messages itself.
+                            try:
+                                await loop.run_in_executor(
+                                    executor,
+                                    merge_messages_by_id,
+                                    target,
+                                    query_id,
+                                    response_id,
+                                    callback_id,
+                                )
+                            except BrokenProcessPool:
+                                logger.error(
+                                    f"[{callback_id}] Process pool is broken; recreating."
+                                )
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                executor = _make_executor(cpu_count)
+                                # The task itself is unfinished. We fall through
+                                # to release the lock and mark complete; the
+                                # callback is effectively dropped. If you want
+                                # at-least-once semantics, NACK back to the
+                                # stream here instead.
+                            except Exception:
+                                logger.error(
+                                    f"[{callback_id}] Error merging message: {traceback.format_exc()}"
+                                )
+                            logger.info(
+                                f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
                             )
+                            # remove lock so others can now modify message
                             await remove_lock(response_id, CONSUMER, logger)
                             await remove_callback_id(callback_id, logger)
-                            continue
-
-                        lock_time = time.time()
-                        # Hand merge off to a worker. Only ids cross the
-                        # process boundary; the worker fetches and writes
-                        # the actual messages itself.
-                        try:
-                            await loop.run_in_executor(
-                                executor,
-                                merge_messages_by_id,
-                                target,
-                                query_id,
-                                response_id,
-                                callback_id,
-                            )
-                        except BrokenProcessPool:
+                        else:
                             logger.error(
-                                f"[{callback_id}] Process pool is broken; recreating."
+                                f"Failed to obtain lock for {query_id}. Discarding callback response."
                             )
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            executor = _make_executor(cpu_count)
-                            # The task itself is unfinished. We fall through
-                            # to release the lock and mark complete; the
-                            # callback is effectively dropped. If you want
-                            # at-least-once semantics, NACK back to the
-                            # stream here instead.
-                        except Exception:
-                            logger.error(
-                                f"[{callback_id}] Error merging message: {traceback.format_exc()}"
-                            )
-                        logger.info(
-                            f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
-                        )
-                        # remove lock so others can now modify message
-                        await remove_lock(response_id, CONSUMER, logger)
-                        await remove_callback_id(callback_id, logger)
-                    else:
-                        logger.error(
-                            f"Failed to obtain lock for {query_id}. Discarding callback response."
-                        )
                 except Exception as e:
                     logger.error(
                         f"Task {task[0]} failed with unhandled error: {e}",
@@ -744,7 +747,6 @@ async def poll_for_tasks():
                     logger.info(
                         f"Finished task {task[0]} in {time.time() - start:.2f}s"
                     )
-                    span.end()
                     limiter.release()
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")

@@ -321,6 +321,7 @@ async def get_logs(
 async def add_callback_id(
     query_id: str,
     callback_id: str,
+    otel_trace: str,
     logger: logging.Logger,
 ):
     """Add a callback->query mapping."""
@@ -329,13 +330,14 @@ async def add_callback_id(
             async with pool.connection(60) as conn:
                 await conn.execute(
                     """
-                INSERT INTO callbacks (query_id, callback_id) VALUES (
-                    %s, %s
+                INSERT INTO callbacks (query_id, callback_id, otel_trace) VALUES (
+                    %s, %s, %s
                 )
                 """,
                     (
                         query_id,
                         callback_id,
+                        otel_trace,
                     ),
                 )
                 await conn.commit()
@@ -439,19 +441,19 @@ async def get_callback_query_id(
     logger: logging.Logger,
 ) -> Union[str, None]:
     """Given a callback id, get the associated query id."""
-    query_id = None
+    original_query = None
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(60) as conn:
                 cursor = await conn.execute(
                     """
-                SELECT query_id FROM callbacks WHERE callback_id = %s
+                SELECT query_id, otel_trace FROM callbacks WHERE callback_id = %s
                 """,
                     (callback_id,),
                 )
                 row = await cursor.fetchone()
                 if row is not None:
-                    query_id = row[0]
+                    original_query = row
             break
         except OperationalError as e:
             logger.error(
@@ -462,7 +464,7 @@ async def get_callback_query_id(
             continue
         except Exception as e:
             logger.error(f"Failed to get a query id from callback: {e}")
-    return query_id
+    return original_query
 
 
 async def get_query_state(

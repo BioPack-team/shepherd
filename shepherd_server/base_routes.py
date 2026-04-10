@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 from fastapi import APIRouter, Body, Response
 from fastapi.responses import JSONResponse
-from opentelemetry.propagate import inject
+from opentelemetry.propagate import extract, inject
 
 from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
@@ -80,10 +80,9 @@ async def run_query(
 
     logger.info(f"Sending {query_id} to {target}")
 
-    with tracer.start_as_current_span(""):
-        span_carrier = {}
-        # adds otel trace to carrier for next worker
-        inject(span_carrier)
+    span_carrier = {}
+    # adds otel trace to carrier for next worker
+    inject(span_carrier)
 
     supported_workflow_operations = set(
         [
@@ -224,9 +223,9 @@ async def callback(
 
     logger.info(f"Got back {len(response['message']['results'])} results.")
     # get associated query id for this callback
-    query_id = await get_callback_query_id(callback_id, logger)
-    logger.info(f"Got original query id: {query_id}")
-    if query_id is None:
+    original_query = await get_callback_query_id(callback_id, logger)
+    logger.debug(f"Got original query: {original_query}")
+    if original_query is None:
         return Response("Couldn't find original query.", 500)
     # if len(response["message"]["results"]) > 0:
     #     with open(
@@ -235,26 +234,32 @@ async def callback(
     #         encoding="utf-8",
     #     ) as f:
     #         json.dump(response, f, indent=2)
-    query_state = await get_query_state(query_id, logger)
+    query_state = await get_query_state(original_query[0], logger)
     if query_state is None:
         return Response("Failed to get query state.", 500)
     response_id = query_state[7]
     # save callback to redis
-    logger.info(f"Saving callback {callback_id} to redis")
+    logger.debug(f"Saving callback {callback_id} to redis")
     await save_message(callback_id, response, logger)
-    logger.info(f"Saved callback {callback_id} to redis")
-    # add new task to merge callback response into original message
-    await add_task(
-        "merge_message",
-        {
-            "target": target,
-            "query_id": query_id,
-            "response_id": response_id,
-            "callback_id": callback_id,
-            "log_level": level_number,
-        },
-        logger,
-    )
+    logger.debug(f"Saved callback {callback_id} to redis")
+    # adds otel trace to carrier for next worker
+    parent_ctx = extract(json.loads(original_query[1]))
+    with tracer.start_as_current_span(f"callback.{callback_id}", context=parent_ctx):
+        span_carrier = {}
+        inject(span_carrier)
+        # add new task to merge callback response into original message
+        await add_task(
+            "merge_message",
+            {
+                "target": target,
+                "query_id": original_query[0],
+                "response_id": response_id,
+                "callback_id": callback_id,
+                "log_level": level_number,
+                "otel": json.dumps(span_carrier),
+            },
+            logger,
+        )
     return Response("Callback received.", 200)
 
 
