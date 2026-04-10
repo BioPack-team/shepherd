@@ -675,8 +675,7 @@ async def poll_for_tasks():
                     callback_id = task[1]["callback_id"]
                     target = task[1]["target"]
                     with tracer.start_as_current_span(
-                        f"{STREAM}.{callback_id}",
-                        context=parent_ctx
+                        f"{STREAM}.{callback_id}", context=parent_ctx
                     ):
                         got_lock = await acquire_lock(response_id, CONSUMER, logger)
                         if got_lock:

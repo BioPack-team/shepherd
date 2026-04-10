@@ -98,9 +98,7 @@ async def run_async_lookup(
         # Put callback UID and query ID in postgres
         await add_callback_id(query_id, callback_id, json.dumps(lookup_carrier), logger)
 
-        message["callback"] = (
-            f"{settings.callback_host}/aragorn/callback/{callback_id}"
-        )
+        message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
 
         logger.debug(
             f"""Sending lookup query to {settings.kg_retrieval_url} with callback {message['callback']}"""
@@ -407,7 +405,9 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
         except asyncio.CancelledError:
             logger.warning(f"Task {task[0]} was cancelled")
         except Exception as e:
-            logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+            logger.error(
+                f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
+            )
             await handle_task_failure(STREAM, GROUP, task, logger)
         finally:
             limiter.release()
