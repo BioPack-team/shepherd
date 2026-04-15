@@ -11,6 +11,7 @@ from string import Template
 from typing import Any, Dict, Optional
 
 import httpx
+from opentelemetry.propagate import inject
 from pydantic import BaseModel, parse_obj_as
 
 from shepherd_utils.config import settings
@@ -86,31 +87,45 @@ class AsyncResponse:
 async def run_async_lookup(
     client: httpx.AsyncClient,
     message: dict,
-    callback_id: str,
+    query_id: str,
+    logger: logging.Logger,
 ) -> AsyncResponse:
     """Return an async lookup response with callback id."""
-    try:
-        response = await client.post(
-            settings.kg_retrieval_url,
-            json=message,
+    callback_id = str(uuid.uuid4())[:8]
+    with tracer.start_as_current_span(f"bte.lookup.{callback_id}") as span:
+        lookup_carrier = {}
+        inject(lookup_carrier)
+        # Put callback UID and query ID in postgres
+        await add_callback_id(query_id, callback_id, json.dumps(lookup_carrier), logger)
+
+        message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
+
+        logger.debug(
+            f"""Sending lookup query to {settings.kg_retrieval_url} with callback {message['callback']}"""
         )
-        return AsyncResponse(
-            status_code=response.status_code,
-            success=response.status_code == 200,
-            callback_id=callback_id,
-        )
-    except Exception as e:
-        return AsyncResponse(
-            status_code=500,
-            success=False,
-            callback_id=callback_id,
-            error=str(e),
-        )
+        try:
+            response = await client.post(
+                settings.kg_retrieval_url,
+                json=message,
+            )
+            return AsyncResponse(
+                status_code=response.status_code,
+                success=response.status_code == 200,
+                callback_id=callback_id,
+            )
+        except Exception as e:
+            return AsyncResponse(
+                status_code=500,
+                success=False,
+                callback_id=callback_id,
+                error=str(e),
+            )
 
 
 async def bte_lookup(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
+    otel = task[1]["otel"]
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
@@ -132,14 +147,15 @@ async def bte_lookup(task, logger: logging.Logger):
     if not infer:
         # Put callback UID and query ID in postgres
         callback_id = str(uuid.uuid4())[:8]
-        await add_callback_id(query_id, callback_id, logger)
+        await add_callback_id(query_id, callback_id, otel, logger)
         message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
 
-        async with httpx.AsyncClient(timeout=100) as client:
-            await client.post(
-                settings.kg_retrieval_url,
-                json=message,
-            )
+        with tracer.start_as_current_span(f"bte.lookup.{callback_id}"):
+            async with httpx.AsyncClient(timeout=100) as client:
+                await client.post(
+                    settings.kg_retrieval_url,
+                    json=message,
+                )
     else:
         expanded_messages = expand_bte_query(message, logger)
         logger.info(f"Expanded to {len(expanded_messages)} messages")
@@ -147,18 +163,9 @@ async def bte_lookup(task, logger: logging.Logger):
         # send all messages to retriever
         async with httpx.AsyncClient(timeout=20) as client:
             for expanded_message in expanded_messages:
-                callback_id = str(uuid.uuid4())[:8]
-                # Put callback UID and query ID in postgres
-                await add_callback_id(query_id, callback_id, logger)
-
-                expanded_message["callback"] = (
-                    f"{settings.callback_host}/bte/callback/{callback_id}"
+                requests.append(
+                    run_async_lookup(client, expanded_message, query_id, logger)
                 )
-
-                logger.debug(
-                    f"""Sending lookup query to {settings.kg_retrieval_url} with callback {expanded_message['callback']}"""
-                )
-                requests.append(run_async_lookup(client, expanded_message, callback_id))
                 # Then we can retrieve all callback ids from query id to see which are still
                 # being looked up
             # fire all the lookups at the same time
@@ -419,23 +426,22 @@ def expand_bte_query(query_dict: dict[str, Any], logger: logging.Logger) -> list
 async def process_task(task, parent_ctx, logger, limiter):
     """Process a given task and ACK in redis."""
     start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await bte_lookup(task, logger)
+    with tracer.start_as_current_span(STREAM, context=parent_ctx):
         try:
-            # Always wrap up the task to ACK it in the broker
-            await wrap_up_task(STREAM, GROUP, task, logger)
+            await bte_lookup(task, logger)
+            try:
+                # Always wrap up the task to ACK it in the broker
+                await wrap_up_task(STREAM, GROUP, task, logger)
+            except Exception as e:
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+        except asyncio.CancelledError:
+            logger.warning(f"Task {task[0]} was cancelled.")
         except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled.")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Task took {time.time() - start}")
+            logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
+            await handle_task_failure(STREAM, GROUP, task, logger)
+        finally:
+            limiter.release()
+            logger.info(f"Task took {time.time() - start}")
 
 
 async def poll_for_tasks():
