@@ -21,6 +21,11 @@ STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 1
+# Upper bound on the number of unique path sentences we will send to the
+# embedding model per task. After dedup we almost never approach this, but it
+# keeps worst-case GPU time bounded; analyses beyond the cap get score=0 and
+# will be dropped by the downstream filter_analyses_top_n worker.
+MAX_SENTENCES_PER_TASK = 10_000
 tracer = setup_tracer(STREAM)
 
 
@@ -108,11 +113,18 @@ async def score_paths(task, logger: logging.Logger):
     message = await get_message(response_id, logger)
 
     try:
+        results = message["message"].get("results", [])
+        knowledge_graph = message["message"]["knowledge_graph"]
+        auxiliary_graphs = message["message"]["auxiliary_graphs"]
+
         for qpath_id, qpath in message["message"]["query_graph"]["paths"].items():
             source_qnode = qpath["subject"]
             target_qnode = qpath["object"]
 
-            for ind, result in enumerate(message["message"].get("results", [])):
+            # Phase 1 - Gather: collect valid (result_ind, analysis_ind, path_id,
+            # source, target) tuples, zeroing analyses whose bindings are missing.
+            gathered = []
+            for ind, result in enumerate(results):
                 try:
                     source = result["node_bindings"][source_qnode][0]["id"]
                     target = result["node_bindings"][target_qnode][0]["id"]
@@ -122,21 +134,9 @@ async def score_paths(task, logger: logging.Logger):
                     )
                     continue
 
-                # Need to keep track of which analyses actually made sentences successfully
-                sentences = []
-                embedding_index = []
                 for analysis_ind, analysis in enumerate(result.get("analyses", [])):
                     try:
                         path_id = analysis["path_bindings"][qpath_id][0]["id"]
-                        sentence = convert_path_to_sentence(
-                            source,
-                            target,
-                            message["message"]["auxiliary_graphs"][path_id]["edges"],
-                            message["message"]["knowledge_graph"],
-                            logger,
-                        )
-                        sentences.append(sentence)
-                        embedding_index.append(analysis_ind)
                     except KeyError as e:
                         logger.error(
                             f"Result {ind}, analysis {analysis_ind}: missing key {e}, skipping analysis."
@@ -145,58 +145,129 @@ async def score_paths(task, logger: logging.Logger):
                             "score"
                         ] = 0.0
                         continue
-                    except ValueError as e:
-                        logger.error(
-                            f"Result {ind}, analysis {analysis_ind}: could not build sentence."
-                        )
-                        message["message"]["results"][ind]["analyses"][analysis_ind][
-                            "score"
-                        ] = 0.0
-                        continue
+                    gathered.append((ind, analysis_ind, path_id, source, target))
 
-                if not sentences:
-                    logger.warning(
-                        f"Result {ind}: no valid analyses to score, skipping."
-                    )
+            if not gathered:
+                logger.warning(
+                    f"qpath {qpath_id}: no valid analyses to score, skipping."
+                )
+                continue
+
+            # Phase 2a - Build a sentence once per unique (path_id, source, target).
+            # Multiple analyses that share the same auxiliary graph collapse here.
+            path_sentence_cache = {}
+            for _, _, path_id, source, target in gathered:
+                key = (path_id, source, target)
+                if key in path_sentence_cache:
                     continue
-
                 try:
-                    # Use lock to avoid data corruption (see here: https://github.com/huggingface/sentence-transformers/issues/794)
-                    logger.debug("Waiting for embedding model lock.")
-                    async with embedding_lock:
-                        logger.info(
-                            f"Generating embeddings using device {device} and batch size {embedding_batch_size}."
-                        )
-                        loop = asyncio.get_running_loop()
-                        embeddings = await loop.run_in_executor(
-                            executor,
-                            partial(
-                                model.encode,
-                                sentences,
-                                batch_size=embedding_batch_size,
-                            ),
-                        )
-                except Exception as e:
-                    logger.error(f"Result {ind}: embedding failed due to {e}.")
-                    for analysis in message["message"]["results"][ind]["analyses"]:
-                        analysis["score"] = 0.0
-                    continue
+                    path_sentence_cache[key] = convert_path_to_sentence(
+                        source,
+                        target,
+                        auxiliary_graphs[path_id]["edges"],
+                        knowledge_graph,
+                        logger,
+                    )
+                except KeyError as e:
+                    logger.error(
+                        f"qpath {qpath_id}, path_id {path_id}: missing key {e} while building sentence."
+                    )
+                    path_sentence_cache[key] = None
+                except ValueError:
+                    logger.error(
+                        f"qpath {qpath_id}, path_id {path_id}: could not build sentence."
+                    )
+                    path_sentence_cache[key] = None
 
-                logger.info(f"Scoring paths from embeddings.")
-                for analysis_ind, embedding in zip(embedding_index, embeddings):
-                    try:
-                        probs = clf.predict_proba(embedding.reshape(1, -1))[:, 1]
-                        message["message"]["results"][ind]["analyses"][analysis_ind][
-                            "score"
-                        ] = float(probs[0])
-                    except Exception as e:
-                        logger.error(
-                            f"Result {ind}, analysis {analysis_ind}: scoring failed due to {e}."
-                        )
+            # Phase 2b - Dedup by sentence text so each unique sentence is encoded
+            # exactly once. records lets us later scatter scores back to every
+            # (result_ind, analysis_ind) that consumed a given sentence.
+            sentence_to_index = {}
+            unique_sentences = []
+            records = []  # list of (result_ind, analysis_ind, sentence_idx or None)
+            for ind, analysis_ind, path_id, source, target in gathered:
+                sentence = path_sentence_cache[(path_id, source, target)]
+                if sentence is None:
+                    message["message"]["results"][ind]["analyses"][analysis_ind][
+                        "score"
+                    ] = 0.0
+                    records.append((ind, analysis_ind, None))
+                    continue
+                idx = sentence_to_index.get(sentence)
+                if idx is None:
+                    idx = len(unique_sentences)
+                    sentence_to_index[sentence] = idx
+                    unique_sentences.append(sentence)
+                records.append((ind, analysis_ind, idx))
+
+            logger.info(
+                f"qpath {qpath_id}: gathered={len(gathered)} "
+                f"unique_paths={len(path_sentence_cache)} "
+                f"unique_sentences={len(unique_sentences)}"
+            )
+
+            # Phase 3 - Safety cap: bound worst-case GPU work. Analyses whose
+            # sentences fall outside the cap get score=0 and will be dropped by
+            # filter_analyses_top_n downstream.
+            if len(unique_sentences) > MAX_SENTENCES_PER_TASK:
+                logger.warning(
+                    f"qpath {qpath_id}: {len(unique_sentences)} unique sentences "
+                    f"exceeds cap {MAX_SENTENCES_PER_TASK}; scoring the first "
+                    f"{MAX_SENTENCES_PER_TASK} and zeroing the rest."
+                )
+                unique_sentences = unique_sentences[:MAX_SENTENCES_PER_TASK]
+                for ind, analysis_ind, idx in records:
+                    if idx is not None and idx >= MAX_SENTENCES_PER_TASK:
                         message["message"]["results"][ind]["analyses"][analysis_ind][
                             "score"
                         ] = 0.0
-                        continue
+
+            if not unique_sentences:
+                logger.warning(
+                    f"qpath {qpath_id}: no valid sentences after dedup, skipping encode."
+                )
+                continue
+
+            # Phase 4 - Score: a single model.encode and a single predict_proba
+            # call for the whole task, then scatter scores back to records.
+            try:
+                # Lock prevents concurrent encode() calls corrupting internal
+                # state (https://github.com/huggingface/sentence-transformers/issues/794).
+                logger.debug("Waiting for embedding model lock.")
+                async with embedding_lock:
+                    logger.info(
+                        f"Generating {len(unique_sentences)} embeddings using "
+                        f"device {device} and batch size {embedding_batch_size}."
+                    )
+                    loop = asyncio.get_running_loop()
+                    embeddings = await loop.run_in_executor(
+                        executor,
+                        partial(
+                            model.encode,
+                            unique_sentences,
+                            batch_size=embedding_batch_size,
+                            show_progress_bar=False,
+                            convert_to_numpy=True,
+                        ),
+                    )
+                logger.info("Scoring embeddings.")
+                scores = clf.predict_proba(embeddings)[:, 1]
+            except Exception as e:
+                logger.error(f"qpath {qpath_id}: embedding/scoring failed due to {e}.")
+                for ind, analysis_ind, idx in records:
+                    if idx is not None and idx < len(unique_sentences):
+                        message["message"]["results"][ind]["analyses"][analysis_ind][
+                            "score"
+                        ] = 0.0
+                continue
+
+            for ind, analysis_ind, idx in records:
+                if idx is None or idx >= len(unique_sentences):
+                    # Already zeroed above (missing sentence or beyond cap).
+                    continue
+                message["message"]["results"][ind]["analyses"][analysis_ind][
+                    "score"
+                ] = float(scores[idx])
     except KeyError as e:
         # can't find the right structure of message
         err = f"Error scoring paths: {e}"
