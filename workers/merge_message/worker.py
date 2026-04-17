@@ -222,8 +222,8 @@ def queries_equivalent(query1, query2):
     """Compare 2 query graphs.  The nuisance is that there is flexiblity in e.g. whether there is a qualifier constraint
     as none or it's not in there or its an empty list.  And similar for is_set and is_set is False.
     """
-    q1 = query1.copy()
-    q2 = query2.copy()
+    q1 = copy.deepcopy(query1)
+    q2 = copy.deepcopy(query2)
     for q in [q1, q2]:
         for node in q["nodes"].values():
             if "is_set" in node and node["is_set"] is False:
