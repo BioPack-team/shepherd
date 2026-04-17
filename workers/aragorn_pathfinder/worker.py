@@ -39,6 +39,7 @@ async def shadowfax(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
+    otel = task[1]["otel"]
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
@@ -196,7 +197,7 @@ async def shadowfax(task, logger: logging.Logger):
 
     callback_id = str(uuid.uuid4())[:8]
     # Put callback UID and query ID in postgres
-    await add_callback_id(query_id, callback_id, logger)
+    await add_callback_id(query_id, callback_id, otel, logger)
 
     await save_message(callback_id, threehop, logger)
     logger.debug("""Sending pathfinder lookup query to gandalf.""")
