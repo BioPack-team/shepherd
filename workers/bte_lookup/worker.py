@@ -98,7 +98,7 @@ async def run_async_lookup(
         # Put callback UID and query ID in postgres
         await add_callback_id(query_id, callback_id, json.dumps(lookup_carrier), logger)
 
-        message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
+        message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
 
         logger.debug(
             f"""Sending lookup query to {settings.kg_retrieval_url} with callback {message['callback']}"""
@@ -158,6 +158,8 @@ async def bte_lookup(task, logger: logging.Logger):
                 )
     else:
         expanded_messages = expand_bte_query(message, logger)
+        with open("debug/expanded_messages.json", "w", encoding="utf-8") as f:
+            json.dump(expanded_messages, f, indent=2)
         logger.info(f"Expanded to {len(expanded_messages)} messages")
         requests = []
         # send all messages to retriever
