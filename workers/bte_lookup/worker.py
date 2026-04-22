@@ -158,8 +158,8 @@ async def bte_lookup(task, logger: logging.Logger):
                 )
     else:
         expanded_messages = expand_bte_query(message, logger)
-        with open("debug/expanded_messages.json", "w", encoding="utf-8") as f:
-            json.dump(expanded_messages, f, indent=2)
+        # with open("debug/expanded_messages.json", "w", encoding="utf-8") as f:
+        #     json.dump(expanded_messages, f, indent=2)
         logger.info(f"Expanded to {len(expanded_messages)} messages")
         requests = []
         # send all messages to retriever
