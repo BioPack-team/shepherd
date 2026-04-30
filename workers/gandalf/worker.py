@@ -74,7 +74,29 @@ def load_graph(path: str, fmt: str = "auto") -> CSRGraph:
 def gandalf_lookup(graph, bmt, in_message, task_logger: logging.Logger):
     """Run a Gandalf lookup for a single task."""
     task_logger.info("Starting Gandalf lookup")
-    return lookup(graph, in_message, bmt=bmt)
+    max_node_degree = (
+        in_message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("max_node_degree", None)
+    )
+    min_information_content = (
+        in_message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("min_information_content", None)
+    )
+    dehydrated = (
+        in_message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("dehydrated", False)
+    )
+    return lookup(
+        graph,
+        in_message,
+        bmt=bmt,
+        max_node_degree=max_node_degree,
+        min_information_content=min_information_content,
+        dehydrated=dehydrated,
+    )
 
 
 async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
@@ -101,11 +123,12 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                         task_logger.error(f"Failed to get {response_id} for lookup.")
                         continue
 
-                    query_id = await get_callback_query_id(callback_id, task_logger)
-                    task_logger.info(f"Got original query id: {query_id}")
-                    if query_id is None:
+                    callback_query = await get_callback_query_id(callback_id, task_logger)
+                    if callback_query is None:
                         task_logger.error("Failed to get original query id.")
                         continue
+                    query_id = callback_query[0]
+                    task_logger.info(f"Got original query id: {query_id}")
 
                     query_state = await get_query_state(query_id, task_logger)
                     if query_state is None:

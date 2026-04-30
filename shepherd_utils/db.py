@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict, List, Union
 
 import orjson
+import redis
 import redis.asyncio as aioredis
 import zstandard
 from psycopg import OperationalError
@@ -77,6 +78,52 @@ data_db_client = aioredis.Redis(connection_pool=data_db_pool)
 logs_db_client = aioredis.Redis(connection_pool=logs_db_pool)
 
 
+# ---------------------------------------------------------------------------
+# Sync Redis client (for use inside ProcessPoolExecutor workers)
+#
+# Lazily constructed so that importing this module in a freshly spawned worker
+# does not open a connection unless the worker actually performs DB work. The
+# client is reused for the lifetime of the worker process.
+# ---------------------------------------------------------------------------
+
+_sync_data_db_client: Union[redis.Redis, None] = None
+
+
+def _get_sync_data_db() -> redis.Redis:
+    """Return a process-local sync Redis client for the data db."""
+    global _sync_data_db_client
+    if _sync_data_db_client is None:
+        _sync_data_db_client = redis.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            db=1,
+            password=settings.redis_password,
+            socket_timeout=5,
+            socket_connect_timeout=10,
+            socket_keepalive=True,
+            health_check_interval=30,
+        )
+    return _sync_data_db_client
+
+
+# ---------------------------------------------------------------------------
+# Codecs
+#
+# Pure functions, no I/O. Shared by both the async and sync code paths so the
+# wire format stays consistent across the process boundary.
+# ---------------------------------------------------------------------------
+
+
+def encode_message(obj: Any) -> bytes:
+    """Serialize a message to compressed bytes for storage in Redis."""
+    return zstandard.compress(orjson.dumps(obj))
+
+
+def decode_message(blob: bytes) -> Any:
+    """Deserialize a stored message blob back into a Python object."""
+    return orjson.loads(zstandard.decompress(blob))
+
+
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
@@ -105,17 +152,9 @@ async def add_query(
     """
     start = time.time()
     try:
-        # print(f"Putting {query_id} on {ara_target} stream")
-        await data_db_client.set(
-            query_id,
-            zstandard.compress(orjson.dumps(query)),
-            ex=settings.redis_ttl,
-        )
-        await data_db_client.set(
-            response_id,
-            zstandard.compress(orjson.dumps(query)),
-            ex=settings.redis_ttl,
-        )
+        encoded = encode_message(query)
+        await data_db_client.set(query_id, encoded, ex=settings.redis_ttl)
+        await data_db_client.set(response_id, encoded, ex=settings.redis_ttl)
     except Exception as e:
         # failed to put message in db
         # TODO: do something more severe
@@ -155,9 +194,8 @@ async def save_message(
     start = time.time()
     try:
         start_comp = time.time()
-        compressed = zstandard.compress(orjson.dumps(response))
+        compressed = encode_message(response)
         logger.info(f"Compression took {time.time() - start_comp}")
-        # print(f"Putting {query_id} on {ara_target} stream")
         await data_db_client.set(
             callback_id,
             compressed,
@@ -182,18 +220,44 @@ async def get_message(
     logger: logging.Logger,
 ) -> Dict:
     """Get the message from db."""
-    message = {}
     start = time.time()
-    message = await data_db_client.get(message_id)
-    if message is None:
+    blob = await data_db_client.get(message_id)
+    if blob is None:
         # failed to get message from db
-        raise Exception(f"Failed to get {message_id} from db: {e}")
+        raise KeyError(f"Failed to get {message_id} from db")
 
     start_decomp = time.time()
-    message = orjson.loads(zstandard.decompress(message))
+    message = decode_message(blob)
     logger.debug(f"Decompression took {time.time() - start_decomp}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
+
+
+# ---------------------------------------------------------------------------
+# Sync variants of get_message / save_message
+#
+# Intended for use inside ProcessPoolExecutor workers, which cannot drive an
+# async event loop without significant overhead. These deliberately do not
+# accept a logger argument: loggers do not pickle cleanly across processes,
+# and worker logging should be configured via the executor's `initializer=`.
+# ---------------------------------------------------------------------------
+
+
+def get_message_sync(message_id: str) -> Dict:
+    """Synchronously fetch and decode a message from the data db."""
+    blob = _get_sync_data_db().get(message_id)
+    if blob is None:
+        raise KeyError(f"Failed to get {message_id} from db")
+    return decode_message(blob)
+
+
+def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
+    """Synchronously encode and store a message in the data db."""
+    _get_sync_data_db().set(
+        message_id,
+        encode_message(message),
+        ex=settings.redis_ttl,
+    )
 
 
 async def save_logs(
@@ -257,6 +321,7 @@ async def get_logs(
 async def add_callback_id(
     query_id: str,
     callback_id: str,
+    otel_trace: str,
     logger: logging.Logger,
 ):
     """Add a callback->query mapping."""
@@ -265,13 +330,14 @@ async def add_callback_id(
             async with pool.connection(60) as conn:
                 await conn.execute(
                     """
-                INSERT INTO callbacks (query_id, callback_id) VALUES (
-                    %s, %s
+                INSERT INTO callbacks (query_id, callback_id, otel_trace) VALUES (
+                    %s, %s, %s
                 )
                 """,
                     (
                         query_id,
                         callback_id,
+                        otel_trace,
                     ),
                 )
                 await conn.commit()
@@ -375,19 +441,19 @@ async def get_callback_query_id(
     logger: logging.Logger,
 ) -> Union[str, None]:
     """Given a callback id, get the associated query id."""
-    query_id = None
+    original_query = None
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(60) as conn:
                 cursor = await conn.execute(
                     """
-                SELECT query_id FROM callbacks WHERE callback_id = %s
+                SELECT query_id, otel_trace FROM callbacks WHERE callback_id = %s
                 """,
                     (callback_id,),
                 )
                 row = await cursor.fetchone()
                 if row is not None:
-                    query_id = row[0]
+                    original_query = row
             break
         except OperationalError as e:
             logger.error(
@@ -398,7 +464,7 @@ async def get_callback_query_id(
             continue
         except Exception as e:
             logger.error(f"Failed to get a query id from callback: {e}")
-    return query_id
+    return original_query
 
 
 async def get_query_state(

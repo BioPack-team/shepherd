@@ -35,13 +35,13 @@ async def sort_results_score(task, logger: logging.Logger):
     if reverse:
         message["message"]["results"] = sorted(
             results,
-            key=lambda x: x["analyses"][0].get("score", 0),
+            key=lambda x: x["analyses"][0].get("score", 0) if x["analyses"] else 0,
             reverse=reverse,
         )
     else:
         message["message"]["results"] = sorted(
             results,
-            key=lambda x: x["analyses"][-1].get("score", 0),
+            key=lambda x: x["analyses"][-1].get("score", 0) if x["analyses"] else 0,
             reverse=reverse,
         )
     logger.info("Returning sorted results.")

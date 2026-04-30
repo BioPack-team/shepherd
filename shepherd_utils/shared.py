@@ -79,7 +79,6 @@ async def wrap_up_task(
 ):
     """Call the next task and mark this one as complete."""
     workflow = json.loads(task[1]["workflow"])
-    logger.info(workflow)
     # remove the operation we just did
     if stream == workflow[0]["id"]:
         # make sure the worker is in the workflow

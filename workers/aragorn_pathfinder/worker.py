@@ -39,6 +39,7 @@ async def shadowfax(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
+    otel = task[1]["otel"]
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
@@ -76,6 +77,17 @@ async def shadowfax(task, logger: logging.Logger):
         intermediate_categories = ["biolink:NamedThing"]
 
     # Create 3-hop query
+    gandalf_parameters = {
+        "min_information_content": message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("min_information_content", 69),
+        "max_node_degree": message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("max_node_degree", 5000),
+        "dehydrated": message.get("parameters", {})
+        .get("gandalf_parameters", {})
+        .get("dehydrated", True),
+    }
     threehop = {
         "message": {
             "query_graph": {
@@ -94,11 +106,12 @@ async def shadowfax(task, logger: logging.Logger):
                         "subject": pinned_node_keys[0],
                         "object": "intermediate_0",
                         "predicates": [
+                            "biolink:physically_interacts_with",
+                            "biolink:genetically_interacts_with",
                             "biolink:contributes_to",
                             "biolink:contribution_from",
                             "biolink:affects",
                             "biolink:affected_by",
-                            "biolink:interacts_with",
                             "biolink:acts_upstream_of",
                             "biolink:has_upstream_actor",
                             "biolink:enables",
@@ -115,17 +128,19 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translation_of",
                             "biolink:has_gene_product",
                             "biolink:gene_product_of",
+                            "biolink:genetically_associated_with",
                         ],
                     },
                     "e1": {
                         "subject": "intermediate_0",
                         "object": "intermediate_1",
                         "predicates": [
+                            "biolink:physically_interacts_with",
+                            "biolink:genetically_interacts_with",
                             "biolink:contributes_to",
                             "biolink:contribution_from",
                             "biolink:affects",
                             "biolink:affected_by",
-                            "biolink:interacts_with",
                             "biolink:acts_upstream_of",
                             "biolink:has_upstream_actor",
                             "biolink:enables",
@@ -142,17 +157,19 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translation_of",
                             "biolink:has_gene_product",
                             "biolink:gene_product_of",
+                            "biolink:genetically_associated_with",
                         ],
                     },
                     "e2": {
                         "subject": "intermediate_1",
                         "object": pinned_node_keys[1],
                         "predicates": [
+                            "biolink:physically_interacts_with",
+                            "biolink:genetically_interacts_with",
                             "biolink:contributes_to",
                             "biolink:contribution_from",
                             "biolink:affects",
                             "biolink:affected_by",
-                            "biolink:interacts_with",
                             "biolink:acts_upstream_of",
                             "biolink:has_upstream_actor",
                             "biolink:enables",
@@ -169,16 +186,18 @@ async def shadowfax(task, logger: logging.Logger):
                             "biolink:translation_of",
                             "biolink:has_gene_product",
                             "biolink:gene_product_of",
+                            "biolink:genetically_associated_with",
                         ],
                     },
                 },
             },
         },
+        "parameters": {"gandalf_parameters": gandalf_parameters},
     }
 
     callback_id = str(uuid.uuid4())[:8]
     # Put callback UID and query ID in postgres
-    await add_callback_id(query_id, callback_id, logger)
+    await add_callback_id(query_id, callback_id, otel, logger)
 
     await save_message(callback_id, threehop, logger)
     logger.debug("""Sending pathfinder lookup query to gandalf.""")
