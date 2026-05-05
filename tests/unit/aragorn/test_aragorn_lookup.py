@@ -35,9 +35,7 @@ async def test_aragorn_creative_lookup(redis_mock, mocker):
         {
             "query_id": "test",
             "response_id": "test_response",
-            "workflow": json.dumps(
-                [{"id": "aragorn.lookup"}, {"id": "aragorn.score"}]
-            ),
+            "workflow": json.dumps([{"id": "aragorn.lookup"}, {"id": "aragorn.score"}]),
             "log_level": "20",
             "otel": json.dumps({}),
         },

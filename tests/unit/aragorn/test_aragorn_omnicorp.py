@@ -172,7 +172,9 @@ async def test_omnicorp_overlay_full_path(lmdb_envs):
     def article_count(node_id):
         attrs = nodes[node_id]["attributes"]
         article_attrs = [
-            a for a in attrs if a.get("original_attribute_name") == "omnicorp_article_count"
+            a
+            for a in attrs
+            if a.get("original_attribute_name") == "omnicorp_article_count"
         ]
         assert len(article_attrs) == 1
         return article_attrs[0]["value"]
@@ -217,7 +219,9 @@ async def test_omnicorp_overlay_full_path(lmdb_envs):
     # that bundles both new edges.
     analysis = out["message"]["results"][0]["analyses"][0]
     omnicorp_sg_ids = [
-        sg for sg in analysis.get("support_graphs", []) if sg.startswith("OMNICORP_support_graph")
+        sg
+        for sg in analysis.get("support_graphs", [])
+        if sg.startswith("OMNICORP_support_graph")
     ]
     # The same OMNICORP graph is appended once per pair, but the worker
     # reuses the existing one after the first match — so the analysis ends

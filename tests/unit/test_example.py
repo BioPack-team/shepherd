@@ -84,9 +84,7 @@ async def test_example_lookup(mocker, redis_mock):
         {
             "query_id": "test",
             "response_id": "test_response",
-            "workflow": json.dumps(
-                [{"id": "example.lookup"}, {"id": "example.score"}]
-            ),
+            "workflow": json.dumps([{"id": "example.lookup"}, {"id": "example.score"}]),
             "log_level": "20",
             "otel": json.dumps({}),
         },
@@ -140,6 +138,4 @@ async def test_example_score(mocker, redis_mock):
 
     assert len(message["message"]["results"]) == 1
     assert "score" in message["message"]["results"][0]["analyses"][0]
-    assert isinstance(
-        message["message"]["results"][0]["analyses"][0]["score"], float
-    )
+    assert isinstance(message["message"]["results"][0]["analyses"][0]["score"], float)
