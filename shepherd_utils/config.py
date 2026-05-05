@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     pathfinder_pmid_db: int = 1
     pathfinder_curies_db: int = 2
 
-    omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.db"
-    omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.db"
+    omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.lmdb"
+    omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
 
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
