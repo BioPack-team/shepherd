@@ -5,13 +5,14 @@ import logging
 import pytest
 
 from shepherd_utils.broker import get_task
+from shepherd_utils.shared import wrap_up_task
 from tests.helpers.generate_messages import creative_query
-from workers.aragorn_lookup.worker import aragorn_lookup
+from workers.aragorn_lookup.worker import GROUP, STREAM, aragorn_lookup
 
 
 @pytest.mark.asyncio
 async def test_aragorn_creative_lookup(redis_mock, mocker):
-    """Test that Aragorn Lookup sends and gets back all the queries."""
+    """Aragorn lookup runs an inferred-edge query and hands off to aragorn.score."""
     mock_callback_response = mocker.patch("workers.aragorn_lookup.worker.get_message")
     mock_callback_response.return_value = copy.deepcopy(creative_query)
     mocker.patch("workers.aragorn_lookup.worker.save_message")
@@ -22,33 +23,34 @@ async def test_aragorn_creative_lookup(redis_mock, mocker):
     mock_running_callbacks.return_value = []
     mock_response = mocker.Mock()
     mock_response.status_code = 200
-    mock_httpx = mocker.patch("httpx.AsyncClient.post", return_value=mock_response)
+    mock_httpx = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=mock_response,
+    )
     logger = logging.getLogger(__name__)
 
-    await aragorn_lookup(
-        [
-            "test",
-            {
-                "query_id": "test",
-                "response_id": "test_response",
-                "workflow": json.dumps(
-                    [{"id": "aragorn.lookup"}, {"id": "aragorn.score"}]
-                ),
-                "log_level": "20",
-                "otel": json.dumps({}),
-            },
-        ],
-        logger,
-    )
+    task = [
+        "test",
+        {
+            "query_id": "test",
+            "response_id": "test_response",
+            "workflow": json.dumps(
+                [{"id": "aragorn.lookup"}, {"id": "aragorn.score"}]
+            ),
+            "log_level": "20",
+            "otel": json.dumps({}),
+        },
+    ]
+
+    await aragorn_lookup(task, logger)
+    # In production this is called inside process_task; emulate it here so the
+    # downstream task lands on the broker for our assertion.
+    await wrap_up_task(STREAM, GROUP, task, logger)
 
     assert mock_httpx.called
 
-    # Get the task that the ara should have put on the queue
-    task = await get_task("aragorn.score", "consumer", "test", logger)
-    assert task is not None
-    workflow = json.loads(task[1]["workflow"])
-    # make sure the workflow was correctly passed
-    assert len(workflow) == 1
-    assert [
-        "aragorn.score",
-    ] == [op["id"] for op in workflow]
+    next_task = await get_task("aragorn.score", "consumer", "test", logger)
+    assert next_task is not None
+    workflow = json.loads(next_task[1]["workflow"])
+    assert [op["id"] for op in workflow] == ["aragorn.score"]

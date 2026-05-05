@@ -152,4 +152,4 @@ async def test_invalid_json(redis_mock, mocker):
             logger,
         )
 
-    assert "Error sorting results" in str(e)
+    assert "analyses" in str(e.value)

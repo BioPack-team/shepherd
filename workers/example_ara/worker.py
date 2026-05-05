@@ -1,6 +1,7 @@
 """Example ARA module."""
 
 import asyncio
+import json
 import logging
 
 import time
@@ -31,7 +32,7 @@ async def example_ara(task, logger: logging.Logger):
         {"id": "filter_kgraph_orphans"},
     ]
 
-    task[1]["workflow"] = workflow
+    task[1]["workflow"] = json.dumps(workflow)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):

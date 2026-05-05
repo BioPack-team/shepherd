@@ -42,22 +42,37 @@ tracer = setup_tracer(STREAM)
 # Matches the upstream `redis_batch_size`.
 LMDB_BATCH_SIZE = 1000
 
-# Open both LMDBs once, read-only, and share across coroutines. These are
-# static datasets so we never coordinate with a writer (`lock=False`).
-_curies_env = lmdb.open(
-    settings.omnicorp_curies_lmdb_path,
-    subdir=False,
-    readonly=True,
-    lock=False,
-    max_readers=512,
-)
-_shared_counts_env = lmdb.open(
-    settings.omnicorp_shared_counts_lmdb_path,
-    subdir=False,
-    readonly=True,
-    lock=False,
-    max_readers=512,
-)
+# Both LMDBs are opened lazily on first use so importing the worker (e.g. in
+# tests) does not require the live data files. Static datasets, so we open
+# read-only and skip the writer lock.
+_curies_env = None
+_shared_counts_env = None
+
+
+def _get_curies_env():
+    global _curies_env
+    if _curies_env is None:
+        _curies_env = lmdb.open(
+            settings.omnicorp_curies_lmdb_path,
+            subdir=False,
+            readonly=True,
+            lock=False,
+            max_readers=512,
+        )
+    return _curies_env
+
+
+def _get_shared_counts_env():
+    global _shared_counts_env
+    if _shared_counts_env is None:
+        _shared_counts_env = lmdb.open(
+            settings.omnicorp_shared_counts_lmdb_path,
+            subdir=False,
+            readonly=True,
+            lock=False,
+            max_readers=512,
+        )
+    return _shared_counts_env
 
 
 def batches(arr, n):
@@ -73,7 +88,7 @@ def curie_query(keys: List[str]) -> Dict[str, dict]:
     for misses, so callers can keep the original ``if len(result) == 0`` check.
     """
     out: Dict[str, dict] = {}
-    with _curies_env.begin(buffers=False) as txn:
+    with _get_curies_env().begin(buffers=False) as txn:
         for key in keys:
             raw = txn.get(key.encode("utf-8"))
             out[key] = json.loads(raw) if raw is not None else {}
@@ -88,7 +103,7 @@ def shared_count_query(keys: List[str]) -> Dict[str, int]:
     expectation.
     """
     out: Dict[str, int] = {}
-    with _shared_counts_env.begin(buffers=False) as txn:
+    with _get_shared_counts_env().begin(buffers=False) as txn:
         for key in keys:
             raw = txn.get(key.encode("utf-8"))
             if raw is None:
