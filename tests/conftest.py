@@ -1,13 +1,22 @@
 """Import pytest fixtures."""
 
-# Replace setup_tracer with a no-op before any worker module imports it,
-# otherwise every worker spins up a BatchSpanProcessor that pushes to a
-# Jaeger collector that does not exist during tests, leaving the pytest
-# process hanging on shutdown while the exporter retries.
-from opentelemetry import trace as _otel_trace  # noqa: E402
-import shepherd_utils.otel as _otel  # noqa: E402
+# Install a stub `shepherd_utils.otel` into sys.modules before any worker
+# module imports it. This avoids two problems at once:
+#   1. The real module starts a BatchSpanProcessor that pushes to a Jaeger
+#      collector that does not exist during tests, so the OTLP exporter
+#      retries on shutdown and stalls pytest by ~30s.
+#   2. The real module imports opentelemetry.instrumentation.httpx, which
+#      pulls in pkg_resources -- not installed in tox-managed venvs by
+#      default, breaking conftest collection in CI.
+# Worker modules only need `setup_tracer`; a MagicMock tracer is fine for
+# tests because none of them exercise the process_task span path.
+import sys  # noqa: E402
+import types  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
 
-_otel.setup_tracer = lambda service_name: _otel_trace.get_tracer(service_name)
+_otel_stub = types.ModuleType("shepherd_utils.otel")
+_otel_stub.setup_tracer = lambda service_name: MagicMock()
+sys.modules["shepherd_utils.otel"] = _otel_stub
 
 import fakeredis.aioredis as fakeredis  # noqa: E402
 from psycopg_pool import AsyncConnectionPool  # noqa: E402
