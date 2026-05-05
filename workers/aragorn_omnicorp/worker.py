@@ -132,7 +132,10 @@ async def add_node_pmid_counts(kgraph, counts):
             "value_type_id": "EDAM:data_0006",
         }
 
-        if "attributes" not in kgraph["nodes"][node_id] or kgraph["nodes"][node_id]["attributes"] is None:
+        if (
+            "attributes" not in kgraph["nodes"][node_id]
+            or kgraph["nodes"][node_id]["attributes"] is None
+        ):
             kgraph["nodes"][node_id]["attributes"] = []
 
         kgraph["nodes"][node_id]["attributes"].append(attribute)
@@ -150,35 +153,37 @@ async def add_shared_pmid_counts(message, values, pair_to_answer):
             continue
 
         uid = str(uuid4())
-        kgraph["edges"].update({
-            uid: {
-                "predicate": "biolink:occurs_together_in_literature_with",
-                "attributes": [
-                    {
-                        "original_attribute_name": "num_publications",
-                        "attribute_type_id": "biolink:has_count",
-                        "value_type_id": "EDAM:data_0006",
-                        "value": publication_count,
-                    },
-                    {
-                        "attribute_type_id": "biolink:agent_type",
-                        "value": "statistical_association_pipeline",
-                    },
-                    {
-                        "attribute_type_id": "biolink:knowledge_level",
-                        "value": "statistical_association",
-                    },
-                ],
-                "sources": [
-                    {
-                        "resource_id": "infores:omnicorp",
-                        "resource_role": "primary_knowledge_source",
-                    }
-                ],
-                "subject": pair[0],
-                "object": pair[1],
+        kgraph["edges"].update(
+            {
+                uid: {
+                    "predicate": "biolink:occurs_together_in_literature_with",
+                    "attributes": [
+                        {
+                            "original_attribute_name": "num_publications",
+                            "attribute_type_id": "biolink:has_count",
+                            "value_type_id": "EDAM:data_0006",
+                            "value": publication_count,
+                        },
+                        {
+                            "attribute_type_id": "biolink:agent_type",
+                            "value": "statistical_association_pipeline",
+                        },
+                        {
+                            "attribute_type_id": "biolink:knowledge_level",
+                            "value": "statistical_association",
+                        },
+                    ],
+                    "sources": [
+                        {
+                            "resource_id": "infores:omnicorp",
+                            "resource_role": "primary_knowledge_source",
+                        }
+                    ],
+                    "subject": pair[0],
+                    "object": pair[1],
+                }
             }
-        })
+        )
 
         for answer_idx, analysis_idx in pair_to_answer[pair]:
             analysis = answers[answer_idx]["analyses"][analysis_idx]
@@ -204,7 +209,9 @@ async def add_shared_pmid_counts(message, values, pair_to_answer):
             aux_graphs[omnisupport]["edges"].append(uid)
 
 
-async def generate_curie_pairs(answers, qgraph_setnodes, node_pub_counts, message, logger):
+async def generate_curie_pairs(
+    answers, qgraph_setnodes, node_pub_counts, message, logger
+):
     pair_to_answer = defaultdict(set)
 
     for ans_idx, answer_map in enumerate(answers):
@@ -336,7 +343,8 @@ async def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
         qgraph_setnodes = set(
             n
             for n in qgraph["nodes"]
-            if (qgraph["nodes"][n].get("set_interpretation", None) or "BATCH") != "BATCH"
+            if (qgraph["nodes"][n].get("set_interpretation", None) or "BATCH")
+            != "BATCH"
         )
 
         t1 = datetime.now()
@@ -356,7 +364,9 @@ async def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
             q_start = datetime.now()
             results = shared_count_query(batch)
             q_end = datetime.now()
-            logger.debug(f"shared_count_query batch ({len(batch)}) time: {q_end - q_start}")
+            logger.debug(
+                f"shared_count_query batch ({len(batch)}) time: {q_end - q_start}"
+            )
 
             for input, output in results.items():
                 if output is not None:

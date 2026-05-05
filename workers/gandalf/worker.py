@@ -123,7 +123,9 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                         task_logger.error(f"Failed to get {response_id} for lookup.")
                         continue
 
-                    callback_query = await get_callback_query_id(callback_id, task_logger)
+                    callback_query = await get_callback_query_id(
+                        callback_id, task_logger
+                    )
                     if callback_query is None:
                         task_logger.error("Failed to get original query id.")
                         continue
