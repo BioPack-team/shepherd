@@ -308,6 +308,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
     build:

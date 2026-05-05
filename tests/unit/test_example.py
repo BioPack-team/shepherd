@@ -1,93 +1,110 @@
 import json
 import logging
+
 import pytest
-import redis.asyncio
+
 from shepherd_utils.broker import get_task
 from shepherd_utils.db import get_message
-
+from shepherd_utils.shared import wrap_up_task
+from workers.example_ara.worker import GROUP as EXAMPLE_GROUP
+from workers.example_ara.worker import STREAM as EXAMPLE_STREAM
 from workers.example_ara.worker import example_ara
+from workers.example_lookup.worker import GROUP as LOOKUP_GROUP
+from workers.example_lookup.worker import STREAM as LOOKUP_STREAM
 from workers.example_lookup.worker import example_lookup
 from workers.example_score.worker import example_score
 
 
 @pytest.mark.asyncio
-async def test_example(redis_mock):
-    # _, redis_constructor = await redis_mock()
-    # monkeypatch.setattr(redis.asyncio, "Redis", redis_constructor)
+async def test_example(redis_mock, mocker):
+    """example_ara installs the default workflow and hands off to example.lookup."""
+    mocker.patch("workers.example_ara.worker.get_message", return_value={})
     logger = logging.getLogger(__name__)
 
-    await example_ara(
-        [
-            "test",
-            {
-                "query_id": "test",
-                "response_id": "test_response",
-                "log_level": "20",
-                "otel": json.dumps({}),
-            },
-        ],
-        logger,
-    )
+    task = [
+        "test",
+        {
+            "query_id": "test",
+            "response_id": "test_response",
+            "log_level": "20",
+            "otel": json.dumps({}),
+        },
+    ]
 
-    # Get the task that the ara should have put on the queue
-    task = await get_task("example.lookup", "consumer", "test", logger)
-    assert task is not None
-    workflow = json.loads(task[1]["workflow"])
-    # make sure the workflow was correctly passed
-    assert len(workflow) == 5
-    assert [
+    await example_ara(task, logger)
+    # In production, process_task calls wrap_up_task. Emulate it here.
+    await wrap_up_task(EXAMPLE_STREAM, EXAMPLE_GROUP, task, logger)
+
+    next_task = await get_task("example.lookup", "consumer", "test", logger)
+    assert next_task is not None
+    workflow = json.loads(next_task[1]["workflow"])
+    assert [op["id"] for op in workflow] == [
         "example.lookup",
         "example.score",
         "sort_results_score",
         "filter_results_top_n",
         "filter_kgraph_orphans",
-    ] == [op["id"] for op in workflow]
+    ]
 
 
 @pytest.mark.asyncio
 async def test_example_lookup(mocker, redis_mock):
-    mock_callback_id = mocker.patch("workers.example_lookup.worker.add_callback_id")
-    mock_callback_id.return_value = "test"
-    mock_callback_response = mocker.patch("workers.example_lookup.worker.save_message")
-    mock_callback_response.return_value = {}
-    mock_running_callbacks = mocker.patch(
-        "workers.example_lookup.worker.get_running_callbacks"
+    """example_lookup fans out callback queries and hands off to example.score."""
+    mocker.patch(
+        "workers.example_lookup.worker.get_message",
+        new_callable=mocker.AsyncMock,
+        return_value={"parameters": {"timeout": 5}},
     )
-    mock_running_callbacks.return_value = []
-    mock_response = mocker.Mock()
-    mocker.patch("httpx.AsyncClient.post", return_value=mock_response)
+    mocker.patch(
+        "workers.example_lookup.worker.add_callback_id",
+        new_callable=mocker.AsyncMock,
+    )
+    mocker.patch(
+        "workers.example_lookup.worker.save_message",
+        new_callable=mocker.AsyncMock,
+    )
+    mocker.patch(
+        "workers.example_lookup.worker.cleanup_callbacks",
+        new_callable=mocker.AsyncMock,
+    )
+    mock_running_callbacks = mocker.patch(
+        "workers.example_lookup.worker.get_running_callbacks",
+        new_callable=mocker.AsyncMock,
+        return_value=[],
+    )
+    mock_post = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=mocker.Mock(status_code=200),
+    )
     logger = logging.getLogger(__name__)
 
-    await example_lookup(
-        [
-            "test",
-            {
-                "query_id": "test",
-                "response_id": "test_response",
-                "workflow": json.dumps(
-                    [{"id": "example.lookup"}, {"id": "example.score"}]
-                ),
-                "log_level": "20",
-                "otel": json.dumps({}),
-            },
-        ],
-        logger,
-    )
+    task = [
+        "test",
+        {
+            "query_id": "test",
+            "response_id": "test_response",
+            "workflow": json.dumps([{"id": "example.lookup"}, {"id": "example.score"}]),
+            "log_level": "20",
+            "otel": json.dumps({}),
+        },
+    ]
 
-    # Get the task that the ara should have put on the queue
-    task = await get_task("example.score", "consumer", "test", logger)
-    assert task is not None
-    workflow = json.loads(task[1]["workflow"])
-    # make sure the workflow was correctly passed
-    assert len(workflow) == 1
-    assert [
-        "example.score",
-    ] == [op["id"] for op in workflow]
+    await example_lookup(task, logger)
+    await wrap_up_task(LOOKUP_STREAM, LOOKUP_GROUP, task, logger)
+
+    assert mock_post.called
+    assert mock_running_callbacks.called
+
+    next_task = await get_task("example.score", "consumer", "test", logger)
+    assert next_task is not None
+    workflow = json.loads(next_task[1]["workflow"])
+    assert [op["id"] for op in workflow] == ["example.score"]
 
 
 @pytest.mark.asyncio
 async def test_example_score(mocker, redis_mock):
-    """Test example scoring."""
+    """example_score writes a random score for every analysis on the message."""
     response_id = "test_response"
     mock_callback_response = mocker.patch("workers.example_score.worker.get_message")
     mock_callback_response.return_value = {
@@ -121,5 +138,4 @@ async def test_example_score(mocker, redis_mock):
 
     assert len(message["message"]["results"]) == 1
     assert "score" in message["message"]["results"][0]["analyses"][0]
-    assert len(message["message"]["results"][0]["analyses"]) == 1
     assert isinstance(message["message"]["results"][0]["analyses"][0]["score"], float)

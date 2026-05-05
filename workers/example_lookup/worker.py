@@ -55,7 +55,9 @@ async def example_lookup(task, logger: logging.Logger):
                 callback_id = str(uuid.uuid4())[:8]
                 try:
                     # Put callback UID and query ID in postgres
-                    await add_callback_id(query_id, callback_id, logger)
+                    await add_callback_id(
+                        query_id, callback_id, task[1].get("otel", "{}"), logger
+                    )
                     # put lookup query graph in redis
                     await save_message(
                         f"{callback_id}_query_graph",

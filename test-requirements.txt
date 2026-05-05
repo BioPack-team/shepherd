@@ -1,5 +1,6 @@
 fakeredis
 httpx
+lmdb
 numpy
 pytest
 pytest-asyncio

@@ -4,7 +4,7 @@ import logging
 import pytest
 
 from shepherd_utils.db import get_message
-from workers.filter_kgraph_orphans.worker import filter_kgraph_orphans
+from workers.filter_kgraph_orphans.worker import do_filter_kgraph_orphans
 
 
 @pytest.mark.asyncio
@@ -56,7 +56,7 @@ async def test_filter_kgraph_orphans(redis_mock, mocker):
 
     logger = logging.getLogger(__name__)
 
-    await filter_kgraph_orphans(
+    await do_filter_kgraph_orphans(
         [
             "test",
             {
