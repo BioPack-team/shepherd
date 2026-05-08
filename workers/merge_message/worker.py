@@ -253,9 +253,11 @@ def _normalize_query(query):
         preds = e.get("predicates")
         if preds and any(p == "biolink:treats" for p in preds):
             e["predicates"] = [
-                "biolink:treats_or_applied_or_studied_to_treat"
-                if p == "biolink:treats"
-                else p
+                (
+                    "biolink:treats_or_applied_or_studied_to_treat"
+                    if p == "biolink:treats"
+                    else p
+                )
                 for p in preds
             ]
         nq_edges[eid] = e
