@@ -1,7 +1,6 @@
 """Shared Shepherd Utility Functions."""
 
 import asyncio
-import copy
 import json
 import logging
 from typing import AsyncGenerator, Dict, List, Tuple
@@ -140,25 +139,27 @@ def recursive_get_edge_support_graphs(
 ):
     """Recursive method to find auxiliary graphs to keep when filtering. Each auxiliary
     graph then has its edges filterd."""
+    if edge in edges:
+        # Already visited; short-circuit to avoid exponential re-traversal
+        # when many edges/aux graphs share the same support structure.
+        return edges, auxgraphs, nodes
     edges.add(edge)
-    nodes.add(message_edges[edge]["subject"])
-    nodes.add(message_edges[edge]["object"])
-    for attribute in message_edges.get(edge, {}).get("attributes", {}):
-        if attribute.get("attribute_type_id", None) == "biolink:support_graphs":
+    edge_data = message_edges[edge]
+    nodes.add(edge_data["subject"])
+    nodes.add(edge_data["object"])
+    for attribute in edge_data.get("attributes", []) or []:
+        if attribute.get("attribute_type_id") == "biolink:support_graphs":
             for auxgraph in attribute.get("value", []):
                 if auxgraph not in message_auxgraphs:
                     raise KeyError(f"auxgraph {auxgraph} not in auxiliary_graphs")
-                try:
-                    edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
-                        auxgraph,
-                        edges,
-                        auxgraphs,
-                        message_edges,
-                        message_auxgraphs,
-                        nodes,
-                    )
-                except KeyError as e:
-                    raise e
+                edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
+                    auxgraph,
+                    edges,
+                    auxgraphs,
+                    message_edges,
+                    message_auxgraphs,
+                    nodes,
+                )
     return edges, auxgraphs, nodes
 
 
@@ -172,17 +173,16 @@ def recursive_get_auxgraph_edges(
 ):
     """Recursive method to find edges to keep when filtering. Each edge then
     has support graphs filtered."""
+    if auxgraph in auxgraphs:
+        return edges, auxgraphs, nodes
     auxgraphs.add(auxgraph)
     aux_edges = message_auxgraphs.get(auxgraph, {}).get("edges", [])
     for aux_edge in aux_edges:
         if aux_edge not in message_edges:
             raise KeyError(f"aux_edge {aux_edge} not in knowledge_graph.edges")
-        try:
-            edges, auxgraphs, nodes = recursive_get_edge_support_graphs(
-                aux_edge, edges, auxgraphs, message_edges, message_auxgraphs, nodes
-            )
-        except KeyError as e:
-            raise e
+        edges, auxgraphs, nodes = recursive_get_edge_support_graphs(
+            aux_edge, edges, auxgraphs, message_edges, message_auxgraphs, nodes
+        )
     return edges, auxgraphs, nodes
 
 
@@ -220,134 +220,118 @@ def validate_message(message, logger):
 
 
 def combine_unique_dicts(list1, list2, logger: logging.Logger):
-    """Combine two lists of dicts, keeping only unique dictionaries"""
+    """Combine two lists of dicts, keeping only unique dictionaries.
 
-    def make_list_hashable(l):
-        """Convert list to tuples."""
-        frozen_items = []
-        for item in l:
-            if isinstance(item, list):
-                frozen_items.append(make_list_hashable(item))
-            elif isinstance(item, dict):
-                frozen_items.append(make_hashable(item))
-            else:
-                frozen_items.append(item)
-        return tuple(sorted(frozen_items))
-
-    def make_hashable(d):
-        """Convert lists to tuples to make dict hashable"""
-        hashable_items = []
-        for key, value in d.items():
-            if isinstance(value, list):
-                if all(isinstance(item, str) for item in value):
-                    hashable_items.append((key, tuple(value)))
-                else:
-                    make_list_hashable(value)
-            elif isinstance(value, dict):
-                # Handle nested dicts recursively
-                hashable_items.append((key, frozenset(make_hashable(value))))
-            else:
-                hashable_items.append((key, value))
-        return tuple(sorted(hashable_items))
-
+    Uses ``json.dumps(..., sort_keys=True)`` as a stable signature -- it's
+    implemented in C and faster than the recursive Python hashing the prior
+    implementation used. ``default=str`` keeps it forgiving for the rare
+    non-JSON-serializable value (datetime, Decimal, etc.) instead of dropping
+    the item silently.
+    """
     seen = set()
     result = []
-
-    for d in list1 + list2:  # This processes ALL items from BOTH lists
-        dict_signature = make_hashable(d)
+    for d in list1:
         try:
-            if dict_signature not in seen:
-                seen.add(dict_signature)
-                result.append(d)  # Adds to result if not seen before
-        except Exception:
-            logger.error(f"Failed to hash this: {dict_signature}")
-
+            sig = json.dumps(d, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            logger.error(f"Failed to hash this: {d}")
+            continue
+        if sig not in seen:
+            seen.add(sig)
+            result.append(d)
+    for d in list2:
+        try:
+            sig = json.dumps(d, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            logger.error(f"Failed to hash this: {d}")
+            continue
+        if sig not in seen:
+            seen.add(sig)
+            result.append(d)
     return result
 
 
 def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
-    """Merge two TRAPI kgraphs together."""
-    merged_kgraph = copy.deepcopy(og_message)
+    """Merge ``new_message`` into ``og_message`` in place and return it.
+
+    Previously this allocated a deep copy of ``og_message`` and mutated that.
+    The deep copy dominated runtime on large kgraphs (thousands of edges,
+    each with attribute lists). The accumulator-style call sites
+    (``acc = merge_kgraph(acc, kg, ...)``) discard ``og_message`` after
+    each call, so mutating it directly is safe and dramatically faster.
+    Newly adopted nodes/edges are not copied either -- ``new_message``
+    is also discarded by the caller after merging.
+    """
+    aggregator_source = {
+        "resource_id": source,
+        "resource_role": "aggregator_knowledge_source",
+        "upstream_resource_ids": ["infores:retriever"],
+    }
+    og_nodes = og_message["nodes"]
+    og_edges = og_message["edges"]
+
     for key, value in new_message["nodes"].items():
-        existing = og_message["nodes"].get(key, None)
-        if existing is not None:
-            # merge
-            if value["name"]:
-                merged_kgraph["nodes"][key]["name"] = value["name"]
-            if value["categories"]:
-                if existing["categories"]:
-                    all_categories = (
-                        merged_kgraph["nodes"][key]["categories"] + value["categories"]
-                    )
-                    merged_kgraph["nodes"][key]["categories"] = list(
-                        set(all_categories)
-                    )
-                else:
-                    merged_kgraph["nodes"][key]["categories"] = value["categories"]
-            if value["attributes"]:
-                if existing["attributes"]:
-                    merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"],
-                        value["attributes"],
-                        logger,
-                    )
-                else:
-                    merged_kgraph["nodes"][key]["attributes"] = value["attributes"]
-        else:
-            merged_kgraph["nodes"][key] = value
+        existing = og_nodes.get(key)
+        if existing is None:
+            og_nodes[key] = value
+            continue
+        # Overlapping node: merge fields onto the existing entry.
+        if value["name"]:
+            existing["name"] = value["name"]
+        new_categories = value["categories"]
+        if new_categories:
+            existing_categories = existing["categories"]
+            if existing_categories:
+                existing["categories"] = list(
+                    set(existing_categories) | set(new_categories)
+                )
+            else:
+                existing["categories"] = new_categories
+        new_attrs = value["attributes"]
+        if new_attrs:
+            existing_attrs = existing["attributes"]
+            if existing_attrs:
+                existing["attributes"] = combine_unique_dicts(
+                    existing_attrs, new_attrs, logger
+                )
+            else:
+                existing["attributes"] = new_attrs
 
     for key, value in new_message["edges"].items():
-        existing = og_message["edges"].get(key, None)
-        if existing is not None:
-            # merge
-            if value["attributes"]:
-                if existing["attributes"]:
-                    new_attributes = []
-                    # just filtering out the new knowledge_level and agent_type attributes
-                    for attribute in value["attributes"]:
-                        if attribute["attribute_type_id"] not in (
-                            "biolink:knowledge_level",
-                            "biolink:agent_type",
-                        ):
-                            # don't add any new KL/AT
-                            new_attributes.append(attribute)
-                    merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"],
-                        value["attributes"],
-                        logger,
-                    )
-                else:
-                    merged_kgraph["edges"][key]["attributes"] = value["attributes"]
-
-            if value["sources"]:
-                if existing["sources"]:
-                    new_sources = combine_unique_dicts(
-                        existing["sources"],
-                        value["sources"],
-                        logger,
-                    )
-                    # TODO: there might need to be some sort of upstream resource id merging to do past this?
-                    merged_kgraph["edges"][key]["sources"] = new_sources
-                else:
-                    merged_kgraph["edges"][key]["sources"] = value["sources"]
-        else:
-            merged_kgraph["edges"][key] = value
-
-            if value.get("sources") and not is_support_edge(value):
-                new_sources = combine_unique_dicts(
-                    value["sources"],
-                    [
-                        {
-                            "resource_id": source,
-                            "resource_role": "aggregator_knowledge_source",
-                            "upstream_resource_ids": ["infores:retriever"],
-                        }
-                    ],
-                    logger,
+        existing = og_edges.get(key)
+        if existing is None:
+            og_edges[key] = value
+            sources = value.get("sources")
+            if sources and not is_support_edge(value):
+                # Append the aggregator source if it isn't already present.
+                # Avoids the heavy combine_unique_dicts hashing for what is
+                # almost always a 3-element list.
+                if aggregator_source not in sources:
+                    sources.append(aggregator_source)
+            continue
+        # Overlapping edge: merge attributes and sources.
+        new_attrs = value["attributes"]
+        if new_attrs:
+            existing_attrs = existing["attributes"]
+            if existing_attrs:
+                existing["attributes"] = combine_unique_dicts(
+                    existing_attrs, new_attrs, logger
                 )
-                merged_kgraph["edges"][key]["sources"] = new_sources
+            else:
+                existing["attributes"] = new_attrs
 
-    return merged_kgraph
+        new_sources = value["sources"]
+        if new_sources:
+            existing_sources = existing["sources"]
+            if existing_sources:
+                # TODO: there might need to be some sort of upstream resource id merging to do past this?
+                existing["sources"] = combine_unique_dicts(
+                    existing_sources, new_sources, logger
+                )
+            else:
+                existing["sources"] = new_sources
+
+    return og_message
 
 
 def filter_kgraph_orphans(message, logger: logging.Logger):

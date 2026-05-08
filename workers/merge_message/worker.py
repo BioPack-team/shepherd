@@ -1,7 +1,6 @@
 """Merge two TRAPI messages together."""
 
 import asyncio
-import copy
 import json
 import logging
 import multiprocessing
@@ -218,48 +217,59 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
     return mergedresult
 
 
+def _normalize_query(query):
+    """Build a normalized copy of a query graph for equivalence comparison.
+
+    Returns shallow-copied node/edge dicts so we never mutate the caller's
+    data; avoids the full ``copy.deepcopy`` the previous implementation paid
+    on every call.
+    """
+    nq_nodes = {}
+    for nid, node in query["nodes"].items():
+        n = dict(node)
+        if n.get("is_set") is False:
+            n.pop("is_set", None)
+        si = n.get("set_interpretation")
+        if si == "BATCH" or si is None:
+            n.pop("set_interpretation", None)
+        if "constraints" in n and len(n["constraints"]) == 0:
+            del n["constraints"]
+        if "member_ids" in n and len(n["member_ids"]) == 0:
+            del n["member_ids"]
+        if n.get("ids") is None:
+            n.pop("ids", None)
+        if n.get("categories") is None:
+            n.pop("categories", None)
+        nq_nodes[nid] = n
+
+    nq_edges = {}
+    for eid, edge in query["edges"].items():
+        e = dict(edge)
+        if "attribute_constraints" in e and len(e["attribute_constraints"]) == 0:
+            del e["attribute_constraints"]
+        if "qualifier_constraints" in e and len(e["qualifier_constraints"]) == 0:
+            del e["qualifier_constraints"]
+        e.pop("knowledge_type", None)
+        preds = e.get("predicates")
+        if preds and any(p == "biolink:treats" for p in preds):
+            e["predicates"] = [
+                (
+                    "biolink:treats_or_applied_or_studied_to_treat"
+                    if p == "biolink:treats"
+                    else p
+                )
+                for p in preds
+            ]
+        nq_edges[eid] = e
+
+    return {"nodes": nq_nodes, "edges": nq_edges}
+
+
 def queries_equivalent(query1, query2):
     """Compare 2 query graphs.  The nuisance is that there is flexiblity in e.g. whether there is a qualifier constraint
     as none or it's not in there or its an empty list.  And similar for is_set and is_set is False.
     """
-    q1 = copy.deepcopy(query1)
-    q2 = copy.deepcopy(query2)
-    for q in [q1, q2]:
-        for node in q["nodes"].values():
-            if "is_set" in node and node["is_set"] is False:
-                del node["is_set"]
-            if (
-                "set_interpretation" in node and node["set_interpretation"] == "BATCH"
-            ) or ("set_interpretation" in node and node["set_interpretation"] is None):
-                del node["set_interpretation"]
-            if "constraints" in node and len(node["constraints"]) == 0:
-                del node["constraints"]
-            if "member_ids" in node and len(node["member_ids"]) == 0:
-                del node["member_ids"]
-            if "ids" in node and node["ids"] is None:
-                del node["ids"]
-            if "categories" in node and node["categories"] is None:
-                del node["categories"]
-        for edge in q["edges"].values():
-            if (
-                "attribute_constraints" in edge
-                and len(edge["attribute_constraints"]) == 0
-            ):
-                del edge["attribute_constraints"]
-            if (
-                "qualifier_constraints" in edge
-                and len(edge["qualifier_constraints"]) == 0
-            ):
-                del edge["qualifier_constraints"]
-            if "knowledge_type" in edge:
-                del edge["knowledge_type"]
-            # handle treats and treats_or_applied_or_studied_to_treat
-            for pred_indx, predicate in enumerate(edge["predicates"]):
-                if predicate == "biolink:treats":
-                    edge["predicates"][
-                        pred_indx
-                    ] = "biolink:treats_or_applied_or_studied_to_treat"
-    return q1 == q2
+    return _normalize_query(query1) == _normalize_query(query2)
 
 
 def group_results_by_qnode(merge_qnode, result_message, lookup_results):
@@ -463,40 +473,29 @@ def merge_messages(
     }
     result["message"]["query_graph"] = original_query_graph
     result["message"]["knowledge_graph"] = pydantic_kgraph
+    merged_aux = result["message"]["auxiliary_graphs"]
     for result_message in [response, new_response]:
-        if "auxiliary_graphs" in result_message["message"]:
-            for aux_id, aux_dict in result_message["message"][
-                "auxiliary_graphs"
-            ].items():
-                if aux_id in result["message"]["auxiliary_graphs"]:
-                    for key, val in aux_dict.items():
-                        if key in result["message"]["auxiliary_graphs"][aux_id]:
-                            if isinstance(
-                                result["message"]["auxiliary_graphs"][aux_id][key], list
-                            ):
-                                # combine both lists and then list/set it for uniqueness
-                                result["message"]["auxiliary_graphs"][aux_id][key] = (
-                                    list(
-                                        set(
-                                            result["message"]["auxiliary_graphs"][
-                                                aux_id
-                                            ][key]
-                                            + val
-                                        )
-                                    )
-                                )
-                            else:
-                                logger.warning(
-                                    f"Message had an invalid aux graph property: {key}"
-                                )
-                        else:
-                            result["message"]["auxiliary_graphs"][aux_id][key] = (
-                                copy.deepcopy(val)
-                            )
+        src_aux = result_message["message"].get("auxiliary_graphs")
+        if not src_aux:
+            continue
+        # Reference adoption is safe: the input messages are discarded after
+        # merging, so nothing else is going to mutate these structures.
+        for aux_id, aux_dict in src_aux.items():
+            existing = merged_aux.get(aux_id)
+            if existing is None:
+                merged_aux[aux_id] = aux_dict
+                continue
+            for key, val in aux_dict.items():
+                if key in existing:
+                    if isinstance(existing[key], list):
+                        # combine both lists and then list/set it for uniqueness
+                        existing[key] = list(set(existing[key] + val))
+                    else:
+                        logger.warning(
+                            f"Message had an invalid aux graph property: {key}"
+                        )
                 else:
-                    result["message"]["auxiliary_graphs"][aux_id] = copy.deepcopy(
-                        aux_dict
-                    )
+                    existing[key] = val
 
     # Determine type of message
     if "edges" in original_query_graph:
