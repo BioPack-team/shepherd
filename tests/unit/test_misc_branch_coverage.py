@@ -21,7 +21,6 @@ import pytest
 
 from shepherd_utils.shared import merge_kgraph, validate_message
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -248,7 +247,10 @@ async def test_add_shared_pmid_counts_reuses_existing_omnicorp_support_graph():
     assert "OMNICORP_support_graph_existing" in sgs
     assert sum(1 for s in set(sgs) if s.startswith("OMNICORP_support_graph")) == 1
     # The existing aux graph picked up the new co-occurrence edge.
-    assert len(message["auxiliary_graphs"]["OMNICORP_support_graph_existing"]["edges"]) == 1
+    assert (
+        len(message["auxiliary_graphs"]["OMNICORP_support_graph_existing"]["edges"])
+        == 1
+    )
 
 
 @pytest.mark.asyncio

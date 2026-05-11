@@ -15,7 +15,6 @@ import pytest
 from tests.helpers.generate_messages import creative_query
 from workers.aragorn.worker import aragorn, examine_query
 
-
 logger = logging.getLogger(__name__)
 
 

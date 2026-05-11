@@ -33,7 +33,9 @@ def test_reasoner_formatter_string_message():
 
 def test_reasoner_formatter_dict_message_merges_extra_keys():
     formatter = ReasonerLogEntryFormatter()
-    record = _make_record({"message": "embedded", "extra": "data"}, level=logging.WARNING)
+    record = _make_record(
+        {"message": "embedded", "extra": "data"}, level=logging.WARNING
+    )
     out = formatter.format(record)
     assert out["message"] == "embedded"
     assert out["extra"] == "data"

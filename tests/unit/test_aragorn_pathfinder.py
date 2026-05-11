@@ -12,7 +12,6 @@ import pytest
 
 from workers.aragorn_pathfinder.worker import shadowfax
 
-
 logger = logging.getLogger(__name__)
 
 

@@ -29,7 +29,6 @@ from workers.aragorn_score.worker import (
     kirchhoff,
 )
 
-
 # --- get_base_weight ------------------------------------------------------
 
 

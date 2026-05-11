@@ -16,7 +16,6 @@ import pytest
 
 from workers.sipr import worker as sipr_worker
 
-
 logger = logging.getLogger(__name__)
 
 

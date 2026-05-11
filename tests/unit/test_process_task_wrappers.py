@@ -25,7 +25,6 @@ import logging
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -62,9 +61,7 @@ class _Limiter:
 async def test_filter_kgraph_orphans_process_task_happy_path(redis_mock, mocker):
     from workers.filter_kgraph_orphans import worker as fko
 
-    mocker.patch.object(
-        fko, "do_filter_kgraph_orphans", new_callable=mocker.AsyncMock
-    )
+    mocker.patch.object(fko, "do_filter_kgraph_orphans", new_callable=mocker.AsyncMock)
     mock_wrap = mocker.patch.object(fko, "wrap_up_task", new_callable=mocker.AsyncMock)
 
     limiter = _Limiter()
@@ -437,9 +434,7 @@ async def test_process_task_swallows_wrap_up_failures(redis_mock, mocker):
     don't escape the wrapper. Verify on filter_kgraph_orphans."""
     from workers.filter_kgraph_orphans import worker as fko
 
-    mocker.patch.object(
-        fko, "do_filter_kgraph_orphans", new_callable=mocker.AsyncMock
-    )
+    mocker.patch.object(fko, "do_filter_kgraph_orphans", new_callable=mocker.AsyncMock)
     mocker.patch.object(
         fko,
         "wrap_up_task",

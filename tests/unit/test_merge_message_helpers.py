@@ -42,7 +42,6 @@ from workers.merge_message.worker import (
     _normalize_query,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -184,7 +183,9 @@ def test_normalize_query_collapses_optional_and_synonym_predicates():
 def test_queries_equivalent_treats_predicate_synonyms_as_same():
     a = {
         "nodes": {"x": {"ids": ["MONDO:1"]}},
-        "edges": {"e": {"subject": "x", "object": "x", "predicates": ["biolink:treats"]}},
+        "edges": {
+            "e": {"subject": "x", "object": "x", "predicates": ["biolink:treats"]}
+        },
     }
     b = {
         "nodes": {"x": {"ids": ["MONDO:1"]}},
@@ -202,11 +203,15 @@ def test_queries_equivalent_treats_predicate_synonyms_as_same():
 def test_queries_equivalent_distinguishes_different_predicates():
     a = {
         "nodes": {"x": {}},
-        "edges": {"e": {"subject": "x", "object": "x", "predicates": ["biolink:related_to"]}},
+        "edges": {
+            "e": {"subject": "x", "object": "x", "predicates": ["biolink:related_to"]}
+        },
     }
     b = {
         "nodes": {"x": {}},
-        "edges": {"e": {"subject": "x", "object": "x", "predicates": ["biolink:treats"]}},
+        "edges": {
+            "e": {"subject": "x", "object": "x", "predicates": ["biolink:treats"]}
+        },
     }
     assert queries_equivalent(a, b) is False
 
@@ -300,17 +305,16 @@ def test_remove_promiscuous_knode_results_drops_overrepresented_knode():
     """Construct an oversubscribed knode and verify it gets pruned."""
     response = {
         "message": {
-            "results": [
-                {"node_bindings": {"qx": [{"id": "BOZO"}]}}
-                for _ in range(15)
-            ]
+            "results": [{"node_bindings": {"qx": [{"id": "BOZO"}]}} for _ in range(15)]
             + [
                 {"node_bindings": {"qx": [{"id": "GOOD"}]}},
             ],
         }
     }
     remove_promiscuous_knode_results(MAX_C=10, qnode="qx", response=response)
-    remaining_ids = [r["node_bindings"]["qx"][0]["id"] for r in response["message"]["results"]]
+    remaining_ids = [
+        r["node_bindings"]["qx"][0]["id"] for r in response["message"]["results"]
+    ]
     assert "BOZO" not in remaining_ids
     assert remaining_ids == ["GOOD"]
 
@@ -403,7 +407,14 @@ def test_merge_messages_lookup_only_returns_new_response_directly():
     out = merge_messages(
         target="t",
         original_query_graph=qg,
-        response={"message": {"query_graph": qg, "knowledge_graph": {"nodes": {}, "edges": {}}, "results": [], "auxiliary_graphs": {}}},
+        response={
+            "message": {
+                "query_graph": qg,
+                "knowledge_graph": {"nodes": {}, "edges": {}},
+                "results": [],
+                "auxiliary_graphs": {},
+            }
+        },
         new_response=new_response,
         logger=logger,
     )

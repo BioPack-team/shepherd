@@ -23,7 +23,6 @@ from shepherd_utils.db import (
 )
 from shepherd_utils.logger import QueryLogger
 
-
 logger = logging.getLogger(__name__)
 
 

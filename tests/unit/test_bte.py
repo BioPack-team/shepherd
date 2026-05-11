@@ -10,7 +10,6 @@ import pytest
 from tests.helpers.generate_messages import creative_query
 from workers.bte.worker import bte, examine_query
 
-
 logger = logging.getLogger(__name__)
 
 

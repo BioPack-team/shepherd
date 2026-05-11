@@ -26,7 +26,6 @@ from workers.aragorn_score.worker import (
     Ranker,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -231,9 +230,7 @@ def test_get_edge_values_publications_string_value_becomes_single_pub():
         "sources": [
             {"resource_id": "infores:foo", "resource_role": "primary_knowledge_source"}
         ],
-        "attributes": [
-            {"original_attribute_name": "publications", "value": "PMID:1"}
-        ],
+        "attributes": [{"original_attribute_name": "publications", "value": "PMID:1"}],
     }
     r = Ranker(_make_msg_with_edge(edge), logger)
     vals = r.get_edge_values("e1")
@@ -411,12 +408,18 @@ def test_get_edge_values_literature_cooccurrence_with_omnicorp_predicate():
             "nodes": {
                 "A": {
                     "attributes": [
-                        {"original_attribute_name": "omnicorp_article_count", "value": 100}
+                        {
+                            "original_attribute_name": "omnicorp_article_count",
+                            "value": 100,
+                        }
                     ]
                 },
                 "B": {
                     "attributes": [
-                        {"original_attribute_name": "omnicorp_article_count", "value": 100}
+                        {
+                            "original_attribute_name": "omnicorp_article_count",
+                            "value": 100,
+                        }
                     ]
                 },
             },
@@ -667,4 +670,6 @@ def test_score_jaccard_like_returns_score_over_one_minus_score():
     raw, _ = Ranker(msg, logger).score(copy.deepcopy(msg["results"][0]))
     raw_score = raw["analyses"][0]["score"]
     if 0 < raw_score < 1:
-        assert scored["analyses"][0]["score"] == pytest.approx(raw_score / (1 - raw_score))
+        assert scored["analyses"][0]["score"] == pytest.approx(
+            raw_score / (1 - raw_score)
+        )

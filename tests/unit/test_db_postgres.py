@@ -18,12 +18,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from shepherd_utils import db
 
-
 logger = logging.getLogger(__name__)
 
 
-def _install_pool_mock(mocker, *, cursor_fetchone=None, cursor_fetchall=None,
-                      raise_on_execute=None):
+def _install_pool_mock(
+    mocker, *, cursor_fetchone=None, cursor_fetchall=None, raise_on_execute=None
+):
     """Install a postgres pool mock at ``shepherd_utils.db.pool``.
 
     Returns ``(mock_conn, mock_pool)`` so tests can assert on the mock calls.

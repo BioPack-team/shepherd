@@ -13,7 +13,6 @@ import pytest
 from shepherd_utils.TRAPI_to_NetworkX import trapi_kg_to_nx
 from tests.helpers.generate_messages import generate_response
 
-
 SIMPLE_KG = {
     "knowledge_graph": {
         "nodes": {

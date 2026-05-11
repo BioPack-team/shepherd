@@ -12,7 +12,6 @@ import pytest
 from shepherd_utils.db import get_message
 from workers.filter_analyses_top_n.worker import filter_analyses_top_n
 
-
 logger = logging.getLogger(__name__)
 
 

@@ -22,7 +22,6 @@ from workers.aragorn_lookup.worker import (
     get_rule_key,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

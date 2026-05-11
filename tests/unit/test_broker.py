@@ -18,7 +18,6 @@ from shepherd_utils.broker import (
     remove_lock,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

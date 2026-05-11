@@ -27,7 +27,6 @@ from workers.bte_lookup.worker import (
     run_async_lookup,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -150,9 +149,7 @@ async def test_bte_lookup_inferred_fans_out_via_expand_bte_query(redis_mock, moc
         btel,
         "run_async_lookup",
         new_callable=mocker.AsyncMock,
-        return_value=AsyncResponse(
-            status_code=200, success=True, callback_id="cb-1"
-        ),
+        return_value=AsyncResponse(status_code=200, success=True, callback_id="cb-1"),
     )
     mocker.patch.object(
         btel,
@@ -282,7 +279,9 @@ async def test_bte_lookup_inferred_logs_exception_responses(redis_mock, mocker):
 
 
 @pytest.mark.asyncio
-async def test_bte_lookup_polling_loop_iterates_until_callbacks_drain(redis_mock, mocker):
+async def test_bte_lookup_polling_loop_iterates_until_callbacks_drain(
+    redis_mock, mocker
+):
     """The polling loop sees in-progress callbacks for one iteration, then
     they drain on the next iteration and the loop breaks."""
     msg = {
@@ -379,6 +378,7 @@ async def test_bte_lookup_timeout_triggers_cleanup_callbacks(redis_mock, mocker)
         new_callable=mocker.AsyncMock,
         return_value=[("still-running",)],
     )
+
     # Patch time.time so the loop goes through one iteration and then exceeds
     # the 5s timeout. We can't predict exactly how many ``time.time`` calls
     # the worker makes, so use an iterator that returns "late" forever after

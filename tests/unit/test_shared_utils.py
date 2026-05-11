@@ -25,7 +25,6 @@ from shepherd_utils.shared import (
     wrap_up_task,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -95,7 +94,11 @@ def test_merge_kgraph_adds_new_nodes_and_appends_aggregator_source():
     og = {"nodes": {}, "edges": {}}
     new = {
         "nodes": {
-            "MONDO:1": {"name": "n1", "categories": ["biolink:Disease"], "attributes": []},
+            "MONDO:1": {
+                "name": "n1",
+                "categories": ["biolink:Disease"],
+                "attributes": [],
+            },
         },
         "edges": {
             "e1": {
@@ -248,7 +251,12 @@ def test_recursive_get_auxgraph_edges_raises_for_missing_aux_edge():
     message_auxgraphs = {"aux1": {"edges": ["missing"]}}
     with pytest.raises(KeyError, match="missing"):
         recursive_get_auxgraph_edges(
-            "aux1", set(), set(), message_edges={}, message_auxgraphs=message_auxgraphs, nodes=set()
+            "aux1",
+            set(),
+            set(),
+            message_edges={},
+            message_auxgraphs=message_auxgraphs,
+            nodes=set(),
         )
 
 
@@ -408,7 +416,11 @@ def test_filter_kgraph_orphans_handles_path_bindings_and_support_graphs():
                 "nodes": {"A": {}, "B": {}, "C": {}},
                 "edges": {
                     "edge_via_path": {"subject": "A", "object": "B", "attributes": []},
-                    "edge_via_support": {"subject": "B", "object": "C", "attributes": []},
+                    "edge_via_support": {
+                        "subject": "B",
+                        "object": "C",
+                        "attributes": [],
+                    },
                 },
             },
             "auxiliary_graphs": {
@@ -465,10 +477,12 @@ async def test_wrap_up_task_pops_completed_op_and_queues_next(redis_mock):
         {
             "query_id": "q1",
             "response_id": "r1",
-            "workflow": json.dumps([
-                {"id": "stream_a"},
-                {"id": "stream_b"},
-            ]),
+            "workflow": json.dumps(
+                [
+                    {"id": "stream_a"},
+                    {"id": "stream_b"},
+                ]
+            ),
             "log_level": "20",
             "otel": "{}",
         },
@@ -508,10 +522,12 @@ async def test_wrap_up_task_does_not_pop_for_entry_worker(redis_mock):
         {
             "query_id": "q1",
             "response_id": "r1",
-            "workflow": json.dumps([
-                {"id": "real_op"},
-                {"id": "next_op"},
-            ]),
+            "workflow": json.dumps(
+                [
+                    {"id": "real_op"},
+                    {"id": "next_op"},
+                ]
+            ),
             "log_level": "20",
             "otel": "{}",
         },

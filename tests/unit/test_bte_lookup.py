@@ -22,7 +22,6 @@ from workers.bte_lookup.worker import (
     match_templates,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -76,7 +75,9 @@ def test_get_params_extracts_full_tuple():
             }
         },
     }
-    s_key, s_type, s_curie, o_key, o_type, o_curie, predicate, qualifiers = get_params(qg)
+    s_key, s_type, s_curie, o_key, o_type, o_curie, predicate, qualifiers = get_params(
+        qg
+    )
     assert s_key == "a"
     assert s_type == "biolink:ChemicalEntity"
     assert s_curie == "CHEBI:1"

@@ -9,7 +9,6 @@ import pytest
 
 from workers.finish_query.worker import finish_query
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +54,9 @@ async def test_finish_query_skips_callback_when_state_missing(redis_mock, mocker
 
 
 @pytest.mark.asyncio
-async def test_finish_query_propagates_status_to_set_query_completed(redis_mock, mocker):
+async def test_finish_query_propagates_status_to_set_query_completed(
+    redis_mock, mocker
+):
     """An ERROR status (set on a failure-routed task) should be passed along
     to set_query_completed."""
     mocker.patch(
