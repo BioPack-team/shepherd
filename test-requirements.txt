@@ -1,10 +1,12 @@
 fakeredis
 httpx
 lmdb
+networkx
 numpy
 pytest
 pytest-asyncio
 pytest-cov
 pytest-mock
+scipy
 tox
 tox-venv
