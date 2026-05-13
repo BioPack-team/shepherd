@@ -100,48 +100,59 @@ async def score_paths(task, logger):
         paths = message["message"]["query_graph"]["paths"]
         results = message["message"]["results"]
         knowledge_graph = message["message"]["knowledge_graph"]
-        rows = []
+        auxiliary_graphs = message["message"].get("auxiliary_graphs") or {}
+        qpath_id, qpath = next(iter(paths.items()))
+        subject_qnode = qpath["subject"]
+        object_qnode = qpath["object"]
+        feature_rows = []
         embedding_index = []
-        for qpath_id, qpath in paths.items():
-            source = qpath["subject"]
-            target = qpath["object"]
-            for r_idx, result in enumerate(results):
-                analyses = result.get("analyses", [])
-                for a_idx, analysis in enumerate(analyses):
-                    edge_bindings = analysis.get("edge_bindings", {}).get(qpath_id, [])
-                    edge_ids = [eb["id"] for eb in edge_bindings]
-                    components = convert_path_to_components(
-                        source, target, edge_ids, knowledge_graph, logger
-                    )
-                    if components is None:
-                        analysis["score"] = 0.0
-                        continue
-                    names, cats, hops = components
-                    try:
-                        row = np.concatenate([
-                            embeddings[names[0]], embeddings[cats[0]],
-                            embeddings[hops[0]], embeddings[names[1]], embeddings[cats[1]],
-                            embeddings[hops[1]], embeddings[names[2]], embeddings[cats[2]],
-                            embeddings[hops[2]], embeddings[names[3]], embeddings[cats[3]],
-                        ])
-                    except KeyError as e:
-                        logger.error(f"Missing embedding for {e}; scoring 0.0")
-                        analysis["score"] = 0.0
-                        continue
-                    rows.append(row)
-                    embedding_index.append((r_idx, a_idx))
-        if rows:
-            X = np.stack(rows).astype(np.float32)
+        for result_ind, result in enumerate(results):
+            try:
+                source = result["node_bindings"][subject_qnode][0]["id"]
+                target = result["node_bindings"][object_qnode][0]["id"]
+            except (KeyError, IndexError, TypeError):
+                continue
+            analyses = result.get("analyses", [])
+            for analysis_ind, analysis in enumerate(analyses):
+                path_bindings = analysis.get("path_bindings", {}).get(qpath_id, [])
+                try:
+                    aux_id = path_bindings[0]["id"]
+                    edge_ids = auxiliary_graphs[aux_id]["edges"]
+                except (KeyError, IndexError, TypeError):
+                    analysis["score"] = 0.0
+                    continue
+                components = convert_path_to_components(
+                    source, target, edge_ids, knowledge_graph, logger
+                )
+                if components is None:
+                    analysis["score"] = 0.0
+                    continue
+                names, cats, hops = components
+                try:
+                    features = np.concatenate([
+                        embeddings[names[0]], embeddings[cats[0]],
+                        embeddings[hops[0]], embeddings[names[1]], embeddings[cats[1]],
+                        embeddings[hops[1]], embeddings[names[2]], embeddings[cats[2]],
+                        embeddings[hops[2]], embeddings[names[3]], embeddings[cats[3]],
+                    ])
+                except KeyError as e:
+                    logger.error(f"Missing embedding for {e}; scoring 0.0")
+                    analysis["score"] = 0.0
+                    continue
+                feature_rows.append(features)
+                embedding_index.append((result_ind, analysis_ind))
+        if feature_rows:
+            features = np.stack(feature_rows).astype(np.float32)
             loop = asyncio.get_event_loop()
-            y = await loop.run_in_executor(executor, partial(mlp, torch.from_numpy(X)))
-            path_embeddings = nn.functional.normalize(y, p=2, dim=1).detach().numpy()
-            for (r_idx, a_idx), embedding in zip(embedding_index, path_embeddings):
+            mlp_out = await loop.run_in_executor(executor, partial(mlp, torch.from_numpy(features)))
+            path_embeddings = nn.functional.normalize(mlp_out, p=2, dim=1).detach().numpy()
+            for (result_ind, analysis_ind), embedding in zip(embedding_index, path_embeddings):
                 try:
                     score = clf.predict_proba(embedding.reshape(1, -1))[:, 1][0]
                 except Exception as e:
                     logger.error(f"Failed to score path: {e}")
                     score = 0.0
-                results[r_idx]["analyses"][a_idx]["score"] = float(score)
+                results[result_ind]["analyses"][analysis_ind]["score"] = float(score)
     except Exception as e:
         logger.error(f"Error scoring paths: {e}", exc_info=True)
         for result in message["message"].get("results", []) or []:
