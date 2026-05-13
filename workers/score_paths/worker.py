@@ -57,7 +57,7 @@ def convert_path_to_components(source, target, path, knowledge_graph, logger):
             if not name or not cats or not cats[0]:
                 return None
             names.append(name)
-            cat_phrases.append("a " + cats[0].removeprefix("biolink:"))
+            cat_phrases.append(cats[0].removeprefix("biolink:"))
         hop_phrases = []
         for cur, nxt in zip(ordered[:-1], ordered[1:]):
             preds = []
@@ -84,8 +84,9 @@ def convert_path_to_components(source, target, path, knowledge_graph, logger):
                     preds.append(name)
             if not preds:
                 return None
+            preds.sort()
             hop_phrases.append(
-                preds[0] if len(preds) == 1 else "either [" + " or ".join(preds) + "]"
+                preds[0] if len(preds) == 1 else "[" + " or ".join(preds) + "]"
             )
         return names, cat_phrases, hop_phrases
     except Exception as e:
