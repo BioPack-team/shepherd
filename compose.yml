@@ -57,6 +57,24 @@ services:
       - '5540:5540'
     volumes:
       - ./data/redisinsight:/db
+  shepherd_monitor:
+    container_name: shepherd_monitor
+    build:
+      context: .
+      dockerfile: workers/monitor/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    ports:
+      - "5440:5440"
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - ./workers/monitor/monitor_alerts.yaml:/app/monitor_alerts.yaml:ro
+
   jaeger:
     image: jaegertracing/all-in-one:1.55
     ports:

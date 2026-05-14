@@ -11,6 +11,7 @@ from opentelemetry.propagate import extract
 from .broker import add_task, get_task, mark_task_as_complete
 from .config import settings
 from .db import initialize_db, save_logs
+from .heartbeat import Heartbeat
 from .logger import QueryLogger, setup_logging
 
 setup_logging()
@@ -47,6 +48,8 @@ async def get_tasks(
     # initialize opens the db connection
     await initialize_db()
     task_limiter = asyncio.Semaphore(task_limit)
+    # register this worker with the monitor via a Redis heartbeat key
+    Heartbeat(stream, consumer, task_limit).start()
     # continuously poll the broker for new tasks
     while True:
         # check if we can take another task

@@ -42,6 +42,20 @@ class Settings(BaseSettings):
     # ttl in seconds
     redis_ttl: int = 1210000
 
+    # Monitor (dashboard) worker
+    monitor_port: int = 5440
+    monitor_poll_interval_sec: float = 3.0
+    monitor_history_days: int = 3
+    monitor_alerts_config: str = "/app/monitor_alerts.yaml"
+    slack_webhook_url: str = ""
+    alert_email_to: str = ""
+    alert_email_from: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+
     class Config:
         env_file = ".env"
 

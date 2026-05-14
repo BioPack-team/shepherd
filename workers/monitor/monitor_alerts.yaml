@@ -1,0 +1,104 @@
+# Default alert rules for the Shepherd monitoring dashboard.
+#
+# Mount this file at /app/monitor_alerts.yaml (the path is overridable via the
+# MONITOR_ALERTS_CONFIG env var).
+#
+# Rule schema:
+#   name:       unique identifier (used as cooldown key)
+#   type:       threshold | heartbeat_lost | queue_pending | oldest_callback_age
+#   metric:     for type=threshold: xlen | callbacks_pending | pg_connection_count
+#   stream:     redis stream name (for xlen / queue_pending)
+#   worker:     worker type name (for heartbeat_lost)
+#   threshold:  number to compare against
+#   duration:   how long the condition must hold before firing (e.g. 60s, 5m)
+#   cooldown:   how long to suppress repeat fires (default 10m)
+#   severity:   info | warning | critical
+
+rules:
+  # Queue backlog: any ARA entry stream that piles up for a minute.
+  - name: aragorn_backlog
+    type: threshold
+    metric: xlen
+    stream: aragorn.lookup
+    threshold: 500
+    duration: 60s
+    severity: warning
+
+  - name: arax_backlog
+    type: threshold
+    metric: xlen
+    stream: arax
+    threshold: 500
+    duration: 60s
+    severity: warning
+
+  - name: bte_backlog
+    type: threshold
+    metric: xlen
+    stream: bte.lookup
+    threshold: 500
+    duration: 60s
+    severity: warning
+
+  - name: sipr_backlog
+    type: threshold
+    metric: xlen
+    stream: sipr
+    threshold: 500
+    duration: 60s
+    severity: warning
+
+  - name: finish_query_backlog
+    type: threshold
+    metric: xlen
+    stream: finish_query
+    threshold: 200
+    duration: 60s
+    severity: warning
+
+  # Worker presence: alert if any required worker type has zero alive heartbeats.
+  - name: aragorn_lookup_down
+    type: heartbeat_lost
+    worker: aragorn.lookup
+    duration: 30s
+    severity: critical
+
+  - name: arax_down
+    type: heartbeat_lost
+    worker: arax
+    duration: 30s
+    severity: critical
+
+  - name: bte_lookup_down
+    type: heartbeat_lost
+    worker: bte.lookup
+    duration: 30s
+    severity: critical
+
+  - name: finish_query_down
+    type: heartbeat_lost
+    worker: finish_query
+    duration: 30s
+    severity: critical
+
+  # Callback backlog: stuck callbacks indicate an ARA never responded.
+  - name: oldest_callback_too_old
+    type: oldest_callback_age
+    threshold: 600
+    duration: 30s
+    severity: warning
+
+  - name: callbacks_pending_high
+    type: threshold
+    metric: callbacks_pending
+    threshold: 100
+    duration: 2m
+    severity: warning
+
+  # Postgres health: connection saturation.
+  - name: pg_connection_saturation
+    type: threshold
+    metric: pg_connection_count
+    threshold: 150
+    duration: 1m
+    severity: warning
