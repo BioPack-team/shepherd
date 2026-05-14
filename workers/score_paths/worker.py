@@ -1,4 +1,5 @@
 """Path scoring module"""
+
 import asyncio
 import logging
 import time
@@ -171,12 +172,21 @@ async def score_paths(task, logger):
                         continue
                     names, cats, hops = components
                     try:
-                        features = np.concatenate([
-                            _lookup(txn, names[0]), _lookup(txn, cats[0]),
-                            _lookup(txn, hops[0]), _lookup(txn, names[1]), _lookup(txn, cats[1]),
-                            _lookup(txn, hops[1]), _lookup(txn, names[2]), _lookup(txn, cats[2]),
-                            _lookup(txn, hops[2]), _lookup(txn, names[3]), _lookup(txn, cats[3]),
-                        ])
+                        features = np.concatenate(
+                            [
+                                _lookup(txn, names[0]),
+                                _lookup(txn, cats[0]),
+                                _lookup(txn, hops[0]),
+                                _lookup(txn, names[1]),
+                                _lookup(txn, cats[1]),
+                                _lookup(txn, hops[1]),
+                                _lookup(txn, names[2]),
+                                _lookup(txn, cats[2]),
+                                _lookup(txn, hops[2]),
+                                _lookup(txn, names[3]),
+                                _lookup(txn, cats[3]),
+                            ]
+                        )
                     except KeyError as e:
                         key = e.args[0]
                         if len(missing_samples) < 5 and key not in missing_samples:
@@ -207,7 +217,9 @@ async def score_paths(task, logger):
                 executor, partial(mlp, torch.from_numpy(features))
             )
             mlp_time = time.time() - t0
-            path_embeddings = nn.functional.normalize(mlp_out, p=2, dim=1).detach().numpy()
+            path_embeddings = (
+                nn.functional.normalize(mlp_out, p=2, dim=1).detach().numpy()
+            )
 
             t0 = time.time()
             try:
@@ -266,8 +278,9 @@ async def poll_for_tasks():
     clf = XGBClassifier()
     clf.load_model("model_weights/squashbert_classifier_weights.json")
     bmt = Toolkit()
-    embedding_env = lmdb.open(EMBEDDING_DIR,
-                              readonly=True, lock=False, readahead=False, subdir=True)
+    embedding_env = lmdb.open(
+        EMBEDDING_DIR, readonly=True, lock=False, readahead=False, subdir=True
+    )
     count, sample = _probe_cache(embedding_env)
     logging.info(f"embeddings cache: {count} entries (sample key: {sample!r})")
     mlp = nn.Sequential(
