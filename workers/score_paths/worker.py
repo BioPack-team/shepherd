@@ -20,7 +20,7 @@ from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 1
+TASK_LIMIT = 5
 EMBEDDING_DIR = "pathfinder_embeddings"
 tracer = setup_tracer(STREAM)
 
@@ -31,7 +31,7 @@ def convert_path_to_components(source, target, path, knowledge_graph, logger):
         nodes = knowledge_graph["nodes"]
         ordered = [source]
         while target not in ordered:
-            progress = False
+            noncylcic = False
             for eid in path:
                 edge = edges.get(eid)
                 if not edge:
@@ -39,12 +39,12 @@ def convert_path_to_components(source, target, path, knowledge_graph, logger):
                 tail = ordered[-1]
                 if edge["subject"] == tail and edge["object"] not in ordered:
                     ordered.append(edge["object"])
-                    progress = True
+                    noncylcic = True
                 elif edge["object"] == tail and edge["subject"] not in ordered:
                     ordered.append(edge["subject"])
-                    progress = True
-            if not progress:
-                return None
+                    noncylcic = True
+            if not noncylcic:
+                return None  # Cyclic paths are not supported
         if len(ordered) != 4:
             return None
         names = []
