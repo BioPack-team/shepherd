@@ -201,24 +201,30 @@ async def score_paths(task, logger):
         logger.info(msg)
         if feature_rows:
             features = np.stack(feature_rows).astype(np.float32)
-            t0 = time.time()
             loop = asyncio.get_event_loop()
+            t0 = time.time()
             mlp_out = await loop.run_in_executor(
                 executor, partial(mlp, torch.from_numpy(features))
             )
             mlp_time = time.time() - t0
             path_embeddings = nn.functional.normalize(mlp_out, p=2, dim=1).detach().numpy()
+
             t0 = time.time()
-            scores = []
-            for (result_ind, analysis_ind), embedding in zip(embedding_index, path_embeddings):
-                try:
-                    score = clf.predict_proba(embedding.reshape(1, -1))[:, 1][0]
-                except Exception as e:
-                    logger.error(f"Failed to score path: {e}")
-                    score = 0.0
-                results[result_ind]["analyses"][analysis_ind]["score"] = float(score)
-                scores.append(float(score))
+            try:
+                all_scores = await loop.run_in_executor(
+                    executor, lambda: clf.predict_proba(path_embeddings)[:, 1]
+                )
+            except Exception as e:
+                logger.error(f"Classifier batch failed: {e}")
+                all_scores = np.zeros(len(path_embeddings))
             clf_time = time.time() - t0
+
+            scores = []
+            for (r_idx, a_idx), s in zip(embedding_index, all_scores):
+                s = float(s)
+                results[r_idx]["analyses"][a_idx]["score"] = s
+                scores.append(s)
+
             logger.info(
                 f"Scored {len(scores)} paths in {mlp_time + clf_time:.1f}s "
                 f"(MLP {mlp_time:.2f}s, classifier {clf_time:.2f}s); "
