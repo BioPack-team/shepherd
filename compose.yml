@@ -205,6 +205,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      - ./pathfinder_embeddings:/app/pathfinder_embeddings
 
   ######### Example ARA
   example_ara:

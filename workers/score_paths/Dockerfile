@@ -7,15 +7,12 @@ LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 ARG DEVICE=gpu
 
 ENV PYTHONHASHSEED=0
-ENV HF_HOME=/app/hf_cache
 
 # set up requirements
 WORKDIR /app
 
-COPY ./workers/score_paths/requirements-cpu.txt ./workers/score_paths/requirements-gpu.txt ./
-RUN pip install --no-cache-dir --timeout=300 --retries=5 -r requirements-${DEVICE}.txt
-# pre-download the model
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('cambridgeltl/SapBERT-from-PubMedBERT-fulltext')"
+COPY ./workers/score_paths/requirements.txt ./
+RUN pip install --no-cache-dir --timeout=300 --retries=5 -r requirements.txt
 
 # Install shared utilities
 COPY ./shepherd_utils ./shepherd_utils
