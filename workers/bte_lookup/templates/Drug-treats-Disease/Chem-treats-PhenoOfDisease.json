@@ -6,7 +6,7 @@
         "categories": ["biolink:ChemicalEntity"]
       },
       "nA": {
-        "categories": ["biolink:PhenotypicFeature"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"],
         "is_set": true
       },
       "$target": {
