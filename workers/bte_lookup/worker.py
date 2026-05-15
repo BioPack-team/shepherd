@@ -213,7 +213,7 @@ async def bte_lookup(task, logger: logging.Logger):
 
     if time.time() - start_time > MAX_QUERY_TIME:
         logger.warning(
-            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
+            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running...{running_callback_ids}"
         )
         await cleanup_callbacks(query_id, logger)
 
