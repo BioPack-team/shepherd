@@ -140,12 +140,15 @@ async def add_query(
     query: dict[str, Any],
     callback_url: Union[str, None],
     logger: logging.Logger,
+    target: Union[str, None] = None,
 ):
     """
     Add an initial query to the db.
 
     Args:
         query (Dict): TRAPI query graph
+        target: The ARA the query was routed to (stored in ``domain`` for
+            per-ARA dashboards).
 
     Returns:
         query_id: str
@@ -164,11 +167,11 @@ async def add_query(
         async with pool.connection(60) as conn:
             await conn.execute(
                 """
-            INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status) VALUES (
-                %s, NOW(), %s, %s, %s, %s
+            INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status, domain) VALUES (
+                %s, NOW(), %s, %s, %s, %s, %s
             )
             """,
-                (query_id, response_id, callback_url, "QUEUED", "OK"),
+                (query_id, response_id, callback_url, "QUEUED", "OK", target),
             )
             # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
             await conn.commit()
@@ -434,6 +437,40 @@ async def cleanup_callbacks(
             continue
         except Exception as e:
             logger.error(f"Failed to remove running lookups: {e}")
+
+
+async def reap_completed_callbacks(logger: logging.Logger) -> int:
+    """Delete callback rows whose parent query is already COMPLETED.
+
+    Used by the monitor's janitor to clean up rows orphaned by code paths that
+    finished without calling ``cleanup_callbacks``. Returns the number of rows
+    deleted on this call.
+    """
+    deleted = 0
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                cur = await conn.execute(
+                    """
+                    DELETE FROM callbacks
+                    WHERE query_id IN (
+                        SELECT qid FROM shepherd_brain WHERE state = 'COMPLETED'
+                    )
+                    """
+                )
+                deleted = cur.rowcount or 0
+                await conn.commit()
+            break
+        except OperationalError as e:
+            logger.warning(
+                f"Connection error reaping completed callbacks (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to reap completed callbacks: {e}")
+            break
+    return deleted
 
 
 async def get_callback_query_id(

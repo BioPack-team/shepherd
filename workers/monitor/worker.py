@@ -26,7 +26,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.db import initialize_db, shutdown_db
 from shepherd_utils.logger import setup_logging
 
-from . import alerts, history, poller
+from . import alerts, history, janitor, poller
 
 setup_logging()
 logger = logging.getLogger("shepherd.monitor")
@@ -81,14 +81,16 @@ async def lifespan(app: FastAPI):
     rules = alerts.load_rules(settings.monitor_alerts_config)
     engine = alerts.AlertEngine(rules)
     poll_task = asyncio.create_task(_poll_loop(engine))
+    janitor_task = asyncio.create_task(janitor.janitor_loop())
     try:
         yield
     finally:
-        poll_task.cancel()
-        try:
-            await poll_task
-        except asyncio.CancelledError:
-            pass
+        for t in (poll_task, janitor_task):
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         await shutdown_db()
 
 
@@ -132,6 +134,12 @@ async def api_history_index():
 @APP.get("/api/alerts")
 async def api_alerts(limit: int = 50):
     return {"alerts": await alerts.recent_alerts(limit=limit)}
+
+
+@APP.post("/api/admin/cleanup")
+async def api_admin_cleanup():
+    """Run the janitor immediately. Returns what got trimmed/reaped."""
+    return await janitor.run_once()
 
 
 @APP.websocket("/ws")

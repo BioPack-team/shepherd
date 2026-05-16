@@ -94,9 +94,21 @@ async def get_task(stream, group, consumer, logger: logging.Logger):
 async def mark_task_as_complete(
     stream, group, msg_id, logger: logging.Logger, retries=0
 ):
-    """Send ACK message back to queue."""
+    """Send ACK message back to queue, then delete the entry.
+
+    Streams aren't used for replay/audit here, so once a message has been
+    successfully processed we delete it to keep ``XLEN`` bounded. The XDEL is
+    best-effort: a failure leaves the message acked-but-present, which a
+    periodic janitor in the monitor cleans up.
+    """
     try:
         await broker_client.xack(stream, group, msg_id)
+        try:
+            await broker_client.xdel(stream, msg_id)
+        except Exception as e:
+            logger.debug(
+                f"XDEL failed for {msg_id} in {stream}: {e}"
+            )
 
     except Exception as e:
         retries += 1

@@ -9,6 +9,7 @@ import uuid
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
+    cleanup_callbacks,
     get_logs,
     get_message,
     get_query_state,
@@ -59,6 +60,13 @@ async def finish_query(task, logger: logging.Logger):
                     await asyncio.sleep(1 * (2**attempt))
 
         await set_query_completed(query_id, status, logger)
+
+    # Always reap any callback rows tied to this query. Lookup workers do this
+    # on timeout, but successful queries previously left rows behind forever.
+    try:
+        await cleanup_callbacks(query_id, logger)
+    except Exception as e:
+        logger.error(f"Failed to clean up callbacks for {query_id}: {e}")
 
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
