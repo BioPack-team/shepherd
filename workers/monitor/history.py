@@ -15,6 +15,11 @@ from shepherd_utils.config import settings
 
 HISTORY_PREFIX = "monitor:hist"
 HISTORY_INDEX = "monitor:hist:index"
+# Cap each series by count as well as age. With history written every ~30s
+# this allows roughly 3.5 days of headroom -- the retention window stays the
+# real bound, but the count cap protects against runaway growth if the poller
+# tick rate is misconfigured.
+HISTORY_MAX_SAMPLES = 10000
 
 
 def _key(name: str) -> str:
@@ -33,6 +38,7 @@ async def record(name: str, value: Any, ts: float | None = None) -> None:
     pipe = broker_client.pipeline()
     pipe.zadd(_key(name), {member: ts})
     pipe.zremrangebyscore(_key(name), 0, cutoff)
+    pipe.zremrangebyrank(_key(name), 0, -HISTORY_MAX_SAMPLES - 1)
     pipe.sadd(HISTORY_INDEX, name)
     await pipe.execute()
 
@@ -46,6 +52,7 @@ async def record_many(samples: dict[str, Any], ts: float | None = None) -> None:
         member = f"{ts}:{json.dumps(value, default=str)}"
         pipe.zadd(_key(name), {member: ts})
         pipe.zremrangebyscore(_key(name), 0, cutoff)
+        pipe.zremrangebyrank(_key(name), 0, -HISTORY_MAX_SAMPLES - 1)
         pipe.sadd(HISTORY_INDEX, name)
     await pipe.execute()
 

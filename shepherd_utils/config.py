@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Monitor (dashboard) worker
     monitor_port: int = 5440
     monitor_poll_interval_sec: float = 3.0
+    # History samples are persisted on a slower cadence than the live UI tick.
+    # Default 30s keeps a few days of trend data without ballooning Redis.
+    monitor_history_interval_sec: float = 30.0
     monitor_history_days: int = 3
     monitor_alerts_config: str = "/app/monitor_alerts.yaml"
     slack_webhook_url: str = ""

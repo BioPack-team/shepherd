@@ -61,11 +61,17 @@ async def _broadcast(payload: Dict[str, Any]) -> None:
 async def _poll_loop(engine: alerts.AlertEngine) -> None:
     global _latest_snapshot
     interval = max(0.5, settings.monitor_poll_interval_sec)
+    history_interval = max(interval, settings.monitor_history_interval_sec)
+    last_history_write = 0.0
     while True:
         try:
             snapshot = await poller.collect_snapshot()
             _latest_snapshot = snapshot
-            await poller.write_history(snapshot)
+            # Persist history at a slower cadence than the live UI tick to
+            # keep Redis memory bounded.
+            if snapshot["ts"] - last_history_write >= history_interval:
+                await poller.write_history(snapshot)
+                last_history_write = snapshot["ts"]
             fired = await engine.evaluate(snapshot)
             if fired:
                 snapshot = {**snapshot, "new_alerts": fired}
