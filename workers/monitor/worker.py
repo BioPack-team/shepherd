@@ -148,6 +148,24 @@ async def api_admin_cleanup():
     return await janitor.run_once()
 
 
+@APP.post("/api/admin/reclaim_dead_consumers")
+async def api_admin_reclaim_dead_consumers(
+    min_idle_seconds: int = 3600,
+    dry_run: bool = False,
+):
+    """Drop pending messages stuck on dead consumers and remove the consumers.
+
+    DESTRUCTIVE: the pending messages are discarded, not retried. Default
+    ``min_idle_seconds=3600`` only touches consumers that have been silent for
+    at least an hour. Pass ``dry_run=true`` first to preview what would be
+    dropped.
+    """
+    return await janitor.reclaim_dead_consumers(
+        min_idle_seconds=min_idle_seconds,
+        dry_run=dry_run,
+    )
+
+
 @APP.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()

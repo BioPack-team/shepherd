@@ -228,6 +228,109 @@ async def cleanup_stale_consumers() -> Dict[str, Any]:
     return {"deleted": deleted, "by_stream": by_stream}
 
 
+async def reclaim_dead_consumers(
+    min_idle_seconds: int = 3600,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Drop pending messages stuck on dead consumers, then remove the consumers.
+
+    A dead consumer is one with no live heartbeat. Its pending messages get
+    ACKed (so they leave the PEL) and XDELed (so they leave the stream), and
+    the consumer entry is removed. This is destructive -- the messages are
+    discarded, not retried -- so it lives on a separate admin endpoint instead
+    of running automatically.
+
+    Set ``dry_run=True`` to see what would be dropped without acting.
+    """
+    min_idle_ms = max(0, int(min_idle_seconds * 1000))
+    alive = await _list_alive_consumers()
+    streams = await _discover_streams()
+    summary: Dict[str, Any] = {
+        "dry_run": dry_run,
+        "min_idle_seconds": min_idle_seconds,
+        "dropped_messages": 0,
+        "consumers_removed": 0,
+        "by_stream": {},
+    }
+    for stream in streams:
+        consumers = await _xinfo_consumers(stream)
+        if not consumers:
+            continue
+        for c in consumers:
+            raw_name = c.get("name")
+            if not raw_name:
+                continue
+            name = raw_name if isinstance(raw_name, str) else raw_name.decode()
+            pending = int(c.get("pending", 0) or 0)
+            idle = int(c.get("idle", 0) or 0)
+            if (stream, name) in alive:
+                continue
+            if pending == 0:
+                continue  # cleanup_stale_consumers handles this case
+            if idle < min_idle_ms:
+                continue
+
+            # Enumerate pending message IDs for this consumer.
+            try:
+                detail = await broker_client.execute_command(
+                    "XPENDING",
+                    stream,
+                    CONSUMER_GROUP,
+                    "IDLE",
+                    min_idle_ms,
+                    "-",
+                    "+",
+                    pending,
+                    name,
+                )
+            except Exception as e:
+                logger.debug(f"XPENDING detail failed for {stream}/{name}: {e}")
+                continue
+
+            msg_ids: List[str] = []
+            if isinstance(detail, list):
+                for row in detail:
+                    if isinstance(row, list) and row:
+                        raw_id = row[0]
+                        msg_ids.append(
+                            raw_id if isinstance(raw_id, str) else raw_id.decode()
+                        )
+
+            bucket = summary["by_stream"].setdefault(
+                stream, {"messages": 0, "consumers": 0}
+            )
+            bucket["messages"] += len(msg_ids)
+            bucket["consumers"] += 1
+            summary["dropped_messages"] += len(msg_ids)
+            summary["consumers_removed"] += 1
+
+            if dry_run:
+                continue
+
+            if msg_ids:
+                try:
+                    await broker_client.xack(stream, CONSUMER_GROUP, *msg_ids)
+                except Exception as e:
+                    logger.warning(f"XACK batch failed for {stream}: {e}")
+                try:
+                    await broker_client.xdel(stream, *msg_ids)
+                except Exception as e:
+                    logger.warning(f"XDEL batch failed for {stream}: {e}")
+            try:
+                await broker_client.execute_command(
+                    "XGROUP", "DELCONSUMER", stream, CONSUMER_GROUP, name
+                )
+            except Exception as e:
+                logger.warning(f"DELCONSUMER {stream}/{name} failed: {e}")
+
+    if not dry_run and summary["consumers_removed"]:
+        logger.warning(
+            f"Reclaimed {summary['dropped_messages']} stuck messages from "
+            f"{summary['consumers_removed']} dead consumers"
+        )
+    return summary
+
+
 async def run_once() -> Dict[str, Any]:
     """Single pass; safe to invoke from an admin endpoint as well."""
     trim_results, callbacks_deleted, consumer_cleanup = await asyncio.gather(
