@@ -43,10 +43,12 @@ class Settings(BaseSettings):
     redis_ttl: int = 1210000
 
     # Reclaim of orphaned Redis Streams messages from dead consumers.
-    # ``min_idle`` must be a comfortable buffer above the worst-case legitimate
-    # task processing time so an active consumer is never robbed.
-    reclaim_min_idle_sec: int = 300
-    reclaim_interval_sec: int = 30
+    # Per-stream overrides live in shepherd_utils/reclaim.PER_STREAM_MIN_IDLE_SEC;
+    # this default applies to streams not listed there (fast workers). The
+    # whole query has a ~5-minute upstream budget, so reclaim needs to fire
+    # quickly enough that a retry has time to finish.
+    reclaim_min_idle_sec: int = 30
+    reclaim_interval_sec: int = 10
     reclaim_max_batch: int = 50
 
     # Monitor (dashboard) worker

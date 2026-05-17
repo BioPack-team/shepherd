@@ -56,10 +56,17 @@ async def get_tasks(
     group: str,
     consumer: str,
     task_limit: int,
+    reclaim_min_idle_sec: int = None,
 ) -> AsyncGenerator[
     Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None
 ]:
-    """Continually monitor the ara queue for tasks."""
+    """Continually monitor the ara queue for tasks.
+
+    ``reclaim_min_idle_sec`` overrides the per-stream default for how long a
+    message must be idle before another consumer can XCLAIM it. Pass an
+    explicit value when the worker knows its worst-case task duration; leave
+    it ``None`` to fall back to ``PER_STREAM_MIN_IDLE_SEC`` / settings.
+    """
     # Set up logger
     level_number = logging._nameToLevel[settings.log_level]
     log_handler = QueryLogger().log_handler
@@ -84,7 +91,11 @@ async def get_tasks(
             last_reclaim = now
             try:
                 reclaimed = await reclaim_orphaned(
-                    stream, group, consumer, worker_logger
+                    stream,
+                    group,
+                    consumer,
+                    worker_logger,
+                    min_idle_sec=reclaim_min_idle_sec,
                 )
             except Exception as e:
                 worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
