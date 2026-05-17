@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # ttl in seconds
     redis_ttl: int = 1210000
 
+    # Reclaim of orphaned Redis Streams messages from dead consumers.
+    # ``min_idle`` must be a comfortable buffer above the worst-case legitimate
+    # task processing time so an active consumer is never robbed.
+    reclaim_min_idle_sec: int = 300
+    reclaim_interval_sec: int = 30
+    reclaim_max_batch: int = 50
+
     # Monitor (dashboard) worker
     monitor_port: int = 5440
     monitor_poll_interval_sec: float = 3.0

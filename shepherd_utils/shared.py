@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
 from opentelemetry.context.context import Context
@@ -13,6 +14,7 @@ from .config import settings
 from .db import initialize_db, save_logs
 from .heartbeat import Heartbeat
 from .logger import QueryLogger, setup_logging
+from .reclaim import reclaim_orphaned
 
 setup_logging()
 
@@ -28,6 +30,25 @@ def get_next_operation(
     """
     next_op = workflow[0]
     return next_op, workflow
+
+
+def _build_task_context(
+    stream: str,
+    consumer: str,
+    ara_task,
+    level_number: int,
+) -> Tuple[Context, logging.Logger]:
+    """Build the per-task logger and otel context for a fetched/reclaimed task."""
+    log_handler = QueryLogger().log_handler
+    task_logger = logging.getLogger(
+        f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+    )
+    task_log_level = int(ara_task[1].get("log_level", level_number))
+    task_logger.setLevel(task_log_level)
+    task_logger.addHandler(log_handler)
+    task_logger.info(f"Doing task {ara_task}")
+    ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
+    return ctx, task_logger
 
 
 async def get_tasks(
@@ -50,22 +71,46 @@ async def get_tasks(
     task_limiter = asyncio.Semaphore(task_limit)
     # register this worker with the monitor via a Redis heartbeat key
     Heartbeat(stream, consumer, task_limit).start()
+    # periodic orphan-task reclaim so a worker crash doesn't strand its PEL
+    reclaim_interval = max(5.0, float(settings.reclaim_interval_sec))
+    last_reclaim = 0.0
     # continuously poll the broker for new tasks
     while True:
+        # Before fetching new work, check whether any pending messages on this
+        # stream belong to a dead consumer and claim them. Heartbeat + idle
+        # filtering inside ``reclaim_orphaned`` keep live consumers safe.
+        now = time.time()
+        if now - last_reclaim >= reclaim_interval:
+            last_reclaim = now
+            try:
+                reclaimed = await reclaim_orphaned(
+                    stream, group, consumer, worker_logger
+                )
+            except Exception as e:
+                worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
+                reclaimed = []
+            for ara_task in reclaimed:
+                await task_limiter.acquire()
+                try:
+                    ctx, task_logger = _build_task_context(
+                        stream, consumer, ara_task, level_number
+                    )
+                except Exception as e:
+                    worker_logger.error(
+                        f"Failed to build context for reclaimed task {ara_task}: {e}"
+                    )
+                    task_limiter.release()
+                    continue
+                yield ara_task, ctx, task_logger, task_limiter
+
         # check if we can take another task
         await task_limiter.acquire()
         # get a new task for the given target
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
-            log_handler = QueryLogger().log_handler
-            task_logger = logging.getLogger(
-                f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+            ctx, task_logger = _build_task_context(
+                stream, consumer, ara_task, level_number
             )
-            task_log_level = int(ara_task[1].get("log_level", level_number))
-            task_logger.setLevel(task_log_level)
-            task_logger.addHandler(log_handler)
-            task_logger.info(f"Doing task {ara_task}")
-            ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
             yield ara_task, ctx, task_logger, task_limiter
