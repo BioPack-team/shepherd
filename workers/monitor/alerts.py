@@ -182,35 +182,44 @@ class AlertEngine:
             fired.append(event)
             await _record_alert(event)
             await dispatch(event)
-        # Worker-crash alerts: only fire when the poller has classified the
-        # transition as a crash. Clean scale-downs (SIGTERM with a shutdown
-        # marker written) are expected and stay silent.
+        # Last-worker-down alerts: critical whenever a worker type hits zero,
+        # because every worker type is supposed to have at least one instance
+        # running. The message differentiates a crash from a clean scale-down
+        # so the operator sees which one happened, but severity is the same.
         for ev in snapshot.get("events", []):
-            if (
-                ev.get("type") == "scale_down"
-                and ev.get("to") == 0
-                and ev.get("kind") == "crashed"
-            ):
+            if not (ev.get("type") == "scale_down" and ev.get("to") == 0):
+                continue
+            kind = ev.get("kind", "unknown")
+            if kind == "crashed":
                 key = f"worker_crashed:{ev['worker']}"
-                if await broker_client.exists(f"alert:cooldown:{key}"):
-                    continue
-                await broker_client.set(f"alert:cooldown:{key}", "1", ex=600)
-                event = {
-                    "ts": now,
-                    "rule": key,
-                    "severity": "critical",
-                    "detail": (
-                        f"{ev['worker']} dropped from {ev['from']} to 0 with no "
-                        "shutdown marker"
-                    ),
-                    "message": (
-                        f"Worker `{ev['worker']}` appears to have crashed "
-                        f"(was {ev['from']}, now 0; no clean-shutdown signal received)."
-                    ),
-                }
-                fired.append(event)
-                await _record_alert(event)
-                await dispatch(event)
+                detail = (
+                    f"{ev['worker']} dropped from {ev['from']} to 0 with no "
+                    "shutdown marker"
+                )
+                message = (
+                    f"Worker `{ev['worker']}` appears to have crashed "
+                    f"(was {ev['from']}, now 0; no clean-shutdown signal received)."
+                )
+            else:
+                key = f"worker_zero:{ev['worker']}"
+                detail = f"{ev['worker']} cleanly scaled down to 0 (was {ev['from']})"
+                message = (
+                    f"Worker `{ev['worker']}` scaled to zero. Every worker "
+                    "type is expected to have at least one instance running."
+                )
+            if await broker_client.exists(f"alert:cooldown:{key}"):
+                continue
+            await broker_client.set(f"alert:cooldown:{key}", "1", ex=600)
+            event = {
+                "ts": now,
+                "rule": key,
+                "severity": "critical",
+                "detail": detail,
+                "message": message,
+            }
+            fired.append(event)
+            await _record_alert(event)
+            await dispatch(event)
         return fired
 
 
