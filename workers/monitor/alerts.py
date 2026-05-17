@@ -182,10 +182,16 @@ class AlertEngine:
             fired.append(event)
             await _record_alert(event)
             await dispatch(event)
-        # Also emit alerts for spontaneous scale_down events to zero.
+        # Worker-crash alerts: only fire when the poller has classified the
+        # transition as a crash. Clean scale-downs (SIGTERM with a shutdown
+        # marker written) are expected and stay silent.
         for ev in snapshot.get("events", []):
-            if ev.get("type") == "scale_down" and ev.get("to") == 0:
-                key = f"worker_down:{ev['worker']}"
+            if (
+                ev.get("type") == "scale_down"
+                and ev.get("to") == 0
+                and ev.get("kind") == "crashed"
+            ):
+                key = f"worker_crashed:{ev['worker']}"
                 if await broker_client.exists(f"alert:cooldown:{key}"):
                     continue
                 await broker_client.set(f"alert:cooldown:{key}", "1", ex=600)
@@ -193,8 +199,14 @@ class AlertEngine:
                     "ts": now,
                     "rule": key,
                     "severity": "critical",
-                    "detail": f"{ev['worker']} dropped from {ev['from']} to 0",
-                    "message": f"All instances of {ev['worker']} are down.",
+                    "detail": (
+                        f"{ev['worker']} dropped from {ev['from']} to 0 with no "
+                        "shutdown marker"
+                    ),
+                    "message": (
+                        f"Worker `{ev['worker']}` appears to have crashed "
+                        f"(was {ev['from']}, now 0; no clean-shutdown signal received)."
+                    ),
                 }
                 fired.append(event)
                 await _record_alert(event)

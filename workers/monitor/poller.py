@@ -11,18 +11,30 @@ import json
 import logging
 import time
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set, Tuple
 
 from shepherd_utils.broker import broker_client
 from shepherd_utils.db import pool as pg_pool
 from shepherd_utils.heartbeat import (
     HEARTBEAT_SCAN_PATTERN,
     HEARTBEAT_TTL_SEC,
+    SHUTDOWN_SCAN_PATTERN,
 )
 
 from . import history
 
 logger = logging.getLogger("shepherd.monitor.poller")
+
+# Persistent per-worker-type state. Lives in Redis so the dashboard remembers
+# every worker it has ever seen across monitor restarts and can render a card
+# for a worker type whose heartbeats have all gone away (crashed or scaled
+# down).
+KNOWN_WORKERS_KEY = "monitor:known_workers"
+WORKER_STATE_PREFIX = "monitor:worker_state"
+
+
+def _worker_state_key(stream: str) -> str:
+    return f"{WORKER_STATE_PREFIX}:{stream}"
 
 
 # Streams to track. Discovered dynamically from heartbeats so new ARAs are
@@ -82,6 +94,17 @@ async def _collect_heartbeats() -> List[Dict[str, Any]]:
         hb["stale"] = hb["age_sec"] > HEARTBEAT_TTL_SEC
         workers.append(hb)
     return workers
+
+
+async def _collect_shutdown_markers() -> Set[Tuple[str, str]]:
+    """Return ``{(stream, consumer)}`` of workers that signalled a clean exit."""
+    markers: Set[Tuple[str, str]] = set()
+    async for key in broker_client.scan_iter(match=SHUTDOWN_SCAN_PATTERN, count=200):
+        # key format: worker:shutdown:{stream}:{consumer}
+        parts = key.split(":", 3)
+        if len(parts) == 4:
+            markers.add((parts[2], parts[3]))
+    return markers
 
 
 async def _collect_streams(stream_names: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -270,54 +293,201 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return dict(grouped)
 
 
-# Cache of last-seen alive-counts so we can emit spin-up/spin-down events.
-_last_alive: Dict[str, int] = {}
+async def _load_worker_state(stream: str) -> Dict[str, Any]:
+    try:
+        raw = await broker_client.get(_worker_state_key(stream))
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
 
 
-def _diff_worker_events(workers_rollup: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+async def _save_worker_state(stream: str, state: Dict[str, Any]) -> None:
+    try:
+        pipe = broker_client.pipeline()
+        pipe.set(_worker_state_key(stream), json.dumps(state))
+        pipe.sadd(KNOWN_WORKERS_KEY, stream)
+        await pipe.execute()
+    except Exception as e:
+        logger.debug(f"Failed to persist worker state for {stream}: {e}")
+
+
+async def _known_workers() -> Set[str]:
+    try:
+        return set(await broker_client.smembers(KNOWN_WORKERS_KEY))
+    except Exception:
+        return set()
+
+
+async def _resolve_worker_states(
+    workers_rollup: Dict[str, Dict[str, Any]],
+    shutdown_markers: Set[Tuple[str, str]],
+    now: float,
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Annotate each worker type with persistent state and emit transition events.
+
+    The state machine per worker type:
+
+    * **alive**: at least one current heartbeat
+    * **scaled_down**: was alive last tick, now zero alive, *and* at least one
+      shutdown marker exists for this stream (a worker exited cleanly via
+      SIGTERM/SIGINT)
+    * **crashed**: was alive last tick, now zero alive, and no shutdown marker
+      was visible at the moment of transition
+    * Once in ``crashed`` or ``scaled_down`` the type stays there until alive
+      heartbeats return -- so a marker expiring after 2 min doesn't flip the
+      state back.
+    """
+    known = await _known_workers()
+    all_streams = set(workers_rollup.keys()) | known
+
+    enhanced: Dict[str, Dict[str, Any]] = {}
     events: List[Dict[str, Any]] = []
-    seen = set()
-    for wtype, info in workers_rollup.items():
-        alive = info["alive"]
-        prev = _last_alive.get(wtype, alive)
-        if alive > prev:
-            events.append(
-                {"type": "scale_up", "worker": wtype, "from": prev, "to": alive}
+
+    markers_by_stream: Dict[str, int] = defaultdict(int)
+    for stream, _c in shutdown_markers:
+        markers_by_stream[stream] += 1
+
+    for stream in sorted(all_streams):
+        info = workers_rollup.get(
+            stream,
+            {"alive": 0, "stale": 0, "consumers": [], "task_limit_total": 0},
+        )
+        prev = await _load_worker_state(stream)
+        prev_state = prev.get("state", "unknown")
+        prev_alive = int(prev.get("last_alive", 0))
+        prev_seen_alive = float(prev.get("last_seen_alive", 0))
+
+        alive_now = info["alive"]
+
+        if alive_now > 0:
+            new_state = "alive"
+        elif prev_state == "alive":
+            # Just transitioned to zero: the decision is locked in *now* based
+            # on whether any shutdown marker is currently observable.
+            new_state = (
+                "scaled_down" if markers_by_stream.get(stream, 0) > 0 else "crashed"
             )
-        elif alive < prev:
+        elif prev_state in ("crashed", "scaled_down"):
+            new_state = prev_state
+        else:
+            # First time we're seeing this stream and it isn't alive. Could be a
+            # seed stream that hasn't been used. Keep it as unknown until proven.
+            new_state = "unknown"
+
+        state_changed = new_state != prev_state
+        state_changed_at = (
+            now if state_changed else float(prev.get("state_changed_at", now))
+        )
+
+        # Emit transition events. Scale-up only matters when we move from a
+        # non-alive state into alive.
+        if state_changed:
+            if new_state in ("crashed", "scaled_down"):
+                events.append(
+                    {
+                        "type": "scale_down",
+                        "worker": stream,
+                        "from": prev_alive,
+                        "to": alive_now,
+                        "kind": new_state,
+                    }
+                )
+            elif new_state == "alive" and prev_state in ("crashed", "scaled_down", "unknown"):
+                events.append(
+                    {
+                        "type": "scale_up",
+                        "worker": stream,
+                        "from": prev_alive,
+                        "to": alive_now,
+                        "recovered_from": prev_state,
+                    }
+                )
+        elif new_state == "alive" and alive_now != prev_alive:
+            # Steady-state scaling within the "alive" state.
             events.append(
-                {"type": "scale_down", "worker": wtype, "from": prev, "to": alive}
+                {
+                    "type": "scale_up" if alive_now > prev_alive else "scale_down",
+                    "worker": stream,
+                    "from": prev_alive,
+                    "to": alive_now,
+                    "kind": "alive",
+                }
             )
-        _last_alive[wtype] = alive
-        seen.add(wtype)
-    # Workers that completely disappeared
-    for wtype, prev in list(_last_alive.items()):
-        if wtype not in seen and prev > 0:
-            events.append(
-                {"type": "scale_down", "worker": wtype, "from": prev, "to": 0}
-            )
-            _last_alive[wtype] = 0
-    return events
+
+        new_record = {
+            "state": new_state,
+            "last_alive": alive_now if alive_now > 0 else prev_alive,
+            "state_changed_at": state_changed_at,
+            "last_seen_alive": now if alive_now > 0 else prev_seen_alive,
+        }
+        await _save_worker_state(stream, new_record)
+
+        info["state"] = new_state
+        info["state_changed_at"] = state_changed_at
+        info["last_seen_alive"] = new_record["last_seen_alive"]
+        info["last_alive_count"] = prev_alive if alive_now == 0 else alive_now
+        enhanced[stream] = info
+
+    return enhanced, events
 
 
-def _discover_streams(workers: List[Dict[str, Any]]) -> List[str]:
+def _discover_streams(
+    workers: List[Dict[str, Any]], known: Set[str] | None = None
+) -> List[str]:
     discovered = {hb.get("stream") for hb in workers if hb.get("stream")}
-    return sorted(set(SEED_STREAMS) | discovered)
+    seed = set(SEED_STREAMS) | (known or set())
+    return sorted(seed | discovered)
+
+
+def _attach_load_to_workers(
+    workers_rollup: Dict[str, Dict[str, Any]],
+    stream_stats: Dict[str, Dict[str, Any]],
+) -> None:
+    """Fold stream backlog/pending into each worker card.
+
+    A worker type's stream is itself, so the lookup is direct. Utilization is
+    clamped to a sensible range for display; the raw numbers stay accurate.
+    """
+    for wtype, info in workers_rollup.items():
+        stats = stream_stats.get(wtype) or {}
+        xlen = int(stats.get("xlen", 0) or 0)
+        pending = int(stats.get("pending", 0) or 0)
+        backlog = xlen
+        capacity = int(info.get("task_limit_total", 0) or 0)
+        info["backlog"] = backlog
+        info["pending"] = pending
+        info["capacity"] = capacity
+        info["utilization"] = (
+            (backlog / capacity) if capacity > 0 else (1.0 if backlog > 0 else 0.0)
+        )
 
 
 async def collect_snapshot() -> Dict[str, Any]:
     """Build one full snapshot. Safe to call independently for /api/snapshot."""
-    workers = await _collect_heartbeats()
-    streams = _discover_streams(workers)
+    workers, shutdown_markers, known = await asyncio.gather(
+        _collect_heartbeats(),
+        _collect_shutdown_markers(),
+        _known_workers(),
+    )
+    streams = _discover_streams(workers, known)
     stream_stats, pg_state, redis_info = await asyncio.gather(
         _collect_streams(streams),
         _collect_postgres(),
         _collect_redis_info(),
     )
     workers_rollup = _rollup_workers(workers)
-    events = _diff_worker_events(workers_rollup)
+    now = time.time()
+    workers_rollup, events = await _resolve_worker_states(
+        workers_rollup, shutdown_markers, now
+    )
+    _attach_load_to_workers(workers_rollup, stream_stats)
     snapshot = {
-        "ts": time.time(),
+        "ts": now,
         "workers": workers_rollup,
         "streams": stream_stats,
         "postgres": pg_state,

@@ -166,6 +166,23 @@ async def api_admin_reclaim_dead_consumers(
     )
 
 
+@APP.post("/api/admin/forget_worker")
+async def api_admin_forget_worker(name: str):
+    """Remove a worker type from the dashboard's known-workers set.
+
+    Use this for a worker that's been retired permanently. The next snapshot
+    will drop its card. If a worker by that name reappears (heartbeats again),
+    it'll be re-learned automatically.
+    """
+    from shepherd_utils.broker import broker_client
+
+    pipe = broker_client.pipeline()
+    pipe.srem("monitor:known_workers", name)
+    pipe.delete(f"monitor:worker_state:{name}")
+    await pipe.execute()
+    return {"forgot": name}
+
+
 @APP.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
