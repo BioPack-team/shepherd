@@ -132,7 +132,7 @@
 
   async function loadSummary() {
     const { since, until } = currentWindow;
-    const s = await fetchJSON(`/api/historical/summary?${qs({ since, until })}`);
+    const s = await fetchJSON(`api/historical/summary?${qs({ since, until })}`);
     const grid = document.getElementById("summary");
     const cards = [
       { label: "Queries started", value: fmtCount(s.queries_started) },
@@ -158,7 +158,7 @@
     // the rate of new shepherd_brain rows -- not in metrics. For now, plot
     // queries_last_1h across the window.
     const r = await fetchJSON(
-      `/api/historical/metrics?${qs({ metric: "pg:queries_last_1h", since, until })}`
+      `api/historical/metrics?${qs({ metric: "pg:queries_last_1h", since, until })}`
     );
     const series = r.series["pg:queries_last_1h"] || [];
     if (!charts.throughput) {
@@ -172,7 +172,7 @@
   async function loadFleet() {
     const { since, until } = currentWindow;
     const r = await fetchJSON(
-      `/api/historical/metrics_by_prefix?${qs({ prefix: "workers_alive:", since, until })}`
+      `api/historical/metrics_by_prefix?${qs({ prefix: "workers_alive:", since, until })}`
     );
     const datasets = [];
     const names = Object.keys(r.series).sort();
@@ -189,7 +189,7 @@
   async function loadBacklog() {
     const { since, until } = currentWindow;
     const r = await fetchJSON(
-      `/api/historical/metrics_by_prefix?${qs({ prefix: "xlen:", since, until })}`
+      `api/historical/metrics_by_prefix?${qs({ prefix: "xlen:", since, until })}`
     );
     // Only show streams with some non-zero traffic to keep the legend useful.
     const datasets = [];
@@ -209,7 +209,7 @@
   async function loadLatency() {
     const { since, until } = currentWindow;
     const r = await fetchJSON(
-      `/api/historical/latency?${qs({ since, until })}`
+      `api/historical/latency?${qs({ since, until })}`
     );
     const grid = document.getElementById("latency-grid");
     const streams = Object.keys(r.series).sort();
@@ -268,8 +268,8 @@
   async function loadHeatmap() {
     const { since, until } = currentWindow;
     const [bl, cap] = await Promise.all([
-      fetchJSON(`/api/historical/metrics_by_prefix?${qs({ prefix: "backlog:", since, until })}`),
-      fetchJSON(`/api/historical/metrics_by_prefix?${qs({ prefix: "capacity:", since, until })}`),
+      fetchJSON(`api/historical/metrics_by_prefix?${qs({ prefix: "backlog:", since, until })}`),
+      fetchJSON(`api/historical/metrics_by_prefix?${qs({ prefix: "capacity:", since, until })}`),
     ]);
     // Find the time-buckets used (assume backlog and capacity share them).
     const streams = new Set();
@@ -327,7 +327,7 @@
   async function loadInfra() {
     const { since, until } = currentWindow;
     const r = await fetchJSON(
-      `/api/historical/metrics?${qs({
+      `api/historical/metrics?${qs({
         metric: "redis:used_memory_bytes,pg:connection_count,pg:db_size_bytes,redis:ops_per_sec",
         since, until,
       })}`
@@ -349,7 +349,7 @@
   async function loadEvents() {
     const { since, until } = currentWindow;
     const r = await fetchJSON(
-      `/api/historical/events?${qs({ since, until, limit: 500 })}`
+      `api/historical/events?${qs({ since, until, limit: 500 })}`
     );
     renderTimeline(r.events || []);
     renderIncidentsTable((r.events || []).filter(e => e.severity && e.severity !== "info"));
