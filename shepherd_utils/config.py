@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # Default 30s keeps a few days of trend data without ballooning Redis.
     monitor_history_interval_sec: float = 30.0
     monitor_history_days: int = 3
+    # On monitor startup we suppress worker-down alerts for this long so the
+    # whole stack coming up at once doesn't spam Slack before workers have
+    # had a chance to register their heartbeats.
+    monitor_startup_grace_sec: int = 90
     monitor_alerts_config: str = "/app/monitor_alerts.yaml"
     slack_webhook_url: str = ""
     alert_email_to: str = ""

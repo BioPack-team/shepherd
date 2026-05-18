@@ -39,14 +39,25 @@ services:
     build:
       context: .
       dockerfile: shepherd_broker/Dockerfile
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-supersecretpassword}
     ports:
       - "6379:6379"
     restart: unless-stopped
+    # The default ``redis-cli ping`` healthcheck silently passed even before
+    # Redis was ready, because (a) it didn't authenticate (NOAUTH error still
+    # exits 0) and (b) during AOF/RDB load Redis answers ``LOADING`` instead
+    # of ``PONG``, which redis-cli also exits 0 on. Grepping for an exact
+    # ``PONG`` makes the check actually wait until Redis is fully online.
+    # ``start_period`` gives a large RDB time to load before failures count.
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        - "CMD-SHELL"
+        - 'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -qx PONG'
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 60s
     volumes:
       - ./data:/data
   shepherd_broker_insight:

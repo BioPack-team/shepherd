@@ -140,6 +140,14 @@ def load_rules(path: str) -> List[Rule]:
 class AlertEngine:
     def __init__(self, rules: List[Rule]):
         self.rules = rules
+        # Captured once at process boot. Worker-down alerts that fire during
+        # the startup grace window get suppressed so a fresh ``docker compose
+        # up`` doesn't immediately spam Slack while workers are still booting.
+        self._boot_time = time.time()
+
+    @property
+    def in_startup_grace(self) -> bool:
+        return (time.time() - self._boot_time) < settings.monitor_startup_grace_sec
 
     async def _in_cooldown(self, rule: Rule) -> bool:
         try:
@@ -186,8 +194,19 @@ class AlertEngine:
         # because every worker type is supposed to have at least one instance
         # running. The message differentiates a crash from a clean scale-down
         # so the operator sees which one happened, but severity is the same.
+        startup_grace = self.in_startup_grace
         for ev in snapshot.get("events", []):
             if not (ev.get("type") == "scale_down" and ev.get("to") == 0):
+                continue
+            if startup_grace:
+                # The whole stack just came up; persistent worker state from a
+                # previous run looks "alive" but current heartbeats haven't
+                # arrived yet. Stay silent until workers have had a chance to
+                # register.
+                logger.debug(
+                    f"Suppressing worker-down alert for {ev.get('worker')} "
+                    "during startup grace"
+                )
                 continue
             kind = ev.get("kind", "unknown")
             if kind == "crashed":
