@@ -327,7 +327,6 @@ async def api_admin_forget_worker(name: str):
     return {"forgot": name}
 
 
-@APP.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     async with _clients_lock:
@@ -349,6 +348,18 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         async with _clients_lock:
             _clients.discard(ws)
+
+
+# Register the WebSocket handler twice when a root_path is configured:
+#   - ``/ws``               : matches when the proxy strips the prefix (local
+#                             dev, or a future ingress that does rewrite WS).
+#   - ``{ROOT_PATH}/ws``    : matches when the proxy hands the upgrade through
+#                             with the prefix intact. Used by the separate
+#                             "no-rewrite" ingress that exists specifically so
+#                             nginx doesn't strip the WebSocket Upgrade header.
+APP.add_api_websocket_route("/ws", ws_endpoint)
+if ROOT_PATH:
+    APP.add_api_websocket_route(f"{ROOT_PATH}/ws", ws_endpoint)
 
 
 def main() -> None:
