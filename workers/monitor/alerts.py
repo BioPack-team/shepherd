@@ -224,6 +224,7 @@ class AlertEngine:
 
 
 async def _record_alert(event: Dict[str, Any]) -> None:
+    # Recent-alerts list in Redis powers the live dashboard's alerts feed.
     try:
         pipe = broker_client.pipeline()
         pipe.lpush(ALERT_HISTORY_KEY, json.dumps(event))
@@ -231,6 +232,24 @@ async def _record_alert(event: Dict[str, Any]) -> None:
         await pipe.execute()
     except Exception as e:
         logger.debug(f"Failed to record alert: {e}")
+    # Durable archive in Postgres lets the History tab surface old alerts.
+    try:
+        from . import storage
+
+        worker = None
+        rule = event.get("rule", "")
+        if ":" in rule:
+            worker = rule.split(":", 1)[1]
+        await storage.insert_event(
+            event_type="alert",
+            worker=worker,
+            severity=event.get("severity"),
+            detail=event.get("detail"),
+            payload=event,
+            unix_ts=event.get("ts"),
+        )
+    except Exception as e:
+        logger.debug(f"Failed to archive alert: {e}")
 
 
 async def recent_alerts(limit: int = 50) -> List[Dict[str, Any]]:

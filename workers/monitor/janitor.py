@@ -24,6 +24,7 @@ from shepherd_utils.broker import broker_client
 from shepherd_utils.db import reap_completed_callbacks
 from shepherd_utils.heartbeat import HEARTBEAT_SCAN_PATTERN
 
+from . import storage
 from .poller import SEED_STREAMS
 
 logger = logging.getLogger("shepherd.monitor.janitor")
@@ -34,6 +35,10 @@ CONSUMER_GROUP = "consumer"
 # has been idle this long. The threshold guards against deleting a worker that
 # just started but hasn't ticked its heartbeat yet.
 STALE_CONSUMER_IDLE_MS = 60 * 60 * 1000  # 1 hour
+# Retention for the Postgres historical archive.
+HISTORY_RETENTION_DAYS = 30
+RETENTION_SWEEP_INTERVAL_SEC = 24 * 60 * 60  # once per day
+RETENTION_LAST_RUN_KEY = "monitor:janitor:last_retention_sweep"
 
 
 def _next_stream_id(stream_id: str) -> str:
@@ -331,18 +336,50 @@ async def reclaim_dead_consumers(
     return summary
 
 
+async def sweep_history_retention(force: bool = False) -> Dict[str, Any]:
+    """Delete Postgres history rows older than ``HISTORY_RETENTION_DAYS``.
+
+    Rate-limited via a Redis key so the loop doesn't re-run on every 5-min
+    tick; pass ``force=True`` to override (used by the admin endpoint).
+    """
+    import time as _time
+
+    now = _time.time()
+    if not force:
+        try:
+            last = await broker_client.get(RETENTION_LAST_RUN_KEY)
+            if last and (now - float(last)) < RETENTION_SWEEP_INTERVAL_SEC:
+                return {"skipped": True, "last_run": float(last)}
+        except Exception:
+            pass
+
+    deletions = await storage.purge_older_than(HISTORY_RETENTION_DAYS)
+    try:
+        await broker_client.set(RETENTION_LAST_RUN_KEY, str(now))
+    except Exception:
+        pass
+    return {"deleted": deletions, "ran_at": now}
+
+
 async def run_once() -> Dict[str, Any]:
     """Single pass; safe to invoke from an admin endpoint as well."""
-    trim_results, callbacks_deleted, consumer_cleanup = await asyncio.gather(
+    (
+        trim_results,
+        callbacks_deleted,
+        consumer_cleanup,
+        retention,
+    ) = await asyncio.gather(
         trim_streams(),
         reap_callbacks(),
         cleanup_stale_consumers(),
+        sweep_history_retention(),
         return_exceptions=False,
     )
     return {
         "streams": trim_results,
         "callbacks_deleted": callbacks_deleted,
         "stale_consumers": consumer_cleanup,
+        "history_retention": retention,
     }
 
 

@@ -21,7 +21,7 @@ from shepherd_utils.heartbeat import (
     SHUTDOWN_SCAN_PATTERN,
 )
 
-from . import history
+from . import history, storage
 
 logger = logging.getLogger("shepherd.monitor.poller")
 
@@ -256,10 +256,24 @@ async def _collect_redis_info() -> Dict[str, Any]:
         return {"error": str(e)}
     return {
         "used_memory_human": info.get("used_memory_human"),
+        "used_memory_bytes": int(info.get("used_memory", 0) or 0),
         "connected_clients": info.get("connected_clients"),
         "instantaneous_ops_per_sec": info.get("instantaneous_ops_per_sec"),
         "uptime_in_seconds": info.get("uptime_in_seconds"),
     }
+
+
+async def _collect_postgres_size() -> int:
+    """Database size in bytes. Useful for the History infra panel."""
+    try:
+        async with pg_pool.connection(10) as conn:
+            cur = await conn.execute(
+                "SELECT pg_database_size(current_database())"
+            )
+            row = await cur.fetchone()
+            return int(row[0] or 0)
+    except Exception:
+        return 0
 
 
 # Worker -> stream attribution. The heartbeat stream is exactly the queue the
@@ -475,11 +489,13 @@ async def collect_snapshot() -> Dict[str, Any]:
         _known_workers(),
     )
     streams = _discover_streams(workers, known)
-    stream_stats, pg_state, redis_info = await asyncio.gather(
+    stream_stats, pg_state, redis_info, pg_size = await asyncio.gather(
         _collect_streams(streams),
         _collect_postgres(),
         _collect_redis_info(),
+        _collect_postgres_size(),
     )
+    pg_state["db_size_bytes"] = pg_size
     workers_rollup = _rollup_workers(workers)
     now = time.time()
     workers_rollup, events = await _resolve_worker_states(
@@ -495,11 +511,30 @@ async def collect_snapshot() -> Dict[str, Any]:
         "events": events,
         "aras": ARAS,
     }
+    # Persist any events to the durable archive. Done here (not in alerts.py
+    # or _resolve_worker_states) so we have a single funnel for everything
+    # the History tab might want to surface.
+    for ev in events:
+        try:
+            await storage.insert_event(
+                event_type=ev.get("type", "scale_change"),
+                worker=ev.get("worker"),
+                severity=("critical" if ev.get("kind") == "crashed" else "info"),
+                detail=(
+                    f"{ev.get('worker')} {ev.get('type')} {ev.get('from')} -> "
+                    f"{ev.get('to')} ({ev.get('kind', 'unknown')})"
+                ),
+                payload=ev,
+                unix_ts=now,
+            )
+        except Exception:
+            pass
     return snapshot
 
 
 async def write_history(snapshot: Dict[str, Any]) -> None:
-    """Persist a few key scalars into the rolling history."""
+    """Persist a tick's scalars into both the Redis recent-window cache and
+    the Postgres durable archive."""
     ts = snapshot["ts"]
     samples: Dict[str, Any] = {}
     for stream, stats in snapshot["streams"].items():
@@ -508,11 +543,29 @@ async def write_history(snapshot: Dict[str, Any]) -> None:
         samples[f"consumers:{stream}"] = stats["consumer_count"]
     for wtype, info in snapshot["workers"].items():
         samples[f"workers_alive:{wtype}"] = info["alive"]
+        samples[f"backlog:{wtype}"] = info.get("backlog", 0)
+        samples[f"capacity:{wtype}"] = info.get("capacity", 0)
     pg = snapshot["postgres"]
     samples["pg:callbacks_pending"] = pg.get("callbacks_pending", 0)
     samples["pg:queries_last_1h"] = pg.get("queries_last_1h", 0)
     samples["pg:oldest_callback_age_sec"] = pg.get("oldest_callback_age_sec", 0)
     samples["pg:connection_count"] = pg.get("connection_count", 0)
+    samples["pg:db_size_bytes"] = pg.get("db_size_bytes", 0)
     for state, count in pg.get("state_counts", {}).items():
         samples[f"pg:state:{state}"] = count
+    redis_info = snapshot.get("redis", {}) or {}
+    if redis_info.get("used_memory_bytes"):
+        samples["redis:used_memory_bytes"] = redis_info["used_memory_bytes"]
+    if redis_info.get("connected_clients") is not None:
+        samples["redis:connected_clients"] = int(
+            redis_info.get("connected_clients") or 0
+        )
+    if redis_info.get("instantaneous_ops_per_sec") is not None:
+        samples["redis:ops_per_sec"] = int(
+            redis_info.get("instantaneous_ops_per_sec") or 0
+        )
+
+    # Live cache: bounded Redis sorted sets used by the live dashboard.
     await history.record_many(samples, ts=ts)
+    # Durable archive: 30-day retention in Postgres, used by History tab.
+    await storage.insert_metrics(samples, unix_ts=ts)

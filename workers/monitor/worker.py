@@ -26,7 +26,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.db import initialize_db, shutdown_db
 from shepherd_utils.logger import setup_logging
 
-from . import alerts, history, janitor, poller
+from . import alerts, history, janitor, latency, poller, storage
 
 setup_logging()
 logger = logging.getLogger("shepherd.monitor")
@@ -84,14 +84,20 @@ async def _poll_loop(engine: alerts.AlertEngine) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await initialize_db()
+    # Self-heal the schema so the History tab works on existing deployments
+    # (Postgres only runs docker-entrypoint-initdb.d scripts on a fresh data
+    # dir, which means upgrading an existing instance wouldn't see the new
+    # tables without this).
+    await storage.ensure_schema()
     rules = alerts.load_rules(settings.monitor_alerts_config)
     engine = alerts.AlertEngine(rules)
     poll_task = asyncio.create_task(_poll_loop(engine))
     janitor_task = asyncio.create_task(janitor.janitor_loop())
+    latency_task = asyncio.create_task(latency.aggregator_loop())
     try:
         yield
     finally:
-        for t in (poll_task, janitor_task):
+        for t in (poll_task, janitor_task, latency_task):
             t.cancel()
             try:
                 await t
@@ -114,9 +120,113 @@ async def index():
     return FileResponse(str(index_path))
 
 
+@APP.get("/history")
+async def history_page():
+    """Historical dashboard tab."""
+    path = STATIC_DIR / "history.html"
+    if not path.exists():
+        return JSONResponse({"error": "history page not found"}, status_code=500)
+    return FileResponse(str(path))
+
+
 @APP.get("/api/health")
 async def health():
     return {"ok": True}
+
+
+# ----- Historical (Postgres-backed) endpoints --------------------------------
+
+
+def _default_window() -> tuple[float, float]:
+    import time as _time
+
+    now = _time.time()
+    return now - 24 * 3600, now
+
+
+@APP.get("/api/historical/metrics")
+async def api_historical_metrics(
+    metric: str,
+    since: float | None = None,
+    until: float | None = None,
+    bucket_seconds: int | None = None,
+):
+    default_since, default_until = _default_window()
+    series = await storage.query_metrics(
+        [m for m in metric.split(",") if m],
+        since=since if since is not None else default_since,
+        until=until if until is not None else default_until,
+        bucket_seconds=bucket_seconds,
+    )
+    return {"series": series, "since": since, "until": until}
+
+
+@APP.get("/api/historical/metrics_by_prefix")
+async def api_historical_metrics_by_prefix(
+    prefix: str,
+    since: float | None = None,
+    until: float | None = None,
+    bucket_seconds: int | None = None,
+):
+    default_since, default_until = _default_window()
+    series = await storage.query_metrics_by_prefix(
+        prefix=prefix,
+        since=since if since is not None else default_since,
+        until=until if until is not None else default_until,
+        bucket_seconds=bucket_seconds,
+    )
+    return {"series": series}
+
+
+@APP.get("/api/historical/latency")
+async def api_historical_latency(
+    streams: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
+    bucket_seconds: int | None = None,
+):
+    default_since, default_until = _default_window()
+    stream_list = (
+        [s for s in streams.split(",") if s] if streams else None
+    )
+    series = await storage.query_latency(
+        streams=stream_list,
+        since=since if since is not None else default_since,
+        until=until if until is not None else default_until,
+        bucket_seconds=bucket_seconds,
+    )
+    return {"series": series}
+
+
+@APP.get("/api/historical/events")
+async def api_historical_events(
+    since: float | None = None,
+    until: float | None = None,
+    type: str | None = None,
+    severity: str | None = None,
+    limit: int = 500,
+):
+    default_since, default_until = _default_window()
+    events = await storage.query_events(
+        since=since if since is not None else default_since,
+        until=until if until is not None else default_until,
+        type_filter=type,
+        severity_filter=severity,
+        limit=limit,
+    )
+    return {"events": events}
+
+
+@APP.get("/api/historical/summary")
+async def api_historical_summary(
+    since: float | None = None,
+    until: float | None = None,
+):
+    default_since, default_until = _default_window()
+    return await storage.query_summary(
+        since=since if since is not None else default_since,
+        until=until if until is not None else default_until,
+    )
 
 
 @APP.get("/api/snapshot")

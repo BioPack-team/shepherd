@@ -9,12 +9,42 @@ from typing import AsyncGenerator, Dict, List, Tuple
 from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
 
-from .broker import add_task, get_task, mark_task_as_complete
+from .broker import add_task, broker_client, get_task, mark_task_as_complete
 from .config import settings
 from .db import initialize_db, save_logs
 from .heartbeat import Heartbeat
 from .logger import QueryLogger, setup_logging
 from .reclaim import reclaim_orphaned
+
+# Cap each per-stream duration queue so a stopped monitor can't OOM the broker.
+# 10k entries per stream is well above what we'd accumulate in a 30s drain
+# window even at peak load.
+_DURATION_QUEUE_CAP = 10000
+
+
+def _duration_key(stream: str) -> str:
+    return f"monitor:task_durations:{stream}"
+
+
+async def _record_task_duration(
+    stream: str,
+    started_at_str: str,
+    logger: logging.Logger,
+) -> None:
+    """Push ``ms_elapsed`` onto the per-stream duration list for the monitor."""
+    if not started_at_str:
+        return
+    try:
+        duration_ms = max(0, int((time.time() - float(started_at_str)) * 1000))
+    except (TypeError, ValueError):
+        return
+    try:
+        pipe = broker_client.pipeline()
+        pipe.lpush(_duration_key(stream), str(duration_ms))
+        pipe.ltrim(_duration_key(stream), 0, _DURATION_QUEUE_CAP - 1)
+        await pipe.execute()
+    except Exception as e:
+        logger.debug(f"Failed to record task duration for {stream}: {e}")
 
 setup_logging()
 
@@ -48,6 +78,12 @@ def _build_task_context(
     task_logger.addHandler(log_handler)
     task_logger.info(f"Doing task {ara_task}")
     ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
+    # Stamp the task payload with our delivery time so wrap_up_task /
+    # handle_task_failure can compute the per-task latency without touching
+    # every individual worker. Only set if not already present so a reclaimed
+    # task keeps its original start time.
+    if "_started_at" not in ara_task[1]:
+        ara_task[1]["_started_at"] = str(time.time())
     return ctx, task_logger
 
 
@@ -162,6 +198,7 @@ async def wrap_up_task(
 
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
+    await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
 
 
 async def handle_task_failure(
@@ -173,6 +210,7 @@ async def handle_task_failure(
     """Handle any full query failures."""
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
+    await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
     logger.error("Sending task straight to finish_query.")
     await add_task(
         "finish_query",
