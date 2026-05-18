@@ -148,9 +148,7 @@ def _serve_templated_html(filename: str) -> Any:
     if cached is None:
         path = STATIC_DIR / filename
         if not path.exists():
-            return JSONResponse(
-                {"error": f"{filename} not found"}, status_code=500
-            )
+            return JSONResponse({"error": f"{filename} not found"}, status_code=500)
         cached = path.read_text(encoding="utf-8")
         _HTML_TEMPLATE_CACHE[filename] = cached
     return HTMLResponse(cached.replace("{{BASE_HREF}}", _base_href()))
