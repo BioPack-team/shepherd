@@ -22,6 +22,10 @@
   let xlenChart, araChart;
   let xlenHistory = {}; // stream -> [{x, y}, ...]
   const HISTORY_POINTS = 60; // rolling window in the chart
+  // Tracks chart legend items the user clicked to hide. Datasets are rebuilt
+  // on every snapshot tick, which wipes Chart.js's internal visibility state,
+  // so we mirror it here (keyed by series label) and re-apply on each rebuild.
+  const xlenHiddenSeries = new Set();
 
   function fmt(n) {
     if (n === null || n === undefined) return "-";
@@ -56,7 +60,18 @@
           animation: false,
           parsing: false,
           plugins: {
-            legend: { labels: { color: "#8b949e", boxWidth: 10 } },
+            legend: {
+              labels: { color: "#8b949e", boxWidth: 10 },
+              onClick: (e, legendItem, legend) => {
+                Chart.defaults.plugins.legend.onClick(e, legendItem, legend);
+                const label = legendItem.text;
+                if (legend.chart.isDatasetVisible(legendItem.datasetIndex)) {
+                  xlenHiddenSeries.delete(label);
+                } else {
+                  xlenHiddenSeries.add(label);
+                }
+              },
+            },
             title: { display: true, text: "Queue depth (XLEN)", color: "#e6edf3" },
           },
           scales: {
@@ -231,6 +246,7 @@
       borderWidth: 1.5,
       pointRadius: 0,
       tension: 0.2,
+      hidden: xlenHiddenSeries.has(n),
     }));
     xlenChart.update("none");
   }
