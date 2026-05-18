@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shepherd Monitor — History</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Shepherd Monitor</h1>
+      <nav class="tabs">
+        <a class="tab" href="/">Live</a>
+        <a class="tab active" href="/history">History</a>
+      </nav>
+      <div class="status">
+        <span id="range-label"></span>
+        <button id="refresh-btn" class="btn">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="range-bar">
+        <div class="range-buttons">
+          <button class="range-btn" data-range="1h">1h</button>
+          <button class="range-btn" data-range="6h">6h</button>
+          <button class="range-btn active" data-range="24h">24h</button>
+          <button class="range-btn" data-range="7d">7d</button>
+          <button class="range-btn" data-range="30d">30d</button>
+        </div>
+        <div class="custom-range">
+          <label>From <input type="datetime-local" id="custom-from" /></label>
+          <label>To <input type="datetime-local" id="custom-to" /></label>
+          <button class="btn" id="custom-apply">Apply</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Summary</h2>
+        <div id="summary" class="summary-grid"></div>
+      </section>
+
+      <section>
+        <h2>Throughput (queries started)</h2>
+        <div class="chart-wrap"><canvas id="throughput-chart"></canvas></div>
+      </section>
+
+      <section>
+        <h2>Worker fleet (alive count by type)</h2>
+        <div class="chart-wrap"><canvas id="fleet-chart"></canvas></div>
+      </section>
+
+      <section>
+        <h2>Queue backlog (XLEN)</h2>
+        <div class="chart-wrap"><canvas id="backlog-chart"></canvas></div>
+      </section>
+
+      <section>
+        <h2>Per-worker task latency</h2>
+        <div id="latency-grid" class="latency-grid"></div>
+      </section>
+
+      <section>
+        <h2>Utilization heatmap</h2>
+        <div id="heatmap" class="heatmap"></div>
+      </section>
+
+      <section>
+        <h2>Infrastructure</h2>
+        <div class="two-col">
+          <div class="chart-wrap"><canvas id="redis-mem-chart"></canvas></div>
+          <div class="chart-wrap"><canvas id="pg-conn-chart"></canvas></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Events timeline</h2>
+        <div id="events-timeline" class="events-timeline"></div>
+      </section>
+
+      <section>
+        <h2>Incidents</h2>
+        <table id="incidents-table">
+          <thead>
+            <tr><th>Time</th><th>Type</th><th>Severity</th><th>Worker</th><th>Detail</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="/static/history.js"></script>
+  </body>
+</html>

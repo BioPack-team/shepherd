@@ -59,6 +59,7 @@ jobs:
           - gandalf
           - gandalf_rehydrate
           - merge_message
+          - monitor
           - score_paths
           - sipr
           - sort_results_score

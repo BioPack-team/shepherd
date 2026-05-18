@@ -114,7 +114,17 @@ async def run_query(
     # save query to db
     try:
 
-        await add_query(query_id, response_id, query, callback_url, logger)
+        # ``target`` is either an ARATargetEnum (which subclasses str -- value
+        # like "aragorn") or already a plain string for workflow-driven queries.
+        target_name = target.value if hasattr(target, "value") else target
+        await add_query(
+            query_id,
+            response_id,
+            query,
+            callback_url,
+            logger,
+            target=target_name,
+        )
         await add_task(
             target,
             {

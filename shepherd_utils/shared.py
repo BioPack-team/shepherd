@@ -3,15 +3,49 @@
 import asyncio
 import json
 import logging
+import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
 from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
 
-from .broker import add_task, get_task, mark_task_as_complete
+from .broker import add_task, broker_client, get_task, mark_task_as_complete
 from .config import settings
 from .db import initialize_db, save_logs
+from .heartbeat import Heartbeat
 from .logger import QueryLogger, setup_logging
+from .reclaim import reclaim_orphaned
+
+# Cap each per-stream duration queue so a stopped monitor can't OOM the broker.
+# 10k entries per stream is well above what we'd accumulate in a 30s drain
+# window even at peak load.
+_DURATION_QUEUE_CAP = 10000
+
+
+def _duration_key(stream: str) -> str:
+    return f"monitor:task_durations:{stream}"
+
+
+async def _record_task_duration(
+    stream: str,
+    started_at_str: str,
+    logger: logging.Logger,
+) -> None:
+    """Push ``ms_elapsed`` onto the per-stream duration list for the monitor."""
+    if not started_at_str:
+        return
+    try:
+        duration_ms = max(0, int((time.time() - float(started_at_str)) * 1000))
+    except (TypeError, ValueError):
+        return
+    try:
+        pipe = broker_client.pipeline()
+        pipe.lpush(_duration_key(stream), str(duration_ms))
+        pipe.ltrim(_duration_key(stream), 0, _DURATION_QUEUE_CAP - 1)
+        await pipe.execute()
+    except Exception as e:
+        logger.debug(f"Failed to record task duration for {stream}: {e}")
+
 
 setup_logging()
 
@@ -29,15 +63,47 @@ def get_next_operation(
     return next_op, workflow
 
 
+def _build_task_context(
+    stream: str,
+    consumer: str,
+    ara_task,
+    level_number: int,
+) -> Tuple[Context, logging.Logger]:
+    """Build the per-task logger and otel context for a fetched/reclaimed task."""
+    log_handler = QueryLogger().log_handler
+    task_logger = logging.getLogger(
+        f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+    )
+    task_log_level = int(ara_task[1].get("log_level", level_number))
+    task_logger.setLevel(task_log_level)
+    task_logger.addHandler(log_handler)
+    task_logger.info(f"Doing task {ara_task}")
+    ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
+    # Stamp the task payload with our delivery time so wrap_up_task /
+    # handle_task_failure can compute the per-task latency without touching
+    # every individual worker. Only set if not already present so a reclaimed
+    # task keeps its original start time.
+    if "_started_at" not in ara_task[1]:
+        ara_task[1]["_started_at"] = str(time.time())
+    return ctx, task_logger
+
+
 async def get_tasks(
     stream: str,
     group: str,
     consumer: str,
     task_limit: int,
+    reclaim_min_idle_sec: int = None,
 ) -> AsyncGenerator[
     Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None
 ]:
-    """Continually monitor the ara queue for tasks."""
+    """Continually monitor the ara queue for tasks.
+
+    ``reclaim_min_idle_sec`` overrides the per-stream default for how long a
+    message must be idle before another consumer can XCLAIM it. Pass an
+    explicit value when the worker knows its worst-case task duration; leave
+    it ``None`` to fall back to ``PER_STREAM_MIN_IDLE_SEC`` / settings.
+    """
     # Set up logger
     level_number = logging._nameToLevel[settings.log_level]
     log_handler = QueryLogger().log_handler
@@ -47,22 +113,52 @@ async def get_tasks(
     # initialize opens the db connection
     await initialize_db()
     task_limiter = asyncio.Semaphore(task_limit)
+    # register this worker with the monitor via a Redis heartbeat key
+    Heartbeat(stream, consumer, task_limit).start()
+    # periodic orphan-task reclaim so a worker crash doesn't strand its PEL
+    reclaim_interval = max(5.0, float(settings.reclaim_interval_sec))
+    last_reclaim = 0.0
     # continuously poll the broker for new tasks
     while True:
+        # Before fetching new work, check whether any pending messages on this
+        # stream belong to a dead consumer and claim them. Heartbeat + idle
+        # filtering inside ``reclaim_orphaned`` keep live consumers safe.
+        now = time.time()
+        if now - last_reclaim >= reclaim_interval:
+            last_reclaim = now
+            try:
+                reclaimed = await reclaim_orphaned(
+                    stream,
+                    group,
+                    consumer,
+                    worker_logger,
+                    min_idle_sec=reclaim_min_idle_sec,
+                )
+            except Exception as e:
+                worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
+                reclaimed = []
+            for ara_task in reclaimed:
+                await task_limiter.acquire()
+                try:
+                    ctx, task_logger = _build_task_context(
+                        stream, consumer, ara_task, level_number
+                    )
+                except Exception as e:
+                    worker_logger.error(
+                        f"Failed to build context for reclaimed task {ara_task}: {e}"
+                    )
+                    task_limiter.release()
+                    continue
+                yield ara_task, ctx, task_logger, task_limiter
+
         # check if we can take another task
         await task_limiter.acquire()
         # get a new task for the given target
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
-            log_handler = QueryLogger().log_handler
-            task_logger = logging.getLogger(
-                f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+            ctx, task_logger = _build_task_context(
+                stream, consumer, ara_task, level_number
             )
-            task_log_level = int(ara_task[1].get("log_level", level_number))
-            task_logger.setLevel(task_log_level)
-            task_logger.addHandler(log_handler)
-            task_logger.info(f"Doing task {ara_task}")
-            ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
             yield ara_task, ctx, task_logger, task_limiter
@@ -103,6 +199,7 @@ async def wrap_up_task(
 
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
+    await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
 
 
 async def handle_task_failure(
@@ -114,6 +211,7 @@ async def handle_task_failure(
     """Handle any full query failures."""
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
+    await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
     logger.error("Sending task straight to finish_query.")
     await add_task(
         "finish_query",

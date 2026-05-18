@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shepherd Monitor</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Shepherd Monitor</h1>
+      <nav class="tabs">
+        <a class="tab active" href="/">Live</a>
+        <a class="tab" href="/history">History</a>
+      </nav>
+      <div class="status">
+        <span id="connection" class="badge offline">connecting...</span>
+        <span id="last-update"></span>
+      </div>
+    </header>
+
+    <main>
+      <section>
+        <h2>Workers</h2>
+        <div id="workers" class="grid"></div>
+      </section>
+
+      <section>
+        <h2>Queues</h2>
+        <div class="chart-row">
+          <div class="chart-wrap"><canvas id="xlen-chart"></canvas></div>
+        </div>
+        <table id="streams-table">
+          <thead>
+            <tr>
+              <th>Stream</th>
+              <th>XLEN</th>
+              <th>Pending</th>
+              <th>Consumers</th>
+              <th>Max idle (s)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="two-col">
+        <div>
+          <h2>Queries</h2>
+          <div id="query-summary"></div>
+          <h3>By ARA (last 24h)</h3>
+          <div class="chart-wrap"><canvas id="ara-chart"></canvas></div>
+        </div>
+        <div>
+          <h2>Postgres / Redis</h2>
+          <div id="infra"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Recent Scaling Events</h2>
+        <ul id="events"></ul>
+      </section>
+
+      <section>
+        <h2>Alerts</h2>
+        <ul id="alerts"></ul>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
