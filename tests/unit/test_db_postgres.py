@@ -64,11 +64,28 @@ async def test_add_query_persists_to_redis_and_postgres(redis_mock, mocker):
     assert await redis_mock["data"].exists("qid-1")
     assert await redis_mock["data"].exists("rid-1")
 
-    # Single INSERT issued.
+    # Single INSERT issued. ``target`` defaults to None so the trailing
+    # ``domain`` parameter is None as well.
     sql, params = mock_conn.execute.call_args.args
     assert "INSERT INTO shepherd_brain" in sql
-    assert params == ("qid-1", "rid-1", None, "QUEUED", "OK")
+    assert params == ("qid-1", "rid-1", None, "QUEUED", "OK", None)
     assert mock_conn.commit.called
+
+
+@pytest.mark.asyncio
+async def test_add_query_stores_target_as_domain(redis_mock, mocker):
+    """``target`` passed to add_query is stored in the ``domain`` column."""
+    mock_conn, _ = _install_pool_mock(mocker)
+    await db.add_query(
+        "qid-2",
+        "rid-2",
+        {"message": {}},
+        callback_url=None,
+        logger=logger,
+        target="aragorn",
+    )
+    _, params = mock_conn.execute.call_args.args
+    assert params == ("qid-2", "rid-2", None, "QUEUED", "OK", "aragorn")
 
 
 @pytest.mark.asyncio
