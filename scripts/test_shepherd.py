@@ -15,7 +15,7 @@ target_urls = {
     "aragorn-dev": "https://shepherd.renci.org/aragorn",
     "arax-dev": "https://shepherd.renci.org/arax",
     "bte-dev": "https://shepherd.renci.org/bte",
-    "aragorn-local-dgraph": "http://localhost:5439/aragorn",
+    "aragorn-local": "http://localhost:5439/aragorn",
     "arax-local": "http://localhost:5439/arax",
     "bte-local": "http://localhost:5439/bte",
 }

@@ -80,7 +80,11 @@ class Rule:
             return None
         if self.kind == "queue_pending":
             stats = snapshot["streams"].get(self.stream)
-            if stats and self.threshold is not None and stats["pending"] > self.threshold:
+            if (
+                stats
+                and self.threshold is not None
+                and stats["pending"] > self.threshold
+            ):
                 return f"{self.stream} pending {stats['pending']} > {self.threshold}"
             return None
         return None
@@ -297,9 +301,11 @@ async def _dispatch_slack(event: Dict[str, Any]) -> None:
     url = settings.slack_webhook_url
     if not url:
         return
-    emoji = {"info": ":information_source:", "warning": ":warning:", "critical": ":rotating_light:"}.get(
-        event.get("severity", "warning"), ":warning:"
-    )
+    emoji = {
+        "info": ":information_source:",
+        "warning": ":warning:",
+        "critical": ":rotating_light:",
+    }.get(event.get("severity", "warning"), ":warning:")
     text = (
         f"{emoji} *Shepherd alert* `{event['rule']}` ({event['severity']})\n"
         f"{event['message']}"
@@ -331,13 +337,17 @@ def _send_email_sync(event: Dict[str, Any]) -> None:
     try:
         if settings.smtp_use_tls:
             ctx = ssl.create_default_context()
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+            with smtplib.SMTP(
+                settings.smtp_host, settings.smtp_port, timeout=10
+            ) as smtp:
                 smtp.starttls(context=ctx)
                 if settings.smtp_user:
                     smtp.login(settings.smtp_user, settings.smtp_password)
                 smtp.send_message(msg)
         else:
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+            with smtplib.SMTP(
+                settings.smtp_host, settings.smtp_port, timeout=10
+            ) as smtp:
                 if settings.smtp_user:
                     smtp.login(settings.smtp_user, settings.smtp_password)
                 smtp.send_message(msg)

@@ -179,4 +179,3 @@ class Heartbeat:
             # useful to do other than exit. Monitor will then classify this as
             # a crash, which is the safe default.
             pass
-

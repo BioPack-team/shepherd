@@ -46,6 +46,7 @@ async def _record_task_duration(
     except Exception as e:
         logger.debug(f"Failed to record task duration for {stream}: {e}")
 
+
 setup_logging()
 
 

@@ -106,9 +106,7 @@ async def mark_task_as_complete(
         try:
             await broker_client.xdel(stream, msg_id)
         except Exception as e:
-            logger.debug(
-                f"XDEL failed for {msg_id} in {stream}: {e}"
-            )
+            logger.debug(f"XDEL failed for {msg_id} in {stream}: {e}")
 
     except Exception as e:
         retries += 1

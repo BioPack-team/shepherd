@@ -217,23 +217,19 @@ async def _collect_postgres() -> Dict[str, Any]:
             row = await cur.fetchone()
             snapshot["callbacks_pending"] = int(row[0] or 0)
 
-            cur = await conn.execute(
-                """
+            cur = await conn.execute("""
                 SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(b.start_time))), 0)
                 FROM callbacks c
                 JOIN shepherd_brain b ON b.qid = c.query_id
-                """
-            )
+                """)
             row = await cur.fetchone()
             snapshot["oldest_callback_age_sec"] = float(row[0] or 0)
 
-            cur = await conn.execute(
-                """
+            cur = await conn.execute("""
                 SELECT domain, COUNT(*) FROM shepherd_brain
                 WHERE start_time > NOW() - INTERVAL '24 hours'
                 GROUP BY domain
-                """
-            )
+                """)
             for domain, count in await cur.fetchall():
                 if domain:
                     snapshot["per_ara_24h"][domain] = int(count)
@@ -267,9 +263,7 @@ async def _collect_postgres_size() -> int:
     """Database size in bytes. Useful for the History infra panel."""
     try:
         async with pg_pool.connection(10) as conn:
-            cur = await conn.execute(
-                "SELECT pg_database_size(current_database())"
-            )
+            cur = await conn.execute("SELECT pg_database_size(current_database())")
             row = await cur.fetchone()
             return int(row[0] or 0)
     except Exception:
@@ -411,7 +405,11 @@ async def _resolve_worker_states(
                         "kind": new_state,
                     }
                 )
-            elif new_state == "alive" and prev_state in ("crashed", "scaled_down", "unknown"):
+            elif new_state == "alive" and prev_state in (
+                "crashed",
+                "scaled_down",
+                "unknown",
+            ):
                 events.append(
                     {
                         "type": "scale_up",

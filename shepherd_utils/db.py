@@ -450,14 +450,12 @@ async def reap_completed_callbacks(logger: logging.Logger) -> int:
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(60) as conn:
-                cur = await conn.execute(
-                    """
+                cur = await conn.execute("""
                     DELETE FROM callbacks
                     WHERE query_id IN (
                         SELECT qid FROM shepherd_brain WHERE state = 'COMPLETED'
                     )
-                    """
-                )
+                    """)
                 deleted = cur.rowcount or 0
                 await conn.commit()
             break

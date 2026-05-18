@@ -406,7 +406,9 @@ async def query_summary(since: float, until: float) -> Dict[str, Any]:
                 if etype == "crash":
                     summary["crashes"] = int(count)
                 elif etype in ("scale_up", "scale_down"):
-                    summary["scale_events"] = summary.get("scale_events", 0) + int(count)
+                    summary["scale_events"] = summary.get("scale_events", 0) + int(
+                        count
+                    )
                 elif etype == "alert":
                     summary["alert_count"] = int(count)
 
@@ -455,9 +457,7 @@ async def purge_older_than(days: int) -> Dict[str, int]:
             await conn.commit()
         total = sum(deletions.values())
         if total:
-            logger.info(
-                f"Purged {total} history rows older than {days}d: {deletions}"
-            )
+            logger.info(f"Purged {total} history rows older than {days}d: {deletions}")
     except Exception as e:
         logger.warning(f"purge_older_than failed: {e}")
     return deletions

@@ -92,12 +92,14 @@ async def _trim_stream(stream: str) -> Optional[Dict[str, Any]]:
 
     minid: Optional[str] = None
     if pending_count > 0 and smallest_pending:
-        minid = smallest_pending if isinstance(smallest_pending, str) else smallest_pending.decode()
+        minid = (
+            smallest_pending
+            if isinstance(smallest_pending, str)
+            else smallest_pending.decode()
+        )
     else:
         try:
-            groups = await broker_client.execute_command(
-                "XINFO", "GROUPS", stream
-            )
+            groups = await broker_client.execute_command("XINFO", "GROUPS", stream)
         except Exception:
             return None
         last_delivered: Optional[str] = None
@@ -116,7 +118,11 @@ async def _trim_stream(stream: str) -> Optional[Dict[str, Any]]:
                     last_delivered = kv.get("last-delivered-id")
                     break
         if last_delivered:
-            ld = last_delivered if isinstance(last_delivered, str) else last_delivered.decode()
+            ld = (
+                last_delivered
+                if isinstance(last_delivered, str)
+                else last_delivered.decode()
+            )
             if ld and ld != "0-0":
                 minid = _next_stream_id(ld)
 
@@ -124,9 +130,7 @@ async def _trim_stream(stream: str) -> Optional[Dict[str, Any]]:
         return {"stream": stream, "trimmed": 0, "before": xlen, "minid": None}
 
     try:
-        trimmed = await broker_client.execute_command(
-            "XTRIM", stream, "MINID", minid
-        )
+        trimmed = await broker_client.execute_command("XTRIM", stream, "MINID", minid)
     except Exception as e:
         logger.debug(f"XTRIM failed for {stream} (minid={minid}): {e}")
         return None
@@ -136,7 +140,12 @@ async def _trim_stream(stream: str) -> Optional[Dict[str, Any]]:
         logger.info(
             f"Janitor trimmed {trimmed} entries from {stream} (xlen {xlen} -> {after}, minid={minid})"
         )
-    return {"stream": stream, "trimmed": int(trimmed or 0), "before": xlen, "after": after}
+    return {
+        "stream": stream,
+        "trimmed": int(trimmed or 0),
+        "before": xlen,
+        "after": after,
+    }
 
 
 async def trim_streams() -> List[Dict[str, Any]]:

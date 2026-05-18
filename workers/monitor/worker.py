@@ -186,9 +186,7 @@ async def api_historical_latency(
     bucket_seconds: int | None = None,
 ):
     default_since, default_until = _default_window()
-    stream_list = (
-        [s for s in streams.split(",") if s] if streams else None
-    )
+    stream_list = [s for s in streams.split(",") if s] if streams else None
     series = await storage.query_latency(
         streams=stream_list,
         since=since if since is not None else default_since,

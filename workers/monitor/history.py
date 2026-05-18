@@ -60,7 +60,9 @@ async def record_many(samples: dict[str, Any], ts: float | None = None) -> None:
 async def fetch(name: str, since: float | None = None) -> List[Tuple[float, Any]]:
     """Return ``[(timestamp, value), ...]`` for the named series, oldest first."""
     min_score = since if since is not None else 0
-    raw = await broker_client.zrangebyscore(_key(name), min_score, "+inf", withscores=True)
+    raw = await broker_client.zrangebyscore(
+        _key(name), min_score, "+inf", withscores=True
+    )
     out: List[Tuple[float, Any]] = []
     for member, score in raw:
         # member encoded as "<ts>:<json>"
