@@ -3,16 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Set by the server from MONITOR_ROOT_PATH. Local dev: "/". Behind an
+         ingress prefix: e.g. "/monitor/". All relative URLs below (and in
+         the JS) resolve against this via document.baseURI. -->
+    <base href="{{BASE_HREF}}" />
     <title>Shepherd Monitor</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="static/style.css" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <header>
       <h1>Shepherd Monitor</h1>
       <nav class="tabs">
-        <a class="tab active" href="/">Live</a>
-        <a class="tab" href="/history">History</a>
+        <a class="tab active" href="./">Live</a>
+        <a class="tab" href="history">History</a>
       </nav>
       <div class="status">
         <span id="connection" class="badge offline">connecting...</span>
@@ -69,6 +73,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <script src="static/app.js"></script>
   </body>
 </html>

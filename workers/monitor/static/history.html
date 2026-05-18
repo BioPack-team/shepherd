@@ -3,16 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Set by the server from MONITOR_ROOT_PATH. See index.html for the why. -->
+    <base href="{{BASE_HREF}}" />
     <title>Shepherd Monitor — History</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="static/style.css" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <header>
       <h1>Shepherd Monitor</h1>
       <nav class="tabs">
-        <a class="tab" href="/">Live</a>
-        <a class="tab active" href="/history">History</a>
+        <a class="tab" href="./">Live</a>
+        <a class="tab active" href="history">History</a>
       </nav>
       <div class="status">
         <span id="range-label"></span>
@@ -90,6 +92,6 @@
       </section>
     </main>
 
-    <script src="/static/history.js"></script>
+    <script src="static/history.js"></script>
   </body>
 </html>

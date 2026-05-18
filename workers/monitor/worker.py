@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Set
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from shepherd_utils.config import settings
@@ -32,6 +32,30 @@ setup_logging()
 logger = logging.getLogger("shepherd.monitor")
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _root_path() -> str:
+    """Normalize MONITOR_ROOT_PATH into a clean prefix (no trailing slash)."""
+    rp = os.environ.get("MONITOR_ROOT_PATH", "").strip()
+    if not rp:
+        return ""
+    if not rp.startswith("/"):
+        rp = "/" + rp
+    return rp.rstrip("/")
+
+
+def _base_href() -> str:
+    """``<base href>`` value for the HTML templates -- always trailing-slash.
+
+    Local dev: empty MONITOR_ROOT_PATH → "/" → app served at the document root.
+    Behind an ingress prefix: e.g. "/monitor" → "/monitor/" so relative links
+    in the HTML and JS resolve correctly via ``document.baseURI``.
+    """
+    rp = _root_path()
+    return (rp or "") + "/"
+
+
+ROOT_PATH = _root_path()
 
 # In-process state shared by the poller loop and websocket clients.
 _clients: Set[WebSocket] = set()
@@ -106,27 +130,41 @@ async def lifespan(app: FastAPI):
         await shutdown_db()
 
 
-APP = FastAPI(lifespan=lifespan, title="Shepherd Monitor")
+APP = FastAPI(lifespan=lifespan, title="Shepherd Monitor", root_path=ROOT_PATH)
 
 if STATIC_DIR.exists():
     APP.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# Templated HTML cache: read once, substitute the base-href placeholder on
+# every request. ``{{BASE_HREF}}`` is the only template variable; substitution
+# happens at serve time so swapping MONITOR_ROOT_PATH at deploy time works
+# without rebuilding the image.
+_HTML_TEMPLATE_CACHE: Dict[str, str] = {}
+
+
+def _serve_templated_html(filename: str) -> Any:
+    cached = _HTML_TEMPLATE_CACHE.get(filename)
+    if cached is None:
+        path = STATIC_DIR / filename
+        if not path.exists():
+            return JSONResponse(
+                {"error": f"{filename} not found"}, status_code=500
+            )
+        cached = path.read_text(encoding="utf-8")
+        _HTML_TEMPLATE_CACHE[filename] = cached
+    return HTMLResponse(cached.replace("{{BASE_HREF}}", _base_href()))
+
+
 @APP.get("/")
 async def index():
-    index_path = STATIC_DIR / "index.html"
-    if not index_path.exists():
-        return JSONResponse({"error": "dashboard UI not found"}, status_code=500)
-    return FileResponse(str(index_path))
+    return _serve_templated_html("index.html")
 
 
 @APP.get("/history")
 async def history_page():
     """Historical dashboard tab."""
-    path = STATIC_DIR / "history.html"
-    if not path.exists():
-        return JSONResponse({"error": "history page not found"}, status_code=500)
-    return FileResponse(str(path))
+    return _serve_templated_html("history.html")
 
 
 @APP.get("/api/health")
@@ -317,11 +355,15 @@ async def ws_endpoint(ws: WebSocket):
 
 def main() -> None:
     port = int(os.environ.get("MONITOR_PORT", settings.monitor_port))
+    # ``root_path`` only affects how FastAPI constructs self-referential URLs
+    # (OpenAPI / redirects). The ingress is expected to strip the prefix
+    # before forwarding, so the route paths themselves are unprefixed.
     uvicorn.run(
         APP,
         host="0.0.0.0",
         port=port,
         log_level=settings.log_level.lower(),
+        root_path=ROOT_PATH,
     )
 
 

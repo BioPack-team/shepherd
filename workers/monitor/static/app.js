@@ -272,7 +272,7 @@
 
   async function loadAlerts() {
     try {
-      const res = await fetch("/api/alerts?limit=50");
+      const res = await fetch("api/alerts?limit=50");
       const body = await res.json();
       renderAlerts(body.alerts || []);
     } catch (e) {
@@ -319,8 +319,12 @@
   let pollTimer;
 
   function connect() {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
+    // Build the websocket URL from <base href>, so a path-prefixed deployment
+    // (e.g. served at /monitor/) routes /monitor/ws correctly. Locally this
+    // resolves to /ws since <base href="/">.
+    const baseUrl = new URL("ws", document.baseURI);
+    baseUrl.protocol = baseUrl.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(baseUrl.toString());
     ws.onopen = () => {
       setConnection(true);
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
@@ -339,7 +343,7 @@
       if (!pollTimer) {
         pollTimer = setInterval(async () => {
           try {
-            const r = await fetch("/api/snapshot");
+            const r = await fetch("api/snapshot");
             applySnapshot(await r.json());
           } catch (e) { /* swallow */ }
         }, 5000);
@@ -350,7 +354,7 @@
   }
 
   // Initial fetch so the UI is populated before the socket opens.
-  fetch("/api/snapshot")
+  fetch("api/snapshot")
     .then(r => r.json())
     .then(applySnapshot)
     .catch(() => {});
