@@ -306,8 +306,14 @@ async def _dispatch_slack(event: Dict[str, Any]) -> None:
         "warning": ":warning:",
         "critical": ":rotating_light:",
     }.get(event.get("severity", "warning"), ":warning:")
+    # Environment context lets one Slack channel receive alerts from multiple
+    # deployments (dev / staging / production) without ambiguity about which
+    # one fired.
+    server_url = settings.server_url or "unknown"
+    maturity = settings.server_maturity or "unknown"
     text = (
         f"{emoji} *Shepherd alert* `{event['rule']}` ({event['severity']})\n"
+        f"*Environment:* {maturity}  |  *URL:* <{server_url}|{server_url}>\n"
         f"{event['message']}"
     )
     try:

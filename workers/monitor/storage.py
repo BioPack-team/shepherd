@@ -395,22 +395,28 @@ async def query_summary(since: float, until: float) -> Dict[str, Any]:
             row = await cur.fetchone()
             summary["queries_started"] = int(row[0] or 0)
 
-            # Event counts.
+            # Event counts. Crashes are not their own row type -- the poller
+            # records them as scale_down events with ``payload.kind = "crashed"``
+            # (a clean scale-down uses kind="scaled_down"), so we have to dig
+            # into the JSON payload to separate the two.
             cur = await conn.execute(
-                "SELECT type, COUNT(*) FROM monitor_events "
+                "SELECT type, COUNT(*) FILTER (WHERE payload->>'kind' = 'crashed'), "
+                "COUNT(*) FROM monitor_events "
                 "WHERE ts >= to_timestamp(%s) AND ts < to_timestamp(%s) "
                 "GROUP BY type",
                 (since, until),
             )
-            for etype, count in await cur.fetchall():
-                if etype == "crash":
-                    summary["crashes"] = int(count)
-                elif etype in ("scale_up", "scale_down"):
+            for etype, crashed_count, total_count in await cur.fetchall():
+                if etype in ("scale_up", "scale_down"):
                     summary["scale_events"] = summary.get("scale_events", 0) + int(
-                        count
+                        total_count
                     )
+                    if etype == "scale_down":
+                        summary["crashes"] = summary.get("crashes", 0) + int(
+                            crashed_count or 0
+                        )
                 elif etype == "alert":
-                    summary["alert_count"] = int(count)
+                    summary["alert_count"] = int(total_count)
 
             # Peak backlog per stream.
             cur = await conn.execute(

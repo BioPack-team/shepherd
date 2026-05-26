@@ -31,8 +31,10 @@ async def arax(task, logger: logging.Logger):
         logger.info(f"Get the message from db {message}")
 
         headers = {"Content-Type": "application/json"}
-        with httpx.Client(timeout=270) as client:
-            response = client.post(settings.arax_url, json=message, headers=headers)
+        async with httpx.AsyncClient(timeout=270) as client:
+            response = await client.post(
+                settings.arax_url, json=message, headers=headers
+            )
 
         logger.info(f"Status Code from ARAX response: {response.status_code}")
         result = response.json()
