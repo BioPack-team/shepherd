@@ -31,9 +31,6 @@ async def arax(task, logger: logging.Logger):
         logger.info(f"Get the message from db {message}")
 
         headers = {"Content-Type": "application/json"}
-        # Must be AsyncClient: the sync httpx.Client blocks the event loop for
-        # the whole request, which starves the heartbeat task and makes the
-        # monitor flag this worker as crashed on any slow ARAX response.
         async with httpx.AsyncClient(timeout=270) as client:
             response = await client.post(
                 settings.arax_url, json=message, headers=headers
