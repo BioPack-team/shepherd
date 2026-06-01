@@ -51,7 +51,9 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         # do rehydration
         parameters["rehydrate"] = parameters.get("rehydrate", True)
         response["parameters"] = parameters
-        logger.debug(f"""Sending pathfinder rehydration to {settings.sync_kg_retrieval_url}.""")
+        logger.debug(
+            f"""Sending pathfinder rehydration to {settings.kg_rehydrate_url}."""
+        )
         with tracer.start_as_current_span(f"aragorn.pathfinder.{query_id}"):
             async with httpx.AsyncClient(timeout=210) as client:
                 # send a sync rehydrate query that "should" be very quick
