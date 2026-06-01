@@ -485,6 +485,7 @@ async def test_wrap_up_task_pops_completed_op_and_queues_next(redis_mock):
             ),
             "log_level": "20",
             "otel": "{}",
+            "metadata": "{}",
         },
     ]
     await wrap_up_task("stream_a", "consumer", task, logger)
@@ -504,6 +505,7 @@ async def test_wrap_up_task_routes_empty_workflow_to_finish_query(redis_mock):
             "workflow": json.dumps([{"id": "stream_a"}]),
             "log_level": "20",
             "otel": "{}",
+            "metadata": "{}",
         },
     ]
     await wrap_up_task("stream_a", "consumer", task, logger)
@@ -530,6 +532,7 @@ async def test_wrap_up_task_does_not_pop_for_entry_worker(redis_mock):
             ),
             "log_level": "20",
             "otel": "{}",
+            "metadata": "{}",
         },
     ]
     await wrap_up_task("entry_stream", "consumer", task, logger)
@@ -550,6 +553,7 @@ async def test_handle_task_failure_routes_to_finish_query_with_error_status(redi
             "workflow": json.dumps([{"id": "broken_op"}]),
             "log_level": "20",
             "otel": "{}",
+            "metadata": "{}",
         },
     ]
     await handle_task_failure("broken_op", "consumer", task, logger)

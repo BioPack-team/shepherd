@@ -1,6 +1,6 @@
 [project]
 name = "shepherd"
-version = "0.8.0"
+version = "0.8.1"
 description = "A shared platform for Translator ARAs"
 authors = [{ name = "Max Wang", email = "max@covar.com" }]
 readme = "README.md"
