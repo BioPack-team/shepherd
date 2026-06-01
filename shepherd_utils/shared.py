@@ -538,3 +538,54 @@ def filter_kgraph_orphans(message, logger: logging.Logger):
         # can't find the right structure of message
         logger.error(f"Error filtering kgraph orphans: {e}")
         # return message, 400
+
+
+def examine_query(message):
+    """Decides whether the input is an infer. Returns the grouping node"""
+    # Currently, we support:
+    # queries that are any shape with all lookup edges
+    # OR
+    # A 1-hop infer query.
+    # OR
+    # Pathfinder query
+    try:
+        # this can still fail if the input looks like e.g.:
+        #  "query_graph": None
+        qedges = message.get("message", {}).get("query_graph", {}).get("edges", {})
+    except KeyError:
+        qedges = {}
+    try:
+        # this can still fail if the input looks like e.g.:
+        #  "query_graph": None
+        qpaths = message.get("message", {}).get("query_graph", {}).get("paths", {})
+    except KeyError:
+        qpaths = {}
+    if len(qpaths) > 1:
+        raise Exception("Only a single path is supported")
+    if (len(qpaths) > 0) and (len(qedges) > 0):
+        raise Exception("Mixed mode pathfinder queries are not supported")
+    pathfinder = len(qpaths) == 1
+    n_infer_edges = 0
+    for edge_id in qedges:
+        if qedges.get(edge_id, {}).get("knowledge_type", "lookup") == "inferred":
+            n_infer_edges += 1
+    if n_infer_edges > 1 and n_infer_edges:
+        raise Exception("Only a single infer edge is supported")
+    if (n_infer_edges > 0) and (n_infer_edges < len(qedges)):
+        raise Exception("Mixed infer and lookup queries not supported")
+    infer = n_infer_edges == 1
+    if not infer:
+        return infer, None, None, pathfinder
+    qnodes = message.get("message", {}).get("query_graph", {}).get("nodes", {})
+    question_node = None
+    answer_node = None
+    for qnode_id, qnode in qnodes.items():
+        if qnode.get("ids", None) is None:
+            answer_node = qnode_id
+        else:
+            question_node = qnode_id
+    if answer_node is None:
+        raise Exception("Both nodes of creative edge pinned")
+    if question_node is None:
+        raise Exception("No nodes of creative edge pinned")
+    return infer, question_node, answer_node, pathfinder

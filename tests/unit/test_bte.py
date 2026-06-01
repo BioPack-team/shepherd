@@ -38,11 +38,9 @@ def test_examine_query_pathfinder_three_inferred_edges():
     msg = {
         "message": {
             "query_graph": {
-                "nodes": {"a": {"ids": ["X:1"]}, "b": {}, "c": {}, "d": {}},
-                "edges": {
-                    "e0": {"subject": "a", "object": "b", "knowledge_type": "inferred"},
-                    "e1": {"subject": "b", "object": "c", "knowledge_type": "inferred"},
-                    "e2": {"subject": "c", "object": "d", "knowledge_type": "inferred"},
+                "nodes": {"a": {"ids": ["X:1"]}, "b": {"ids": ["Y:1"]}},
+                "paths": {
+                    "e0": {"subject": "a", "object": "b"},
                 },
             }
         }
@@ -182,11 +180,9 @@ async def test_bte_rejects_pathfinder_query(redis_mock, mocker):
     pathfinder_msg = {
         "message": {
             "query_graph": {
-                "nodes": {"a": {"ids": ["X:1"]}, "b": {}, "c": {}, "d": {}},
-                "edges": {
-                    "e0": {"subject": "a", "object": "b", "knowledge_type": "inferred"},
-                    "e1": {"subject": "b", "object": "c", "knowledge_type": "inferred"},
-                    "e2": {"subject": "c", "object": "d", "knowledge_type": "inferred"},
+                "nodes": {"a": {"ids": ["X:1"]}, "b": {"ids": ["Y:1"]}},
+                "paths": {
+                    "e0": {"subject": "a", "object": "b"},
                 },
             }
         }
