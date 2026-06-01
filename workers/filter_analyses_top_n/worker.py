@@ -28,10 +28,11 @@ async def filter_analyses_top_n(task, logger: logging.Logger):
     if current_op is None:
         logger.error(f"Unable to find operation {STREAM} in workflow")
         raise Exception(f"Operation {STREAM} is not in workflow")
-    n = current_op.get("max_analyses", 1000)
+    n = current_op.get("max_analyses", 500)
+    logger.info(f"Filtering top {n} analyses.")
     for ind, result in enumerate(results):
         message["message"]["results"][ind]["analyses"] = result["analyses"][:n]
-    logger.info("Returning filtered results.")
+    logger.info("Returning filtered analyses.")
 
     # save merged message back to db
     await save_message(response_id, message, logger)
