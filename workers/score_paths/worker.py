@@ -14,7 +14,7 @@ from bmt import Toolkit
 from torch import nn
 from xgboost import XGBClassifier
 
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
 
@@ -123,9 +123,9 @@ def _probe_cache(env):
         return n, key.decode("utf-8", errors="replace")
 
 
-async def score_paths(task, logger):
+def score_paths(task, logger):
     response_id = task[1]["response_id"]
-    message = await get_message(response_id, logger)
+    message = get_message_sync(response_id)
     try:
         paths = message["message"]["query_graph"]["paths"]
         results = message["message"]["results"]
@@ -211,11 +211,8 @@ async def score_paths(task, logger):
         logger.info(msg)
         if feature_rows:
             features = np.stack(feature_rows).astype(np.float32)
-            loop = asyncio.get_event_loop()
             t0 = time.time()
-            mlp_out = await loop.run_in_executor(
-                executor, partial(mlp, torch.from_numpy(features))
-            )
+            mlp_out = mlp(torch.from_numpy(features))
             mlp_time = time.time() - t0
             path_embeddings = (
                 nn.functional.normalize(mlp_out, p=2, dim=1).detach().numpy()
@@ -223,9 +220,7 @@ async def score_paths(task, logger):
 
             t0 = time.time()
             try:
-                all_scores = await loop.run_in_executor(
-                    executor, lambda: clf.predict_proba(path_embeddings)[:, 1]
-                )
+                all_scores = clf.predict_proba(path_embeddings)[:, 1]
             except Exception as e:
                 logger.error(f"Classifier batch failed: {e}")
                 all_scores = np.zeros(len(path_embeddings))
@@ -250,14 +245,26 @@ async def score_paths(task, logger):
         for result in message["message"].get("results", []) or []:
             for analysis in result.get("analyses", []) or []:
                 analysis.setdefault("score", 0.0)
-    await save_message(response_id, message, logger)
+    for attempt in range(5):
+        try:
+            save_message_sync(response_id, message)
+            break
+        except Exception as e:
+            if attempt < 4:
+                logger.warning(
+                    f"Failed to save message {attempt + 1} times. Trying again..."
+                )
+                time.sleep(0.5)
+            else:
+                logger.error(f"Failed to save a message into redis: {e}")
 
 
 async def process_task(task, parent_ctx, logger, limiter):
     start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await score_paths(task, logger)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor, partial(score_paths, task, logger))
         try:
             await wrap_up_task(STREAM, GROUP, task, logger)
         except Exception as e:
