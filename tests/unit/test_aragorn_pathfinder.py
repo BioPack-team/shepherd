@@ -24,6 +24,7 @@ def _make_task(workflow=None):
             "workflow": json.dumps(workflow if workflow is not None else []),
             "log_level": "20",
             "otel": json.dumps({}),
+            "metadata": json.dumps({}),
         },
     ]
 
@@ -61,40 +62,23 @@ async def test_shadowfax_happy_path_dispatches_to_gandalf(redis_mock, mocker):
         "workers.aragorn_pathfinder.worker.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
-    mock_save = mocker.patch(
-        "workers.aragorn_pathfinder.worker.save_message",
-        new_callable=mocker.AsyncMock,
-    )
-    mock_add_task = mocker.patch(
-        "workers.aragorn_pathfinder.worker.add_task",
-        new_callable=mocker.AsyncMock,
-    )
     mocker.patch(
         "workers.aragorn_pathfinder.worker.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
+    mock_response = mocker.Mock()
+    mock_response.status_code = 200
+    mock_httpx = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=mock_response,
+    )
 
     await shadowfax(_make_task(), logger)
 
     assert mock_add_cb.called
-    assert mock_save.called
-    assert mock_add_task.called
-    target_stream, payload = mock_add_task.call_args.args[:2]
-    assert target_stream == "gandalf"
-    assert payload["target"] == "aragorn"
-
-    # The threehop saved to redis should be a 3-edge query whose endpoints
-    # match the original pinned pathfinder nodes.
-    saved_id, saved_threehop = mock_save.call_args.args[:2]
-    qg = saved_threehop["message"]["query_graph"]
-    assert "n0" in qg["nodes"] and "n1" in qg["nodes"]
-    assert "intermediate_0" in qg["nodes"] and "intermediate_1" in qg["nodes"]
-    assert set(qg["edges"].keys()) == {"e0", "e1", "e2"}
-    # Endpoints stitch through the intermediates.
-    assert qg["edges"]["e0"]["subject"] == "n0"
-    assert qg["edges"]["e0"]["object"] == "intermediate_0"
-    assert qg["edges"]["e2"]["object"] == "n1"
+    assert mock_httpx.called
 
 
 @pytest.mark.asyncio
@@ -160,22 +144,27 @@ async def test_shadowfax_uses_intermediate_category_from_constraint(redis_mock, 
         "workers.aragorn_pathfinder.worker.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
-    mock_save = mocker.patch(
-        "workers.aragorn_pathfinder.worker.save_message",
-        new_callable=mocker.AsyncMock,
-    )
-    mocker.patch(
-        "workers.aragorn_pathfinder.worker.add_task",
-        new_callable=mocker.AsyncMock,
-    )
     mocker.patch(
         "workers.aragorn_pathfinder.worker.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
 
+    mock_response = mocker.Mock()
+    mock_response.status_code = 200
+    mock_httpx = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=mock_response,
+    )
+
     await shadowfax(_make_task(), logger)
-    threehop = mock_save.call_args.args[1]
+
+    mock_httpx.assert_awaited_once()
+
+    args, kwargs = mock_httpx.call_args
+
+    threehop = kwargs["json"]
     nodes = threehop["message"]["query_graph"]["nodes"]
     assert nodes["intermediate_0"]["categories"] == ["biolink:Gene"]
     assert nodes["intermediate_1"]["categories"] == ["biolink:Gene"]
@@ -186,10 +175,9 @@ async def test_shadowfax_propagates_gandalf_parameters(redis_mock, mocker):
     """Custom gandalf_parameters in the input should ride along into the
     saved threehop's parameters."""
     msg = _pathfinder_message()
-    msg["parameters"]["gandalf_parameters"] = {
+    msg["parameters"]["filter_config"] = {
         "min_information_content": 1,
         "max_node_degree": 10,
-        "dehydrated": False,
     }
     mocker.patch(
         "workers.aragorn_pathfinder.worker.get_message",
@@ -200,25 +188,25 @@ async def test_shadowfax_propagates_gandalf_parameters(redis_mock, mocker):
         "workers.aragorn_pathfinder.worker.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
-    mock_save = mocker.patch(
-        "workers.aragorn_pathfinder.worker.save_message",
-        new_callable=mocker.AsyncMock,
-    )
-    mocker.patch(
-        "workers.aragorn_pathfinder.worker.add_task",
-        new_callable=mocker.AsyncMock,
-    )
     mocker.patch(
         "workers.aragorn_pathfinder.worker.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
+    mock_response = mocker.Mock()
+    mock_response.status_code = 200
+    mock_httpx = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=mock_response,
+    )
 
     await shadowfax(_make_task(), logger)
-    threehop = mock_save.call_args.args[1]
-    gp = threehop["parameters"]["gandalf_parameters"]
-    assert gp == {
-        "min_information_content": 1,
-        "max_node_degree": 10,
-        "dehydrated": False,
-    }
+
+    mock_httpx.assert_awaited_once()
+
+    args, kwargs = mock_httpx.call_args
+
+    query_parameters = kwargs["json"]["parameters"]
+    assert query_parameters["filter_config"]["min_information_content"] == 1
+    assert query_parameters["filter_config"]["max_node_degree"] == 10

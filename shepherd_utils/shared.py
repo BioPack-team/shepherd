@@ -169,7 +169,7 @@ async def get_tasks(
 async def wrap_up_task(
     stream: str,
     group: str,
-    task: Tuple[str, dict],
+    task: tuple[str, dict],
     logger: logging.Logger,
 ):
     """Call the next task and mark this one as complete."""
@@ -193,6 +193,7 @@ async def wrap_up_task(
             "workflow": json.dumps(workflow),
             "log_level": task[1].get("log_level", 20),
             "otel": task[1]["otel"],
+            "metadata": task[1]["metadata"],
         },
         logger,
     )
@@ -222,6 +223,7 @@ async def handle_task_failure(
             "log_level": task[1].get("log_level", 20),
             "otel": task[1]["otel"],
             "status": "ERROR",
+            "metadata": task[1]["metadata"],
         },
         logger,
     )

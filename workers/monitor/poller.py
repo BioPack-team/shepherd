@@ -51,8 +51,6 @@ SEED_STREAMS = [
     "bte",
     "bte.lookup",
     "sipr",
-    "gandalf",
-    "gandalf.rehydrate",
     "example",
     "example.lookup",
     "example.score",

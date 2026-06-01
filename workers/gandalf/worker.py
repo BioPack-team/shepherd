@@ -173,6 +173,7 @@ async def poll_for_tasks(graph: CSRGraph, bmt: Toolkit):
                             "callback_id": callback_id,
                             "log_level": task[1].get("log_level", 20),
                             "otel": task[1]["otel"],
+                            "metadata": json.dumps({}),
                         },
                         task_logger,
                     )

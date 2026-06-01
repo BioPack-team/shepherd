@@ -133,6 +133,7 @@ async def run_query(
                 "workflow": json.dumps(workflow),
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
+                "metadata": json.dumps({}),
             },
             logger,
         )
@@ -267,6 +268,7 @@ async def callback(
                 "callback_id": callback_id,
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
+                "metadata": json.dumps({}),
             },
             logger,
         )

@@ -200,7 +200,7 @@ async def test_aragorn_pathfinder_workflow(redis_mock, mocker):
         "sort_results_score",
         "filter_analyses_top_n",
         "filter_kgraph_orphans",
-        "gandalf.rehydrate",
+        "aragorn.pathfinder",
     ]
 
 

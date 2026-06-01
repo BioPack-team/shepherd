@@ -6,6 +6,8 @@ import logging
 import time
 import uuid
 
+import httpx
+
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_callback_id,
@@ -16,7 +18,6 @@ from shepherd_utils.db import (
 )
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import (
-    add_task,
     get_tasks,
     handle_task_failure,
     wrap_up_task,
@@ -31,7 +32,7 @@ TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
 
-async def shadowfax(task, logger: logging.Logger):
+async def shadowfax(task, logger: logging.Logger) -> str:
     """Processes pathfinder queries. This is done by using literature
     co-occurrence to find nodes that occur in publications with our input
     nodes, then finding paths that connect our input nodes through these
@@ -40,10 +41,37 @@ async def shadowfax(task, logger: logging.Logger):
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
     otel = task[1]["otel"]
+    metadata = json.loads(task[1]["metadata"])
     message = await get_message(query_id, logger)
+    response = await get_message(response_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
-    # parameters["tiers"] = parameters.get("tiers") or [0]
+
+    if metadata.get("rehydrate"):
+        # do rehydration
+        parameters["rehydrate"] = parameters.get("rehydrate", True)
+        response["parameters"] = parameters
+        logger.debug(
+            f"""Sending pathfinder rehydration to {settings.kg_rehydrate_url}."""
+        )
+        with tracer.start_as_current_span(f"aragorn.pathfinder.{query_id}"):
+            async with httpx.AsyncClient(timeout=210) as client:
+                # send a sync rehydrate query that "should" be very quick
+                rehydrated_response = await client.post(
+                    settings.kg_rehydrate_url,
+                    json=response,
+                )
+                rehydrated_response.raise_for_status()
+                response_json = rehydrated_response.json()
+                await save_message(response_id, response_json, logger)
+                return json.dumps({})
+
+    filter_config = parameters.get("filter_config", {})
+    parameters["filter_config"] = {
+        "min_information_content": filter_config.get("min_information_content", 69),
+        "max_node_degree": filter_config.get("max_node_degree", 5000),
+    }
+    parameters["dehydrated"] = parameters.get("dehydrated", True)
     message["parameters"] = parameters
 
     qgraph = message["message"]["query_graph"]
@@ -77,143 +105,122 @@ async def shadowfax(task, logger: logging.Logger):
         intermediate_categories = ["biolink:NamedThing"]
 
     # Create 3-hop query
-    gandalf_parameters = {
-        "min_information_content": message.get("parameters", {})
-        .get("gandalf_parameters", {})
-        .get("min_information_content", 69),
-        "max_node_degree": message.get("parameters", {})
-        .get("gandalf_parameters", {})
-        .get("max_node_degree", 5000),
-        "dehydrated": message.get("parameters", {})
-        .get("gandalf_parameters", {})
-        .get("dehydrated", True),
-    }
-    threehop = {
-        "message": {
-            "query_graph": {
-                "nodes": {
-                    pinned_node_keys[0]: {"ids": [pinned_node_ids[0]]},
-                    "intermediate_0": {
-                        "categories": intermediate_categories,
-                    },
-                    "intermediate_1": {
-                        "categories": intermediate_categories,
-                    },
-                    pinned_node_keys[1]: {"ids": [pinned_node_ids[1]]},
-                },
-                "edges": {
-                    "e0": {
-                        "subject": pinned_node_keys[0],
-                        "object": "intermediate_0",
-                        "predicates": [
-                            "biolink:physically_interacts_with",
-                            "biolink:genetically_interacts_with",
-                            "biolink:contributes_to",
-                            "biolink:contribution_from",
-                            "biolink:affects",
-                            "biolink:affected_by",
-                            "biolink:acts_upstream_of",
-                            "biolink:has_upstream_actor",
-                            "biolink:enables",
-                            "biolink:enabled_by",
-                            "biolink:produces",
-                            "biolink:produced_by",
-                            "biolink:has_participant",
-                            "biolink:participates_in",
-                            "biolink:derives_from",
-                            "biolink:derives_into",
-                            "biolink:transcribed_to",
-                            "biolink:transcribed_from",
-                            "biolink:translates_to",
-                            "biolink:translation_of",
-                            "biolink:has_gene_product",
-                            "biolink:gene_product_of",
-                            "biolink:genetically_associated_with",
-                        ],
-                    },
-                    "e1": {
-                        "subject": "intermediate_0",
-                        "object": "intermediate_1",
-                        "predicates": [
-                            "biolink:physically_interacts_with",
-                            "biolink:genetically_interacts_with",
-                            "biolink:contributes_to",
-                            "biolink:contribution_from",
-                            "biolink:affects",
-                            "biolink:affected_by",
-                            "biolink:acts_upstream_of",
-                            "biolink:has_upstream_actor",
-                            "biolink:enables",
-                            "biolink:enabled_by",
-                            "biolink:produces",
-                            "biolink:produced_by",
-                            "biolink:has_participant",
-                            "biolink:participates_in",
-                            "biolink:derives_from",
-                            "biolink:derives_into",
-                            "biolink:transcribed_to",
-                            "biolink:transcribed_from",
-                            "biolink:translates_to",
-                            "biolink:translation_of",
-                            "biolink:has_gene_product",
-                            "biolink:gene_product_of",
-                            "biolink:genetically_associated_with",
-                        ],
-                    },
-                    "e2": {
-                        "subject": "intermediate_1",
-                        "object": pinned_node_keys[1],
-                        "predicates": [
-                            "biolink:physically_interacts_with",
-                            "biolink:genetically_interacts_with",
-                            "biolink:contributes_to",
-                            "biolink:contribution_from",
-                            "biolink:affects",
-                            "biolink:affected_by",
-                            "biolink:acts_upstream_of",
-                            "biolink:has_upstream_actor",
-                            "biolink:enables",
-                            "biolink:enabled_by",
-                            "biolink:produces",
-                            "biolink:produced_by",
-                            "biolink:has_participant",
-                            "biolink:participates_in",
-                            "biolink:derives_from",
-                            "biolink:derives_into",
-                            "biolink:transcribed_to",
-                            "biolink:transcribed_from",
-                            "biolink:translates_to",
-                            "biolink:translation_of",
-                            "biolink:has_gene_product",
-                            "biolink:gene_product_of",
-                            "biolink:genetically_associated_with",
-                        ],
-                    },
-                },
+
+    message["message"]["query_graph"] = {
+        "nodes": {
+            pinned_node_keys[0]: {"ids": [pinned_node_ids[0]]},
+            "intermediate_0": {
+                "categories": intermediate_categories,
+            },
+            "intermediate_1": {
+                "categories": intermediate_categories,
+            },
+            pinned_node_keys[1]: {"ids": [pinned_node_ids[1]]},
+        },
+        "edges": {
+            "e0": {
+                "subject": pinned_node_keys[0],
+                "object": "intermediate_0",
+                "predicates": [
+                    "biolink:physically_interacts_with",
+                    "biolink:genetically_interacts_with",
+                    "biolink:contributes_to",
+                    "biolink:contribution_from",
+                    "biolink:affects",
+                    "biolink:affected_by",
+                    "biolink:acts_upstream_of",
+                    "biolink:has_upstream_actor",
+                    "biolink:enables",
+                    "biolink:enabled_by",
+                    "biolink:produces",
+                    "biolink:produced_by",
+                    "biolink:has_participant",
+                    "biolink:participates_in",
+                    "biolink:derives_from",
+                    "biolink:derives_into",
+                    "biolink:transcribed_to",
+                    "biolink:transcribed_from",
+                    "biolink:translates_to",
+                    "biolink:translation_of",
+                    "biolink:has_gene_product",
+                    "biolink:gene_product_of",
+                    "biolink:genetically_associated_with",
+                ],
+            },
+            "e1": {
+                "subject": "intermediate_0",
+                "object": "intermediate_1",
+                "predicates": [
+                    "biolink:physically_interacts_with",
+                    "biolink:genetically_interacts_with",
+                    "biolink:contributes_to",
+                    "biolink:contribution_from",
+                    "biolink:affects",
+                    "biolink:affected_by",
+                    "biolink:acts_upstream_of",
+                    "biolink:has_upstream_actor",
+                    "biolink:enables",
+                    "biolink:enabled_by",
+                    "biolink:produces",
+                    "biolink:produced_by",
+                    "biolink:has_participant",
+                    "biolink:participates_in",
+                    "biolink:derives_from",
+                    "biolink:derives_into",
+                    "biolink:transcribed_to",
+                    "biolink:transcribed_from",
+                    "biolink:translates_to",
+                    "biolink:translation_of",
+                    "biolink:has_gene_product",
+                    "biolink:gene_product_of",
+                    "biolink:genetically_associated_with",
+                ],
+            },
+            "e2": {
+                "subject": "intermediate_1",
+                "object": pinned_node_keys[1],
+                "predicates": [
+                    "biolink:physically_interacts_with",
+                    "biolink:genetically_interacts_with",
+                    "biolink:contributes_to",
+                    "biolink:contribution_from",
+                    "biolink:affects",
+                    "biolink:affected_by",
+                    "biolink:acts_upstream_of",
+                    "biolink:has_upstream_actor",
+                    "biolink:enables",
+                    "biolink:enabled_by",
+                    "biolink:produces",
+                    "biolink:produced_by",
+                    "biolink:has_participant",
+                    "biolink:participates_in",
+                    "biolink:derives_from",
+                    "biolink:derives_into",
+                    "biolink:transcribed_to",
+                    "biolink:transcribed_from",
+                    "biolink:translates_to",
+                    "biolink:translation_of",
+                    "biolink:has_gene_product",
+                    "biolink:gene_product_of",
+                    "biolink:genetically_associated_with",
+                ],
             },
         },
-        "parameters": {"gandalf_parameters": gandalf_parameters},
     }
 
     callback_id = str(uuid.uuid4())[:8]
     # Put callback UID and query ID in postgres
     await add_callback_id(query_id, callback_id, otel, logger)
 
-    await save_message(callback_id, threehop, logger)
-    logger.debug("""Sending pathfinder lookup query to gandalf.""")
+    message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
 
-    await add_task(
-        "gandalf",
-        {
-            "target": "aragorn",
-            "query_id": query_id,
-            "response_id": response_id,
-            "callback_id": callback_id,
-            "log_level": task[1].get("log_level", 20),
-            "otel": task[1]["otel"],
-        },
-        logger,
-    )
+    logger.debug(f"""Sending pathfinder query to {settings.kg_retrieval_url}.""")
+    with tracer.start_as_current_span(f"aragorn.pathfinder.{callback_id}"):
+        async with httpx.AsyncClient(timeout=100) as client:
+            await client.post(
+                settings.kg_retrieval_url,
+                json=message,
+            )
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
@@ -243,13 +250,16 @@ async def shadowfax(task, logger: logging.Logger):
     except asyncio.CancelledError:
         logger.warning(f"Task {task[0]}: Cancelled while waiting for callbacks")
 
+    return json.dumps({"rehydrate": True})
+
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
     start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await shadowfax(task, logger)
+        metadata = await shadowfax(task, logger)
+        task[1]["metadata"] = metadata
         # Always wrap up the task to ACK it in the broker
         try:
             await wrap_up_task(STREAM, GROUP, task, logger)
