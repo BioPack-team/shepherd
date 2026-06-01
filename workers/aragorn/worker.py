@@ -91,13 +91,11 @@ async def aragorn(task, logger: logging.Logger):
         elif pathfinder:
             workflow = [
                 {"id": "aragorn.pathfinder"},
-                # {"id": "aragorn.omnicorp"},
-                # {"id": "aragorn.score"},
                 {"id": "score_paths"},
                 {"id": "sort_results_score"},
                 {"id": "filter_analyses_top_n", "parameters": {"max_analyses": 500}},
                 {"id": "filter_kgraph_orphans"},
-                {"id": "gandalf.rehydrate"},
+                {"id": "aragorn.pathfinder"},
             ]
         else:
             workflow = [
