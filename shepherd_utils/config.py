@@ -18,9 +18,10 @@ class Settings(BaseSettings):
     redis_password: str = "supersecretpassword"
 
     lookup_timeout: int = 210
-    callback_host: str = "http://127.0.0.1:5439"
-    kg_retrieval_url: str = "https://strider.renci.org/asyncquery"
-    sync_kg_retrieval_url: str = "https://strider.renci.org/query"
+    callback_host: str = "http://host.docker.internal:5439"
+    kg_retrieval_url: str = "http://host.docker.internal:8080/asyncquery"
+    sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
+    kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
     default_data_tier: int = 0
     omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
