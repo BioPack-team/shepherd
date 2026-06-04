@@ -4,7 +4,7 @@ import logging
 import logging.config
 import os
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class ReasonerLogEntryFormatter(logging.Formatter):
@@ -23,7 +23,9 @@ class ReasonerLogEntryFormatter(logging.Formatter):
             log_entry |= record.msg
 
         # Add timestamp
-        iso_timestamp = datetime.utcfromtimestamp(record.created).isoformat()
+        iso_timestamp = datetime.fromtimestamp(
+            record.created, tz=timezone.utc
+        ).isoformat()
         log_entry["timestamp"] = iso_timestamp
 
         # Add level
