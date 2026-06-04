@@ -32,8 +32,14 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["shepherd_utils", "workers", "shepherd_server"]
-include = ["shepherd_utils.*", "workers.*", "shepherd_server.*"]
+# Scan from the repo root so the first-party packages are installed under their
+# real dotted names (``shepherd_utils``, ``workers.monitor``, ...). The previous
+# config pointed ``where`` *inside* each directory, so discovered names never
+# matched the ``include`` filter and nothing first-party was actually installed
+# -- importability silently depended on the working directory being /app.
+# The trailing ``*`` (not ``.*``) keeps the top-level packages themselves.
+where = ["."]
+include = ["shepherd_utils*", "workers*", "shepherd_server*"]
 
 [tool.setuptools.package-data]
 shepherd_utils = ["*.yml"]
