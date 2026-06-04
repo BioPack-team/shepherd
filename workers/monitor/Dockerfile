@@ -4,6 +4,13 @@ LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
 
+# Make the ``workers`` package resolvable for ``python -m workers.monitor.worker``
+# regardless of the working directory the runtime launches the container with.
+# ``python -m`` only adds the *current* working directory to sys.path, so without
+# this an environment that overrides the working dir fails with
+# "No module named 'workers'".
+ENV PYTHONPATH=/app
+
 WORKDIR /app
 
 RUN chmod -R 777 .
