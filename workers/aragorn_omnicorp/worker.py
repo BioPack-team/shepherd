@@ -234,9 +234,7 @@ def add_shared_pmid_counts(message, values, pair_to_answer):
             aux_graphs[omnisupport]["edges"].append(uid)
 
 
-def generate_curie_pairs(
-    answers, qgraph_setnodes, node_pub_counts, message, logger
-):
+def generate_curie_pairs(answers, qgraph_setnodes, node_pub_counts, message, logger):
     pair_to_answer = defaultdict(set)
 
     for ans_idx, answer_map in enumerate(answers):
@@ -459,7 +457,9 @@ def aragorn_omnicorp(message: dict, logger: logging.Logger) -> dict:
     return response
 
 
-async def process_task(task, parent_ctx, logger: logging.Logger, limiter, loop, executor):
+async def process_task(
+    task, parent_ctx, logger: logging.Logger, limiter, loop, executor
+):
     """Process a given task and ACK in redis.
 
     The overlay itself is CPU-bound, so it is dispatched to a process pool via
