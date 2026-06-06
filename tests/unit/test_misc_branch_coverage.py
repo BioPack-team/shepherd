@@ -190,8 +190,7 @@ def test_create_log_entry_default_code_none():
     assert entry["code"] is None
 
 
-@pytest.mark.asyncio
-async def test_add_node_pmid_counts_uses_zero_for_missing_curies():
+def test_add_node_pmid_counts_uses_zero_for_missing_curies():
     """add_node_pmid_counts attaches an attribute with value=0 to nodes whose
     curie isn't in the counts dict."""
     from workers.aragorn_omnicorp.worker import add_node_pmid_counts
@@ -202,7 +201,7 @@ async def test_add_node_pmid_counts_uses_zero_for_missing_curies():
             "MISSING:CURIE": {"attributes": None},  # exercises the None-init branch
         }
     }
-    await add_node_pmid_counts(kgraph, {"MONDO:0001": 42})
+    add_node_pmid_counts(kgraph, {"MONDO:0001": 42})
     found = kgraph["nodes"]["MONDO:0001"]["attributes"]
     found_attr = next(
         a for a in found if a.get("original_attribute_name") == "omnicorp_article_count"
@@ -218,8 +217,7 @@ async def test_add_node_pmid_counts_uses_zero_for_missing_curies():
     assert missing_attr["value"] == 0
 
 
-@pytest.mark.asyncio
-async def test_add_shared_pmid_counts_reuses_existing_omnicorp_support_graph():
+def test_add_shared_pmid_counts_reuses_existing_omnicorp_support_graph():
     """If an analysis already has an OMNICORP support graph, new co-occurrence
     edges should be appended to that one rather than creating a second."""
     from workers.aragorn_omnicorp.worker import add_shared_pmid_counts
@@ -241,7 +239,7 @@ async def test_add_shared_pmid_counts_reuses_existing_omnicorp_support_graph():
         ],
     }
     pair_to_answer = {("A", "B"): {(0, 0)}}
-    await add_shared_pmid_counts(message, {("A", "B"): 7}, pair_to_answer)
+    add_shared_pmid_counts(message, {("A", "B"): 7}, pair_to_answer)
     sgs = message["results"][0]["analyses"][0]["support_graphs"]
     # No new OMNICORP support graph created; the existing one was reused.
     assert "OMNICORP_support_graph_existing" in sgs
@@ -253,8 +251,7 @@ async def test_add_shared_pmid_counts_reuses_existing_omnicorp_support_graph():
     )
 
 
-@pytest.mark.asyncio
-async def test_add_shared_pmid_counts_skips_zero_publication_counts():
+def test_add_shared_pmid_counts_skips_zero_publication_counts():
     """A pair with publication_count == 0 should not produce any edges."""
     from workers.aragorn_omnicorp.worker import add_shared_pmid_counts
 
@@ -271,12 +268,11 @@ async def test_add_shared_pmid_counts_skips_zero_publication_counts():
             }
         ],
     }
-    await add_shared_pmid_counts(message, {("A", "B"): 0}, {("A", "B"): {(0, 0)}})
+    add_shared_pmid_counts(message, {("A", "B"): 0}, {("A", "B"): {(0, 0)}})
     assert message["knowledge_graph"]["edges"] == {}
 
 
-@pytest.mark.asyncio
-async def test_generate_curie_pairs_includes_setnode_pairings():
+def test_generate_curie_pairs_includes_setnode_pairings():
     """When the qgraph has setnodes, every cross-product with non-set nodes
     becomes a candidate pair."""
     from workers.aragorn_omnicorp.worker import generate_curie_pairs
@@ -300,7 +296,7 @@ async def test_generate_curie_pairs_includes_setnode_pairings():
         "knowledge_graph": {"edges": {}},
         "auxiliary_graphs": {},
     }
-    pair_to_answer = await generate_curie_pairs(
+    pair_to_answer = generate_curie_pairs(
         answers, qgraph_setnodes, node_pub_counts, message, logger
     )
     # S1<->O1 and S2<->O1 are the setnode-vs-nonset pairs.

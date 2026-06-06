@@ -19,6 +19,7 @@ import os
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from itertools import combinations
 from typing import Dict, List
@@ -36,7 +37,10 @@ STREAM = "aragorn.omnicorp"
 # Consumer group, most likely you don't need to change this.
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+# In-flight task cap. The overlay runs in a process pool (see poll_for_tasks),
+# so this bounds how many messages are loaded/queued at once rather than how
+# many run in parallel; keep it modest since each message can be large.
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
 # Matches the upstream `redis_batch_size`.
@@ -133,7 +137,7 @@ def create_log_entry(msg: str, err_level, code=None) -> dict:
     }
 
 
-async def add_node_pmid_counts(kgraph, counts):
+def add_node_pmid_counts(kgraph, counts):
     for node_id in kgraph["nodes"]:
         if node_id in counts:
             count = counts[node_id]
@@ -156,7 +160,7 @@ async def add_node_pmid_counts(kgraph, counts):
         kgraph["nodes"][node_id]["attributes"].append(attribute)
 
 
-async def add_shared_pmid_counts(message, values, pair_to_answer):
+def add_shared_pmid_counts(message, values, pair_to_answer):
     """Count PMIDS shared by a pair of nodes and create a new support edge."""
     kgraph = message["knowledge_graph"]
     aux_graphs = message["auxiliary_graphs"]
@@ -224,7 +228,7 @@ async def add_shared_pmid_counts(message, values, pair_to_answer):
             aux_graphs[omnisupport]["edges"].append(uid)
 
 
-async def generate_curie_pairs(
+def generate_curie_pairs(
     answers, qgraph_setnodes, node_pub_counts, message, logger
 ):
     pair_to_answer = defaultdict(set)
@@ -299,12 +303,16 @@ async def generate_curie_pairs(
     return pair_to_answer
 
 
-async def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
+def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     """Add literature co-occurrence support to a TRAPI message in-place.
 
     Mirrors aragorn-ranker's ``omnicorp_overlay.query`` but reads from local
     LMDBs rather than Redis and operates on a plain dict instead of a
     pydantic Response.
+
+    This is CPU-bound (LMDB reads plus pair-building loops with no real I/O
+    await points), so it is synchronous and meant to run inside a process
+    pool executor rather than directly on the event loop.
     """
     logger.info("Start omnicorp")
 
@@ -348,7 +356,7 @@ async def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
                 node_pub_counts[curie] = result["pmc"]
                 node_indices[curie] = int(result["index"])
 
-        await add_node_pmid_counts(kgraph, node_pub_counts)
+        add_node_pmid_counts(kgraph, node_pub_counts)
 
         end_node_time = datetime.now()
         logger.info(f"Node time: {end_node_time - start_node_time}")
@@ -363,7 +371,7 @@ async def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
         )
 
         t1 = datetime.now()
-        pair_to_answer = await generate_curie_pairs(
+        pair_to_answer = generate_curie_pairs(
             answers, qgraph_setnodes, node_pub_counts, message, logger
         )
         t2 = datetime.now()
@@ -391,7 +399,7 @@ async def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
                     except Exception:
                         values[curie_pair] = 0
 
-        await add_shared_pmid_counts(message, values, pair_to_answer)
+        add_shared_pmid_counts(message, values, pair_to_answer)
 
         end_pair_time = datetime.now()
         logger.info(f"Pair time: {end_pair_time - start_pair_time}")
@@ -415,29 +423,53 @@ async def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     return in_message
 
 
-async def aragorn_omnicorp(task, logger: logging.Logger):
-    # given a task, get the message from the db
-    response_id = task[1]["response_id"]
-    message = await get_message(response_id, logger)
+def aragorn_omnicorp(message: dict, logger: logging.Logger) -> dict:
+    """Run the omnicorp overlay on an already-loaded message.
 
+    CPU-bound; intended to run inside a process pool executor, so it stays
+    synchronous. The DB load/save are handled by the async ``process_task``
+    on the event loop, not here.
+    """
     workflow = None
     if "workflow" in message:
         workflow = message["workflow"]
         del message["workflow"]
 
-    response = await omnicorp_overlay(message, logger)
+    response = omnicorp_overlay(message, logger)
 
     if workflow is not None:
         response["workflow"] = workflow
-    await save_message(response_id, response, logger)
+    return response
 
 
-async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
-    """Process a given task and ACK in redis."""
+async def process_task(task, parent_ctx, logger: logging.Logger, limiter, loop, executor):
+    """Process a given task and ACK in redis.
+
+    The overlay itself is CPU-bound, so it is dispatched to a process pool via
+    ``run_in_executor``. That keeps the event loop free to poll for, dispatch,
+    and finish other tasks while a single (potentially very large) overlay is
+    crunching -- previously the overlay ran inline on the loop and blocked
+    everything else until it finished.
+    """
     start = time.time()
     span = tracer.start_span(STREAM, context=parent_ctx)
     try:
-        await aragorn_omnicorp(task, logger)
+        # given a task, get the message from the db (async I/O on the loop)
+        response_id = task[1]["response_id"]
+        message = await get_message(response_id, logger)
+        if message is not None:
+            response = await loop.run_in_executor(
+                executor,
+                aragorn_omnicorp,
+                message,
+                logger,
+            )
+            if response is None:
+                logger.error("Omnicorp overlay returned nothing. Saving unchanged.")
+                response = message
+            await save_message(response_id, response, logger)
+        else:
+            logger.error(f"Failed to get {response_id} for omnicorp overlay.")
         # Always wrap up the task to ACK it in the broker
         try:
             await wrap_up_task(STREAM, GROUP, task, logger)
@@ -456,12 +488,22 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
+    loop = asyncio.get_running_loop()
+    # The overlay is CPU-bound, so cap real parallelism at the number of cores
+    # (mirrors aragorn_score). Extra in-flight tasks queue against the pool
+    # without blocking the loop.
+    cpu_count = os.cpu_count()
+    cpu_count = cpu_count if cpu_count is not None else 1
+    cpu_count = min(cpu_count, TASK_LIMIT)
+    executor = ProcessPoolExecutor(max_workers=cpu_count)
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
                 STREAM, GROUP, CONSUMER, TASK_LIMIT
             ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+                asyncio.create_task(
+                    process_task(task, parent_ctx, logger, limiter, loop, executor)
+                )
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")
         except Exception as e:

@@ -112,8 +112,7 @@ def test_batches_handles_partial_final_batch():
     assert chunks == [["a", "b"], ["c", "d"], ["e"]]
 
 
-@pytest.mark.asyncio
-async def test_omnicorp_overlay_full_path(lmdb_envs):
+def test_omnicorp_overlay_full_path(lmdb_envs):
     """End-to-end: node counts annotated, support edges + auxgraph wired up.
 
     The query graph has all-BATCH set_interpretations (so no setnode logic
@@ -164,7 +163,7 @@ async def test_omnicorp_overlay_full_path(lmdb_envs):
     }
 
     logger = logging.getLogger(__name__)
-    out = await worker.omnicorp_overlay(copy.deepcopy(in_message), logger)
+    out = worker.omnicorp_overlay(copy.deepcopy(in_message), logger)
 
     nodes = out["message"]["knowledge_graph"]["nodes"]
 
@@ -245,8 +244,7 @@ async def test_omnicorp_overlay_full_path(lmdb_envs):
     assert co_occurrence_edge_ids.issubset(set(aux_edge_ids))
 
 
-@pytest.mark.asyncio
-async def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
+def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
     """A pair whose shared count is 0 should not produce a co-occurrence edge."""
     # Add a zero-count pair to the shared-counts LMDB.
     env = lmdb.open(
@@ -298,7 +296,7 @@ async def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
     }
 
     logger = logging.getLogger(__name__)
-    out = await worker.omnicorp_overlay(copy.deepcopy(in_message), logger)
+    out = worker.omnicorp_overlay(copy.deepcopy(in_message), logger)
 
     co_occurrence_edges = [
         e
@@ -308,10 +306,16 @@ async def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
     assert co_occurrence_edges == []
 
 
-@pytest.mark.asyncio
-async def test_aragorn_omnicorp_task_roundtrip(lmdb_envs, mocker):
-    """The task entrypoint loads the message, runs the overlay, and saves it back."""
+def test_aragorn_omnicorp_runs_overlay_and_preserves_workflow(lmdb_envs):
+    """The executor entrypoint runs the overlay on a loaded message in place.
+
+    ``aragorn_omnicorp`` is the CPU-bound function dispatched to the process
+    pool: it takes an already-loaded message, applies the overlay, and returns
+    it (DB load/save are handled by ``process_task`` on the event loop). It
+    must also strip and restore any top-level ``workflow`` around the overlay.
+    """
     in_message = {
+        "workflow": [{"id": "aragorn.omnicorp"}],
         "message": {
             "query_graph": {
                 "nodes": {"n0": {"set_interpretation": "BATCH"}},
@@ -322,36 +326,17 @@ async def test_aragorn_omnicorp_task_roundtrip(lmdb_envs, mocker):
                 "edges": {},
             },
             "results": [],
-        }
+        },
     }
 
-    mocker.patch(
-        "workers.aragorn_omnicorp.worker.get_message",
-        new_callable=mocker.AsyncMock,
-        return_value=copy.deepcopy(in_message),
-    )
-    mock_save = mocker.patch(
-        "workers.aragorn_omnicorp.worker.save_message",
-        new_callable=mocker.AsyncMock,
-    )
-
-    task = [
-        "test",
-        {
-            "query_id": "test",
-            "response_id": "test_response",
-            "log_level": "20",
-            "otel": "{}",
-        },
-    ]
     logger = logging.getLogger(__name__)
 
-    await worker.aragorn_omnicorp(task, logger)
+    out = worker.aragorn_omnicorp(copy.deepcopy(in_message), logger)
 
-    assert mock_save.called
-    saved_id, saved_message = mock_save.call_args.args[:2]
-    assert saved_id == "test_response"
-    saved_node = saved_message["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
+    # The workflow is stripped before the overlay and restored afterwards.
+    assert out["workflow"] == [{"id": "aragorn.omnicorp"}]
+
+    saved_node = out["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
     article_attrs = [
         a
         for a in saved_node["attributes"]
