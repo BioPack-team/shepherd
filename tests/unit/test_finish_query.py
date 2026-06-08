@@ -17,26 +17,28 @@ async def test_finish_sync_query(redis_mock, mocker):
         "workers.finish_query.worker.set_query_completed"
     )
     mock_callback_response = mocker.patch("workers.finish_query.worker.get_message")
-    mock_callback_response.return_value = orjson.dumps({
-        "message": {
-            "results": [
-                {
-                    "analyses": [
-                        {
-                            "score": 0.1,
-                        },
-                    ],
-                },
-                {
-                    "analyses": [
-                        {
-                            "score": 0.9,
-                        },
-                    ],
-                },
-            ],
-        },
-    })
+    mock_callback_response.return_value = orjson.dumps(
+        {
+            "message": {
+                "results": [
+                    {
+                        "analyses": [
+                            {
+                                "score": 0.1,
+                            },
+                        ],
+                    },
+                    {
+                        "analyses": [
+                            {
+                                "score": 0.9,
+                            },
+                        ],
+                    },
+                ],
+            },
+        }
+    )
 
     logger = logging.getLogger(__name__)
 

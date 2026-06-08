@@ -170,7 +170,10 @@ async def run_sync_query(
                 response = await get_message(response_id, logger)
                 if response is None:
                     return ORJSONResponse(
-                        content={"status": "ERROR", "description": "Unable to get response"}
+                        content={
+                            "status": "ERROR",
+                            "description": "Unable to get response",
+                        }
                     )
                 logs = await get_logs(response_id, logger)
                 response["logs"] = logs
@@ -180,9 +183,7 @@ async def run_sync_query(
         await asyncio.sleep(0.5)
 
     logger.error("Query timed out")
-    return ORJSONResponse(
-        content={"status": "TIMEOUT", "description": "Query timeout"}
-    )
+    return ORJSONResponse(content={"status": "TIMEOUT", "description": "Query timeout"})
 
 
 async def run_async_query(
