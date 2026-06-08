@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any, Dict, List, Union
 
+import msgspec.msgpack
 import orjson
 import redis
 import redis.asyncio as aioredis
@@ -116,12 +117,20 @@ def _get_sync_data_db() -> redis.Redis:
 
 def encode_message(obj: Any) -> bytes:
     """Serialize a message to compressed bytes for storage in Redis."""
-    return zstandard.compress(orjson.dumps(obj))
+    return zstandard.compress(msgspec.msgpack.encode(obj))
 
 
 def decode_message(blob: bytes) -> Any:
-    """Deserialize a stored message blob back into a Python object."""
-    return orjson.loads(zstandard.decompress(blob))
+    """Deserialize a stored message blob back into a Python object.
+
+    Handles both msgpack (new) and JSON (legacy) payloads so that messages
+    written before the codec switch are still readable during a rolling deploy.
+    """
+    raw = zstandard.decompress(blob)
+    # JSON payloads always start with '{' (0x7b); msgpack maps never do.
+    if raw[0:1] == b"{":
+        return orjson.loads(raw)
+    return msgspec.msgpack.decode(raw)
 
 
 async def initialize_db() -> None:

@@ -8,6 +8,7 @@ helpers (``add_query``, ``add_callback_id`` etc.) are exercised via
 
 import logging
 
+import msgspec.msgpack
 import orjson
 import pytest
 
@@ -42,7 +43,7 @@ def test_encode_message_compresses_repeating_input():
     """zstd should achieve good compression on a redundant payload."""
     big_payload = {"message": {"results": [{"x": "y" * 1000}] * 50}}
     encoded = encode_message(big_payload)
-    assert len(encoded) < len(orjson.dumps(big_payload))
+    assert len(encoded) < len(msgspec.msgpack.encode(big_payload))
 
 
 @pytest.mark.asyncio
