@@ -348,7 +348,7 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     try:
         start_node_time = datetime.now()
 
-        keys = list(kgraph["nodes"].keys())
+        keys = sorted(kgraph["nodes"].keys())
         node_pub_counts = {}
         node_indices = {}
 
@@ -395,7 +395,7 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
             return in_message
 
         keypairs = {make_key(x, node_indices): x for x in pair_to_answer.keys()}
-        inputkeys = list(keypairs.keys())
+        inputkeys = sorted(keypairs.keys())
         values = {}
 
         for batch in batches(inputkeys, LMDB_BATCH_SIZE):
