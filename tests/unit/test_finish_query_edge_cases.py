@@ -5,6 +5,7 @@ existing happy-path tests don't reach.
 import json
 import logging
 
+import orjson
 import pytest
 
 from workers.finish_query.worker import finish_query
@@ -29,7 +30,7 @@ async def test_finish_query_skips_callback_when_state_missing(redis_mock, mocker
         new_callable=mocker.AsyncMock,
     )
     mock_get_message = mocker.patch(
-        "workers.finish_query.worker.get_message",
+        "workers.finish_query.worker.get_message_raw",
         new_callable=mocker.AsyncMock,
     )
     mock_post = mocker.patch("httpx.AsyncClient.post", new_callable=mocker.AsyncMock)
@@ -69,9 +70,9 @@ async def test_finish_query_propagates_status_to_set_query_completed(
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.finish_query.worker.get_message",
+        "workers.finish_query.worker.get_message_raw",
         new_callable=mocker.AsyncMock,
-        return_value={"message": {}},
+        return_value=orjson.dumps({"message": {}}),
     )
 
     await finish_query(
@@ -105,9 +106,9 @@ async def test_finish_async_query_retries_callback_on_failure(redis_mock, mocker
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.finish_query.worker.get_message",
+        "workers.finish_query.worker.get_message_raw",
         new_callable=mocker.AsyncMock,
-        return_value={"message": {"results": []}},
+        return_value=orjson.dumps({"message": {"results": []}}),
     )
     mocker.patch(
         "workers.finish_query.worker.get_logs",
@@ -153,9 +154,9 @@ async def test_finish_async_query_attaches_logs_to_message_payload(redis_mock, m
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.finish_query.worker.get_message",
+        "workers.finish_query.worker.get_message_raw",
         new_callable=mocker.AsyncMock,
-        return_value={"message": {"results": []}},
+        return_value=orjson.dumps({"message": {"results": []}}),
     )
     mocker.patch(
         "workers.finish_query.worker.get_logs",
@@ -185,6 +186,6 @@ async def test_finish_async_query_attaches_logs_to_message_payload(redis_mock, m
         logger,
     )
     assert mock_post.called
-    posted_payload = mock_post.call_args.kwargs["json"]
+    posted_payload = orjson.loads(mock_post.call_args.kwargs["content"])
     assert "logs" in posted_payload
     assert posted_payload["logs"][0]["message"] == "log line"

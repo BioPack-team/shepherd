@@ -6,12 +6,13 @@ import logging
 import time
 import uuid
 
+import orjson
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
     cleanup_callbacks,
     get_logs,
-    get_message,
+    get_message_raw,
     get_query_state,
     set_query_completed,
 )
@@ -42,15 +43,25 @@ async def finish_query(task, logger: logging.Logger):
         callback_url = query_state[8]
         if callback_url is not None:
             # this was an async query, need to send message back
-            message = await get_message(response_id, logger)
+            message_bytes = await get_message_raw(response_id, logger)
             logs = await get_logs(response_id, logger)
-            message["logs"] = logs
+            logs_bytes = orjson.dumps(logs)
+            # Splice logs into the raw JSON bytes to avoid deserializing
+            # and re-serializing the (potentially huge) message dict.
+            if message_bytes and message_bytes[-1:] == b"}":
+                last_brace = message_bytes.rindex(b"}")
+                payload = message_bytes[:last_brace] + b',"logs":' + logs_bytes + b"}"
+            else:
+                message = orjson.loads(message_bytes)
+                message["logs"] = logs
+                payload = orjson.dumps(message)
             for attempt in range(CALLBACK_RETRIES):
                 try:
                     async with httpx.AsyncClient(timeout=120) as client:
                         response = await client.post(
                             callback_url,
-                            json=message,
+                            content=payload,
+                            headers={"Content-Type": "application/json"},
                         )
                         response.raise_for_status()
                         logger.info(f"Sent response back to {callback_url}")

@@ -2,7 +2,8 @@ import json
 import logging
 import pytest
 
-from shepherd_utils.db import get_message
+import orjson
+
 from workers.finish_query.worker import finish_query
 
 
@@ -15,8 +16,8 @@ async def test_finish_sync_query(redis_mock, mocker):
     mock_set_query_completed = mocker.patch(
         "workers.finish_query.worker.set_query_completed"
     )
-    mock_callback_response = mocker.patch("workers.finish_query.worker.get_message")
-    mock_callback_response.return_value = {
+    mock_callback_response = mocker.patch("workers.finish_query.worker.get_message_raw")
+    mock_callback_response.return_value = orjson.dumps({
         "message": {
             "results": [
                 {
@@ -35,7 +36,7 @@ async def test_finish_sync_query(redis_mock, mocker):
                 },
             ],
         },
-    }
+    })
 
     logger = logging.getLogger(__name__)
 
@@ -75,13 +76,13 @@ async def test_finish_async_query(redis_mock, mocker):
     mock_set_query_completed = mocker.patch(
         "workers.finish_query.worker.set_query_completed"
     )
-    mock_callback_response = mocker.patch("workers.finish_query.worker.get_message")
     final_response = {
         "message": {
             "result": "this is the final response",
         },
     }
-    mock_callback_response.return_value = final_response
+    mock_callback_response = mocker.patch("workers.finish_query.worker.get_message_raw")
+    mock_callback_response.return_value = orjson.dumps(final_response)
 
     mock_post = mocker.patch("httpx.AsyncClient.post")
 
@@ -100,5 +101,9 @@ async def test_finish_async_query(redis_mock, mocker):
         logger,
     )
 
-    mock_post.assert_called_once_with("http://test", json=final_response)
+    mock_post.assert_called_once()
+    call_kwargs = mock_post.call_args.kwargs
+    assert call_kwargs["headers"]["Content-Type"] == "application/json"
+    posted_payload = orjson.loads(call_kwargs["content"])
+    assert posted_payload["message"] == final_response["message"]
     mock_set_query_completed.assert_called_once_with("test", "OK", logger)

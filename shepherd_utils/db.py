@@ -236,6 +236,21 @@ async def get_message(
     return message
 
 
+async def get_message_raw(
+    message_id: str,
+    logger: logging.Logger,
+) -> bytes:
+    """Get the message from db as raw JSON bytes (no Python object parsing)."""
+    start = time.time()
+    blob = await data_db_client.get(message_id)
+    if blob is None:
+        raise KeyError(f"Failed to get {message_id} from db")
+
+    raw = zstandard.decompress(blob)
+    logger.debug(f"Getting raw message took {time.time() - start} seconds")
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # Sync variants of get_message / save_message
 #
