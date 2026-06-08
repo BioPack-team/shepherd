@@ -221,34 +221,29 @@ async def save_message(
 async def get_message(
     message_id: str,
     logger: logging.Logger,
-) -> Dict:
-    """Get the message from db."""
+    raw: bool = False,
+) -> Union[Dict, bytes]:
+    """Get the message from db.
+
+    When *raw* is True, return the decompressed JSON bytes without parsing
+    into a Python object — useful when the caller will forward the payload
+    without inspecting it.
+    """
     start = time.time()
     blob = await data_db_client.get(message_id)
     if blob is None:
-        # failed to get message from db
         raise KeyError(f"Failed to get {message_id} from db")
+
+    if raw:
+        result = zstandard.decompress(blob)
+        logger.debug(f"Getting raw message took {time.time() - start} seconds")
+        return result
 
     start_decomp = time.time()
     message = decode_message(blob)
     logger.debug(f"Decompression took {time.time() - start_decomp}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
-
-
-async def get_message_raw(
-    message_id: str,
-    logger: logging.Logger,
-) -> bytes:
-    """Get the message from db as raw JSON bytes (no Python object parsing)."""
-    start = time.time()
-    blob = await data_db_client.get(message_id)
-    if blob is None:
-        raise KeyError(f"Failed to get {message_id} from db")
-
-    raw = zstandard.decompress(blob)
-    logger.debug(f"Getting raw message took {time.time() - start} seconds")
-    return raw
 
 
 # ---------------------------------------------------------------------------

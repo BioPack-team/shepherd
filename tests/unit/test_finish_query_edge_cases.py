@@ -30,7 +30,7 @@ async def test_finish_query_skips_callback_when_state_missing(redis_mock, mocker
         new_callable=mocker.AsyncMock,
     )
     mock_get_message = mocker.patch(
-        "workers.finish_query.worker.get_message_raw",
+        "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
     )
     mock_post = mocker.patch("httpx.AsyncClient.post", new_callable=mocker.AsyncMock)
@@ -70,7 +70,7 @@ async def test_finish_query_propagates_status_to_set_query_completed(
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.finish_query.worker.get_message_raw",
+        "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
         return_value=orjson.dumps({"message": {}}),
     )
@@ -106,7 +106,7 @@ async def test_finish_async_query_retries_callback_on_failure(redis_mock, mocker
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.finish_query.worker.get_message_raw",
+        "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
         return_value=orjson.dumps({"message": {"results": []}}),
     )
@@ -154,7 +154,7 @@ async def test_finish_async_query_attaches_logs_to_message_payload(redis_mock, m
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.finish_query.worker.get_message_raw",
+        "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
         return_value=orjson.dumps({"message": {"results": []}}),
     )

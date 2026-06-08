@@ -12,7 +12,7 @@ from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
     cleanup_callbacks,
     get_logs,
-    get_message_raw,
+    get_message,
     get_query_state,
     set_query_completed,
 )
@@ -43,7 +43,7 @@ async def finish_query(task, logger: logging.Logger):
         callback_url = query_state[8]
         if callback_url is not None:
             # this was an async query, need to send message back
-            message_bytes = await get_message_raw(response_id, logger)
+            message_bytes = await get_message(response_id, logger, raw=True)
             logs = await get_logs(response_id, logger)
             logs_bytes = orjson.dumps(logs)
             # Splice logs into the raw JSON bytes to avoid deserializing
