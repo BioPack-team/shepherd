@@ -8,8 +8,9 @@ import uuid
 from enum import Enum
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, Body, Response
-from fastapi.responses import JSONResponse
+import orjson
+from fastapi import APIRouter, Body, Request, Response
+from fastapi.responses import JSONResponse, ORJSONResponse
 from opentelemetry.propagate import extract, inject
 
 from shepherd_utils.broker import add_task
@@ -147,7 +148,7 @@ async def run_query(
 async def run_sync_query(
     target: ARATargetEnum,
     query: dict = Body(..., examples=[default_input_query]),
-) -> dict:
+) -> Response:
     """Handle synchronous TRAPI queries."""
     # query_dict = query.dict()
     query_dict = query
@@ -168,19 +169,21 @@ async def run_sync_query(
                 response_id = query_state[7]
                 response = await get_message(response_id, logger)
                 if response is None:
-                    return {"status": "ERROR", "description": "Unable to get response"}
+                    return ORJSONResponse(
+                        content={
+                            "status": "ERROR",
+                            "description": "Unable to get response",
+                        }
+                    )
                 logs = await get_logs(response_id, logger)
                 response["logs"] = logs
-                return response
+                return ORJSONResponse(content=response)
         else:
             logger.warning(f"Failed to get the query state of query id {query_id}")
         await asyncio.sleep(0.5)
 
     logger.error("Query timed out")
-    return {
-        "status": "TIMEOUT",
-        "description": "Query timeout",
-    }
+    return ORJSONResponse(content={"status": "TIMEOUT", "description": "Query timeout"})
 
 
 async def run_async_query(
@@ -211,9 +214,16 @@ async def run_async_query(
 async def callback(
     target: ARATargetEnum,
     callback_id: str,
-    response: dict,
+    request: Request,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
+    try:
+        response = orjson.loads(await request.body())
+    except orjson.JSONDecodeError:
+        return JSONResponse(
+            content={"detail": "Invalid JSON in request body"},
+            status_code=422,
+        )
     # Set up logger
     log_level = response.get("log_level") or "INFO"
     level_number = logging._nameToLevel[log_level]
@@ -300,7 +310,7 @@ async def get_query_response(
     logger.addHandler(log_handler)
     response = await get_message(query_id, logger)
     if response is None:
-        return 404
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
     logs = await get_logs(query_id, logger)
     response["logs"] = logs
-    return response
+    return ORJSONResponse(content=response)
