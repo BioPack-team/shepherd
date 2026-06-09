@@ -6,13 +6,16 @@ helpers (``add_query``, ``add_callback_id`` etc.) are exercised via
 ``postgres_mock`` from the conftest.
 """
 
+import io
 import logging
 
 import orjson
 import pytest
+import zstandard
 
 from shepherd_utils.db import (
     decode_message,
+    decompress_zstd,
     encode_message,
     get_logs,
     get_message,
@@ -43,6 +46,37 @@ def test_encode_message_compresses_repeating_input():
     big_payload = {"message": {"results": [{"x": "y" * 1000}] * 50}}
     encoded = encode_message(big_payload)
     assert len(encoded) < len(orjson.dumps(big_payload))
+
+
+def test_decompress_zstd_embedded_size_frame():
+    """A frame compressed with the one-shot API embeds the content size."""
+    raw = orjson.dumps({"message": {"results": [{"score": 0.5}]}})
+    frame = zstandard.compress(raw)
+    assert decompress_zstd(frame) == raw
+
+
+def test_decompress_zstd_streaming_frame_without_content_size():
+    """Streaming frames omit the content size; the one-shot API can't read them.
+
+    This is the case ``decompress_zstd`` exists to handle: external services
+    that compress in streaming mode produce frames the one-shot
+    ``zstandard.decompress`` rejects.
+    """
+    raw = orjson.dumps({"message": {"results": [{"score": 0.5}]}})
+    buf = io.BytesIO()
+    with zstandard.ZstdCompressor().stream_writer(buf, closefd=False) as writer:
+        writer.write(raw)
+    frame = buf.getvalue()
+
+    assert decompress_zstd(frame) == raw
+    with pytest.raises(zstandard.ZstdError):
+        zstandard.decompress(frame)
+
+
+def test_decompress_zstd_rejects_garbage():
+    """Non-zstd bytes raise ZstdError so the route can map it to a 422."""
+    with pytest.raises(zstandard.ZstdError):
+        decompress_zstd(b"not a zstd frame")
 
 
 @pytest.mark.asyncio

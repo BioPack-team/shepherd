@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Optional, Tuple
 
 import orjson
+import zstandard
 from fastapi import APIRouter, Body, Request, Response
 from fastapi.responses import JSONResponse, ORJSONResponse
 from opentelemetry.propagate import extract, inject
@@ -17,6 +18,7 @@ from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_query,
+    decompress_zstd,
     get_callback_query_id,
     get_logs,
     get_message,
@@ -217,11 +219,14 @@ async def callback(
     request: Request,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
+    raw = await request.body()
     try:
-        response = orjson.loads(await request.body())
-    except orjson.JSONDecodeError:
+        if "zstd" in request.headers.get("content-encoding", "").lower():
+            raw = decompress_zstd(raw)
+        response = orjson.loads(raw)
+    except (orjson.JSONDecodeError, zstandard.ZstdError):
         return JSONResponse(
-            content={"detail": "Invalid JSON in request body"},
+            content={"detail": "Invalid request body"},
             status_code=422,
         )
     # Set up logger
