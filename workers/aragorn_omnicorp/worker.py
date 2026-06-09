@@ -383,17 +383,6 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
             f"generate_curie_pairs time: {t2 - t1}. Number of pairs: {len(pair_to_answer)}"
         )
 
-        if len(pair_to_answer) >= OMNICORP_MAX_CURIE_PAIRS:
-            logger.warning(
-                f"Skipping omnicorp shared-count overlay: {len(pair_to_answer)} "
-                f"curie pairs meets/exceeds threshold {OMNICORP_MAX_CURIE_PAIRS}. "
-                "Returning message without literature co-occurrence overlay."
-            )
-            message["knowledge_graph"] = kgraph
-            message["results"] = answers
-            logger.info("Omnicorp complete. Returning.")
-            return in_message
-
         keypairs = {make_key(x, node_indices): x for x in pair_to_answer.keys()}
         inputkeys = sorted(keypairs.keys())
         values = {}
