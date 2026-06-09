@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
 
     otel_enabled: bool = True
-    jaeger_host: str = "http://jaeger"
+    jaeger_host: str = "http://localhost"
     jaeger_port: int = 4317
 
     # ttl in seconds
