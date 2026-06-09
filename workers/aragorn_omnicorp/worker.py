@@ -50,7 +50,7 @@ LMDB_BATCH_SIZE = 1000
 # literature co-occurrence overlay. The per-pair shared-count reads degrade into
 # disk-bound random LMDB lookups for very large queries, pushing latency from
 # seconds to 45 minutes-3 hours. Override via the env var if needed.
-OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 100_000))
+OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 1_000_000))
 
 # Both LMDBs are opened lazily on first use so importing the worker (e.g. in
 # tests) does not require the live data files. Static datasets, so we open
@@ -382,6 +382,17 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
         logger.info(
             f"generate_curie_pairs time: {t2 - t1}. Number of pairs: {len(pair_to_answer)}"
         )
+
+        if len(pair_to_answer) >= OMNICORP_MAX_CURIE_PAIRS:
+            logger.warning(
+                f"Skipping omnicorp shared-count overlay: {len(pair_to_answer)} "
+                f"curie pairs meets/exceeds threshold {OMNICORP_MAX_CURIE_PAIRS}. "
+                "Returning message without literature co-occurrence overlay."
+            )
+            message["knowledge_graph"] = kgraph
+            message["results"] = answers
+            logger.info("Omnicorp complete. Returning.")
+            return in_message
 
         keypairs = {make_key(x, node_indices): x for x in pair_to_answer.keys()}
         inputkeys = sorted(keypairs.keys())
