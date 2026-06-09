@@ -1,6 +1,7 @@
 """Postgres DB Manager."""
 
 import asyncio
+import io
 import logging
 import time
 from typing import Any, Dict, List, Union
@@ -122,6 +123,16 @@ def encode_message(obj: Any) -> bytes:
 def decode_message(blob: bytes) -> Any:
     """Deserialize a stored message blob back into a Python object."""
     return orjson.loads(zstandard.decompress(blob))
+
+
+def decompress_zstd(blob: bytes) -> bytes:
+    """Decompress a zstd frame into raw bytes.
+
+    Uses a streaming reader so it handles both frames with an embedded content
+    size and streaming frames that omit it (unlike the one-shot
+    ``zstandard.decompress``).
+    """
+    return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)).read()
 
 
 async def initialize_db() -> None:
