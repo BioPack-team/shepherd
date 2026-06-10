@@ -265,7 +265,8 @@ async def callback(
     logger.debug(f"Saved callback {callback_id} to redis")
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
-    with tracer.start_as_current_span(f"callback.{callback_id}", context=parent_ctx):
+    with tracer.start_as_current_span("callback", context=parent_ctx) as span:
+        span.set_attribute("callback_id", callback_id)
         span_carrier = {}
         inject(span_carrier)
         # add new task to merge callback response into original message
