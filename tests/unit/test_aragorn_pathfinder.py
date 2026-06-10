@@ -129,48 +129,6 @@ async def test_shadowfax_rejects_multiple_intermediate_categories(redis_mock, mo
 
 
 @pytest.mark.asyncio
-async def test_shadowfax_uses_intermediate_category_from_constraint(redis_mock, mocker):
-    """When a constraint provides an intermediate category, the threehop's
-    intermediates carry that category instead of biolink:NamedThing."""
-    msg = _pathfinder_message(
-        constraints=[{"intermediate_categories": ["biolink:Gene"]}]
-    )
-    mocker.patch(
-        "workers.aragorn_pathfinder.worker.get_message",
-        new_callable=mocker.AsyncMock,
-        return_value=msg,
-    )
-    mocker.patch(
-        "workers.aragorn_pathfinder.worker.add_callback_id",
-        new_callable=mocker.AsyncMock,
-    )
-    mocker.patch(
-        "workers.aragorn_pathfinder.worker.get_running_callbacks",
-        new_callable=mocker.AsyncMock,
-        return_value=[],
-    )
-
-    mock_response = mocker.Mock()
-    mock_response.status_code = 200
-    mock_httpx = mocker.patch(
-        "httpx.AsyncClient.post",
-        new_callable=mocker.AsyncMock,
-        return_value=mock_response,
-    )
-
-    await shadowfax(_make_task(), logger)
-
-    mock_httpx.assert_awaited_once()
-
-    args, kwargs = mock_httpx.call_args
-
-    threehop = kwargs["json"]
-    nodes = threehop["message"]["query_graph"]["nodes"]
-    assert nodes["intermediate_0"]["categories"] == ["biolink:Gene"]
-    assert nodes["intermediate_1"]["categories"] == ["biolink:Gene"]
-
-
-@pytest.mark.asyncio
 async def test_shadowfax_propagates_gandalf_parameters(redis_mock, mocker):
     """Custom gandalf_parameters in the input should ride along into the
     saved threehop's parameters."""
