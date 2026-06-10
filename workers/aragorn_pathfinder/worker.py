@@ -77,6 +77,10 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     qgraph = message["message"]["query_graph"]
     pinned_node_keys = []
     pinned_node_ids = []
+    retriever_query = {
+        "message": message["message"],
+        "parameters": parameters
+    }
     for node_key, node in qgraph["nodes"].items():
         pinned_node_keys.append(node_key)
         if node.get("ids", None) is not None:
@@ -106,7 +110,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
 
     # Create 3-hop query
 
-    message["message"]["query_graph"] = {
+    retriever_query["message"]["query_graph"] = {
         "nodes": {
             pinned_node_keys[0]: {"ids": [pinned_node_ids[0]]},
             "intermediate_0": {
@@ -219,7 +223,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         async with httpx.AsyncClient(timeout=100) as client:
             await client.post(
                 settings.kg_retrieval_url,
-                json=message,
+                json=retriever_query,
             )
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
