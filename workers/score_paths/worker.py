@@ -14,6 +14,7 @@ from bmt import Toolkit
 from torch import nn
 from xgboost import XGBClassifier
 
+from shepherd_utils.config import settings
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
@@ -22,7 +23,7 @@ STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 4
-EMBEDDING_DIR = "pathfinder_embeddings"
+EMBEDDING_DIR = settings.pathfinder_embeddings_dir
 tracer = setup_tracer(STREAM)
 
 
