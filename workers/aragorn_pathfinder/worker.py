@@ -89,7 +89,6 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     if len(set(pinned_node_ids)) != 2:
         raise Exception("Pathfinder queries require two pinned nodes.")
 
-    intermediate_categories = []
     path_key = next(iter(qgraph["paths"].keys()))
     qpath = qgraph["paths"][path_key]
     if qpath.get("constraints", None) is not None:
@@ -101,12 +100,10 @@ async def shadowfax(task, logger: logging.Logger) -> str:
             intermediate_categories = (
                 constraints[0].get("intermediate_categories", None) or []
             )
-        if len(intermediate_categories) > 1:
-            raise Exception(
-                "Pathfinder queries do not support multiple intermediate categories"
-            )
-    else:
-        intermediate_categories = ["biolink:NamedThing"]
+            if len(intermediate_categories) > 1:
+                raise Exception(
+                    "Pathfinder queries do not support multiple intermediate categories"
+                )
 
     # Create 3-hop query
 
@@ -114,10 +111,10 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         "nodes": {
             pinned_node_keys[0]: {"ids": [pinned_node_ids[0]]},
             "intermediate_0": {
-                "categories": intermediate_categories,
+                "categories": ["biolink:NamedThing"],
             },
             "intermediate_1": {
-                "categories": intermediate_categories,
+                "categories": ["biolink:NamedThing"],
             },
             pinned_node_keys[1]: {"ids": [pinned_node_ids[1]]},
         },
