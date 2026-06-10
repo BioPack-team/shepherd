@@ -8,6 +8,7 @@ import uuid
 import orjson
 
 from opentelemetry.propagate import inject
+from opentelemetry.trace import Status, StatusCode
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
@@ -92,12 +93,14 @@ async def finish_query(task, logger: logging.Logger):
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
     start = time.time()
-    with tracer.start_as_current_span(STREAM, context=parent_ctx):
+    with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
         try:
             await finish_query(task, logger)
         except asyncio.CancelledError:
             logger.warning(f"Task {task[0]} was cancelled")
         except Exception as e:
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
             logger.error(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
             )

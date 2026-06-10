@@ -11,6 +11,7 @@ import logging
 
 import pytest
 
+from shepherd_utils import shared
 from shepherd_utils.broker import get_task
 from shepherd_utils.shared import (
     combine_unique_dicts,
@@ -21,6 +22,7 @@ from shepherd_utils.shared import (
     merge_kgraph,
     recursive_get_auxgraph_edges,
     recursive_get_edge_support_graphs,
+    run_task_lifecycle,
     validate_message,
     wrap_up_task,
 )
@@ -560,3 +562,96 @@ async def test_handle_task_failure_routes_to_finish_query_with_error_status(redi
     next_task = await get_task("finish_query", "consumer", "test", logger)
     assert next_task is not None
     assert next_task[1]["status"] == "ERROR"
+
+
+# --- run_task_lifecycle ---------------------------------------------------
+
+
+class _Limiter:
+    """Records whether ``release()`` was called."""
+
+    def __init__(self):
+        self.released = False
+
+    def release(self):
+        self.released = True
+
+
+def _lifecycle_task():
+    return [
+        "msg-id",
+        {
+            "query_id": "qid",
+            "response_id": "rid",
+            "workflow": json.dumps([{"id": "some_stream"}]),
+            "log_level": "20",
+            "otel": "{}",
+            "metadata": "{}",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_task_lifecycle_success_wraps_up_and_releases(mocker):
+    worker_fn = mocker.AsyncMock()
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
+    mock_fail = mocker.patch.object(
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
+    )
+    limiter = _Limiter()
+
+    await run_task_lifecycle(
+        "some_stream", "consumer", _lifecycle_task(), None, logger, limiter, worker_fn
+    )
+
+    worker_fn.assert_awaited_once()
+    assert mock_wrap.called
+    assert not mock_fail.called
+    assert limiter.released
+
+
+@pytest.mark.asyncio
+async def test_run_task_lifecycle_failure_records_error_and_routes_to_handler(mocker):
+    worker_fn = mocker.AsyncMock(side_effect=RuntimeError("kaboom"))
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
+    mock_fail = mocker.patch.object(
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
+    )
+    # Capture the span so we can assert the error status was recorded (#5).
+    span = mocker.MagicMock()
+    cm = mocker.MagicMock()
+    cm.__enter__.return_value = span
+    mocker.patch.object(shared._tracer, "start_as_current_span", return_value=cm)
+    limiter = _Limiter()
+
+    await run_task_lifecycle(
+        "some_stream", "consumer", _lifecycle_task(), None, logger, limiter, worker_fn
+    )
+
+    assert not mock_wrap.called
+    assert mock_fail.called
+    span.record_exception.assert_called_once()
+    span.set_status.assert_called_once()
+    assert limiter.released
+
+
+@pytest.mark.asyncio
+async def test_run_task_lifecycle_cancellation_does_not_route_failure(mocker):
+    import asyncio
+
+    worker_fn = mocker.AsyncMock(side_effect=asyncio.CancelledError)
+    mock_fail = mocker.patch.object(
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
+    )
+    limiter = _Limiter()
+
+    await run_task_lifecycle(
+        "some_stream", "consumer", _lifecycle_task(), None, logger, limiter, worker_fn
+    )
+
+    assert not mock_fail.called
+    assert limiter.released

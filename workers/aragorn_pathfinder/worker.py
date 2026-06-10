@@ -19,8 +19,7 @@ from shepherd_utils.db import (
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import (
     get_tasks,
-    handle_task_failure,
-    wrap_up_task,
+    run_task_lifecycle,
 )
 
 # Queue name
@@ -257,25 +256,12 @@ async def shadowfax(task, logger: logging.Logger) -> str:
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
-    start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
+
+    async def _run(task, logger):
         metadata = await shadowfax(task, logger)
         task[1]["metadata"] = metadata
-        # Always wrap up the task to ACK it in the broker
-        try:
-            await wrap_up_task(STREAM, GROUP, task, logger)
-        except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Finished task {task[0]} in {time.time() - start}")
+
+    await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
 
 async def poll_for_tasks():

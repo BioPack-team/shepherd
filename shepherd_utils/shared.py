@@ -6,8 +6,10 @@ import logging
 import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
+from opentelemetry import trace
 from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
+from opentelemetry.trace import Status, StatusCode
 
 from .broker import add_task, broker_client, get_task, mark_task_as_complete
 from .config import settings
@@ -227,6 +229,55 @@ async def handle_task_failure(
         },
         logger,
     )
+
+
+# Proxy tracer: resolves to whatever provider the worker process set up via
+# setup_tracer(STREAM) at the time a span is created, so the outer task span
+# inherits the worker's service.name without shared.py needing to know it.
+_tracer = trace.get_tracer(__name__)
+
+
+async def run_task_lifecycle(
+    stream: str,
+    group: str,
+    task: Tuple[str, dict],
+    parent_ctx: Context,
+    logger: logging.Logger,
+    limiter: asyncio.Semaphore,
+    worker_fn,
+) -> None:
+    """Span-wrapped task lifecycle shared by the standard workers.
+
+    Activates the per-task span as current so auto-instrumented (httpx) and
+    manual child spans nest under it, records exceptions + ERROR status on the
+    span, runs ``worker_fn(task, logger)`` then ``wrap_up_task`` on success or
+    ``handle_task_failure`` on an unhandled error, and always releases the
+    limiter.
+
+    ``worker_fn`` is an async callable ``(task, logger) -> None`` holding the
+    per-worker logic (or a closure for workers that dispatch to a process pool).
+    """
+    start = time.time()
+    with _tracer.start_as_current_span(stream, context=parent_ctx) as span:
+        try:
+            await worker_fn(task, logger)
+            # Always wrap up the task to ACK it in the broker
+            try:
+                await wrap_up_task(stream, group, task, logger)
+            except Exception as e:
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+        except asyncio.CancelledError:
+            logger.warning(f"Task {task[0]} was cancelled")
+        except Exception as e:
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            logger.error(
+                f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
+            )
+            await handle_task_failure(stream, group, task, logger)
+        finally:
+            limiter.release()
+            logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 def recursive_get_edge_support_graphs(

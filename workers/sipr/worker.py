@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import time
 import uuid
 from copy import deepcopy
 
@@ -16,7 +15,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
 STREAM = "sipr"
@@ -338,23 +337,7 @@ async def sipr(task, logger: logging.Logger):
 
 async def process_task(task, parent_ctx, logger, limiter):
     """Process a given task and ACK in redis."""
-    start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await sipr(task, logger)
-        try:
-            await wrap_up_task(STREAM, GROUP, task, logger)
-        except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled.")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Task took {time.time() - start}")
+    await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, sipr)
 
 
 async def poll_for_tasks():

@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -30,7 +29,7 @@ import lmdb
 from shepherd_utils.config import settings
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
 STREAM = "aragorn.omnicorp"
@@ -468,9 +467,8 @@ async def process_task(
     crunching -- previously the overlay ran inline on the loop and blocked
     everything else until it finished.
     """
-    start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
+
+    async def _run(task, logger):
         # given a task, get the message from the db (async I/O on the loop)
         response_id = task[1]["response_id"]
         message = await get_message(response_id, logger)
@@ -487,20 +485,8 @@ async def process_task(
             await save_message(response_id, response, logger)
         else:
             logger.error(f"Failed to get {response_id} for omnicorp overlay.")
-        # Always wrap up the task to ACK it in the broker
-        try:
-            await wrap_up_task(STREAM, GROUP, task, logger)
-        except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Finished task {task[0]} in {time.time() - start}")
+
+    await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
 
 async def poll_for_tasks():
