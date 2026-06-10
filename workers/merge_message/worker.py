@@ -538,7 +538,9 @@ def merge_messages(
         intermediate_category = None
         constraints = og_path.get("constraints") or []
         if len(constraints) > 0:
-            intermediate_categories = constraints[0].get("intermediate_categories") or []
+            intermediate_categories = (
+                constraints[0].get("intermediate_categories") or []
+            )
             if len(intermediate_categories) > 0:
                 intermediate_category = intermediate_categories[0]
 
