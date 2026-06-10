@@ -534,6 +534,19 @@ def merge_messages(
         object_node_id = og_path.get("object")
         if subject_node_id is None or object_node_id is None:
             raise KeyError("Missing either subject or object from path.")
+
+        intermediate_category = None
+        constraints = og_path.get("constraints") or []
+        if len(constraints) > 0:
+            intermediate_categories = (
+                constraints[0].get("intermediate_categories") or []
+            )
+            if len(intermediate_categories) > 0:
+                intermediate_category = intermediate_categories[0]
+
+        kg_nodes = result["message"]["knowledge_graph"].get("nodes", {})
+        kg_edges = result["message"]["knowledge_graph"].get("edges", {})
+
         aux_counter = 0
         score = 0
         analyses = []
@@ -544,10 +557,33 @@ def merge_messages(
                 for qg_edge_key, bindings in edge_bindings.items():
                     for binding in bindings:
                         path_edge_ids.add(binding["id"])
-                score = new_result.get("score")
-
+            score = new_result.get("score")
             if not path_edge_ids:
                 continue
+
+            if (
+                intermediate_category is not None
+                and intermediate_category != "biolink:NamedThing"
+            ):
+                nb = new_result.get("node_bindings", {})
+                pinned_ids = set()
+                for pinned in (subject_node_id, object_node_id):
+                    for binding in nb.get(pinned, []) or []:
+                        pinned_ids.add(binding["id"])
+                intermediate_node_ids = set()
+                for edge_id in path_edge_ids:
+                    edge = kg_edges.get(edge_id)
+                    if edge is None:
+                        continue
+                    for node_id in (edge.get("subject"), edge.get("object")):
+                        if node_id and node_id not in pinned_ids:
+                            intermediate_node_ids.add(node_id)
+                if not any(
+                    intermediate_category
+                    in (kg_nodes.get(nid, {}).get("categories") or [])
+                    for nid in intermediate_node_ids
+                ):
+                    continue
 
             aux_id = f"a_{aux_counter}"
             aux_counter += 1

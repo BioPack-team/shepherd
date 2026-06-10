@@ -49,7 +49,7 @@ LMDB_BATCH_SIZE = 1000
 # literature co-occurrence overlay. The per-pair shared-count reads degrade into
 # disk-bound random LMDB lookups for very large queries, pushing latency from
 # seconds to 45 minutes-3 hours. Override via the env var if needed.
-OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 100_000))
+OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 1_000_000))
 
 # Both LMDBs are opened lazily on first use so importing the worker (e.g. in
 # tests) does not require the live data files. Static datasets, so we open

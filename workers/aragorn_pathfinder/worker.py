@@ -77,6 +77,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     qgraph = message["message"]["query_graph"]
     pinned_node_keys = []
     pinned_node_ids = []
+    retriever_query = {"message": message["message"], "parameters": parameters}
     for node_key, node in qgraph["nodes"].items():
         pinned_node_keys.append(node_key)
         if node.get("ids", None) is not None:
@@ -85,7 +86,6 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     if len(set(pinned_node_ids)) != 2:
         raise Exception("Pathfinder queries require two pinned nodes.")
 
-    intermediate_categories = []
     path_key = next(iter(qgraph["paths"].keys()))
     qpath = qgraph["paths"][path_key]
     if qpath.get("constraints", None) is not None:
@@ -97,23 +97,21 @@ async def shadowfax(task, logger: logging.Logger) -> str:
             intermediate_categories = (
                 constraints[0].get("intermediate_categories", None) or []
             )
-        if len(intermediate_categories) > 1:
-            raise Exception(
-                "Pathfinder queries do not support multiple intermediate categories"
-            )
-    else:
-        intermediate_categories = ["biolink:NamedThing"]
+            if len(intermediate_categories) > 1:
+                raise Exception(
+                    "Pathfinder queries do not support multiple intermediate categories"
+                )
 
     # Create 3-hop query
 
-    message["message"]["query_graph"] = {
+    retriever_query["message"]["query_graph"] = {
         "nodes": {
             pinned_node_keys[0]: {"ids": [pinned_node_ids[0]]},
             "intermediate_0": {
-                "categories": intermediate_categories,
+                "categories": ["biolink:NamedThing"],
             },
             "intermediate_1": {
-                "categories": intermediate_categories,
+                "categories": ["biolink:NamedThing"],
             },
             pinned_node_keys[1]: {"ids": [pinned_node_ids[1]]},
         },
@@ -212,16 +210,23 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     # Put callback UID and query ID in postgres
     await add_callback_id(query_id, callback_id, otel, logger)
 
-    message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
-
+    retriever_query["callback"] = (
+        f"{settings.callback_host}/aragorn/callback/{callback_id}"
+    )
     logger.debug(f"""Sending pathfinder query to {settings.kg_retrieval_url}.""")
     with tracer.start_as_current_span("aragorn.pathfinder") as span:
         span.set_attribute("callback_id", callback_id)
         async with httpx.AsyncClient(timeout=100) as client:
-            await client.post(
+            retriever_async_response = await client.post(
                 settings.kg_retrieval_url,
-                json=message,
+                json=retriever_query,
             )
+            try:
+                retriever_async_response.raise_for_status()
+            except Exception as e:
+                logger.error(f"Error contacting retriever: {e}")
+                logger.debug(f"Error details: {retriever_async_response.json()}")
+                raise e
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
