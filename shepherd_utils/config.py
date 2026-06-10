@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     # whole stack coming up at once doesn't spam Slack before workers have
     # had a chance to register their heartbeats.
     monitor_startup_grace_sec: int = 90
+    # When several workers go down close together (e.g. a laptop going to
+    # sleep), buffer their down-alerts for this long and send ONE combined
+    # Slack/email message listing every downed worker instead of one message
+    # per worker. The poll loop ticks faster than this, so the buffer flushes
+    # on a normal tick without a dedicated timer.
+    monitor_down_debounce_sec: float = 5.0
     monitor_alerts_config: str = "/app/monitor_alerts.yaml"
     slack_webhook_url: str = ""
     alert_email_to: str = ""
