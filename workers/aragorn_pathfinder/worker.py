@@ -225,6 +225,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
             except Exception as e:
                 logger.error(f"Error contacting retriever: {e}")
                 logger.debug(f"Error details: {retriever_async_response.json()}")
+                raise e
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
