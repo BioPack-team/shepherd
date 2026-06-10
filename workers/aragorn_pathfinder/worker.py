@@ -220,10 +220,16 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     logger.debug(f"""Sending pathfinder query to {settings.kg_retrieval_url}.""")
     with tracer.start_as_current_span(f"aragorn.pathfinder.{callback_id}"):
         async with httpx.AsyncClient(timeout=100) as client:
-            await client.post(
+            retriever_async_response = await client.post(
                 settings.kg_retrieval_url,
                 json=retriever_query,
             )
+            try:
+                retriever_async_response.raise_for_status()
+            except Exception as e:
+                logger.error(f"Error contact retriever: {e}")
+                logger.debug(f"Error details: {retriever_async_response.json()}")
+
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
