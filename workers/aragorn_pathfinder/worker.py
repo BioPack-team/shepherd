@@ -77,10 +77,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     qgraph = message["message"]["query_graph"]
     pinned_node_keys = []
     pinned_node_ids = []
-    retriever_query = {
-        "message": message["message"],
-        "parameters": parameters
-    }
+    retriever_query = {"message": message["message"], "parameters": parameters}
     for node_key, node in qgraph["nodes"].items():
         pinned_node_keys.append(node_key)
         if node.get("ids", None) is not None:
