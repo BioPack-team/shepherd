@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.lmdb"
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
 
+    pathfinder_embeddings_dir: str = "pathfinder_embeddings"
+
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
