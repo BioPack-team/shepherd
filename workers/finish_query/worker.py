@@ -5,8 +5,9 @@ import httpx
 import logging
 import time
 import uuid
-
 import orjson
+
+from opentelemetry.propagate import inject
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
@@ -55,13 +56,19 @@ async def finish_query(task, logger: logging.Logger):
                 message = orjson.loads(message_bytes)
                 message["logs"] = logs
                 payload = orjson.dumps(message)
+            headers = {"Content-Type": "application/json"}
+            # Propagate the otel trace context through the callback.
+            # Matches the inject() carrier pattern used by the
+            # lookup workers; the active span comes from process_task's
+            # start_as_current_span.
+            inject(headers)
             for attempt in range(CALLBACK_RETRIES):
                 try:
                     async with httpx.AsyncClient(timeout=120) as client:
                         response = await client.post(
                             callback_url,
                             content=payload,
-                            headers={"Content-Type": "application/json"},
+                            headers=headers,
                         )
                         response.raise_for_status()
                         logger.info(f"Sent response back to {callback_url}")
@@ -85,22 +92,23 @@ async def finish_query(task, logger: logging.Logger):
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
     start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await finish_query(task, logger)
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-    finally:
-        # Always wrap up the task to ACK it in the broker
+    with tracer.start_as_current_span(STREAM, context=parent_ctx):
         try:
-            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+            await finish_query(task, logger)
+        except asyncio.CancelledError:
+            logger.warning(f"Task {task[0]} was cancelled")
         except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-        span.end()
-        limiter.release()
-        logger.info(f"Finished task {task[0]} in {time.time() - start}")
+            logger.error(
+                f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
+            )
+        finally:
+            # Always wrap up the task to ACK it in the broker
+            try:
+                await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+            except Exception as e:
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+            limiter.release()
+            logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():
