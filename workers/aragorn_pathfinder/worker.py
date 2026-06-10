@@ -216,8 +216,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     # Put callback UID and query ID in postgres
     await add_callback_id(query_id, callback_id, otel, logger)
 
-    message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
-
+    retriever_query["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
     logger.debug(f"""Sending pathfinder query to {settings.kg_retrieval_url}.""")
     with tracer.start_as_current_span(f"aragorn.pathfinder.{callback_id}"):
         async with httpx.AsyncClient(timeout=100) as client:
