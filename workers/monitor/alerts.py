@@ -148,6 +148,14 @@ class AlertEngine:
         # the startup grace window get suppressed so a fresh ``docker compose
         # up`` doesn't immediately spam Slack while workers are still booting.
         self._boot_time = time.time()
+        # Worker-down alerts (crash/scale-down transitions and heartbeat_lost
+        # rules) are buffered here keyed by worker name rather than dispatched
+        # immediately. When a laptop sleeps, every worker drops to zero at once;
+        # buffering for ``monitor_down_debounce_sec`` lets us send a single
+        # Slack/email message listing all of them instead of ~20 separate ones.
+        # The buffer flushes on a normal poll tick once the window elapses.
+        self._down_buffer: Dict[str, Dict[str, Any]] = {}
+        self._down_buffer_started_at: float = 0.0
 
     @property
     def in_startup_grace(self) -> bool:
@@ -166,6 +174,35 @@ class AlertEngine:
             )
         except Exception as e:
             logger.debug(f"Failed to set cooldown for {rule.name}: {e}")
+
+    def _buffer_down(self, worker: str, event: Dict[str, Any], now: float) -> None:
+        """Queue a worker-down alert for batched delivery.
+
+        Keyed by worker name so a worker that trips more than one rule within
+        the same window is only listed once. The debounce window starts when
+        the first event lands in an empty buffer.
+        """
+        if not self._down_buffer:
+            self._down_buffer_started_at = now
+        self._down_buffer[worker] = event
+
+    async def _maybe_flush_down_buffer(self, now: float) -> None:
+        """Send buffered worker-down alerts once the debounce window elapses.
+
+        One worker keeps the original single-worker message; several get
+        coalesced into one combined message.
+        """
+        if not self._down_buffer:
+            return
+        if (now - self._down_buffer_started_at) < settings.monitor_down_debounce_sec:
+            return
+        events = list(self._down_buffer.values())
+        self._down_buffer.clear()
+        self._down_buffer_started_at = 0.0
+        if len(events) == 1:
+            await dispatch(events[0])
+        else:
+            await dispatch_batch(events, f"{len(events)} workers down")
 
     async def evaluate(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Return the list of alerts that fired on this snapshot."""
@@ -193,7 +230,13 @@ class AlertEngine:
             }
             fired.append(event)
             await _record_alert(event)
-            await dispatch(event)
+            # heartbeat_lost is a worker-down alert: buffer it so it coalesces
+            # with any crash/scale-down events for the same flood. All other
+            # rule kinds (backlog/threshold) are unrelated and fire immediately.
+            if rule.kind == "heartbeat_lost" and rule.worker:
+                self._buffer_down(rule.worker, event, now)
+            else:
+                await dispatch(event)
         # Last-worker-down alerts: critical whenever a worker type hits zero,
         # because every worker type is supposed to have at least one instance
         # running. The message differentiates a crash from a clean scale-down
@@ -242,7 +285,11 @@ class AlertEngine:
             }
             fired.append(event)
             await _record_alert(event)
-            await dispatch(event)
+            self._buffer_down(ev["worker"], event, now)
+        # Deliver any buffered worker-down alerts whose window has elapsed. The
+        # poll loop calls evaluate() faster than the debounce window, so this
+        # fires on a normal tick without a dedicated timer.
+        await self._maybe_flush_down_buffer(now)
         return fired
 
 
@@ -289,6 +336,34 @@ async def recent_alerts(limit: int = 50) -> List[Dict[str, Any]]:
     return out
 
 
+_SEVERITY_EMOJI = {
+    "info": ":information_source:",
+    "warning": ":warning:",
+    "critical": ":rotating_light:",
+}
+# Highest-to-lowest so we can pick the most urgent severity across a batch.
+_SEVERITY_ORDER = ["critical", "warning", "info"]
+
+
+def _env_context_line() -> str:
+    """Environment context line shared by single and batched Slack messages.
+
+    Lets one Slack channel receive alerts from multiple deployments (dev /
+    staging / production) without ambiguity about which one fired.
+    """
+    server_url = settings.server_url or "unknown"
+    maturity = settings.server_maturity or "unknown"
+    return f"*Environment:* {maturity}  |  *URL:* <{server_url}|{server_url}>"
+
+
+def _max_severity(events: List[Dict[str, Any]]) -> str:
+    severities = {ev.get("severity", "warning") for ev in events}
+    for level in _SEVERITY_ORDER:
+        if level in severities:
+            return level
+    return "warning"
+
+
 async def dispatch(event: Dict[str, Any]) -> None:
     await asyncio.gather(
         _dispatch_slack(event),
@@ -297,25 +372,48 @@ async def dispatch(event: Dict[str, Any]) -> None:
     )
 
 
+async def dispatch_batch(events: List[Dict[str, Any]], summary: str) -> None:
+    """Send one combined Slack/email message for several related alerts.
+
+    ``summary`` is the short headline phrase, e.g. ``"18 workers down"`` or
+    ``"3 abandoned queries"``.
+    """
+    await asyncio.gather(
+        _dispatch_slack_batch(events, summary),
+        _dispatch_email_batch(events, summary),
+        return_exceptions=True,
+    )
+
+
 async def _dispatch_slack(event: Dict[str, Any]) -> None:
     url = settings.slack_webhook_url
     if not url:
         return
-    emoji = {
-        "info": ":information_source:",
-        "warning": ":warning:",
-        "critical": ":rotating_light:",
-    }.get(event.get("severity", "warning"), ":warning:")
-    # Environment context lets one Slack channel receive alerts from multiple
-    # deployments (dev / staging / production) without ambiguity about which
-    # one fired.
-    server_url = settings.server_url or "unknown"
-    maturity = settings.server_maturity or "unknown"
+    emoji = _SEVERITY_EMOJI.get(event.get("severity", "warning"), ":warning:")
     text = (
         f"{emoji} *Shepherd alert* `{event['rule']}` ({event['severity']})\n"
-        f"*Environment:* {maturity}  |  *URL:* <{server_url}|{server_url}>\n"
+        f"{_env_context_line()}\n"
         f"{event['message']}"
     )
+    await _post_slack(url, text)
+
+
+async def _dispatch_slack_batch(events: List[Dict[str, Any]], summary: str) -> None:
+    url = settings.slack_webhook_url
+    if not url:
+        return
+    severity = _max_severity(events)
+    emoji = _SEVERITY_EMOJI.get(severity, ":warning:")
+    bullets = "\n".join(f"• {ev['message']}" for ev in events)
+    text = (
+        f"{emoji} *Shepherd alert* — {summary} ({severity})\n"
+        f"{_env_context_line()}\n"
+        f"{bullets}"
+    )
+    await _post_slack(url, text)
+
+
+async def _post_slack(url: str, text: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             await client.post(url, json={"text": text})
@@ -329,6 +427,14 @@ async def _dispatch_email(event: Dict[str, Any]) -> None:
     await asyncio.get_running_loop().run_in_executor(None, _send_email_sync, event)
 
 
+async def _dispatch_email_batch(events: List[Dict[str, Any]], summary: str) -> None:
+    if not (settings.alert_email_to and settings.smtp_host):
+        return
+    await asyncio.get_running_loop().run_in_executor(
+        None, _send_email_batch_sync, events, summary
+    )
+
+
 def _send_email_sync(event: Dict[str, Any]) -> None:
     msg = EmailMessage()
     msg["Subject"] = f"[Shepherd] {event['severity']}: {event['rule']}"
@@ -340,22 +446,31 @@ def _send_email_sync(event: Dict[str, Any]) -> None:
         f"Time: {time.ctime(event['ts'])}\n\n"
         f"{event['message']}\n"
     )
+    _smtp_send(msg)
+
+
+def _send_email_batch_sync(events: List[Dict[str, Any]], summary: str) -> None:
+    severity = _max_severity(events)
+    msg = EmailMessage()
+    msg["Subject"] = f"[Shepherd] {severity}: {summary}"
+    msg["From"] = settings.alert_email_from or settings.smtp_user or "shepherd-monitor"
+    msg["To"] = settings.alert_email_to
+    body = "\n".join(f"- {ev['message']}" for ev in events)
+    msg.set_content(
+        f"Severity: {severity}\n"
+        f"Time: {time.ctime(events[0]['ts'])}\n\n"
+        f"{summary}:\n{body}\n"
+    )
+    _smtp_send(msg)
+
+
+def _smtp_send(msg: EmailMessage) -> None:
     try:
-        if settings.smtp_use_tls:
-            ctx = ssl.create_default_context()
-            with smtplib.SMTP(
-                settings.smtp_host, settings.smtp_port, timeout=10
-            ) as smtp:
-                smtp.starttls(context=ctx)
-                if settings.smtp_user:
-                    smtp.login(settings.smtp_user, settings.smtp_password)
-                smtp.send_message(msg)
-        else:
-            with smtplib.SMTP(
-                settings.smtp_host, settings.smtp_port, timeout=10
-            ) as smtp:
-                if settings.smtp_user:
-                    smtp.login(settings.smtp_user, settings.smtp_password)
-                smtp.send_message(msg)
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+            if settings.smtp_use_tls:
+                smtp.starttls(context=ssl.create_default_context())
+            if settings.smtp_user:
+                smtp.login(settings.smtp_user, settings.smtp_password)
+            smtp.send_message(msg)
     except Exception as e:
         logger.warning(f"Email dispatch failed: {e}")

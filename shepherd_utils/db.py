@@ -492,6 +492,76 @@ async def reap_completed_callbacks(logger: logging.Logger) -> int:
     return deleted
 
 
+async def reap_abandoned_queries(
+    max_age_sec: float, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Fail-and-clean queries stuck in a non-terminal state past the budget.
+
+    A query that hasn't reached COMPLETED long after the whole-query upstream
+    budget (~5 min) has elapsed is considered abandoned -- usually because the
+    worker driving it crashed. We mark it ABANDONED, clear its pending callback
+    rows (the rows that otherwise keep ``oldest_callback_age_sec`` climbing and
+    re-firing the callback-age alert every cooldown), and return one record per
+    query so the caller can alert on it exactly once. The state flip means a
+    query is reaped a single time and never rediscovered.
+    """
+    abandoned: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                cur = await conn.execute(
+                    """
+                    SELECT b.qid,
+                           EXTRACT(EPOCH FROM (NOW() - b.start_time)) AS age_sec,
+                           COUNT(c.callback_id) AS callbacks
+                    FROM shepherd_brain b
+                    LEFT JOIN callbacks c ON c.query_id = b.qid
+                    WHERE b.state NOT IN ('COMPLETED', 'ABANDONED')
+                      AND b.start_time < NOW() - make_interval(secs => %s)
+                    GROUP BY b.qid, b.start_time
+                    """,
+                    (float(max_age_sec),),
+                )
+                rows = await cur.fetchall()
+                if not rows:
+                    return []
+                qids = [r[0] for r in rows]
+                # Clear callbacks first (FK references shepherd_brain), then
+                # move the parent query to a terminal ABANDONED state.
+                await conn.execute(
+                    "DELETE FROM callbacks WHERE query_id = ANY(%s)", (qids,)
+                )
+                await conn.execute(
+                    """
+                    UPDATE shepherd_brain
+                    SET state = 'ABANDONED', stop_time = NOW(),
+                        status = 'Abandoned: no completion within budget'
+                    WHERE qid = ANY(%s)
+                    """,
+                    (qids,),
+                )
+                await conn.commit()
+                abandoned = [
+                    {
+                        "qid": r[0],
+                        "age_sec": float(r[1] or 0),
+                        "callbacks_deleted": int(r[2] or 0),
+                    }
+                    for r in rows
+                ]
+            break
+        except OperationalError as e:
+            logger.warning(
+                f"Connection error reaping abandoned queries (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to reap abandoned queries: {e}")
+            break
+    return abandoned
+
+
 async def get_callback_query_id(
     callback_id: str,
     logger: logging.Logger,
