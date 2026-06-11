@@ -24,7 +24,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
 STREAM = "aragorn.lookup"
@@ -92,7 +92,8 @@ async def run_async_lookup(
 ) -> AsyncResponse:
     """Return an async lookup response with callback id."""
     callback_id = str(uuid.uuid4())[:8]
-    with tracer.start_as_current_span(f"aragorn.lookup.{callback_id}") as span:
+    with tracer.start_as_current_span("aragorn.lookup") as span:
+        span.set_attribute("callback_id", callback_id)
         lookup_carrier = {}
         inject(lookup_carrier)
         # Put callback UID and query ID in postgres
@@ -158,7 +159,8 @@ async def aragorn_lookup(task, logger: logging.Logger):
         #     json.dump(message, f, indent=2)
 
         logger.debug(f"""Sending lookup query to {settings.kg_retrieval_url}.""")
-        with tracer.start_as_current_span(f"aragorn.lookup.{callback_id}"):
+        with tracer.start_as_current_span("aragorn.lookup") as span:
+            span.set_attribute("callback_id", callback_id)
             async with httpx.AsyncClient(timeout=100) as client:
                 await client.post(
                     settings.kg_retrieval_url,
@@ -351,25 +353,9 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
-    start = time.time()
-    with tracer.start_as_current_span(STREAM, context=parent_ctx):
-        try:
-            await aragorn_lookup(task, logger)
-            # Always wrap up the task to ACK it in the broker
-            try:
-                await wrap_up_task(STREAM, GROUP, task, logger)
-            except Exception as e:
-                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-        except asyncio.CancelledError:
-            logger.warning(f"Task {task[0]} was cancelled")
-        except Exception as e:
-            logger.error(
-                f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
-            )
-            await handle_task_failure(STREAM, GROUP, task, logger)
-        finally:
-            limiter.release()
-            logger.info(f"Finished task {task[0]} in {time.time() - start}")
+    await run_task_lifecycle(
+        STREAM, GROUP, task, parent_ctx, logger, limiter, aragorn_lookup
+    )
 
 
 async def poll_for_tasks():

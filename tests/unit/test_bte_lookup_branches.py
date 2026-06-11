@@ -19,6 +19,7 @@ import logging
 import httpx
 import pytest
 
+from shepherd_utils import shared
 from workers.bte_lookup import worker as btel
 from workers.bte_lookup.worker import (
     AsyncResponse,
@@ -486,7 +487,9 @@ class _Limiter:
 @pytest.mark.asyncio
 async def test_bte_lookup_process_task_happy_path(redis_mock, mocker):
     mocker.patch.object(btel, "bte_lookup", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(btel, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
     limiter = _Limiter()
     await process_task(_make_task(), None, logger, limiter)
     assert mock_wrap.called
@@ -504,7 +507,7 @@ async def test_bte_lookup_process_task_routes_failure_to_handle_task_failure(
         side_effect=RuntimeError("kaboom"),
     )
     mock_failure = mocker.patch.object(
-        btel, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
     limiter = _Limiter()
     await process_task(_make_task(), None, logger, limiter)
@@ -521,7 +524,7 @@ async def test_bte_lookup_process_task_swallows_cancellation(redis_mock, mocker)
         side_effect=asyncio.CancelledError,
     )
     mock_failure = mocker.patch.object(
-        btel, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
     limiter = _Limiter()
     await process_task(_make_task(), None, logger, limiter)
@@ -534,7 +537,7 @@ async def test_bte_lookup_process_task_swallows_wrap_up_failure(redis_mock, mock
     """A wrap_up_task failure should be logged but not escape."""
     mocker.patch.object(btel, "bte_lookup", new_callable=mocker.AsyncMock)
     mocker.patch.object(
-        btel,
+        shared,
         "wrap_up_task",
         new_callable=mocker.AsyncMock,
         side_effect=RuntimeError("redis dropped"),

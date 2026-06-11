@@ -25,6 +25,8 @@ import logging
 
 import pytest
 
+from shepherd_utils import shared
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +64,9 @@ async def test_filter_kgraph_orphans_process_task_happy_path(redis_mock, mocker)
     from workers.filter_kgraph_orphans import worker as fko
 
     mocker.patch.object(fko, "do_filter_kgraph_orphans", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(fko, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await fko.process_task(_make_task("filter_kgraph_orphans"), None, logger, limiter)
@@ -83,7 +87,7 @@ async def test_filter_kgraph_orphans_process_task_failure_routes_to_failure_hand
         side_effect=RuntimeError("kaboom"),
     )
     mock_failure = mocker.patch.object(
-        fko, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -106,7 +110,7 @@ async def test_filter_kgraph_orphans_process_task_cancellation_does_not_route_fa
         side_effect=asyncio.CancelledError,
     )
     mock_failure = mocker.patch.object(
-        fko, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -123,7 +127,9 @@ async def test_filter_results_top_n_process_task_happy_path(redis_mock, mocker):
     from workers.filter_results_top_n import worker as frt
 
     mocker.patch.object(frt, "filter_results_top_n", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(frt, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await frt.process_task(_make_task("filter_results_top_n"), None, logger, limiter)
@@ -141,7 +147,7 @@ async def test_filter_results_top_n_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("oops"),
     )
     mock_failure = mocker.patch.object(
-        frt, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -157,7 +163,9 @@ async def test_filter_analyses_top_n_process_task_happy_path(redis_mock, mocker)
     from workers.filter_analyses_top_n import worker as fan
 
     mocker.patch.object(fan, "filter_analyses_top_n", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(fan, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await fan.process_task(_make_task("filter_analyses_top_n"), None, logger, limiter)
@@ -175,7 +183,7 @@ async def test_filter_analyses_top_n_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        fan, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -191,7 +199,9 @@ async def test_sort_results_score_process_task_happy_path(redis_mock, mocker):
     from workers.sort_results_score import worker as srs
 
     mocker.patch.object(srs, "sort_results_score", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(srs, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await srs.process_task(_make_task("sort_results_score"), None, logger, limiter)
@@ -209,7 +219,7 @@ async def test_sort_results_score_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        srs, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -225,7 +235,9 @@ async def test_example_ara_process_task_happy_path(redis_mock, mocker):
     from workers.example_ara import worker as eara
 
     mocker.patch.object(eara, "example_ara", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(eara, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await eara.process_task(_make_task("example"), None, logger, limiter)
@@ -243,7 +255,7 @@ async def test_example_ara_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        eara, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -260,7 +272,7 @@ async def test_example_score_process_task_happy_path(redis_mock, mocker):
 
     mocker.patch.object(escore, "example_score", new_callable=mocker.AsyncMock)
     mock_wrap = mocker.patch.object(
-        escore, "wrap_up_task", new_callable=mocker.AsyncMock
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -279,7 +291,7 @@ async def test_example_score_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        escore, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -296,7 +308,7 @@ async def test_example_lookup_process_task_happy_path(redis_mock, mocker):
 
     mocker.patch.object(elookup, "example_lookup", new_callable=mocker.AsyncMock)
     mock_wrap = mocker.patch.object(
-        elookup, "wrap_up_task", new_callable=mocker.AsyncMock
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -315,7 +327,7 @@ async def test_example_lookup_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        elookup, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -331,7 +343,9 @@ async def test_aragorn_process_task_happy_path(redis_mock, mocker):
     from workers.aragorn import worker as ar
 
     mocker.patch.object(ar, "aragorn", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(ar, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await ar.process_task(_make_task("aragorn"), None, logger, limiter)
@@ -349,7 +363,7 @@ async def test_aragorn_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        ar, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -365,7 +379,9 @@ async def test_aragorn_pathfinder_process_task_happy_path(redis_mock, mocker):
     from workers.aragorn_pathfinder import worker as apf
 
     mocker.patch.object(apf, "shadowfax", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(apf, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await apf.process_task(_make_task("aragorn.pathfinder"), None, logger, limiter)
@@ -383,7 +399,7 @@ async def test_aragorn_pathfinder_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        apf, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -399,7 +415,9 @@ async def test_bte_process_task_happy_path(redis_mock, mocker):
     from workers.bte import worker as bte
 
     mocker.patch.object(bte, "bte", new_callable=mocker.AsyncMock)
-    mock_wrap = mocker.patch.object(bte, "wrap_up_task", new_callable=mocker.AsyncMock)
+    mock_wrap = mocker.patch.object(
+        shared, "wrap_up_task", new_callable=mocker.AsyncMock
+    )
 
     limiter = _Limiter()
     await bte.process_task(_make_task("bte"), None, logger, limiter)
@@ -417,7 +435,7 @@ async def test_bte_process_task_failure(redis_mock, mocker):
         side_effect=RuntimeError("nope"),
     )
     mock_failure = mocker.patch.object(
-        bte, "handle_task_failure", new_callable=mocker.AsyncMock
+        shared, "handle_task_failure", new_callable=mocker.AsyncMock
     )
 
     limiter = _Limiter()
@@ -436,7 +454,7 @@ async def test_process_task_swallows_wrap_up_failures(redis_mock, mocker):
 
     mocker.patch.object(fko, "do_filter_kgraph_orphans", new_callable=mocker.AsyncMock)
     mocker.patch.object(
-        fko,
+        shared,
         "wrap_up_task",
         new_callable=mocker.AsyncMock,
         side_effect=RuntimeError("redis dropped"),

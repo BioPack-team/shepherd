@@ -17,7 +17,7 @@ from xgboost import XGBClassifier
 from shepherd_utils.config import settings
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 STREAM = "score_paths"
 GROUP = "consumer"
@@ -261,24 +261,11 @@ def score_paths(task, logger):
 
 
 async def process_task(task, parent_ctx, logger, limiter):
-    start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
+    async def _run(task, logger):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(executor, partial(score_paths, task, logger))
-        try:
-            await wrap_up_task(STREAM, GROUP, task, logger)
-        except Exception as e:
-            logger.error(f"Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task cancelled: {task[0]}")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Task took {time.time() - start} seconds")
+
+    await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
 
 async def poll_for_tasks():
