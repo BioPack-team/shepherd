@@ -604,6 +604,10 @@ def merge_messages(
 
         # --- Resolve the pinned node IDs from any old result's node_bindings ---
         # (They should all bind the same start/end IDs since they're pinned)
+        if not analyses:
+            result["message"]["results"] = []
+            return result
+
         start_kg_id = None
         end_kg_id = None
         for new_result in new_response["message"]["results"]:
@@ -614,6 +618,10 @@ def merge_messages(
                 end_kg_id = nb[object_node_id][0]["id"]
             if start_kg_id and end_kg_id:
                 break
+
+        if not start_kg_id or not end_kg_id:
+            result["message"]["results"] = []
+            return result
 
         # --- Assemble the single Pathfinder result ---
         pathfinder_result = {
