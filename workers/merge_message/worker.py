@@ -607,7 +607,7 @@ def merge_messages(
         if not analyses:
             result["message"]["results"] = []
             return result
-        
+
         start_kg_id = None
         end_kg_id = None
         for new_result in new_response["message"]["results"]:
