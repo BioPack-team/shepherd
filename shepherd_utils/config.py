@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     pathfinder_embeddings_dir: str = "pathfinder_embeddings"
 
     otel_enabled: bool = True
-    jaeger_host: str = "http://localhost"
+    jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
 
     # ttl in seconds
