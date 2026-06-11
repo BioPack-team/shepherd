@@ -18,13 +18,16 @@ Runs alongside the poll loop on a slower cadence. Handles two things:
 
 import asyncio
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from shepherd_utils.broker import broker_client
+from shepherd_utils.config import settings
+from shepherd_utils.db import reap_abandoned_queries as reap_abandoned_queries_db
 from shepherd_utils.db import reap_completed_callbacks
 from shepherd_utils.heartbeat import HEARTBEAT_SCAN_PATTERN
 
-from . import storage
+from . import alerts, storage
 from .poller import SEED_STREAMS
 
 logger = logging.getLogger("shepherd.monitor.janitor")
@@ -160,6 +163,53 @@ async def trim_streams() -> List[Dict[str, Any]]:
 
 async def reap_callbacks() -> int:
     return await reap_completed_callbacks(logger)
+
+
+async def reap_abandoned_queries() -> List[Dict[str, Any]]:
+    """Fail-and-clean queries stuck without completion past the budget.
+
+    Unlike ``reap_callbacks`` (which only sweeps callbacks of already-COMPLETED
+    queries), this catches queries whose driving worker crashed: they never
+    reach a terminal state, so their callbacks linger forever and keep
+    re-tripping the callback-age alert. We mark them ABANDONED, clear those
+    callbacks, and fire a single alert per incident so the operator can track
+    how often it happens -- without the every-cooldown repeat for the same
+    stuck query.
+    """
+    abandoned = await reap_abandoned_queries_db(
+        settings.monitor_abandoned_query_sec, logger
+    )
+    if abandoned:
+        await _alert_abandoned(abandoned)
+    return abandoned
+
+
+async def _alert_abandoned(abandoned: List[Dict[str, Any]]) -> None:
+    now = time.time()
+    events: List[Dict[str, Any]] = []
+    for q in abandoned:
+        mins = q["age_sec"] / 60
+        n = q["callbacks_deleted"]
+        event = {
+            "ts": now,
+            "rule": "query_abandoned",
+            "severity": "warning",
+            "detail": (
+                f"query {q['qid']} abandoned after {q['age_sec']:.0f}s; "
+                f"{n} callback(s) cleared"
+            ),
+            "message": (
+                f"Query `{q['qid']}` was abandoned (stuck ~{mins:.0f}m with no "
+                f"completion) and cleaned up; {n} pending callback(s) cleared."
+            ),
+            "qid": q["qid"],
+        }
+        events.append(event)
+        await alerts._record_alert(event)
+    if len(events) == 1:
+        await alerts.dispatch(events[0])
+    else:
+        await alerts.dispatch_batch(events, f"{len(events)} abandoned queries")
 
 
 async def _list_alive_consumers() -> set:
@@ -375,11 +425,13 @@ async def run_once() -> Dict[str, Any]:
     (
         trim_results,
         callbacks_deleted,
+        abandoned_queries,
         consumer_cleanup,
         retention,
     ) = await asyncio.gather(
         trim_streams(),
         reap_callbacks(),
+        reap_abandoned_queries(),
         cleanup_stale_consumers(),
         sweep_history_retention(),
         return_exceptions=False,
@@ -387,6 +439,7 @@ async def run_once() -> Dict[str, Any]:
     return {
         "streams": trim_results,
         "callbacks_deleted": callbacks_deleted,
+        "abandoned_queries": abandoned_queries,
         "stale_consumers": consumer_cleanup,
         "history_retention": retention,
     }
@@ -398,10 +451,17 @@ async def janitor_loop() -> None:
             summary = await run_once()
             total_trimmed = sum(s.get("trimmed", 0) for s in summary["streams"])
             consumers_deleted = summary["stale_consumers"]["deleted"]
-            if total_trimmed or summary["callbacks_deleted"] or consumers_deleted:
+            abandoned = len(summary["abandoned_queries"])
+            if (
+                total_trimmed
+                or summary["callbacks_deleted"]
+                or abandoned
+                or consumers_deleted
+            ):
                 logger.info(
                     f"Janitor: trimmed {total_trimmed} stream entries, "
                     f"reaped {summary['callbacks_deleted']} orphan callbacks, "
+                    f"cleaned {abandoned} abandoned queries, "
                     f"deleted {consumers_deleted} stale consumers"
                 )
         except Exception as e:

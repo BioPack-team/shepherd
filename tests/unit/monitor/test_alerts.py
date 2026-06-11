@@ -119,7 +119,7 @@ async def test_slack_batch_lists_every_worker(mocker):
             "message": "Worker `bte` scaled to zero.",
         },
     ]
-    await alerts._dispatch_slack_batch(events)
+    await alerts._dispatch_slack_batch(events, "2 workers down")
     post.assert_called_once()
     text = post.call_args.args[1]
     assert "2 workers down" in text

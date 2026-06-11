@@ -202,7 +202,7 @@ class AlertEngine:
         if len(events) == 1:
             await dispatch(events[0])
         else:
-            await dispatch_batch(events)
+            await dispatch_batch(events, f"{len(events)} workers down")
 
     async def evaluate(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Return the list of alerts that fired on this snapshot."""
@@ -372,11 +372,15 @@ async def dispatch(event: Dict[str, Any]) -> None:
     )
 
 
-async def dispatch_batch(events: List[Dict[str, Any]]) -> None:
-    """Send one combined Slack/email message for several worker-down alerts."""
+async def dispatch_batch(events: List[Dict[str, Any]], summary: str) -> None:
+    """Send one combined Slack/email message for several related alerts.
+
+    ``summary`` is the short headline phrase, e.g. ``"18 workers down"`` or
+    ``"3 abandoned queries"``.
+    """
     await asyncio.gather(
-        _dispatch_slack_batch(events),
-        _dispatch_email_batch(events),
+        _dispatch_slack_batch(events, summary),
+        _dispatch_email_batch(events, summary),
         return_exceptions=True,
     )
 
@@ -394,7 +398,7 @@ async def _dispatch_slack(event: Dict[str, Any]) -> None:
     await _post_slack(url, text)
 
 
-async def _dispatch_slack_batch(events: List[Dict[str, Any]]) -> None:
+async def _dispatch_slack_batch(events: List[Dict[str, Any]], summary: str) -> None:
     url = settings.slack_webhook_url
     if not url:
         return
@@ -402,7 +406,7 @@ async def _dispatch_slack_batch(events: List[Dict[str, Any]]) -> None:
     emoji = _SEVERITY_EMOJI.get(severity, ":warning:")
     bullets = "\n".join(f"• {ev['message']}" for ev in events)
     text = (
-        f"{emoji} *Shepherd alert* — {len(events)} workers down ({severity})\n"
+        f"{emoji} *Shepherd alert* — {summary} ({severity})\n"
         f"{_env_context_line()}\n"
         f"{bullets}"
     )
@@ -423,11 +427,11 @@ async def _dispatch_email(event: Dict[str, Any]) -> None:
     await asyncio.get_running_loop().run_in_executor(None, _send_email_sync, event)
 
 
-async def _dispatch_email_batch(events: List[Dict[str, Any]]) -> None:
+async def _dispatch_email_batch(events: List[Dict[str, Any]], summary: str) -> None:
     if not (settings.alert_email_to and settings.smtp_host):
         return
     await asyncio.get_running_loop().run_in_executor(
-        None, _send_email_batch_sync, events
+        None, _send_email_batch_sync, events, summary
     )
 
 
@@ -445,17 +449,17 @@ def _send_email_sync(event: Dict[str, Any]) -> None:
     _smtp_send(msg)
 
 
-def _send_email_batch_sync(events: List[Dict[str, Any]]) -> None:
+def _send_email_batch_sync(events: List[Dict[str, Any]], summary: str) -> None:
     severity = _max_severity(events)
     msg = EmailMessage()
-    msg["Subject"] = f"[Shepherd] {severity}: {len(events)} workers down"
+    msg["Subject"] = f"[Shepherd] {severity}: {summary}"
     msg["From"] = settings.alert_email_from or settings.smtp_user or "shepherd-monitor"
     msg["To"] = settings.alert_email_to
     body = "\n".join(f"- {ev['message']}" for ev in events)
     msg.set_content(
         f"Severity: {severity}\n"
         f"Time: {time.ctime(events[0]['ts'])}\n\n"
-        f"{len(events)} workers went down:\n{body}\n"
+        f"{summary}:\n{body}\n"
     )
     _smtp_send(msg)
 

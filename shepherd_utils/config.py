@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # per worker. The poll loop ticks faster than this, so the buffer flushes
     # on a normal tick without a dedicated timer.
     monitor_down_debounce_sec: float = 5.0
+    # A query that never reaches COMPLETED this long after it started is treated
+    # as abandoned (the worker driving it almost certainly crashed). The janitor
+    # marks it ABANDONED and clears its pending callbacks. Must comfortably
+    # exceed the whole-query upstream budget (~5 min) so genuinely in-flight
+    # queries are never reaped; the default matches the callback-age alert.
+    monitor_abandoned_query_sec: float = 600.0
     monitor_alerts_config: str = "/app/monitor_alerts.yaml"
     slack_webhook_url: str = ""
     alert_email_to: str = ""
