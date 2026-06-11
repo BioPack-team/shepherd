@@ -51,7 +51,13 @@ PER_STREAM_MIN_IDLE_SEC: Dict[str, int] = {
     "merge_message": 60,
     "score_paths": 60,
     "example.score": 30,
-    # Filter / entry / finish workers fall through to the default (fast).
+    # finish_query sends the async callback, which retries with backoff and can
+    # legitimately run for minutes against a slow callback endpoint (httpx
+    # timeout 120s x up to 3 attempts). At the fast default (30s) a second
+    # consumer could XCLAIM the message mid-callback and deliver it twice. The
+    # heartbeat filter is the primary guard; this floor is the backstop.
+    "finish_query": 240,
+    # Other filter / entry workers fall through to the default (fast).
 }
 
 

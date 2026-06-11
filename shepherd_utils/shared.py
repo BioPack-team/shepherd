@@ -3,6 +3,9 @@
 import asyncio
 import json
 import logging
+import os
+import signal
+import sys
 import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
@@ -50,6 +53,131 @@ async def _record_task_duration(
 
 
 setup_logging()
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown / in-flight drain
+#
+# Kubernetes sends SIGTERM on every rollout, scale-down and node drain. Without
+# handling it the worker is killed mid-task and the work is only recovered later
+# via Redis reclaim. Here we install asyncio-aware signal handlers that flip a
+# shutdown flag; ``get_tasks`` then stops pulling new work and drains anything
+# in flight before the process exits.
+#
+# Draining piggybacks on the concurrency semaphore that ``get_tasks`` already
+# owns: every worker acquires a permit before a task starts and releases it when
+# the task finishes (in run_task_lifecycle / each worker's process_task finally).
+# So "all permits acquired" is equivalent to "no task in flight" -- we don't need
+# the workers to register their background tasks with us.
+# ---------------------------------------------------------------------------
+
+_shutdown = asyncio.Event()
+_active_heartbeat: "Heartbeat | None" = None
+_signal_handlers_installed = False
+
+
+def is_shutting_down() -> bool:
+    return _shutdown.is_set()
+
+
+def _request_shutdown() -> None:
+    _shutdown.set()
+
+
+def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
+    """Install asyncio-aware SIGTERM/SIGINT handlers (idempotent).
+
+    ``loop.add_signal_handler`` is the safe way to react to a signal from inside
+    a running event loop: the callback runs between awaits rather than in the
+    interrupt context, so it can flip an ``asyncio.Event`` the drain loop awaits.
+    """
+    global _signal_handlers_installed, _active_heartbeat
+    # Always update the heartbeat reference so the marker is written for the
+    # currently-active worker even if get_tasks is re-entered after an error.
+    _active_heartbeat = heartbeat
+    if _signal_handlers_installed:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Platforms without loop signal support fall back to signal.signal.
+            try:
+                signal.signal(sig, lambda *_: _request_shutdown())
+            except (ValueError, OSError):
+                pass
+    _signal_handlers_installed = True
+
+
+async def _drain_and_exit(
+    limiter: asyncio.Semaphore,
+    task_limit: int,
+    logger: logging.Logger,
+) -> None:
+    """Wait for in-flight tasks to finish, mark a clean shutdown, then exit.
+
+    Acquiring all ``task_limit`` permits means every in-flight task has released
+    its permit -- i.e. completed. Bounded by ``worker_drain_timeout_sec``;
+    stragglers are left in the stream for Redis reclaim to retry.
+    """
+    logger.info("Shutdown signal received; draining in-flight tasks.")
+    acquired = 0
+
+    async def _acquire_all() -> None:
+        nonlocal acquired
+        for _ in range(task_limit):
+            await limiter.acquire()
+            acquired += 1
+
+    try:
+        await asyncio.wait_for(
+            _acquire_all(), timeout=float(settings.worker_drain_timeout_sec)
+        )
+        logger.info("All in-flight tasks drained cleanly.")
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Drain timed out with ~{task_limit - acquired} task(s) still "
+            "running; leaving them in the stream for Redis reclaim."
+        )
+
+    hb = _active_heartbeat
+    if hb is not None:
+        try:
+            await hb.mark_clean_shutdown()
+        except Exception as e:
+            logger.debug(f"Failed to write clean shutdown marker: {e}")
+        try:
+            await hb.stop()
+        except Exception:
+            pass
+    logger.info("Exiting after graceful drain.")
+    sys.exit(0)
+
+
+def _resolve_task_limit(stream: str, default: int, logger: logging.Logger) -> int:
+    """Allow ops to override a worker's concurrency via the TASK_LIMIT env var.
+
+    Each worker runs as its own container/Deployment, so a single ``TASK_LIMIT``
+    env per Deployment unambiguously tunes that worker without a code change or
+    rebuild. Falls back to the value the worker passed in.
+    """
+    raw = os.getenv("TASK_LIMIT")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        if value < 1:
+            raise ValueError
+    except ValueError:
+        logger.warning(f"Ignoring invalid TASK_LIMIT={raw!r} for {stream}.")
+        return default
+    if value != default:
+        logger.info(f"TASK_LIMIT for {stream} overridden to {value} via env.")
+    return value
 
 
 def get_next_operation(
@@ -112,16 +240,25 @@ async def get_tasks(
     worker_logger = logging.getLogger(f"shepherd.{stream}.{consumer}")
     worker_logger.setLevel(level_number)
     worker_logger.addHandler(log_handler)
+    # allow ops to tune concurrency per Deployment without a code change
+    task_limit = _resolve_task_limit(stream, task_limit, worker_logger)
     # initialize opens the db connection
     await initialize_db()
     task_limiter = asyncio.Semaphore(task_limit)
-    # register this worker with the monitor via a Redis heartbeat key
-    Heartbeat(stream, consumer, task_limit).start()
+    # register this worker with the monitor via a Redis heartbeat key. The
+    # heartbeat does not install its own (immediate-exit) signal handlers --
+    # install_shutdown_handlers below installs asyncio-aware ones that drain.
+    heartbeat = Heartbeat(stream, consumer, task_limit, manage_signals=False).start()
+    install_shutdown_handlers(heartbeat)
     # periodic orphan-task reclaim so a worker crash doesn't strand its PEL
     reclaim_interval = max(5.0, float(settings.reclaim_interval_sec))
     last_reclaim = 0.0
     # continuously poll the broker for new tasks
     while True:
+        # On shutdown, stop taking new work and drain anything in flight.
+        if is_shutting_down():
+            await _drain_and_exit(task_limiter, task_limit, worker_logger)
+            return
         # Before fetching new work, check whether any pending messages on this
         # stream belong to a dead consumer and claim them. Heartbeat + idle
         # filtering inside ``reclaim_orphaned`` keep live consumers safe.
@@ -155,6 +292,12 @@ async def get_tasks(
 
         # check if we can take another task
         await task_limiter.acquire()
+        # A shutdown may have arrived while we waited for a free slot; don't
+        # fetch new work in that case -- release and drain.
+        if is_shutting_down():
+            task_limiter.release()
+            await _drain_and_exit(task_limiter, task_limit, worker_logger)
+            return
         # get a new task for the given target
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
