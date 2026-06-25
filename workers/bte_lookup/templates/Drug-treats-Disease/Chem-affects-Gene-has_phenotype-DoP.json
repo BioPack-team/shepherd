@@ -18,16 +18,12 @@
       "eA": {
         "subject": "$source",
         "object": "nA",
-        "predicates": ["biolink:regulates", "biolink:affects"]
+        "predicates": ["biolink:affects"]
       },
       "eB": {
         "subject": "nA",
         "object": "$target",
-        "predicates": [
-          "biolink:affects",
-          "biolink:causes",
-          "biolink:contributes_to"
-        ]
+        "predicates": ["biolink:has_phenotype"]
       }
     }
   }

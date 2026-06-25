@@ -12,7 +12,8 @@
     "object": ["Disease", "PhenotypicFeature", "DiseaseOrPhenotypicFeature"],
     "templates": [
       "Chem-treats-PhenoOfDisease.json",
-      "Chem-affects-Gene-associated_variant_contributes-DoP.json"
+      "Chem-affects-Gene-associated_variant_contributes-DoP.json",
+      "Chem-affects-Gene-has_phenotype-DoP.json"
     ],
     "qualifiers": {}
   },
