@@ -18,14 +18,25 @@
       "eA": {
         "subject": "$source",
         "object": "nA",
-        "predicates": ["biolink:regulates", "biolink:affects"]
+        "predicates": ["biolink:affects"]
       },
       "eB": {
         "subject": "nA",
         "object": "$target",
-        "predicates": [
-          "biolink:gene_associated_with_condition",
-          "biolink:biomarker_for"
+        "predicates": ["biolink:associated_with"],
+        "qualifier_constraints": [
+          {
+            "qualifier_set": [
+              {
+                "qualifier_type_id": "biolink:subject_form_or_variant_qualifier",
+                "qualifier_value": "genetic_variant_form"
+              },
+              {
+                "qualifier_type_id": "biolink:qualified_predicate",
+                "qualifier_value": "biolink:contributes_to"
+              }
+            ]
+          }
         ]
       }
     }
