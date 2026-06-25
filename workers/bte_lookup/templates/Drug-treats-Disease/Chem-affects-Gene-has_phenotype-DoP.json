@@ -6,8 +6,7 @@
         "categories": ["biolink:ChemicalEntity"]
       },
       "nA": {
-        "categories": ["biolink:Gene"],
-        "is_set": true
+        "categories": ["biolink:Gene"]
       },
       "$target": {
         "ids": ["$target_id"],
