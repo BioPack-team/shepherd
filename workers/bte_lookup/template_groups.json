@@ -12,6 +12,8 @@
     "object": ["Disease", "PhenotypicFeature", "DiseaseOrPhenotypicFeature"],
     "templates": [
       "Chem-treats-PhenoOfDisease.json",
+      "Chem-affects_increases-Gene-loss_function-Disease.json",
+      "Chem-affects_decreases-Gene-non_loss_function-Disease.json",
       "Chem-affects-Gene-associated_variant_contributes-DoP.json",
       "Chem-affects-Gene-has_phenotype-DoP.json"
     ],
