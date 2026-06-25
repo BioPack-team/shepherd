@@ -34,8 +34,7 @@
     "templates": [
       "Chem-IncreaseAnotherGeneThatUpregs-Gene.json",
       "Chem-DecreaseAnotherGeneThatDownregs-Gene.json",
-      "Chem-physically_interacts-GeneThatUpregs-Gene.json",
-      "Chem-physically_interacts-Gene.json"
+      "Chem-physically_interacts-GeneThatUpregs-Gene.json"
     ]
   },
   {
@@ -56,8 +55,7 @@
     "templates": [
       "Chem-IncreaseAnotherGeneThatDownregs-Gene.json",
       "Chem-DecreaseAnotherGeneThatUpregs-Gene.json",
-      "Chem-physically_interacts-GeneThatDownregs-Gene.json",
-      "Chem-physically_interacts-Gene.json"
+      "Chem-physically_interacts-GeneThatDownregs-Gene.json"
     ]
   }
 ]
