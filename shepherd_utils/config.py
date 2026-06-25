@@ -29,7 +29,9 @@ def parse_size_to_bytes(value: str) -> int:
     """
     if not value:
         return 0
-    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgtp]i?)?b?\s*", str(value), re.IGNORECASE)
+    m = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*([kmgtp]i?)?b?\s*", str(value), re.IGNORECASE
+    )
     if not m:
         return 0
     number, unit = m.group(1), (m.group(2) or "").lower()

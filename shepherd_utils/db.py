@@ -39,6 +39,7 @@ def log_pg_disk_full(
         f"{exc} -- Postgres is rejecting writes because its data volume is full"
     )
 
+
 CONNINFO = (
     f"postgresql://postgres:{settings.postgres_password}@"
     f"{settings.postgres_host}:{settings.postgres_port}/"
