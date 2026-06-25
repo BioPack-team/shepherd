@@ -1,4 +1,39 @@
+import re
+
 from pydantic_settings import BaseSettings
+
+# Binary suffixes (Ki/Mi/...) are powers of 1024; decimal suffixes (K/M/...) are
+# powers of 1000 -- matching Kubernetes resource-quantity semantics.
+_SIZE_UNITS = {
+    "": 1,
+    "k": 10**3,
+    "m": 10**6,
+    "g": 10**9,
+    "t": 10**12,
+    "p": 10**15,
+    "ki": 2**10,
+    "mi": 2**20,
+    "gi": 2**30,
+    "ti": 2**40,
+    "pi": 2**50,
+}
+
+
+def parse_size_to_bytes(value: str) -> int:
+    """Parse a size string into bytes.
+
+    Accepts Kubernetes-style quantities (``"100Gi"``, ``"50G"``, ``"2Ti"``,
+    ``"100GiB"``) and plain byte counts (``"107374182400"``). Returns 0 for
+    empty or unparseable input, which callers treat as "capacity unknown /
+    feature disabled".
+    """
+    if not value:
+        return 0
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgtp]i?)?b?\s*", str(value), re.IGNORECASE)
+    if not m:
+        return 0
+    number, unit = m.group(1), (m.group(2) or "").lower()
+    return int(float(number) * _SIZE_UNITS[unit])
 
 
 class Settings(BaseSettings):
@@ -12,6 +47,10 @@ class Settings(BaseSettings):
     postgres_host: str = "shepherd_db"
     postgres_port: int = 5432
     postgres_password: str = "supersecretpassw0rd"
+    # Size of the Postgres data volume, set from the SAME Helm value that sizes
+    # the PVC (e.g. "100Gi"). Lets the monitor compute how full the disk is and
+    # alert before it fills. Empty disables the db-capacity alert.
+    pg_volume_capacity: str = ""
 
     redis_host: str = "shepherd_broker"
     redis_port: int = 6379
@@ -86,6 +125,11 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+
+    @property
+    def pg_volume_capacity_bytes(self) -> int:
+        """Configured Postgres volume size in bytes (0 if unset)."""
+        return parse_size_to_bytes(self.pg_volume_capacity)
 
     class Config:
         env_file = ".env"

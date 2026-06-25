@@ -17,6 +17,28 @@ from .config import settings
 
 PG_RETRIES = 5
 
+# Postgres SQLSTATE 53100 is ``disk_full``. A full data volume surfaces as
+# psycopg.errors.DiskFull, which subclasses OperationalError -- so it lands in
+# the OperationalError branches of the retry loops below, where retrying can
+# never help. We detect it explicitly and emit one stable, greppable marker so
+# a cluster-wide outage caused by a full disk is obvious in every worker's logs
+# instead of hiding behind generic "connection error" noise.
+PG_DISK_FULL_SQLSTATE = "53100"
+
+
+def is_disk_full_error(exc: BaseException) -> bool:
+    """True if *exc* is a Postgres error caused by a full data volume."""
+    return getattr(exc, "sqlstate", None) == PG_DISK_FULL_SQLSTATE
+
+
+def log_pg_disk_full(
+    logger: logging.Logger, operation: str, exc: BaseException
+) -> None:
+    logger.critical(
+        f"PG_DISK_FULL operation={operation} sqlstate={getattr(exc, 'sqlstate', None)}: "
+        f"{exc} -- Postgres is rejecting writes because its data volume is full"
+    )
+
 CONNINFO = (
     f"postgresql://postgres:{settings.postgres_password}@"
     f"{settings.postgres_host}:{settings.postgres_port}/"
@@ -187,7 +209,10 @@ async def add_query(
             # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
             await conn.commit()
     except Exception as e:
-        logger.error(f"Failed to save initial query state to db: {e}")
+        if is_disk_full_error(e):
+            log_pg_disk_full(logger, "add_query", e)
+        else:
+            logger.error(f"Failed to save initial query state to db: {e}")
         raise Exception("Failed to save initial query state.")
     logger.debug(f"Adding query took {time.time() - start} seconds")
 
@@ -367,12 +392,16 @@ async def add_callback_id(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "add_callback_id", e)
+                break
             logger.error(f"Connection error on attempt {attempt}: {e}")
             logger.info(f"Pool stats: {pool.get_stats()}")
             await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error(f"Failed to save callback: {e}")
+            break
 
 
 async def remove_callback_id(
@@ -392,6 +421,9 @@ async def remove_callback_id(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "remove_callback_id", e)
+                break
             logger.error(
                 f"Connection error removing callback id after attempt {attempt}: {e}"
             )
@@ -400,6 +432,7 @@ async def remove_callback_id(
             continue
         except Exception as e:
             logger.error(f"Failed to remove callback after processing: {e}")
+            break
 
 
 async def get_running_callbacks(
@@ -421,6 +454,9 @@ async def get_running_callbacks(
                 running_lookups = rows
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_running_callbacks", e)
+                break
             logger.error(
                 f"Connection error getting running callbacks after attempt {attempt}: {e}"
             )
@@ -450,6 +486,9 @@ async def cleanup_callbacks(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "cleanup_callbacks", e)
+                break
             logger.error(
                 f"Connection error deleting callbacks after attempt {attempt}: {e}"
             )
@@ -458,6 +497,7 @@ async def cleanup_callbacks(
             continue
         except Exception as e:
             logger.error(f"Failed to remove running lookups: {e}")
+            break
 
 
 async def reap_completed_callbacks(logger: logging.Logger) -> int:
@@ -481,6 +521,9 @@ async def reap_completed_callbacks(logger: logging.Logger) -> int:
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "reap_completed_callbacks", e)
+                break
             logger.warning(
                 f"Connection error reaping completed callbacks (attempt {attempt}): {e}"
             )
@@ -551,6 +594,9 @@ async def reap_abandoned_queries(
                 ]
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "reap_abandoned_queries", e)
+                break
             logger.warning(
                 f"Connection error reaping abandoned queries (attempt {attempt}): {e}"
             )
@@ -582,6 +628,9 @@ async def get_callback_query_id(
                     original_query = row
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_callback_query_id", e)
+                break
             logger.error(
                 f"Connection error getting query id from callback after attempt {attempt}: {e}"
             )
@@ -590,6 +639,7 @@ async def get_callback_query_id(
             continue
         except Exception as e:
             logger.error(f"Failed to get a query id from callback: {e}")
+            break
     return original_query
 
 
@@ -612,6 +662,9 @@ async def get_query_state(
                 query_state = row
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_query_state", e)
+                break
             logger.error(
                 f"Connection error getting query state after attempt {attempt}: {e}"
             )
@@ -620,6 +673,7 @@ async def get_query_state(
             continue
         except Exception as e:
             logger.error(f"Failed to get query state: {e}")
+            break
     return query_state
 
 
@@ -644,6 +698,9 @@ async def set_query_completed(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "set_query_completed", e)
+                break
             logger.error(
                 f"Connection error setting query completed after attempt {attempt}: {e}"
             )
@@ -652,3 +709,4 @@ async def set_query_completed(
             continue
         except Exception as e:
             logger.error(f"Failed to successfully complete query in db: {e}")
+            break

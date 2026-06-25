@@ -102,3 +102,22 @@ rules:
     threshold: 150
     duration: 1m
     severity: warning
+
+  # Postgres disk capacity: warn before the data volume fills and crashes PG.
+  # Driven by PG_VOLUME_CAPACITY (set from the same Helm value as the PVC size);
+  # these rules are a no-op until that env var is configured. The percentage is
+  # based on pg_database_size + WAL, which under-counts true filesystem usage --
+  # treat as early warning, not a replacement for an infra-level volume alert.
+  - name: pg_disk_almost_full
+    type: db_capacity
+    threshold: 80
+    duration: 2m
+    severity: warning
+    message: "Postgres data volume is over 80% full. Plan to grow the PVC soon."
+
+  - name: pg_disk_critically_full
+    type: db_capacity
+    threshold: 90
+    duration: 1m
+    severity: critical
+    message: "Postgres data volume is over 90% full. Grow the PVC now to avoid a crash."

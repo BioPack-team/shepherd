@@ -87,6 +87,8 @@ class Rule:
             ):
                 return f"{self.stream} pending {stats['pending']} > {self.threshold}"
             return None
+        if self.kind == "db_capacity":
+            return self._eval_db_capacity(snapshot)
         return None
 
     def _eval_threshold(self, snapshot: Dict[str, Any]) -> Optional[str]:
@@ -104,6 +106,29 @@ class Rule:
             v = snapshot["postgres"].get("connection_count", 0)
             if self.threshold is not None and v > self.threshold:
                 return f"pg connections {v} > {self.threshold}"
+        return None
+
+    def _eval_db_capacity(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when the Postgres volume crosses ``threshold`` percent full.
+
+        ``disk_used_pct`` is populated by the poller only when
+        ``PG_VOLUME_CAPACITY`` is configured; without that we don't know the
+        denominator, so the rule is a no-op. The percentage is based on
+        ``pg_database_size`` + WAL, which under-counts true filesystem use --
+        early warning, not a substitute for an infra-level volume alert.
+        """
+        pg = snapshot.get("postgres", {})
+        capacity = pg.get("disk_capacity_bytes", 0)
+        if not capacity or self.threshold is None:
+            return None
+        pct = pg.get("disk_used_pct", 0)
+        if pct >= float(self.threshold):
+            used_gb = pg.get("disk_used_bytes", 0) / 1e9
+            cap_gb = capacity / 1e9
+            return (
+                f"Postgres volume {pct:.1f}% full "
+                f"({used_gb:.1f}GB of {cap_gb:.1f}GB) >= {self.threshold}%"
+            )
         return None
 
     def _eval_heartbeat_lost(self, snapshot: Dict[str, Any]) -> Optional[str]:
