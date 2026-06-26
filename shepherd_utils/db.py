@@ -58,7 +58,7 @@ async def check_connection(conn):
 
 pool = AsyncConnectionPool(
     conninfo=CONNINFO,
-    timeout=10,
+    timeout=settings.postgres_pool_timeout,
     min_size=5,
     max_size=10,
     max_idle=300,
@@ -198,7 +198,7 @@ async def add_query(
         logger.error(f"Failed to save initial query or response: {e}")
         raise Exception("Failed to save initial query or response.")
     try:
-        async with pool.connection(60) as conn:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
             await conn.execute(
                 """
             INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status, domain) VALUES (
@@ -377,7 +377,7 @@ async def add_callback_id(
     """Add a callback->query mapping."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 INSERT INTO callbacks (query_id, callback_id, otel_trace) VALUES (
@@ -412,7 +412,7 @@ async def remove_callback_id(
     """Once a callback has been processed, remove it."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 DELETE FROM callbacks WHERE callback_id = %s
@@ -444,7 +444,7 @@ async def get_running_callbacks(
     running_lookups = []
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT callback_id FROM callbacks WHERE query_id = %s
@@ -477,7 +477,7 @@ async def cleanup_callbacks(
     """Remove any current running callbacks."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 DELETE FROM callbacks WHERE query_id = %s
@@ -511,7 +511,7 @@ async def reap_completed_callbacks(logger: logging.Logger) -> int:
     deleted = 0
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cur = await conn.execute("""
                     DELETE FROM callbacks
                     WHERE query_id IN (
@@ -552,7 +552,7 @@ async def reap_abandoned_queries(
     abandoned: List[Dict[str, Any]] = []
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cur = await conn.execute(
                     """
                     SELECT b.qid,
@@ -627,7 +627,7 @@ async def purge_old_queries(
         return result
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 # callbacks FK-references shepherd_brain, so clear any leftover
                 # rows for the doomed queries first (most are already reaped on
                 # completion, but a crash can leave stragglers).
@@ -683,7 +683,7 @@ async def get_callback_query_id(
     original_query = None
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT query_id, otel_trace FROM callbacks WHERE callback_id = %s
@@ -718,7 +718,7 @@ async def get_query_state(
     query_state = None
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT * FROM shepherd_brain WHERE qid = %s
@@ -752,7 +752,7 @@ async def set_query_completed(
     """This query is done."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s

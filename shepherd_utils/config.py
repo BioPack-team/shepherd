@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     postgres_host: str = "shepherd_db"
     postgres_port: int = 5432
     postgres_password: str = "supersecretpassw0rd"
+    # How long (seconds) to wait to acquire a connection from the pool before
+    # giving up. Kept short so callers fail fast when the DB is unreachable
+    # instead of blocking; raise it if you hit pool timeouts under heavy load.
+    postgres_pool_timeout: float = 5.0
     # Size of the Postgres data volume, set from the SAME Helm value that sizes
     # the PVC (e.g. "100Gi"). Lets the monitor compute how full the disk is and
     # alert before it fills. Empty disables the db-capacity alert.

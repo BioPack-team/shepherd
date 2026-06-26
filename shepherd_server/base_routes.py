@@ -205,7 +205,10 @@ async def run_sync_query(
                 response["logs"] = logs
                 return ORJSONResponse(content=response)
         else:
-            logger.warning(f"Failed to get the query state of query id {query_id}")
+            # Debug, not warning: this fires every 0.5s while a query is still
+            # in flight (the row just isn't COMPLETED yet) and would otherwise
+            # flood the logs -- especially if the DB is unreachable.
+            logger.debug(f"Failed to get the query state of query id {query_id}")
         await asyncio.sleep(0.5)
 
     logger.error("Query timed out")

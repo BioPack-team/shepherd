@@ -174,6 +174,31 @@ async def _collect_streams(stream_names: List[str]) -> Dict[str, Dict[str, Any]]
     return out
 
 
+# Process-local view of Postgres reachability. Used to log an outage once (on
+# the healthy->down edge) and recovery once, instead of on every poll tick --
+# otherwise stopping the DB spams an identical warning every few seconds.
+_pg_reachable = True
+
+
+def _note_pg_reachable() -> None:
+    global _pg_reachable
+    if not _pg_reachable:
+        logger.info("Postgres reachable again")
+        _pg_reachable = True
+
+
+def _note_pg_unreachable(exc: Exception) -> None:
+    global _pg_reachable
+    if _pg_reachable:
+        logger.warning(
+            f"Postgres unavailable: {exc}. Suppressing repeat poll errors until "
+            "it recovers."
+        )
+        _pg_reachable = False
+    else:
+        logger.debug(f"Postgres still unavailable: {exc}")
+
+
 async def _collect_postgres() -> Dict[str, Any]:
     """Query state breakdown, callback backlog, ARA volume."""
     snapshot: Dict[str, Any] = {
@@ -187,7 +212,7 @@ async def _collect_postgres() -> Dict[str, Any]:
         "connection_count": 0,
     }
     try:
-        async with pg_pool.connection(10) as conn:
+        async with pg_pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
                 "SELECT state, COUNT(*) FROM shepherd_brain GROUP BY state"
             )
@@ -238,8 +263,9 @@ async def _collect_postgres() -> Dict[str, Any]:
             )
             row = await cur.fetchone()
             snapshot["connection_count"] = int(row[0] or 0)
+        _note_pg_reachable()
     except Exception as e:
-        logger.warning(f"Postgres snapshot failed: {e}")
+        _note_pg_unreachable(e)
         snapshot["error"] = str(e)
     return snapshot
 
@@ -269,7 +295,7 @@ async def _collect_postgres_size() -> Dict[str, int]:
     """
     sizes = {"db_size_bytes": 0, "wal_size_bytes": 0}
     try:
-        async with pg_pool.connection(10) as conn:
+        async with pg_pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute("SELECT pg_database_size(current_database())")
             row = await cur.fetchone()
             sizes["db_size_bytes"] = int(row[0] or 0)
