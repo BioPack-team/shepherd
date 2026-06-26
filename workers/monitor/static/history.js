@@ -328,7 +328,7 @@
     const { since, until } = currentWindow;
     const r = await fetchJSON(
       `api/historical/metrics?${qs({
-        metric: "redis:used_memory_bytes,pg:connection_count,pg:db_size_bytes,redis:ops_per_sec",
+        metric: "redis:used_memory_bytes,pg:connection_count,pg:db_size_bytes,redis:ops_per_sec,pg:disk_used_pct",
         since, until,
       })}`
     );
@@ -343,6 +343,16 @@
     replaceDatasets(charts.pgConn, [
       seriesToDataset("PG connections", r.series["pg:connection_count"] || [], COLORS[1]),
       seriesToDataset("Redis ops/s", r.series["redis:ops_per_sec"] || [], COLORS[2]),
+    ]);
+    // DB disk used %. Only populated when PG_VOLUME_CAPACITY is configured, so
+    // the series is empty (flat-no-data) on deployments that don't set it.
+    if (!charts.pgDisk) {
+      charts.pgDisk = mkChart("pg-disk-chart", "line", []);
+      charts.pgDisk.options.scales.y.max = 100;
+      charts.pgDisk.options.scales.y.ticks.callback = v => v + "%";
+    }
+    replaceDatasets(charts.pgDisk, [
+      seriesToDataset("DB disk used %", r.series["pg:disk_used_pct"] || [], COLORS[3], { fill: true }),
     ]);
   }
 

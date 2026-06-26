@@ -42,6 +42,15 @@
     return `${Math.round(seconds / 3600)}h`;
   }
 
+  function fmtBytes(n) {
+    if (n === null || n === undefined) return "-";
+    if (n >= 1e12) return (n / 1e12).toFixed(1) + " TB";
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + " KB";
+    return `${n} B`;
+  }
+
   function setConnection(online) {
     connectionEl.classList.toggle("online", online);
     connectionEl.classList.toggle("offline", !online);
@@ -267,7 +276,20 @@
   }
 
   function updateInfra(pg, redis) {
+    // DB disk: show % full when PG_VOLUME_CAPACITY is configured (the poller
+    // only populates disk_used_pct then), otherwise fall back to raw DB size.
+    const cap = pg.disk_capacity_bytes || 0;
+    let dbDisk;
+    if (cap > 0) {
+      const pct = pg.disk_used_pct ?? 0;
+      const text = `${pct.toFixed(1)}% (${fmtBytes(pg.disk_used_bytes)} / ${fmtBytes(cap)})`;
+      const color = pct >= 90 ? "var(--bad)" : pct >= 80 ? "var(--warn)" : null;
+      dbDisk = color ? `<span style="color:${color}">${text}</span>` : text;
+    } else {
+      dbDisk = fmtBytes(pg.db_size_bytes);
+    }
     const rows = [
+      { label: "DB disk", value: dbDisk },
       { label: "PG connections", value: pg.connection_count ?? "-" },
       { label: "Redis memory", value: redis.used_memory_human || "-" },
       { label: "Redis clients", value: redis.connected_clients ?? "-" },

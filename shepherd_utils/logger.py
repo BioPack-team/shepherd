@@ -112,7 +112,16 @@ def get_logging_config():
             "shepherd": {
                 "level": "DEBUG",
                 "handlers": logger_handlers,
-            }
+            },
+            # psycopg's pool retries to keep min_size connections warm and logs
+            # a WARNING on every failed attempt. When the DB is down that floods
+            # the logs from every service; raise the threshold so only genuine
+            # pool errors surface (our own code already logs the outage once).
+            "psycopg.pool": {
+                "level": "ERROR",
+                "handlers": logger_handlers,
+                "propagate": False,
+            },
         },
         "incremental": False,
         "disable_existing_loggers": False,

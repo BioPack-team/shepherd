@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from shepherd_utils.broker import broker_client
 from shepherd_utils.config import settings
+from shepherd_utils.db import purge_old_queries
 from shepherd_utils.db import reap_abandoned_queries as reap_abandoned_queries_db
 from shepherd_utils.db import reap_completed_callbacks
 from shepherd_utils.heartbeat import HEARTBEAT_SCAN_PATTERN
@@ -42,6 +43,7 @@ STALE_CONSUMER_IDLE_MS = 60 * 60 * 1000  # 1 hour
 HISTORY_RETENTION_DAYS = 30
 RETENTION_SWEEP_INTERVAL_SEC = 24 * 60 * 60  # once per day
 RETENTION_LAST_RUN_KEY = "monitor:janitor:last_retention_sweep"
+QUERY_RETENTION_LAST_RUN_KEY = "monitor:janitor:last_query_retention_sweep"
 
 
 def _next_stream_id(stream_id: str) -> str:
@@ -420,6 +422,37 @@ async def sweep_history_retention(force: bool = False) -> Dict[str, Any]:
     return {"deleted": deletions, "ran_at": now}
 
 
+async def sweep_query_retention(force: bool = False) -> Dict[str, Any]:
+    """Age out terminal ``shepherd_brain`` rows past the retention window.
+
+    Postgres has no native row TTL; this is the scheduled equivalent for the
+    durable query-state table (callbacks are already reaped on completion).
+    Rate-limited to once a day via a Redis key, like the history sweep; pass
+    ``force=True`` to run immediately from the admin endpoint. Disabled when
+    ``query_retention_days`` is 0.
+    """
+    import time as _time
+
+    if settings.query_retention_days <= 0:
+        return {"skipped": True, "reason": "disabled"}
+
+    now = _time.time()
+    if not force:
+        try:
+            last = await broker_client.get(QUERY_RETENTION_LAST_RUN_KEY)
+            if last and (now - float(last)) < RETENTION_SWEEP_INTERVAL_SEC:
+                return {"skipped": True, "last_run": float(last)}
+        except Exception:
+            pass
+
+    purged = await purge_old_queries(settings.query_retention_days, logger)
+    try:
+        await broker_client.set(QUERY_RETENTION_LAST_RUN_KEY, str(now))
+    except Exception:
+        pass
+    return {"purged": purged, "ran_at": now}
+
+
 async def run_once() -> Dict[str, Any]:
     """Single pass; safe to invoke from an admin endpoint as well."""
     (
@@ -428,12 +461,14 @@ async def run_once() -> Dict[str, Any]:
         abandoned_queries,
         consumer_cleanup,
         retention,
+        query_retention,
     ) = await asyncio.gather(
         trim_streams(),
         reap_callbacks(),
         reap_abandoned_queries(),
         cleanup_stale_consumers(),
         sweep_history_retention(),
+        sweep_query_retention(),
         return_exceptions=False,
     )
     return {
@@ -442,6 +477,7 @@ async def run_once() -> Dict[str, Any]:
         "abandoned_queries": abandoned_queries,
         "stale_consumers": consumer_cleanup,
         "history_retention": retention,
+        "query_retention": query_retention,
     }
 
 
@@ -452,17 +488,22 @@ async def janitor_loop() -> None:
             total_trimmed = sum(s.get("trimmed", 0) for s in summary["streams"])
             consumers_deleted = summary["stale_consumers"]["deleted"]
             abandoned = len(summary["abandoned_queries"])
+            purged_queries = (
+                summary["query_retention"].get("purged", {}).get("queries", 0)
+            )
             if (
                 total_trimmed
                 or summary["callbacks_deleted"]
                 or abandoned
                 or consumers_deleted
+                or purged_queries
             ):
                 logger.info(
                     f"Janitor: trimmed {total_trimmed} stream entries, "
                     f"reaped {summary['callbacks_deleted']} orphan callbacks, "
                     f"cleaned {abandoned} abandoned queries, "
-                    f"deleted {consumers_deleted} stale consumers"
+                    f"deleted {consumers_deleted} stale consumers, "
+                    f"purged {purged_queries} expired queries"
                 )
         except Exception as e:
             logger.exception(f"Janitor iteration failed: {e}")

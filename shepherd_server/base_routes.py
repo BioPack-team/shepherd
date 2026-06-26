@@ -35,6 +35,15 @@ tracer = setup_tracer("shepherd-server")
 base_router = APIRouter()
 
 
+class QueryIntakeError(Exception):
+    """Raised when a query can't be accepted because its initial state could
+    not be persisted (e.g. the datastore is full or unavailable).
+
+    The message is client-safe -- it's surfaced verbatim in the HTTP response,
+    so it must not leak connection details. The specific underlying cause is
+    logged server-side (see ``PG_DISK_FULL`` in ``shepherd_utils.db``)."""
+
+
 class ARATargetEnum(str, Enum):
     ARAGORN = "aragorn"
     ARAX = "arax"
@@ -141,8 +150,17 @@ async def run_query(
             logger,
         )
     except Exception as e:
-        logger.error(f"Failed to save query: {e}")
-        # TODO: set query to failed state
+        # Previously this was swallowed and we returned as if the query had been
+        # accepted -- so a full/unavailable datastore left the query unsaved and
+        # unqueued: the sync path then polled a row that never existed until it
+        # timed out (~6 min), and the async path returned a fake 200 Accepted for
+        # a job that would never run. Surface it instead so the caller gets a
+        # real error describing what happened.
+        logger.error(f"Failed to accept query {query_id}: {e}")
+        raise QueryIntakeError(
+            "Unable to accept query: failed to persist initial query state "
+            "(datastore unavailable). Please retry shortly."
+        ) from e
 
     return query_id, response_id, logger
 
@@ -154,7 +172,13 @@ async def run_sync_query(
     """Handle synchronous TRAPI queries."""
     # query_dict = query.dict()
     query_dict = query
-    query_id, response_id, logger = await run_query(target, query_dict)
+    try:
+        query_id, response_id, logger = await run_query(target, query_dict)
+    except QueryIntakeError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=500,
+        )
     start = time.time()
     now = start
     timeout = query_dict.get("parameters", {}).get("timeout", 360)
@@ -181,7 +205,10 @@ async def run_sync_query(
                 response["logs"] = logs
                 return ORJSONResponse(content=response)
         else:
-            logger.warning(f"Failed to get the query state of query id {query_id}")
+            # Debug, not warning: this fires every 0.5s while a query is still
+            # in flight (the row just isn't COMPLETED yet) and would otherwise
+            # flood the logs -- especially if the DB is unreachable.
+            logger.debug(f"Failed to get the query state of query id {query_id}")
         await asyncio.sleep(0.5)
 
     logger.error("Query timed out")
@@ -202,7 +229,13 @@ async def run_async_query(
             },
             status_code=422,
         )
-    query_id, _, _ = await run_query(target, query, callback_url)
+    try:
+        query_id, _, _ = await run_query(target, query, callback_url)
+    except QueryIntakeError as e:
+        return JSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=500,
+        )
     return JSONResponse(
         content={
             "status": "Accepted",

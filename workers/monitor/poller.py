@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
 from shepherd_utils.broker import broker_client
+from shepherd_utils.config import settings
 from shepherd_utils.db import pool as pg_pool
 from shepherd_utils.heartbeat import (
     HEARTBEAT_SCAN_PATTERN,
@@ -173,6 +174,31 @@ async def _collect_streams(stream_names: List[str]) -> Dict[str, Dict[str, Any]]
     return out
 
 
+# Process-local view of Postgres reachability. Used to log an outage once (on
+# the healthy->down edge) and recovery once, instead of on every poll tick --
+# otherwise stopping the DB spams an identical warning every few seconds.
+_pg_reachable = True
+
+
+def _note_pg_reachable() -> None:
+    global _pg_reachable
+    if not _pg_reachable:
+        logger.info("Postgres reachable again")
+        _pg_reachable = True
+
+
+def _note_pg_unreachable(exc: Exception) -> None:
+    global _pg_reachable
+    if _pg_reachable:
+        logger.warning(
+            f"Postgres unavailable: {exc}. Suppressing repeat poll errors until "
+            "it recovers."
+        )
+        _pg_reachable = False
+    else:
+        logger.debug(f"Postgres still unavailable: {exc}")
+
+
 async def _collect_postgres() -> Dict[str, Any]:
     """Query state breakdown, callback backlog, ARA volume."""
     snapshot: Dict[str, Any] = {
@@ -186,7 +212,7 @@ async def _collect_postgres() -> Dict[str, Any]:
         "connection_count": 0,
     }
     try:
-        async with pg_pool.connection(10) as conn:
+        async with pg_pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
                 "SELECT state, COUNT(*) FROM shepherd_brain GROUP BY state"
             )
@@ -237,8 +263,9 @@ async def _collect_postgres() -> Dict[str, Any]:
             )
             row = await cur.fetchone()
             snapshot["connection_count"] = int(row[0] or 0)
+        _note_pg_reachable()
     except Exception as e:
-        logger.warning(f"Postgres snapshot failed: {e}")
+        _note_pg_unreachable(e)
         snapshot["error"] = str(e)
     return snapshot
 
@@ -257,15 +284,33 @@ async def _collect_redis_info() -> Dict[str, Any]:
     }
 
 
-async def _collect_postgres_size() -> int:
-    """Database size in bytes. Useful for the History infra panel."""
+async def _collect_postgres_size() -> Dict[str, int]:
+    """Logical DB size + WAL size in bytes.
+
+    Used for the History infra panel and for the disk-fullness estimate that
+    drives the ``db_capacity`` alert. WAL is included because a stalled archiver
+    or inactive replication slot can balloon ``pg_wal`` independently of table
+    growth. Note this is still only an *estimate* of on-disk usage (it excludes
+    temp files and filesystem overhead), so it under-counts true volume usage.
+    """
+    sizes = {"db_size_bytes": 0, "wal_size_bytes": 0}
     try:
-        async with pg_pool.connection(10) as conn:
+        async with pg_pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute("SELECT pg_database_size(current_database())")
             row = await cur.fetchone()
-            return int(row[0] or 0)
+            sizes["db_size_bytes"] = int(row[0] or 0)
+            try:
+                cur = await conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) FROM pg_ls_waldir()"
+                )
+                row = await cur.fetchone()
+                sizes["wal_size_bytes"] = int(row[0] or 0)
+            except Exception:
+                # pg_ls_waldir needs superuser/pg_monitor; skip if not granted.
+                pass
     except Exception:
-        return 0
+        pass
+    return sizes
 
 
 # Worker -> stream attribution. The heartbeat stream is exactly the queue the
@@ -485,13 +530,23 @@ async def collect_snapshot() -> Dict[str, Any]:
         _known_workers(),
     )
     streams = _discover_streams(workers, known)
-    stream_stats, pg_state, redis_info, pg_size = await asyncio.gather(
+    stream_stats, pg_state, redis_info, pg_sizes = await asyncio.gather(
         _collect_streams(streams),
         _collect_postgres(),
         _collect_redis_info(),
         _collect_postgres_size(),
     )
-    pg_state["db_size_bytes"] = pg_size
+    db_size = pg_sizes.get("db_size_bytes", 0)
+    wal_size = pg_sizes.get("wal_size_bytes", 0)
+    capacity = settings.pg_volume_capacity_bytes
+    on_disk = db_size + wal_size
+    pg_state["db_size_bytes"] = db_size
+    pg_state["wal_size_bytes"] = wal_size
+    pg_state["disk_capacity_bytes"] = capacity
+    pg_state["disk_used_bytes"] = on_disk
+    pg_state["disk_used_pct"] = (
+        round(100.0 * on_disk / capacity, 2) if capacity > 0 else 0.0
+    )
     workers_rollup = _rollup_workers(workers)
     now = time.time()
     workers_rollup, events = await _resolve_worker_states(
@@ -547,6 +602,11 @@ async def write_history(snapshot: Dict[str, Any]) -> None:
     samples["pg:oldest_callback_age_sec"] = pg.get("oldest_callback_age_sec", 0)
     samples["pg:connection_count"] = pg.get("connection_count", 0)
     samples["pg:db_size_bytes"] = pg.get("db_size_bytes", 0)
+    samples["pg:wal_size_bytes"] = pg.get("wal_size_bytes", 0)
+    if pg.get("disk_capacity_bytes"):
+        samples["pg:disk_capacity_bytes"] = pg["disk_capacity_bytes"]
+        samples["pg:disk_used_bytes"] = pg.get("disk_used_bytes", 0)
+        samples["pg:disk_used_pct"] = pg.get("disk_used_pct", 0)
     for state, count in pg.get("state_counts", {}).items():
         samples[f"pg:state:{state}"] = count
     redis_info = snapshot.get("redis", {}) or {}
