@@ -222,10 +222,12 @@ def test_omnicorp_overlay_full_path(lmdb_envs):
         for sg in analysis.get("support_graphs", [])
         if sg.startswith("OMNICORP_support_graph")
     ]
-    # The same OMNICORP graph is appended once per pair, but the worker
-    # reuses the existing one after the first match — so the analysis ends
-    # up with at least one OMNICORP entry.
-    assert len(omnicorp_sg_ids) >= 1
+    # The analysis is referenced by every curie pair, but its OMNICORP support
+    # graph must only be attached once — no matter how many pairs contribute
+    # co-occurrence edges to it.
+    assert len(omnicorp_sg_ids) == 1
+    # And it must not appear more than once in the support_graphs list.
+    assert analysis["support_graphs"].count(omnicorp_sg_ids[0]) == 1
 
     aux_graphs = out["message"]["auxiliary_graphs"]
     referenced = {sg for sg in omnicorp_sg_ids if sg in aux_graphs}
