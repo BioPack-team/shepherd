@@ -609,6 +609,72 @@ async def reap_abandoned_queries(
     return abandoned
 
 
+async def purge_old_queries(
+    retention_days: int, logger: logging.Logger
+) -> Dict[str, int]:
+    """Delete terminal queries (and their leftover callbacks) past retention.
+
+    Postgres has no row-level TTL, so this is the scheduled equivalent for the
+    ``shepherd_brain`` table, which otherwise grows forever (rows only ever flip
+    to COMPLETED/ABANDONED, never get removed). Rows in a terminal state whose
+    work finished longer ago than ``retention_days`` are deleted; in-flight
+    queries are never touched regardless of age -- the abandoned-query reaper is
+    what moves a stuck query into a terminal state, after which it becomes
+    eligible here. Returns ``{"queries": n, "callbacks": m}``.
+    """
+    result = {"queries": 0, "callbacks": 0}
+    if retention_days <= 0:
+        return result
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(60) as conn:
+                # callbacks FK-references shepherd_brain, so clear any leftover
+                # rows for the doomed queries first (most are already reaped on
+                # completion, but a crash can leave stragglers).
+                cur = await conn.execute(
+                    """
+                    DELETE FROM callbacks WHERE query_id IN (
+                        SELECT qid FROM shepherd_brain
+                        WHERE state IN ('COMPLETED', 'ABANDONED')
+                          AND COALESCE(stop_time, start_time)
+                              < NOW() - make_interval(days => %s)
+                    )
+                    """,
+                    (retention_days,),
+                )
+                result["callbacks"] = cur.rowcount or 0
+                cur = await conn.execute(
+                    """
+                    DELETE FROM shepherd_brain
+                    WHERE state IN ('COMPLETED', 'ABANDONED')
+                      AND COALESCE(stop_time, start_time)
+                          < NOW() - make_interval(days => %s)
+                    """,
+                    (retention_days,),
+                )
+                result["queries"] = cur.rowcount or 0
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "purge_old_queries", e)
+                break
+            logger.warning(
+                f"Connection error purging old queries (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to purge old queries: {e}")
+            break
+    if result["queries"] or result["callbacks"]:
+        logger.info(
+            f"Purged {result['queries']} terminal queries and "
+            f"{result['callbacks']} leftover callbacks older than {retention_days}d"
+        )
+    return result
+
+
 async def get_callback_query_id(
     callback_id: str,
     logger: logging.Logger,

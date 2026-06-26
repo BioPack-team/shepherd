@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # ttl in seconds
     redis_ttl: int = 1210000
 
+    # Retention for the durable query-state table (``shepherd_brain``). Postgres
+    # has no native row TTL, so the monitor janitor purges terminal queries
+    # (COMPLETED/ABANDONED) -- and any leftover callbacks -- this many days after
+    # they finished. This is the durable-table analog of ``redis_ttl``, which
+    # already expires the query payloads in Redis. In-flight queries are never
+    # touched regardless of age. Set to 0 to disable purging.
+    query_retention_days: int = 30
+
     # Reclaim of orphaned Redis Streams messages from dead consumers.
     # Per-stream overrides live in shepherd_utils/reclaim.PER_STREAM_MIN_IDLE_SEC;
     # this default applies to streams not listed there (fast workers). The
