@@ -6,8 +6,7 @@
         "categories": ["biolink:ChemicalEntity"]
       },
       "nA": {
-        "categories": ["biolink:Gene"],
-        "is_set": true
+        "categories": ["biolink:Gene"]
       },
       "$target": {
         "ids": ["$target_id"],
@@ -18,15 +17,12 @@
       "eA": {
         "subject": "$source",
         "object": "nA",
-        "predicates": ["biolink:regulates", "biolink:affects"]
+        "predicates": ["biolink:affects"]
       },
       "eB": {
         "subject": "nA",
         "object": "$target",
-        "predicates": [
-          "biolink:gene_associated_with_condition",
-          "biolink:biomarker_for"
-        ]
+        "predicates": ["biolink:has_phenotype"]
       }
     }
   }
