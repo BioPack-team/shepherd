@@ -25,7 +25,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "finish_query"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 CALLBACK_RETRIES = 3
 
@@ -48,15 +48,22 @@ async def finish_query(task, logger: logging.Logger):
             message_bytes = await get_message(response_id, logger, raw=True)
             logs = await get_logs(response_id, logger)
             logs_bytes = orjson.dumps(logs)
-            # Splice logs into the raw JSON bytes to avoid deserializing
-            # and re-serializing the (potentially huge) message dict.
+            # Splice logs into the raw JSON bytes to avoid deserializing and
+            # re-serializing the (potentially huge) message dict. We rebind
+            # message_bytes to the spliced result so the original buffer is
+            # released as soon as the new one is built -- otherwise both full
+            # copies would stay resident for the entire (up to 120s x retries)
+            # POST below, doubling this worker's peak memory under load.
             if message_bytes and message_bytes[-1:] == b"}":
                 last_brace = message_bytes.rindex(b"}")
-                payload = message_bytes[:last_brace] + b',"logs":' + logs_bytes + b"}"
+                message_bytes = (
+                    message_bytes[:last_brace] + b',"logs":' + logs_bytes + b"}"
+                )
             else:
                 message = orjson.loads(message_bytes)
                 message["logs"] = logs
-                payload = orjson.dumps(message)
+                message_bytes = orjson.dumps(message)
+                del message
             headers = {"Content-Type": "application/json"}
             # Propagate the otel trace context through the callback.
             # Matches the inject() carrier pattern used by the
@@ -68,7 +75,7 @@ async def finish_query(task, logger: logging.Logger):
                     async with httpx.AsyncClient(timeout=120) as client:
                         response = await client.post(
                             callback_url,
-                            content=payload,
+                            content=message_bytes,
                             headers=headers,
                         )
                         response.raise_for_status()

@@ -22,6 +22,46 @@ can do that task either synchronously, asynchronously, on a separate process etc
 Each worker has access to a shared utilities library that aids in db and message broker interaction as well as other functions that are common across ARAs. Check the
 shared function library before writing a new function that you think other ARAs might also want to use.
 
+#### Worker tuning & graceful shutdown
+
+Every worker draws its tasks through `shepherd_utils.shared.get_tasks`, so the
+following behavior applies to all of them:
+
+- **Concurrency (`TASK_LIMIT`)** — each worker declares a default in-process
+  concurrency, but it can be overridden per deployment with the `TASK_LIMIT`
+  environment variable (each worker is its own container, so a single
+  `TASK_LIMIT` per Deployment is unambiguous). No code change or rebuild needed.
+- **Graceful drain on shutdown** — on `SIGTERM`/`SIGINT` (Kubernetes sends
+  `SIGTERM` on every rollout, scale-down and node drain) a worker stops pulling
+  new tasks, waits up to `WORKER_DRAIN_TIMEOUT_SEC` (default 30s) for in-flight
+  tasks to finish, writes a clean-shutdown marker the monitor reads (so the
+  event is classified as a graceful scale-down rather than a crash), then exits.
+  Tasks that don't finish in the window are left in the stream for Redis reclaim.
+  Set the deployment's `terminationGracePeriodSeconds` comfortably above
+  `WORKER_DRAIN_TIMEOUT_SEC`.
+
+##### Kubernetes sizing (Helm)
+
+Production limits live in the Helm chart, not in `compose.yml` (which is
+dev-only). Recommended starting point for `finish_query`, which holds whole
+decompressed TRAPI payloads in memory while POSTing async callbacks:
+
+| Setting | Value |
+| --- | --- |
+| `resources.requests` | `cpu: 500m`, `memory: 1Gi` |
+| `resources.limits` | `cpu: "2"`, `memory: 4Gi` |
+| `TASK_LIMIT` | `32` (down from the in-code default of 100) |
+| `terminationGracePeriodSeconds` | `35` |
+
+Scale throughput with replicas / an HPA (on CPU or queue depth) rather than a
+single large pod. On Kubernetes the memory `limit` (OOMKilled + restart) plus
+regular rollouts already recycle pods, so leaked-resource cleanup comes for free
+— add an RSS-based `livenessProbe` only if the monitor shows OOMKills in
+practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
+`aragorn_score`, `aragorn_omnicorp`) size their process/thread pools from the
+in-code default, so raising `TASK_LIMIT` for those only deepens the intake queue
+rather than adding parallelism.
+
 ### Message Broker Streams
 
 Shepherd uses Redis Streams for its message broker. More info on Redis Streams can be found [here](https://redis.io/docs/latest/develop/data-types/streams/)

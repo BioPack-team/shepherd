@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     reclaim_interval_sec: int = 10
     reclaim_max_batch: int = 50
 
+    # Graceful shutdown. On SIGTERM/SIGINT (Kubernetes sends SIGTERM on every
+    # rollout, scale-down and node drain) a worker stops pulling new tasks and
+    # waits up to this long for in-flight tasks to finish before exiting, so the
+    # recycling the orchestrator already does is clean instead of lossy. Tasks
+    # that don't finish in the window are left in the stream for Redis reclaim.
+    # Keep this comfortably below the deployment's terminationGracePeriodSeconds.
+    worker_drain_timeout_sec: float = 30.0
+
     # Monitor (dashboard) worker
     monitor_port: int = 5440
     monitor_poll_interval_sec: float = 3.0

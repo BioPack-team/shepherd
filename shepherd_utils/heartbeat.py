@@ -53,13 +53,23 @@ def shutdown_key(stream: str, consumer: str) -> str:
 class Heartbeat:
     """Background task that periodically refreshes a presence key in Redis."""
 
-    def __init__(self, stream: str, consumer: str, task_limit: int):
+    def __init__(
+        self,
+        stream: str,
+        consumer: str,
+        task_limit: int,
+        manage_signals: bool = True,
+    ):
         self.stream = stream
         self.consumer = consumer
         self.task_limit = task_limit
         self.started_at = time.time()
         self._task: asyncio.Task | None = None
         self._logger = logging.getLogger(f"shepherd.heartbeat.{stream}")
+        # When False, this Heartbeat does not install its own SIGTERM/SIGINT
+        # handlers -- the caller (shared.get_tasks) installs asyncio-aware
+        # handlers instead so it can drain in-flight tasks before exiting.
+        self.manage_signals = manage_signals
         self._signal_installed = False
         self._prev_handlers: dict = {}
 
@@ -90,8 +100,35 @@ class Heartbeat:
     def start(self) -> "Heartbeat":
         if self._task is None:
             self._task = asyncio.create_task(self._loop())
-        self._install_signal_handlers()
+        if self.manage_signals:
+            self._install_signal_handlers()
         return self
+
+    async def mark_clean_shutdown(self) -> None:
+        """Write the shutdown marker from within the event loop.
+
+        Mirror of ``_mark_shutdown_sync`` for the graceful-shutdown path, which
+        already runs on the asyncio loop and so can use the async broker client.
+        The monitor reads this marker to classify the disappearance of the
+        heartbeat as a clean scale-down rather than a crash. Heartbeat key
+        deletion is handled by ``stop()``.
+        """
+        payload = json.dumps(
+            {
+                "stream": self.stream,
+                "consumer": self.consumer,
+                "signum": int(signal.SIGTERM),
+                "ts": time.time(),
+            }
+        )
+        try:
+            await broker_client.set(
+                shutdown_key(self.stream, self.consumer),
+                payload,
+                ex=SHUTDOWN_TTL_SEC,
+            )
+        except Exception as e:
+            self._logger.debug(f"Failed to write clean shutdown marker: {e}")
 
     async def stop(self) -> None:
         if self._task is not None:
