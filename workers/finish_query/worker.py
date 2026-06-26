@@ -25,7 +25,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "finish_query"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 CALLBACK_RETRIES = 3
 
