@@ -221,11 +221,15 @@ def add_shared_pmid_counts(message, values, pair_to_answer):
                     omnisupport = sg
                     break
 
+            # Only attach the support graph id to the analysis the first time
+            # we create it. A single analysis is referenced by many curie pairs
+            # (every combination of its nodes maps back to the same analysis),
+            # so appending unconditionally added the same OMNICORP_support_graph
+            # id to support_graphs once per pair.
             if omnisupport is None:
                 omnisupport = f"OMNICORP_support_graph_{support_idx}"
                 support_idx += 1
-
-            analysis["support_graphs"].append(omnisupport)
+                analysis["support_graphs"].append(omnisupport)
 
             if omnisupport not in aux_graphs:
                 aux_graphs[omnisupport] = {"edges": [], "attributes": []}
