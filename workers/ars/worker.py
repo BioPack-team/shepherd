@@ -17,9 +17,18 @@ import uuid
 from opentelemetry.propagate import inject
 from opentelemetry.trace import Status, StatusCode
 
+from shepherd_utils.ars_notify import publish_ars_event
+from shepherd_utils.ars_workflow import ARS_TAIL_WORKFLOW
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
-from shepherd_utils.db import add_ars_children, add_query, get_message
+from shepherd_utils.db import (
+    add_ars_children,
+    add_query,
+    claim_ars_tail,
+    get_message,
+    get_timed_out_ars_parents,
+    mark_ars_children_errored,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks
 
@@ -114,6 +123,57 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
             limiter.release()
 
 
+async def run_watchdog_once(logger: logging.Logger):
+    """Force timed-out parents to finish so the submitter still gets a result.
+
+    For each parent past its budget with ARAs still pending, mark those ARAs
+    ERROR and (winning the same single-launch latch as ars_accumulate) enqueue
+    the post-merge tail on whatever partial results have accumulated.
+    """
+    timed_out = await get_timed_out_ars_parents(
+        settings.ars_overall_timeout_sec, logger
+    )
+    for parent in timed_out:
+        parent_qid = parent["qid"]
+        pending = parent["pending"]
+        await mark_ars_children_errored(parent_qid, pending, logger)
+        logger.warning(
+            f"ARS parent {parent_qid} timed out; errored pending ARAs {pending}."
+        )
+        await publish_ars_event(
+            {"parent_qid": parent_qid, "status": "timeout", "errored": pending},
+            logger,
+        )
+        if await claim_ars_tail(parent_qid, logger):
+            await add_task(
+                "node_norm",
+                {
+                    "query_id": parent_qid,
+                    "response_id": parent["response_id"],
+                    "workflow": json.dumps(ARS_TAIL_WORKFLOW),
+                    "log_level": 20,
+                    "otel": json.dumps({}),
+                    "metadata": json.dumps({}),
+                },
+                logger,
+            )
+
+
+async def watchdog_loop():
+    """Periodically sweep for timed-out ARS parents."""
+    logger = logging.getLogger("shepherd.ars.watchdog")
+    interval = max(5.0, float(settings.ars_watchdog_interval_sec))
+    while True:
+        # Sleep first so the poll loop has initialized the db pool.
+        await asyncio.sleep(interval)
+        try:
+            await run_watchdog_once(logger)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"ARS watchdog sweep failed: {e}", exc_info=True)
+
+
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     while True:
@@ -129,5 +189,10 @@ async def poll_for_tasks():
             await asyncio.sleep(5)  # back off before retrying
 
 
+async def main():
+    """Run the fan-out poll loop and the timeout watchdog together."""
+    await asyncio.gather(poll_for_tasks(), watchdog_loop())
+
+
 if __name__ == "__main__":
-    asyncio.run(poll_for_tasks())
+    asyncio.run(main())

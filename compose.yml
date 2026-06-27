@@ -254,6 +254,22 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env
       - ./config/blocklist.json:/app/config/blocklist.json:ro
+  ars_ws:
+    container_name: ars_ws
+    build:
+      context: .
+      dockerfile: workers/ars_ws/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    ports:
+      - "5441:5441"
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
 
   filter_analyses_top_n:
     container_name: filter_analyses_top_n

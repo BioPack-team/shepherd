@@ -29,6 +29,7 @@ from shepherd_utils.db import (
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.signature import is_signature_valid
 
 setup_logging()
 
@@ -350,6 +351,10 @@ async def ars_callback(
     accumulating message (and gate the post-merge tail once every ARA is in).
     """
     raw = await request.body()
+    # Verify the callback signature before doing any work (no-op unless
+    # settings.ars_signature_verify is on). Check against the on-wire bytes.
+    if not is_signature_valid(request.headers, raw):
+        return JSONResponse(content={"detail": "Invalid signature"}, status_code=401)
     try:
         if "zstd" in request.headers.get("content-encoding", "").lower():
             raw = decompress_zstd(raw)

@@ -11,6 +11,7 @@ import redis
 import redis.asyncio as aioredis
 import zstandard
 from psycopg import OperationalError
+from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
@@ -1100,6 +1101,281 @@ async def claim_ars_tail(
             logger.error(f"Failed to claim ARS tail for {parent_qid}: {e}")
             raise
     return claimed
+
+
+async def upsert_actor(
+    infores: str,
+    url: str,
+    channel: str,
+    agent_name: str,
+    maturity: str,
+    logger: logging.Logger,
+    active: bool = True,
+    inforev: Union[Dict[str, Any], None] = None,
+):
+    """Insert or update an ARS actor (ARA) in the registry, keyed by infores."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    """
+                INSERT INTO ars_actors
+                    (infores, url, channel, agent_name, maturity, active, inforev)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (infores) DO UPDATE SET
+                    url = EXCLUDED.url,
+                    channel = EXCLUDED.channel,
+                    agent_name = EXCLUDED.agent_name,
+                    maturity = EXCLUDED.maturity,
+                    active = EXCLUDED.active,
+                    inforev = EXCLUDED.inforev
+                """,
+                    (
+                        infores,
+                        url,
+                        channel,
+                        agent_name,
+                        maturity,
+                        active,
+                        Json(inforev) if inforev is not None else None,
+                    ),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "upsert_actor", e)
+                break
+            logger.error(
+                f"Connection error upserting actor after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to upsert actor {infores}: {e}")
+            break
+
+
+async def list_actors(logger: logging.Logger) -> List[Dict[str, Any]]:
+    """List all registered ARS actors."""
+    actors: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT infores, url, channel, agent_name, maturity, active
+                FROM ars_actors ORDER BY infores
+                """
+                )
+                rows = await cursor.fetchall()
+                actors = [
+                    {
+                        "infores": r[0],
+                        "url": r[1],
+                        "channel": r[2],
+                        "agent_name": r[3],
+                        "maturity": r[4],
+                        "active": r[5],
+                    }
+                    for r in rows
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "list_actors", e)
+                break
+            logger.error(f"Connection error listing actors after attempt {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to list actors: {e}")
+            raise
+    return actors
+
+
+async def list_actor_field(field: str, logger: logging.Logger) -> List[str]:
+    """Return the distinct non-null values of an ``ars_actors`` column.
+
+    ``field`` is validated against a fixed allowlist so it can be interpolated
+    into the query safely (column names can't be parameterized).
+    """
+    allowed = {"agent_name", "channel"}
+    if field not in allowed:
+        raise ValueError(f"Unsupported actor field: {field}")
+    values: List[str] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    f"SELECT DISTINCT {field} FROM ars_actors "
+                    f"WHERE {field} IS NOT NULL ORDER BY {field}"
+                )
+                rows = await cursor.fetchall()
+                values = [r[0] for r in rows]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "list_actor_field", e)
+                break
+            logger.error(
+                f"Connection error listing actor field after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to list actor field {field}: {e}")
+            raise
+    return values
+
+
+async def add_subscriber(
+    parent_qid: str,
+    callback_url: str,
+    logger: logging.Logger,
+):
+    """Register a subscriber callback for status updates on a parent query."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    "INSERT INTO ars_subscribers (parent_qid, callback_url) "
+                    "VALUES (%s, %s)",
+                    (parent_qid, callback_url),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "add_subscriber", e)
+                break
+            logger.error(
+                f"Connection error adding subscriber after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to add subscriber for {parent_qid}: {e}")
+            break
+
+
+async def list_subscribers(
+    parent_qid: str,
+    logger: logging.Logger,
+) -> List[str]:
+    """Return the callback urls subscribed to a parent query."""
+    urls: List[str] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT callback_url FROM ars_subscribers WHERE parent_qid = %s",
+                    (parent_qid,),
+                )
+                rows = await cursor.fetchall()
+                urls = [r[0] for r in rows]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "list_subscribers", e)
+                break
+            logger.error(
+                f"Connection error listing subscribers after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to list subscribers for {parent_qid}: {e}")
+            raise
+    return urls
+
+
+async def get_timed_out_ars_parents(
+    timeout_sec: float,
+    logger: logging.Logger,
+) -> List[Dict[str, Any]]:
+    """Find ARS parents past their budget with children still pending.
+
+    Returns one record per timed-out parent: ``{qid, response_id, pending}``
+    where ``pending`` is the list of ARAs that never reported back. The caller
+    (the watchdog) marks those children ERROR and forces the post-merge tail so
+    partial results still reach the submitter.
+    """
+    timed_out: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                    SELECT b.qid, b.response_id,
+                           ARRAY_AGG(c.ara) AS pending
+                    FROM shepherd_brain b
+                    JOIN ars_children c ON c.parent_qid = b.qid
+                    WHERE b.is_ars_parent = TRUE
+                      AND b.state NOT IN ('COMPLETED', 'ABANDONED')
+                      AND b.ars_tail_launched = FALSE
+                      AND b.start_time < NOW() - make_interval(secs => %s)
+                      AND c.status NOT IN ('DONE', 'ERROR')
+                    GROUP BY b.qid, b.response_id
+                    """,
+                    (float(timeout_sec),),
+                )
+                rows = await cursor.fetchall()
+                timed_out = [
+                    {"qid": r[0], "response_id": r[1], "pending": list(r[2])}
+                    for r in rows
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_timed_out_ars_parents", e)
+                break
+            logger.error(
+                f"Connection error finding timed-out ARS parents after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to find timed-out ARS parents: {e}")
+            break
+    return timed_out
+
+
+async def mark_ars_children_errored(
+    parent_qid: str,
+    aras: List[str],
+    logger: logging.Logger,
+):
+    """Mark the given parent's pending child ARAs as ERROR (watchdog timeout)."""
+    if not aras:
+        return
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    """
+                    UPDATE ars_children
+                    SET status = 'ERROR', stop_time = NOW(),
+                        code = COALESCE(code, 504)
+                    WHERE parent_qid = %s AND ara = ANY(%s)
+                      AND status NOT IN ('DONE', 'ERROR')
+                    """,
+                    (parent_qid, aras),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "mark_ars_children_errored", e)
+                break
+            logger.error(
+                f"Connection error erroring ARS children after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to error ARS children for {parent_qid}: {e}")
+            break
 
 
 async def list_ars_parents(

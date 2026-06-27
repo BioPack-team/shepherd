@@ -33,6 +33,8 @@ from shepherd_utils.db import (
     save_message,
     set_ars_child_status,
 )
+from shepherd_utils.ars_notify import publish_ars_event
+from shepherd_utils.ars_workflow import ARS_TAIL_WORKFLOW as TAIL_WORKFLOW
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, merge_kgraph
 
@@ -42,18 +44,6 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
-
-# The post-merge tail, launched once every ARA has reported back. ``finish_query``
-# is appended automatically by wrap_up_task when the list empties, so it is not
-# listed here.
-TAIL_WORKFLOW = [
-    {"id": "node_norm"},
-    {"id": "node_annotate"},
-    {"id": "answer_appraise"},
-    {"id": "ars_blocklist"},
-    {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
-]
-
 
 def merge_child_into_parent(parent_msg, child_msg, source, logger):
     """Merge one child response into the accumulating parent message.
@@ -122,6 +112,16 @@ async def ars_accumulate(task, logger: logging.Logger):
     )
 
     pending = await get_pending_ars_children(parent_qid, logger)
+    await publish_ars_event(
+        {
+            "parent_qid": parent_qid,
+            "ara": ara,
+            "status": "DONE",
+            "result_count": result_count,
+            "pending": pending,
+        },
+        logger,
+    )
     if pending:
         logger.info(f"Parent {parent_qid} still waiting on ARAs: {pending}")
         return
@@ -130,6 +130,9 @@ async def ars_accumulate(task, logger: logging.Logger):
     if await claim_ars_tail(parent_qid, logger):
         logger.info(
             f"All ARAs done for {parent_qid}; launching post-merge tail."
+        )
+        await publish_ars_event(
+            {"parent_qid": parent_qid, "status": "merging"}, logger
         )
         await add_task(
             "node_norm",

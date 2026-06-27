@@ -25,15 +25,21 @@ from shepherd_server.base_routes import (
 )
 from shepherd_server.openapi import construct_open_api_schema
 from shepherd_utils.db import (
+    add_subscriber,
     get_ars_children,
     get_logs,
     get_message,
     get_query_state,
+    list_actor_field,
+    list_actors,
     list_ars_parents,
+    list_subscribers,
     save_message,
+    upsert_actor,
 )
 from shepherd_utils.logger import QueryLogger
 from shepherd_utils.shared import filter_kgraph_orphans
+from shepherd_utils.smartapi import refresh_actors
 
 ARS = FastAPI(title="Shepherd ARS")
 
@@ -228,6 +234,71 @@ async def retain(pk: str):
     if query_state is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
     return ORJSONResponse(content={"retained": pk})
+
+
+@ARS.get("/actors", status_code=200)
+async def get_actors():
+    """List the registered ARS actors (ARAs)."""
+    logger = _api_logger()
+    return ORJSONResponse(content={"actors": await list_actors(logger)})
+
+
+@ARS.post("/actors", status_code=200)
+async def register_actor(body: dict = Body(...)):
+    """Manually register/update an actor (ARA)."""
+    logger = _api_logger()
+    if not body.get("infores"):
+        return JSONResponse(content={"error": "infores required"}, status_code=422)
+    await upsert_actor(
+        body["infores"],
+        body.get("url", ""),
+        body.get("channel", "ARA"),
+        body.get("agent_name", body["infores"]),
+        body.get("maturity", "production"),
+        logger,
+        active=body.get("active", True),
+    )
+    return ORJSONResponse(content={"registered": body["infores"]})
+
+
+@ARS.post("/actors/discover", status_code=200)
+async def discover_actors():
+    """Refresh the actor registry from the SmartAPI registry."""
+    logger = _api_logger()
+    count = await refresh_actors(logger)
+    return ORJSONResponse(content={"discovered": count})
+
+
+@ARS.get("/agents", status_code=200)
+async def get_agents():
+    """List the distinct agent names across registered actors."""
+    logger = _api_logger()
+    return ORJSONResponse(content={"agents": await list_actor_field("agent_name", logger)})
+
+
+@ARS.get("/channels", status_code=200)
+async def get_channels():
+    """List the distinct channels across registered actors."""
+    logger = _api_logger()
+    return ORJSONResponse(content={"channels": await list_actor_field("channel", logger)})
+
+
+@ARS.post("/subscribe/{pk}", status_code=200)
+async def subscribe(pk: str, body: dict = Body(...)):
+    """Register a callback url to receive status updates for a parent query."""
+    logger = _api_logger()
+    callback_url = body.get("callback_url")
+    if not callback_url:
+        return JSONResponse(content={"error": "callback_url required"}, status_code=422)
+    await add_subscriber(pk, callback_url, logger)
+    return ORJSONResponse(content={"subscribed": pk})
+
+
+@ARS.get("/subscribers/{pk}", status_code=200, include_in_schema=False)
+async def get_subscribers(pk: str):
+    """List subscriber callback urls for a parent query."""
+    logger = _api_logger()
+    return ORJSONResponse(content={"subscribers": await list_subscribers(pk, logger)})
 
 
 ARS.include_router(base_router, prefix="")

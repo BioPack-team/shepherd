@@ -93,8 +93,21 @@ class Settings(BaseSettings):
     ars_blocklist_path: str = "/app/config/blocklist.json"
     # Verify HMAC signatures on inbound ARS callbacks when True (ARS parity).
     ars_signature_verify: bool = False
+    # Shared secret for the HMAC-SHA256 callback signature (X-ARS-Signature).
+    ars_signature_secret: str = ""
     # Where the ars_ws subscriber/websocket service is reachable.
     ars_subscriber_host: str = "http://shepherd_ars_ws:5441"
+    ars_ws_port: int = 5441
+    # Redis pub/sub channel ARS status events are published on (broadcast by the
+    # ars_ws service and POSTed to subscriber callbacks).
+    ars_events_channel: str = "ars_events"
+    # How often the ARS watchdog sweeps for timed-out parent queries.
+    ars_watchdog_interval_sec: float = 30.0
+    # SmartAPI registry endpoint used by the actor auto-discovery refresh.
+    smartapi_registry_url: str = (
+        "https://smart-api.info/api/query"
+        "?q=info.x-translator.component:ARA&size=200&raw=1"
+    )
 
     pathfinder_redis_host: str = "host.docker.internal"
     pathfinder_redis_port: int = 6383
