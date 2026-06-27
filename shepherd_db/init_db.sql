@@ -21,6 +21,54 @@ CREATE TABLE IF NOT EXISTS callbacks (
   otel_trace varchar(255)
 );
 
+-- ARS (Autonomous Relay System) tables --
+-- NOTE: base_routes.py reads shepherd_brain by positional index ([7]/[8]/[9]),
+-- so the column appended below MUST stay at the end of the table.
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS is_ars_parent BOOLEAN DEFAULT FALSE;
+-- Single-winner latch: the first ars_accumulate task that observes all ARAs
+-- done flips this TRUE and launches the post-merge tail workflow. Atomic
+-- ``UPDATE ... WHERE ars_tail_launched = FALSE RETURNING`` guarantees exactly
+-- one launch even when child callbacks land concurrently.
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS ars_tail_launched BOOLEAN DEFAULT FALSE;
+
+-- One row per (parent ARS query x ARA). This is the cross-ARA completion
+-- counter: a parent query is "done fanning out" when no child row is left in a
+-- non-terminal state. Modeled on the callbacks/get_running_callbacks primitive.
+CREATE TABLE IF NOT EXISTS ars_children (
+  parent_qid        varchar(255) REFERENCES shepherd_brain(qid),
+  ara               TEXT NOT NULL,            -- aragorn | arax | bte | sipr
+  child_qid         varchar(255),            -- the child query_id we dispatched
+  child_response_id TEXT,                    -- where that ARA's merged response lives
+  status            TEXT NOT NULL,           -- QUEUED | RUNNING | DONE | ERROR
+  code              INT,                     -- HTTP-ish status code (ARS parity)
+  result_count      INT,
+  merged_version    INT DEFAULT 0,
+  start_time        TIMESTAMP DEFAULT NOW(),
+  stop_time         TIMESTAMP,
+  PRIMARY KEY (parent_qid, ara)
+);
+CREATE INDEX IF NOT EXISTS idx_ars_children_parent ON ars_children (parent_qid);
+
+-- Actor/agent/channel registry for auto-discovery (SmartAPI parity).
+CREATE TABLE IF NOT EXISTS ars_actors (
+  id         SERIAL PRIMARY KEY,
+  infores    TEXT UNIQUE,
+  url        TEXT,
+  channel    TEXT,
+  agent_name TEXT,
+  maturity   TEXT,
+  active     BOOLEAN DEFAULT TRUE,
+  inforev    JSONB
+);
+
+-- Subscribers that receive websocket/status push for a parent query.
+CREATE TABLE IF NOT EXISTS ars_subscribers (
+  id           SERIAL PRIMARY KEY,
+  parent_qid   varchar(255),
+  callback_url TEXT,
+  created      TIMESTAMP DEFAULT NOW()
+);
+
 -- Historical metrics archive, written by the monitor every 30s. Used by the
 -- History tab to show trends over days/weeks. Live dashboard reads from Redis
 -- (recent, fast); this is the durable 30-day record.

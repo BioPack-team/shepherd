@@ -777,3 +777,320 @@ async def set_query_completed(
         except Exception as e:
             logger.error(f"Failed to successfully complete query in db: {e}")
             break
+
+
+# ---------------------------------------------------------------------------
+# ARS (Autonomous Relay System) helpers
+#
+# A parent ARS query fans out to several ARAs. Each (parent x ARA) pair gets a
+# row in ``ars_children``; the parent is "done" when no child row is left in a
+# non-terminal state. These mirror the retry-loop style of the callbacks helpers
+# above.
+# ---------------------------------------------------------------------------
+
+# Terminal child states. A parent has finished fanning out once every child row
+# is in one of these.
+ARS_TERMINAL_CHILD_STATES = ("DONE", "ERROR")
+
+
+async def set_query_ars_parent(
+    query_id: str,
+    logger: logging.Logger,
+):
+    """Mark a query as a top-level ARS parent (so /ars/messages can list it)."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    "UPDATE shepherd_brain SET is_ars_parent = TRUE WHERE qid = %s",
+                    (query_id,),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "set_query_ars_parent", e)
+                break
+            logger.error(
+                f"Connection error marking ARS parent after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to mark query {query_id} as ARS parent: {e}")
+            break
+
+
+async def add_ars_children(
+    parent_qid: str,
+    children: List[Dict[str, str]],
+    logger: logging.Logger,
+):
+    """Insert the per-ARA child rows for a parent ARS query.
+
+    ``children`` is a list of dicts with keys ``ara``, ``child_qid`` and
+    ``child_response_id``. All rows start in the QUEUED state.
+    """
+    params = [
+        (
+            parent_qid,
+            child["ara"],
+            child["child_qid"],
+            child["child_response_id"],
+            "QUEUED",
+        )
+        for child in children
+    ]
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                for row in params:
+                    await conn.execute(
+                        """
+                    INSERT INTO ars_children
+                        (parent_qid, ara, child_qid, child_response_id, status)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                        row,
+                    )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "add_ars_children", e)
+                break
+            logger.error(
+                f"Connection error adding ARS children after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to add ARS children for {parent_qid}: {e}")
+            raise
+
+
+async def set_ars_child_status(
+    parent_qid: str,
+    ara: str,
+    status: str,
+    logger: logging.Logger,
+    child_response_id: Union[str, None] = None,
+    code: Union[int, None] = None,
+    result_count: Union[int, None] = None,
+):
+    """Update one ARA child row. Sets ``stop_time`` when the status is terminal.
+
+    Only non-None optional fields are written, so a RUNNING update doesn't clear
+    a previously-recorded ``child_response_id``.
+    """
+    sets = ["status = %s"]
+    values: List[Any] = [status]
+    if child_response_id is not None:
+        sets.append("child_response_id = %s")
+        values.append(child_response_id)
+    if code is not None:
+        sets.append("code = %s")
+        values.append(code)
+    if result_count is not None:
+        sets.append("result_count = %s")
+        values.append(result_count)
+    if status in ARS_TERMINAL_CHILD_STATES:
+        sets.append("stop_time = NOW()")
+    values.extend([parent_qid, ara])
+    query = (
+        f"UPDATE ars_children SET {', '.join(sets)} "
+        "WHERE parent_qid = %s AND ara = %s"
+    )
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(query, tuple(values))
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "set_ars_child_status", e)
+                break
+            logger.error(
+                f"Connection error setting ARS child status after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(
+                f"Failed to set ARS child status for {parent_qid}/{ara}: {e}"
+            )
+            break
+
+
+async def get_pending_ars_children(
+    parent_qid: str,
+    logger: logging.Logger,
+) -> List[str]:
+    """Return the ARA names whose child rows are not yet terminal.
+
+    An empty list means every ARA has reported back (DONE or ERROR) -- the
+    cross-ARA completion gate.
+    """
+    pending: List[str] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT ara FROM ars_children
+                WHERE parent_qid = %s AND status NOT IN ('DONE', 'ERROR')
+                """,
+                    (parent_qid,),
+                )
+                rows = await cursor.fetchall()
+                pending = [r[0] for r in rows]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_pending_ars_children", e)
+                break
+            logger.error(
+                f"Connection error getting pending ARS children after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get pending ARS children for {parent_qid}: {e}")
+            raise
+    return pending
+
+
+async def get_ars_children(
+    parent_qid: str,
+    logger: logging.Logger,
+) -> List[Dict[str, Any]]:
+    """Return all child rows for a parent query (for the trace/status API)."""
+    children: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT ara, child_qid, child_response_id, status, code,
+                       result_count, merged_version, start_time, stop_time
+                FROM ars_children WHERE parent_qid = %s ORDER BY ara
+                """,
+                    (parent_qid,),
+                )
+                rows = await cursor.fetchall()
+                children = [
+                    {
+                        "ara": r[0],
+                        "child_qid": r[1],
+                        "child_response_id": r[2],
+                        "status": r[3],
+                        "code": r[4],
+                        "result_count": r[5],
+                        "merged_version": r[6],
+                        "start_time": r[7].isoformat() if r[7] else None,
+                        "stop_time": r[8].isoformat() if r[8] else None,
+                    }
+                    for r in rows
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_ars_children", e)
+                break
+            logger.error(
+                f"Connection error getting ARS children after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get ARS children for {parent_qid}: {e}")
+            raise
+    return children
+
+
+async def claim_ars_tail(
+    parent_qid: str,
+    logger: logging.Logger,
+) -> bool:
+    """Atomically claim the right to launch the post-merge tail workflow.
+
+    Returns True for exactly one caller (the one that flips ``ars_tail_launched``
+    from FALSE to TRUE) and False for every other concurrent caller, so the tail
+    (node_norm -> ... -> finish_query) is enqueued only once even when several
+    child callbacks observe "all done" at the same time.
+    """
+    claimed = False
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                UPDATE shepherd_brain SET ars_tail_launched = TRUE
+                WHERE qid = %s AND ars_tail_launched = FALSE
+                RETURNING qid
+                """,
+                    (parent_qid,),
+                )
+                row = await cursor.fetchone()
+                await conn.commit()
+                claimed = row is not None
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "claim_ars_tail", e)
+                break
+            logger.error(
+                f"Connection error claiming ARS tail after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to claim ARS tail for {parent_qid}: {e}")
+            raise
+    return claimed
+
+
+async def list_ars_parents(
+    logger: logging.Logger,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """List parent ARS queries (most recent first) for the /ars/messages API."""
+    parents: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT qid, start_time, stop_time, response_id, state, status
+                FROM shepherd_brain WHERE is_ars_parent = TRUE
+                ORDER BY start_time DESC LIMIT %s
+                """,
+                    (limit,),
+                )
+                rows = await cursor.fetchall()
+                parents = [
+                    {
+                        "qid": r[0],
+                        "start_time": r[1].isoformat() if r[1] else None,
+                        "stop_time": r[2].isoformat() if r[2] else None,
+                        "response_id": r[3],
+                        "state": r[4],
+                        "status": r[5],
+                    }
+                    for r in rows
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "list_ars_parents", e)
+                break
+            logger.error(
+                f"Connection error listing ARS parents after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to list ARS parents: {e}")
+            raise
+    return parents

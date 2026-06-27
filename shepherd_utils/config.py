@@ -72,6 +72,30 @@ class Settings(BaseSettings):
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
     node_norm: str = "https://biothings.ci.transltr.io/nodenorm/api/"
 
+    # ARS (Autonomous Relay System) orchestration. When a query is submitted to
+    # the top-level ``/ars`` endpoint, Shepherd fans it out to each of these ARAs
+    # (using their existing internal Shepherd workflows), merges the responses,
+    # normalizes + annotates nodes, runs the answer appraiser, then notifies the
+    # submitter. See workers/ars and workers/ars_accumulate.
+    ars_aras: list[str] = ["aragorn", "arax", "bte", "sipr"]
+    # Biothings annotator (adds ``biothings_annotations`` node attributes) and the
+    # answer appraiser (adds ``ordering_components``). ``node_norm`` above is the
+    # node normalizer used to canonicalize curies before annotation.
+    annotator_url: str = "https://biothings.ncats.io/curie"
+    appraiser_url: str = "https://answerappraiser.ci.transltr.io/get_appraisal"
+    # A parent ARS query whose child ARAs haven't all returned within this many
+    # seconds is forced to finish with whatever partial results have arrived, so
+    # the submitter is still notified. Must comfortably exceed a single ARA's
+    # whole-query budget (~5 min).
+    ars_overall_timeout_sec: int = 360
+    # Blocklist of knowledge-source infores ids whose edges are dropped from the
+    # merged result. Mounted into the ars_blocklist worker container.
+    ars_blocklist_path: str = "/app/config/blocklist.json"
+    # Verify HMAC signatures on inbound ARS callbacks when True (ARS parity).
+    ars_signature_verify: bool = False
+    # Where the ars_ws subscriber/websocket service is reachable.
+    ars_subscriber_host: str = "http://shepherd_ars_ws:5441"
+
     pathfinder_redis_host: str = "host.docker.internal"
     pathfinder_redis_port: int = 6383
     pathfinder_redis_password: str = "supersecretpassword"
