@@ -8,6 +8,7 @@ in the ``ars`` and ``ars_accumulate`` workers.
 """
 
 import logging
+import uuid
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -29,8 +30,10 @@ from shepherd_utils.db import (
     get_message,
     get_query_state,
     list_ars_parents,
+    save_message,
 )
 from shepherd_utils.logger import QueryLogger
+from shepherd_utils.shared import filter_kgraph_orphans
 
 ARS = FastAPI(title="Shepherd ARS")
 
@@ -136,6 +139,95 @@ async def status(pk: str):
             "children": {c["ara"]: c["status"] for c in children},
         }
     )
+
+
+async def _load_parent_message(pk: str, logger: logging.Logger):
+    """Return ``(message, error_response)`` for a parent query's stored response."""
+    query_state = await get_query_state(pk, logger)
+    if query_state is None:
+        return None, JSONResponse(content={"error": "Not found"}, status_code=404)
+    try:
+        message = await get_message(query_state[7], logger)
+    except KeyError:
+        return None, JSONResponse(
+            content={"error": "Response not found"}, status_code=404
+        )
+    return message, None
+
+
+async def _save_derived(message: dict, logger: logging.Logger) -> str:
+    """Persist a curated copy under a fresh id and return it."""
+    derived_id = str(uuid.uuid4())[:8]
+    await save_message(derived_id, message, logger)
+    return derived_id
+
+
+def _remove_nodes(message: dict, nodes: set) -> None:
+    """Drop nodes (and edges touching them) from the kgraph in place."""
+    kg = message.get("message", {}).get("knowledge_graph") or {}
+    kg_nodes = kg.get("nodes") or {}
+    kg_edges = kg.get("edges") or {}
+    for nid in list(kg_nodes.keys()):
+        if nid in nodes:
+            del kg_nodes[nid]
+    for eid in [
+        eid
+        for eid, e in kg_edges.items()
+        if e.get("subject") in nodes or e.get("object") in nodes
+    ]:
+        del kg_edges[eid]
+
+
+@ARS.post("/block/{pk}", status_code=200)
+async def block(pk: str, body: dict = Body(...)):
+    """Remove the given node curies (and dependent edges) from a stored result.
+
+    Body: ``{"nodes": ["CURIE:1", ...]}``. Returns the id of a derived response.
+    """
+    logger = _api_logger()
+    message, err = await _load_parent_message(pk, logger)
+    if err is not None:
+        return err
+    nodes = set(body.get("nodes") or [])
+    _remove_nodes(message, nodes)
+    filter_kgraph_orphans(message, logger)
+    derived_id = await _save_derived(message, logger)
+    return ORJSONResponse(content={"response_id": derived_id})
+
+
+@ARS.post("/filter/{pk}", status_code=200)
+async def filter_results(pk: str, body: dict = Body(...)):
+    """Drop results below ``min_normalized_score`` from a stored result.
+
+    Body: ``{"min_normalized_score": 50}``. Returns the id of a derived response.
+    """
+    logger = _api_logger()
+    message, err = await _load_parent_message(pk, logger)
+    if err is not None:
+        return err
+    threshold = body.get("min_normalized_score", 0)
+    results = message.get("message", {}).get("results") or []
+    message["message"]["results"] = [
+        r for r in results if r.get("normalized_score", 0) >= threshold
+    ]
+    filter_kgraph_orphans(message, logger)
+    derived_id = await _save_derived(message, logger)
+    return ORJSONResponse(content={"response_id": derived_id})
+
+
+@ARS.post("/retain/{pk}", status_code=200)
+async def retain(pk: str):
+    """Acknowledge a retain request for a parent query.
+
+    Note: durable retention (overriding the purge janitor) needs a dedicated
+    flag and is handled in the hardening phase; this endpoint currently confirms
+    the query exists.
+    """
+    logger = _api_logger()
+    query_state = await get_query_state(pk, logger)
+    if query_state is None:
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
+    return ORJSONResponse(content={"retained": pk})
 
 
 ARS.include_router(base_router, prefix="")

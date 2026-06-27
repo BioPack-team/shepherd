@@ -197,6 +197,63 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+  node_norm:
+    container_name: node_norm
+    build:
+      context: .
+      dockerfile: workers/node_norm/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  node_annotate:
+    container_name: node_annotate
+    build:
+      context: .
+      dockerfile: workers/node_annotate/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  answer_appraise:
+    container_name: answer_appraise
+    build:
+      context: .
+      dockerfile: workers/answer_appraise/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  ars_blocklist:
+    container_name: ars_blocklist
+    build:
+      context: .
+      dockerfile: workers/ars_blocklist/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - ./config/blocklist.json:/app/config/blocklist.json:ro
 
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
