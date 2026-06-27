@@ -20,6 +20,7 @@ from shepherd_server.aras.aragorn import ARAGORN
 from shepherd_server.aras.arax import ARAX
 from shepherd_server.aras.bte import BTE
 from shepherd_server.aras.sipr import SIPR
+from shepherd_server.ars import ARS
 from shepherd_server.base_routes import base_router
 from shepherd_server.openapi import construct_open_api_schema
 from shepherd_utils.broker import add_task
@@ -54,6 +55,7 @@ APP.mount("/aragorn", ARAGORN)
 APP.mount("/arax", ARAX)
 APP.mount("/bte", BTE)
 APP.mount("/sipr", SIPR)
+APP.mount("/ars", ARS)
 
 APP.add_middleware(
     CORSMiddleware,

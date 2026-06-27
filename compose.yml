@@ -168,6 +168,36 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+  ######### ARS orchestration
+  ars:
+    container_name: ars
+    build:
+      context: .
+      dockerfile: workers/ars/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  ars_accumulate:
+    container_name: ars_accumulate
+    build:
+      context: .
+      dockerfile: workers/ars_accumulate/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
     build:

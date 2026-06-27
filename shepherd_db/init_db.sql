@@ -35,10 +35,12 @@ ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS ars_tail_launched BOOLEAN DE
 -- counter: a parent query is "done fanning out" when no child row is left in a
 -- non-terminal state. Modeled on the callbacks/get_running_callbacks primitive.
 CREATE TABLE IF NOT EXISTS ars_children (
-  parent_qid        varchar(255) REFERENCES shepherd_brain(qid),
+  parent_qid        varchar(255) REFERENCES shepherd_brain(qid) ON DELETE CASCADE,
   ara               TEXT NOT NULL,            -- aragorn | arax | bte | sipr
   child_qid         varchar(255),            -- the child query_id we dispatched
   child_response_id TEXT,                    -- where that ARA's merged response lives
+  ars_callback_id   TEXT,                    -- callback id the child posts back to
+  otel_trace        TEXT,                    -- otel carrier to continue the trace
   status            TEXT NOT NULL,           -- QUEUED | RUNNING | DONE | ERROR
   code              INT,                     -- HTTP-ish status code (ARS parity)
   result_count      INT,
@@ -48,6 +50,7 @@ CREATE TABLE IF NOT EXISTS ars_children (
   PRIMARY KEY (parent_qid, ara)
 );
 CREATE INDEX IF NOT EXISTS idx_ars_children_parent ON ars_children (parent_qid);
+CREATE INDEX IF NOT EXISTS idx_ars_children_callback ON ars_children (ars_callback_id);
 
 -- Actor/agent/channel registry for auto-discovery (SmartAPI parity).
 CREATE TABLE IF NOT EXISTS ars_actors (

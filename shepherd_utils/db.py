@@ -828,8 +828,9 @@ async def add_ars_children(
 ):
     """Insert the per-ARA child rows for a parent ARS query.
 
-    ``children`` is a list of dicts with keys ``ara``, ``child_qid`` and
-    ``child_response_id``. All rows start in the QUEUED state.
+    ``children`` is a list of dicts with keys ``ara``, ``child_qid``,
+    ``child_response_id``, ``ars_callback_id`` and ``otel_trace``. All rows start
+    in the QUEUED state.
     """
     params = [
         (
@@ -837,6 +838,8 @@ async def add_ars_children(
             child["ara"],
             child["child_qid"],
             child["child_response_id"],
+            child.get("ars_callback_id"),
+            child.get("otel_trace"),
             "QUEUED",
         )
         for child in children
@@ -848,8 +851,9 @@ async def add_ars_children(
                     await conn.execute(
                         """
                     INSERT INTO ars_children
-                        (parent_qid, ara, child_qid, child_response_id, status)
-                    VALUES (%s, %s, %s, %s, %s)
+                        (parent_qid, ara, child_qid, child_response_id,
+                         ars_callback_id, otel_trace, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                         row,
                     )
@@ -1007,6 +1011,53 @@ async def get_ars_children(
             logger.error(f"Failed to get ARS children for {parent_qid}: {e}")
             raise
     return children
+
+
+async def get_ars_child_by_callback(
+    callback_id: str,
+    logger: logging.Logger,
+) -> Union[Dict[str, Any], None]:
+    """Resolve an ARS callback id to its parent query and ARA.
+
+    The child ARA's ``finish_query`` posts its final response to
+    ``/ars/callback/{ars_callback_id}``; this maps that id back to the parent so
+    the response can be folded into the right accumulating message. Returns None
+    if the callback id is unknown.
+    """
+    child = None
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT parent_qid, ara, child_qid, child_response_id, otel_trace
+                FROM ars_children WHERE ars_callback_id = %s
+                """,
+                    (callback_id,),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    child = {
+                        "parent_qid": row[0],
+                        "ara": row[1],
+                        "child_qid": row[2],
+                        "child_response_id": row[3],
+                        "otel_trace": row[4],
+                    }
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_ars_child_by_callback", e)
+                break
+            logger.error(
+                f"Connection error getting ARS child by callback after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get ARS child by callback {callback_id}: {e}")
+            break
+    return child
 
 
 async def claim_ars_tail(

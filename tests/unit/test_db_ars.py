@@ -63,8 +63,20 @@ async def test_set_query_ars_parent_runs_update(mocker):
 async def test_add_ars_children_inserts_all_rows(mocker):
     mock_conn, _ = _install_pool_mock(mocker)
     children = [
-        {"ara": "aragorn", "child_qid": "cq-a", "child_response_id": "cr-a"},
-        {"ara": "bte", "child_qid": "cq-b", "child_response_id": "cr-b"},
+        {
+            "ara": "aragorn",
+            "child_qid": "cq-a",
+            "child_response_id": "cr-a",
+            "ars_callback_id": "cb-a",
+            "otel_trace": "{}",
+        },
+        {
+            "ara": "bte",
+            "child_qid": "cq-b",
+            "child_response_id": "cr-b",
+            "ars_callback_id": "cb-b",
+            "otel_trace": "{}",
+        },
     ]
     await db.add_ars_children("parent-1", children, logger)
 
@@ -73,8 +85,8 @@ async def test_add_ars_children_inserts_all_rows(mocker):
     sql = mock_conn.execute.call_args_list[0].args[0]
     assert "INSERT INTO ars_children" in sql
     assert all_params == [
-        ("parent-1", "aragorn", "cq-a", "cr-a", "QUEUED"),
-        ("parent-1", "bte", "cq-b", "cr-b", "QUEUED"),
+        ("parent-1", "aragorn", "cq-a", "cr-a", "cb-a", "{}", "QUEUED"),
+        ("parent-1", "bte", "cq-b", "cr-b", "cb-b", "{}", "QUEUED"),
     ]
     assert mock_conn.commit.called
 

@@ -19,11 +19,13 @@ from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_query,
     decompress_zstd,
+    get_ars_child_by_callback,
     get_callback_query_id,
     get_logs,
     get_message,
     get_query_state,
     save_message,
+    set_query_ars_parent,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
 from shepherd_utils.otel import setup_tracer
@@ -50,6 +52,9 @@ class ARATargetEnum(str, Enum):
     BTE = "bte"
     EXAMPLE = "example"
     SIPR = "sipr"
+    # Top-level ARS orchestrator: fans the query out to all of the above ARAs,
+    # merges, normalizes/annotates, appraises, then notifies the submitter.
+    ARS = "ars"
 
 
 default_input_query: dict = {
@@ -112,6 +117,11 @@ async def run_query(
             "filter_kgraph_orphans",
             "score_paths",
             "filter_analyses_top_n",
+            # ARS post-merge tail operations
+            "node_norm",
+            "node_annotate",
+            "answer_appraise",
+            "ars_blocklist",
         ]
     )
     workflow = None
@@ -123,12 +133,11 @@ async def run_query(
             if operation.get("id") not in supported_workflow_operations:
                 raise KeyError(f"Workflow operation {operation} is not supported.")
 
+    # ``target`` is either an ARATargetEnum (which subclasses str -- value
+    # like "aragorn") or already a plain string for workflow-driven queries.
+    target_name = target.value if hasattr(target, "value") else target
     # save query to db
     try:
-
-        # ``target`` is either an ARATargetEnum (which subclasses str -- value
-        # like "aragorn") or already a plain string for workflow-driven queries.
-        target_name = target.value if hasattr(target, "value") else target
         await add_query(
             query_id,
             response_id,
@@ -161,6 +170,11 @@ async def run_query(
             "Unable to accept query: failed to persist initial query state "
             "(datastore unavailable). Please retry shortly."
         ) from e
+
+    # Flag top-level ARS parent queries so /ars/messages can list them and the
+    # trace API can distinguish a parent from its per-ARA child queries.
+    if target_name == "ars":
+        await set_query_ars_parent(query_id, logger)
 
     return query_id, response_id, logger
 
@@ -315,6 +329,82 @@ async def callback(
                 "query_id": original_query[0],
                 "response_id": response_id,
                 "callback_id": callback_id,
+                "log_level": level_number,
+                "otel": json.dumps(span_carrier),
+                "metadata": json.dumps({}),
+            },
+            logger,
+        )
+    return Response("Callback received.", 200)
+
+
+async def ars_callback(
+    callback_id: str,
+    request: Request,
+) -> Response:
+    """Handle a per-ARA response posted back to the top-level ARS orchestrator.
+
+    A child ARA's ``finish_query`` POSTs its final merged response here. We
+    resolve the callback to its parent query + ARA, stash the response in Redis,
+    and enqueue an ``ars_accumulate`` task to fold it into the parent's
+    accumulating message (and gate the post-merge tail once every ARA is in).
+    """
+    raw = await request.body()
+    try:
+        if "zstd" in request.headers.get("content-encoding", "").lower():
+            raw = decompress_zstd(raw)
+        response = orjson.loads(raw)
+    except (orjson.JSONDecodeError, zstandard.ZstdError):
+        return JSONResponse(
+            content={"detail": "Invalid request body"},
+            status_code=422,
+        )
+    log_level = response.get("log_level") or "INFO"
+    level_number = logging._nameToLevel[log_level]
+    log_handler = QueryLogger().log_handler
+    logger = logging.getLogger(f"shepherd.ars.{callback_id}")
+    logger.setLevel(level_number)
+    logger.addHandler(log_handler)
+
+    message = response.get("message") or {}
+    if message.get("results") is None:
+        message["results"] = []
+    if message.get("knowledge_graph") is None:
+        message["knowledge_graph"] = {"nodes": {}, "edges": {}}
+    response["message"] = message
+
+    child = await get_ars_child_by_callback(callback_id, logger)
+    if child is None:
+        logger.error(f"Unknown ARS callback id {callback_id}.")
+        return Response("Couldn't find original ARS query.", 500)
+    parent_qid = child["parent_qid"]
+    ara = child["ara"]
+    logger.info(
+        f"Got {len(message['results'])} results back from {ara} "
+        f"for parent {parent_qid}."
+    )
+
+    parent_state = await get_query_state(parent_qid, logger)
+    if parent_state is None:
+        return Response("Failed to get parent query state.", 500)
+    parent_response_id = parent_state[7]
+
+    # Stash the child's response under the callback id; ars_accumulate fetches it.
+    await save_message(callback_id, response, logger)
+
+    parent_ctx = extract(json.loads(child.get("otel_trace") or "{}"))
+    with tracer.start_as_current_span("ars_callback", context=parent_ctx) as span:
+        span.set_attribute("callback_id", callback_id)
+        span.set_attribute("ara", ara)
+        span_carrier = {}
+        inject(span_carrier)
+        await add_task(
+            "ars_accumulate",
+            {
+                "query_id": parent_qid,
+                "response_id": parent_response_id,
+                "callback_id": callback_id,
+                "ara": ara,
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
                 "metadata": json.dumps({}),
