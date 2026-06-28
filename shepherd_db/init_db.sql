@@ -72,7 +72,32 @@ CREATE TABLE IF NOT EXISTS ars_subscribers (
   id           SERIAL PRIMARY KEY,
   parent_qid   varchar(255),
   callback_url TEXT,
+  client_id    TEXT,
   created      TIMESTAMP DEFAULT NOW()
+);
+
+-- Agent registry (ARS Agent model parity).
+CREATE TABLE IF NOT EXISTS ars_agents (
+  name        TEXT PRIMARY KEY,
+  description TEXT,
+  uri         TEXT,
+  contact     TEXT
+);
+
+-- Channel registry (ARS Channel model parity).
+CREATE TABLE IF NOT EXISTS ars_channels (
+  name        TEXT PRIMARY KEY,
+  description TEXT
+);
+
+-- Subscriber clients with an (AES-CBC) encrypted shared secret and a list of
+-- subscribed parent pks (ARS Client model parity).
+CREATE TABLE IF NOT EXISTS ars_clients (
+  client_id     TEXT PRIMARY KEY,
+  client_secret TEXT,
+  callback_url  TEXT,
+  subscriptions JSONB DEFAULT '[]'::jsonb,
+  active        BOOLEAN DEFAULT TRUE
 );
 
 -- Historical metrics archive, written by the monitor every 30s. Used by the

@@ -7,6 +7,8 @@ the submitter. This module exposes the public endpoints; the orchestration runs
 in the ``ars`` and ``ars_accumulate`` workers.
 """
 
+import ast
+import json
 import logging
 import uuid
 
@@ -26,18 +28,36 @@ from shepherd_server.base_routes import (
 from shepherd_server.openapi import construct_open_api_schema
 from shepherd_utils.db import (
     add_subscriber,
+    get_agent,
     get_ars_children,
+    get_ars_report,
+    get_latest_pks,
     get_logs,
     get_message,
     get_query_state,
-    list_actor_field,
     list_actors,
+    list_agents,
     list_ars_parents,
+    list_channels,
+    get_client,
     list_subscribers,
+    ping_db,
+    ping_redis,
+    remove_subscriber,
     save_message,
+    set_client_subscriptions,
     set_query_retained,
     upsert_actor,
+    upsert_agent,
+    upsert_channel,
+    upsert_client,
 )
+from shepherd_utils.ars_clients import (
+    EVENT_SIGNATURE_HEADER,
+    verify_get_signature,
+    verify_post_signature,
+)
+from shepherd_utils.ars_filter import apply_filters
 from shepherd_utils.logger import QueryLogger
 from shepherd_utils.shared import filter_kgraph_orphans
 from shepherd_utils.smartapi import refresh_actors
@@ -202,24 +222,40 @@ async def block(pk: str, body: dict = Body(...)):
     return ORJSONResponse(content={"response_id": derived_id})
 
 
-@ARS.post("/filter/{pk}", status_code=200)
-async def filter_results(pk: str, body: dict = Body(...)):
-    """Drop results below ``min_normalized_score`` from a stored result.
+def _parse_filter_value(raw: str):
+    """Parse a filter query-param value as a JSON/Python literal (Relay uses
+    ``ast.literal_eval``); fall back to the raw string."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        try:
+            return ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            return raw
 
-    Body: ``{"min_normalized_score": 50}``. Returns the id of a derived response.
+
+@ARS.get("/filter/{pk}", status_code=200)
+async def filter_results(pk: str, request: Request):
+    """Filter a stored result (Relay parity), returning a derived response id.
+
+    Query params (any combination, applied in order): ``hop=<int>`` keeps
+    results with fewer than N bound qnodes; ``score=[lo,hi]`` keeps results whose
+    normalized_score is strictly between; ``node_type=["Category",...]`` drops
+    results binding a node of those categories; ``spec_node=["CURIE",...]`` drops
+    results binding those curies.
     """
     logger = _api_logger()
     message, err = await _load_parent_message(pk, logger)
     if err is not None:
         return err
-    threshold = body.get("min_normalized_score", 0)
-    results = message.get("message", {}).get("results") or []
-    message["message"]["results"] = [
-        r for r in results if r.get("normalized_score", 0) >= threshold
+    filters = [
+        (key, _parse_filter_value(value))
+        for key, value in request.query_params.items()
     ]
+    count = apply_filters(message, filters, logger)
     filter_kgraph_orphans(message, logger)
     derived_id = await _save_derived(message, logger)
-    return ORJSONResponse(content={"response_id": derived_id})
+    return ORJSONResponse(content={"response_id": derived_id, "result_count": count})
 
 
 @ARS.get("/retain/{pk}", status_code=200)
@@ -231,6 +267,33 @@ async def retain(pk: str):
     """
     logger = _api_logger()
     return ORJSONResponse(content=await set_query_retained(pk, logger))
+
+
+@ARS.get("/latest_pk/{n}", status_code=200)
+async def latest_pk(n: int):
+    """Per-day parent counts over the last n days + latest/running pks."""
+    logger = _api_logger()
+    return ORJSONResponse(content=await get_latest_pks(n, logger))
+
+
+@ARS.get("/report/{inforesid}", status_code=200)
+async def report(inforesid: str):
+    """Per-child performance stats for an ARA over the last 24 hours."""
+    logger = _api_logger()
+    return ORJSONResponse(content=await get_ars_report(inforesid, logger))
+
+
+@ARS.get("/health", status_code=200)
+async def health():
+    """Liveness of the datastore + broker (Relay health parity)."""
+    logger = _api_logger()
+    db_ok = await ping_db(logger)
+    broker_ok = await ping_redis(logger)
+    ok = db_ok and broker_ok
+    return JSONResponse(
+        content={"ok": ok, "db": db_ok, "broker": broker_ok},
+        status_code=200 if ok else 503,
+    )
 
 
 @ARS.get("/actors", status_code=200)
@@ -268,16 +331,52 @@ async def discover_actors():
 
 @ARS.get("/agents", status_code=200)
 async def get_agents():
-    """List the distinct agent names across registered actors."""
+    """List the registered agents."""
     logger = _api_logger()
-    return ORJSONResponse(content={"agents": await list_actor_field("agent_name", logger)})
+    return ORJSONResponse(content={"agents": await list_agents(logger)})
+
+
+@ARS.post("/agents", status_code=200)
+async def register_agent(body: dict = Body(...)):
+    """Create or update an agent (ARS agents POST parity)."""
+    logger = _api_logger()
+    if not body.get("name"):
+        return JSONResponse(content={"error": "name required"}, status_code=422)
+    await upsert_agent(
+        body["name"],
+        logger,
+        description=body.get("description", ""),
+        uri=body.get("uri", ""),
+        contact=body.get("contact", ""),
+    )
+    return ORJSONResponse(content={"registered": body["name"]})
+
+
+@ARS.get("/agents/{name}", status_code=200)
+async def get_single_agent(name: str):
+    """Return a single agent by name."""
+    logger = _api_logger()
+    agent = await get_agent(name, logger)
+    if agent is None:
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
+    return ORJSONResponse(content=agent)
 
 
 @ARS.get("/channels", status_code=200)
 async def get_channels():
-    """List the distinct channels across registered actors."""
+    """List the registered channels."""
     logger = _api_logger()
-    return ORJSONResponse(content={"channels": await list_actor_field("channel", logger)})
+    return ORJSONResponse(content={"channels": await list_channels(logger)})
+
+
+@ARS.post("/channels", status_code=200)
+async def register_channel(body: dict = Body(...)):
+    """Create or update a channel (ARS channels POST parity)."""
+    logger = _api_logger()
+    if not body.get("name"):
+        return JSONResponse(content={"error": "name required"}, status_code=422)
+    await upsert_channel(body["name"], logger, description=body.get("description", ""))
+    return ORJSONResponse(content={"registered": body["name"]})
 
 
 @ARS.post("/subscribe/{pk}", status_code=200)
@@ -296,6 +395,111 @@ async def get_subscribers(pk: str):
     """List subscriber callback urls for a parent query."""
     logger = _api_logger()
     return ORJSONResponse(content={"subscribers": await list_subscribers(pk, logger)})
+
+
+@ARS.post("/clients", status_code=200, include_in_schema=False)
+async def register_client(body: dict = Body(...)):
+    """Register/update a subscriber client (id + AES-encrypted secret + callback)."""
+    logger = _api_logger()
+    if not body.get("client_id"):
+        return JSONResponse(content={"error": "client_id required"}, status_code=422)
+    await upsert_client(
+        body["client_id"],
+        body.get("client_secret", ""),
+        body.get("callback_url", ""),
+        logger,
+    )
+    return ORJSONResponse(content={"registered": body["client_id"]})
+
+
+def _terminal(state: str) -> bool:
+    return state in ("COMPLETED", "ABANDONED")
+
+
+@ARS.post("/query_event_subscribe", status_code=200)
+async def query_event_subscribe(request: Request):
+    """Signature-verified subscribe: a client subscribes to a set of parent pks.
+
+    Body: ``{"client_id": "...", "pks": ["...", ...]}`` with an
+    ``x-event-signature`` HMAC of the raw body under the client secret.
+    """
+    logger = _api_logger()
+    raw = await request.body()
+    try:
+        body = json.loads(raw)
+        pks = body["pks"]
+        client_id = body["client_id"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return JSONResponse(content={"message": "Invalid request body"}, status_code=400)
+
+    signature = request.headers.get(EVENT_SIGNATURE_HEADER, "")
+    if not await verify_post_signature(signature, raw, client_id, logger):
+        return JSONResponse(
+            content={"message": "Invalid Signature provided"}, status_code=401
+        )
+
+    client = await get_client(client_id, logger)
+    callback_url = (client or {}).get("callback_url", "")
+    subs = list((client or {}).get("subscriptions") or [])
+    result: dict = {"success": [], "failure": {}}
+    for pk in pks:
+        state = await get_query_state(pk, logger)
+        if state is None:
+            result["failure"][pk] = "UUID not found"
+        elif _terminal(state[9]):
+            result["failure"][pk] = "Query already complete"
+        else:
+            await add_subscriber(pk, callback_url, logger, client_id=client_id)
+            if pk not in subs:
+                subs.append(pk)
+            result["success"].append(pk)
+    await set_client_subscriptions(client_id, subs, logger)
+    return ORJSONResponse(content=result)
+
+
+@ARS.get("/query_event_subscribe", status_code=200)
+async def query_event_subscribe_list(request: Request, client_id: str):
+    """Signature-verified listing of a client's current subscriptions."""
+    logger = _api_logger()
+    signature = request.headers.get(EVENT_SIGNATURE_HEADER, "")
+    verified = await verify_get_signature(
+        signature, str(request.url), client_id, logger
+    )
+    if not verified["verified"]:
+        return JSONResponse(
+            content={"message": "Invalid Signature provided"}, status_code=401
+        )
+    return ORJSONResponse(content={"pks": verified["pks"]})
+
+
+@ARS.post("/query_event_unsubscribe", status_code=200)
+async def query_event_unsubscribe(request: Request):
+    """Signature-verified unsubscribe from a set of parent pks."""
+    logger = _api_logger()
+    raw = await request.body()
+    try:
+        body = json.loads(raw)
+        pks = body["pks"]
+        client_id = body["client_id"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return JSONResponse(content={"message": "Invalid request body"}, status_code=400)
+
+    signature = request.headers.get(EVENT_SIGNATURE_HEADER, "")
+    if not await verify_post_signature(signature, raw, client_id, logger):
+        return JSONResponse(
+            content={"message": "Invalid Signature provided"}, status_code=401
+        )
+
+    client = await get_client(client_id, logger)
+    subs = list((client or {}).get("subscriptions") or [])
+    result: dict = {"success": [], "failure": {}}
+    for pk in pks:
+        await remove_subscriber(pk, client_id, logger)
+        if pk in subs:
+            subs.remove(pk)
+        result["success"].append(pk)
+    await set_client_subscriptions(client_id, subs, logger)
+    return ORJSONResponse(content=result)
 
 
 ARS.include_router(base_router, prefix="")

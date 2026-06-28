@@ -1235,15 +1235,16 @@ async def add_subscriber(
     parent_qid: str,
     callback_url: str,
     logger: logging.Logger,
+    client_id: Union[str, None] = None,
 ):
     """Register a subscriber callback for status updates on a parent query."""
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
-                    "INSERT INTO ars_subscribers (parent_qid, callback_url) "
-                    "VALUES (%s, %s)",
-                    (parent_qid, callback_url),
+                    "INSERT INTO ars_subscribers (parent_qid, callback_url, client_id)"
+                    " VALUES (%s, %s, %s)",
+                    (parent_qid, callback_url, client_id),
                 )
                 await conn.commit()
             break
@@ -1258,6 +1259,34 @@ async def add_subscriber(
             continue
         except Exception as e:
             logger.error(f"Failed to add subscriber for {parent_qid}: {e}")
+            break
+
+
+async def remove_subscriber(
+    parent_qid: str,
+    client_id: str,
+    logger: logging.Logger,
+):
+    """Remove a client's subscription to a parent query."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    "DELETE FROM ars_subscribers WHERE parent_qid = %s "
+                    "AND client_id = %s",
+                    (parent_qid, client_id),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "remove_subscriber", e)
+                break
+            logger.error(f"Connection error removing subscriber after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to remove subscriber {client_id}/{parent_qid}: {e}")
             break
 
 
@@ -1290,6 +1319,259 @@ async def list_subscribers(
             logger.error(f"Failed to list subscribers for {parent_qid}: {e}")
             raise
     return urls
+
+
+async def upsert_agent(
+    name: str,
+    logger: logging.Logger,
+    description: str = "",
+    uri: str = "",
+    contact: str = "",
+):
+    """Insert or update an agent (ARS Agent model parity)."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO ars_agents (name, description, uri, contact)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (name) DO UPDATE SET
+                        description = EXCLUDED.description,
+                        uri = EXCLUDED.uri,
+                        contact = EXCLUDED.contact
+                    """,
+                    (name, description, uri, contact),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "upsert_agent", e)
+                break
+            logger.error(f"Connection error upserting agent after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to upsert agent {name}: {e}")
+            break
+
+
+async def list_agents(logger: logging.Logger) -> List[Dict[str, Any]]:
+    """List all registered agents."""
+    agents: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT name, description, uri, contact FROM ars_agents "
+                    "ORDER BY name"
+                )
+                agents = [
+                    {"name": r[0], "description": r[1], "uri": r[2], "contact": r[3]}
+                    for r in await cursor.fetchall()
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "list_agents", e)
+                break
+            logger.error(f"Connection error listing agents after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to list agents: {e}")
+            raise
+    return agents
+
+
+async def get_agent(name: str, logger: logging.Logger) -> Union[Dict[str, Any], None]:
+    """Return a single agent by name, or None."""
+    agent = None
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT name, description, uri, contact FROM ars_agents "
+                    "WHERE name = %s",
+                    (name,),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    agent = {
+                        "name": row[0],
+                        "description": row[1],
+                        "uri": row[2],
+                        "contact": row[3],
+                    }
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_agent", e)
+                break
+            logger.error(f"Connection error getting agent after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get agent {name}: {e}")
+            break
+    return agent
+
+
+async def upsert_channel(
+    name: str,
+    logger: logging.Logger,
+    description: str = "",
+):
+    """Insert or update a channel (ARS Channel model parity)."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO ars_channels (name, description) VALUES (%s, %s)
+                    ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description
+                    """,
+                    (name, description),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "upsert_channel", e)
+                break
+            logger.error(f"Connection error upserting channel after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to upsert channel {name}: {e}")
+            break
+
+
+async def list_channels(logger: logging.Logger) -> List[Dict[str, Any]]:
+    """List all registered channels."""
+    channels: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT name, description FROM ars_channels ORDER BY name"
+                )
+                channels = [
+                    {"name": r[0], "description": r[1]}
+                    for r in await cursor.fetchall()
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "list_channels", e)
+                break
+            logger.error(f"Connection error listing channels after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to list channels: {e}")
+            raise
+    return channels
+
+
+async def get_client(
+    client_id: str, logger: logging.Logger
+) -> Union[Dict[str, Any], None]:
+    """Return a subscriber client row (ARS Client) by id, or None."""
+    client = None
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT client_id, client_secret, callback_url, subscriptions, "
+                    "active FROM ars_clients WHERE client_id = %s",
+                    (client_id,),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    client = {
+                        "client_id": row[0],
+                        "client_secret": row[1],
+                        "callback_url": row[2],
+                        "subscriptions": row[3] or [],
+                        "active": row[4],
+                    }
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_client", e)
+                break
+            logger.error(f"Connection error getting client after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get client {client_id}: {e}")
+            break
+    return client
+
+
+async def upsert_client(
+    client_id: str,
+    client_secret: str,
+    callback_url: str,
+    logger: logging.Logger,
+):
+    """Insert or update a subscriber client (encrypted secret + callback)."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO ars_clients (client_id, client_secret, callback_url)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (client_id) DO UPDATE SET
+                        client_secret = EXCLUDED.client_secret,
+                        callback_url = EXCLUDED.callback_url
+                    """,
+                    (client_id, client_secret, callback_url),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "upsert_client", e)
+                break
+            logger.error(f"Connection error upserting client after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to upsert client {client_id}: {e}")
+            break
+
+
+async def set_client_subscriptions(
+    client_id: str,
+    subscriptions: List[str],
+    logger: logging.Logger,
+):
+    """Replace a client's subscription pk list."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    "UPDATE ars_clients SET subscriptions = %s WHERE client_id = %s",
+                    (Json(subscriptions), client_id),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "set_client_subscriptions", e)
+                break
+            logger.error(
+                f"Connection error setting subscriptions after {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to set subscriptions for {client_id}: {e}")
+            break
 
 
 async def get_timed_out_ars_parents(
@@ -1378,6 +1660,128 @@ async def mark_ars_children_errored(
         except Exception as e:
             logger.error(f"Failed to error ARS children for {parent_qid}: {e}")
             break
+
+
+async def get_latest_pks(n: int, logger: logging.Logger) -> Dict[str, Any]:
+    """Relay ``latest_pk`` parity: per-day parent counts over the last ``n`` days,
+    the latest ``n`` parent pks, and parents still running in the last 24h."""
+    response: Dict[str, Any] = {
+        f"pk_count_last_{n}_days": {},
+        f"latest_{n}_pks": [],
+        "latest_24hr_running_pks": [],
+    }
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                    SELECT start_time::date AS d, COUNT(*)
+                    FROM shepherd_brain
+                    WHERE is_ars_parent = TRUE
+                      AND start_time >= NOW() - make_interval(days => %s)
+                    GROUP BY d ORDER BY d
+                    """,
+                    (n,),
+                )
+                for row in await cursor.fetchall():
+                    response[f"pk_count_last_{n}_days"][str(row[0])] = row[1]
+                cursor = await conn.execute(
+                    """
+                    SELECT qid FROM shepherd_brain WHERE is_ars_parent = TRUE
+                    ORDER BY start_time DESC LIMIT %s
+                    """,
+                    (n,),
+                )
+                response[f"latest_{n}_pks"] = [r[0] for r in await cursor.fetchall()]
+                cursor = await conn.execute(
+                    """
+                    SELECT qid FROM shepherd_brain
+                    WHERE is_ars_parent = TRUE AND state = 'QUEUED'
+                      AND start_time > NOW() - interval '24 hours'
+                    """
+                )
+                response["latest_24hr_running_pks"] = [
+                    r[0] for r in await cursor.fetchall()
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_latest_pks", e)
+                break
+            logger.error(f"Connection error in get_latest_pks after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get latest pks: {e}")
+            break
+    return response
+
+
+async def get_ars_report(inforesid: str, logger: logging.Logger) -> Dict[str, Any]:
+    """Relay ``get_report`` parity: per-child stats for an ARA over the last 24h.
+
+    Matches ``inforesid`` against the child ARA name (``inforesid`` ends with the
+    ARA, e.g. ``infores:aragorn`` matches ``aragorn``).
+    """
+    report: Dict[str, Any] = {}
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                    SELECT child_qid, code, result_count, start_time, stop_time
+                    FROM ars_children
+                    WHERE start_time > NOW() - interval '24 hours'
+                      AND %s ILIKE '%%' || ara
+                    """,
+                    (inforesid,),
+                )
+                for row in await cursor.fetchall():
+                    child_qid, code, result_count, start_time, stop_time = row
+                    elapsed = (
+                        str(stop_time - start_time)
+                        if (start_time and stop_time)
+                        else None
+                    )
+                    report[child_qid] = {
+                        "status_code": code,
+                        "time_elapsed": elapsed,
+                        "result_count": result_count,
+                        "created_at": start_time.isoformat() if start_time else None,
+                        "updated_at": stop_time.isoformat() if stop_time else None,
+                    }
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_ars_report", e)
+                break
+            logger.error(f"Connection error in get_ars_report after {attempt}: {e}")
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get report for {inforesid}: {e}")
+            break
+    return report
+
+
+async def ping_db(logger: logging.Logger) -> bool:
+    """Return True if Postgres answers a trivial query."""
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            await conn.execute("SELECT 1")
+        return True
+    except Exception as e:
+        logger.error(f"DB ping failed: {e}")
+        return False
+
+
+async def ping_redis(logger: logging.Logger) -> bool:
+    """Return True if the Redis data store answers PING."""
+    try:
+        return bool(await data_db_client.ping())
+    except Exception as e:
+        logger.error(f"Redis ping failed: {e}")
+        return False
 
 
 async def set_query_retained(

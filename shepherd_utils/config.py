@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     ars_signature_verify: bool = False
     # Shared secret for the HMAC-SHA256 callback signature (X-ARS-Signature).
     ars_signature_secret: str = ""
+    # Base64-encoded AES master key used to decrypt subscriber client secrets
+    # (ARS event subscribe/unsubscribe signature scheme). Empty disables it.
+    aes_master_key: str = ""
     # Where the ars_ws subscriber/websocket service is reachable.
     ars_subscriber_host: str = "http://shepherd_ars_ws:5441"
     ars_ws_port: int = 5441

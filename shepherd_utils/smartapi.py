@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 import httpx
 
 from shepherd_utils.config import settings
-from shepherd_utils.db import upsert_actor
+from shepherd_utils.db import upsert_actor, upsert_agent, upsert_channel
 
 
 def parse_smartapi_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -83,5 +83,8 @@ async def refresh_actors(logger: logging.Logger) -> int:
             actor["maturity"],
             logger,
         )
+        # Keep the agent/channel registries in sync with discovered actors.
+        await upsert_agent(actor["agent_name"], logger, uri=actor["url"])
+        await upsert_channel(actor["channel"], logger)
     logger.info(f"Refreshed {len(actors)} ARS actors from SmartAPI.")
     return len(actors)
