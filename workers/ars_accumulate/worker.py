@@ -33,6 +33,11 @@ from shepherd_utils.db import (
     save_message,
     set_ars_child_status,
 )
+from shepherd_utils.ars_merge import (
+    average_result_scores,
+    merge_aux_graphs,
+    merge_result_maps,
+)
 from shepherd_utils.ars_notify import publish_ars_event
 from shepherd_utils.ars_workflow import ARS_TAIL_WORKFLOW as TAIL_WORKFLOW
 from shepherd_utils.otel import setup_tracer
@@ -60,17 +65,19 @@ def merge_child_into_parent(parent_msg, child_msg, source, logger):
         parent_kg, child_kg, source, logger
     )
 
+    # Dedup identical answers across ARAs (Relay parity): results binding the
+    # same node curies collapse into one, concatenating analyses and
+    # accumulating differing score fields for later averaging.
     child_results = child_message.get("results") or []
-    if parent_message.get("results") is None:
-        parent_message["results"] = []
-    parent_message["results"].extend(child_results)
+    parent_message["results"] = merge_result_maps(
+        parent_message.get("results") or [], child_results, logger
+    )
 
     parent_aux = parent_message.get("auxiliary_graphs")
     if parent_aux is None:
         parent_aux = {}
         parent_message["auxiliary_graphs"] = parent_aux
-    for aux_id, aux in (child_message.get("auxiliary_graphs") or {}).items():
-        parent_aux.setdefault(aux_id, aux)
+    merge_aux_graphs(parent_aux, child_message.get("auxiliary_graphs") or {})
 
     return parent_msg, len(child_results)
 
@@ -131,6 +138,20 @@ async def ars_accumulate(task, logger: logging.Logger):
         logger.info(
             f"All ARAs done for {parent_qid}; launching post-merge tail."
         )
+        # Finalize once: average any accumulated normalized_score lists across
+        # the deduped answers (Relay mergeMessagesRecursive finalize). The latch
+        # guarantees a single winner, so this runs exactly once.
+        got_final_lock = await acquire_lock(parent_response_id, CONSUMER, logger)
+        if got_final_lock:
+            try:
+                final_msg = await get_message(parent_response_id, logger)
+                await asyncio.to_thread(
+                    average_result_scores,
+                    final_msg.get("message", {}).get("results") or [],
+                )
+                await save_message(parent_response_id, final_msg, logger)
+            finally:
+                await remove_lock(parent_response_id, CONSUMER, logger)
         await publish_ars_event(
             {"parent_qid": parent_qid, "status": "merging"}, logger
         )

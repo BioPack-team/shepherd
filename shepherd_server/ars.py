@@ -35,6 +35,7 @@ from shepherd_utils.db import (
     list_ars_parents,
     list_subscribers,
     save_message,
+    set_query_retained,
     upsert_actor,
 )
 from shepherd_utils.logger import QueryLogger
@@ -221,19 +222,15 @@ async def filter_results(pk: str, body: dict = Body(...)):
     return ORJSONResponse(content={"response_id": derived_id})
 
 
-@ARS.post("/retain/{pk}", status_code=200)
+@ARS.get("/retain/{pk}", status_code=200)
 async def retain(pk: str):
-    """Acknowledge a retain request for a parent query.
+    """Retain a query (and its ARS children) from the purge janitor.
 
-    Note: durable retention (overriding the purge janitor) needs a dedicated
-    flag and is handled in the hardening phase; this endpoint currently confirms
-    the query exists.
+    Relay ``retain`` parity (GET): a child pk retains its parent; retention is
+    refused while the query is still running.
     """
     logger = _api_logger()
-    query_state = await get_query_state(pk, logger)
-    if query_state is None:
-        return JSONResponse(content={"error": "Not found"}, status_code=404)
-    return ORJSONResponse(content={"retained": pk})
+    return ORJSONResponse(content=await set_query_retained(pk, logger))
 
 
 @ARS.get("/actors", status_code=200)

@@ -637,6 +637,7 @@ async def purge_old_queries(
                     DELETE FROM callbacks WHERE query_id IN (
                         SELECT qid FROM shepherd_brain
                         WHERE state IN ('COMPLETED', 'ABANDONED')
+                          AND retain = FALSE
                           AND COALESCE(stop_time, start_time)
                               < NOW() - make_interval(days => %s)
                     )
@@ -648,6 +649,7 @@ async def purge_old_queries(
                     """
                     DELETE FROM shepherd_brain
                     WHERE state IN ('COMPLETED', 'ABANDONED')
+                      AND retain = FALSE
                       AND COALESCE(stop_time, start_time)
                           < NOW() - make_interval(days => %s)
                     """,
@@ -1376,6 +1378,73 @@ async def mark_ars_children_errored(
         except Exception as e:
             logger.error(f"Failed to error ARS children for {parent_qid}: {e}")
             break
+
+
+async def set_query_retained(
+    qid: str,
+    logger: logging.Logger,
+) -> Dict[str, Any]:
+    """Retain a parent query and its ARS children from the purge janitor.
+
+    Relay ``retain_all`` parity: if ``qid`` is a child, the parent is retained
+    instead; retention is refused while the parent is still running; on success
+    the parent and every child query row get ``retain = TRUE``. Returns a Relay-
+    shaped ``{"success", ...}`` dict.
+    """
+    result: Dict[str, Any] = {"success": False}
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                # Resolve to the parent if a child pk was given.
+                cursor = await conn.execute(
+                    "SELECT parent_qid FROM ars_children WHERE child_qid = %s LIMIT 1",
+                    (qid,),
+                )
+                row = await cursor.fetchone()
+                parent = row[0] if row else qid
+
+                cursor = await conn.execute(
+                    "SELECT state FROM shepherd_brain WHERE qid = %s", (parent,)
+                )
+                state_row = await cursor.fetchone()
+                if state_row is None:
+                    result = {"success": False, "description": "Invalid PK"}
+                    break
+                # 'QUEUED' is the in-flight state; refuse like Relay's 'R'.
+                if state_row[0] == "QUEUED":
+                    result = {
+                        "success": False,
+                        "parent_pk": parent,
+                        "description": "PK still running",
+                    }
+                    break
+
+                await conn.execute(
+                    """
+                    UPDATE shepherd_brain SET retain = TRUE
+                    WHERE qid = %s
+                       OR qid IN (
+                           SELECT child_qid FROM ars_children WHERE parent_qid = %s
+                       )
+                    """,
+                    (parent, parent),
+                )
+                await conn.commit()
+                result = {"success": True, "parent_pk": parent}
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "set_query_retained", e)
+                break
+            logger.error(
+                f"Connection error retaining query after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to retain query {qid}: {e}")
+            break
+    return result
 
 
 async def list_ars_parents(

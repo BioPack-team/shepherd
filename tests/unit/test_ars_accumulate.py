@@ -37,18 +37,22 @@ def _msg(nodes=None, edges=None, results=None, aux=None):
 # --- merge_child_into_parent ----------------------------------------------
 
 
-def test_merge_child_into_parent_concatenates_results_and_kg():
-    parent = _msg(nodes={"n1": _node("A")}, results=[{"id": "r1"}])
+def test_merge_child_into_parent_keeps_distinct_answers_and_merges_kg():
+    parent = _msg(
+        nodes={"n1": _node("A")},
+        results=[{"node_bindings": {"n0": [{"id": "A:1"}]}, "analyses": []}],
+    )
     child = _msg(
         nodes={"n2": _node("B")},
-        results=[{"id": "r2"}],
+        results=[{"node_bindings": {"n0": [{"id": "B:2"}]}, "analyses": []}],
         aux={"aux1": {"edges": [], "attributes": []}},
     )
     merged, count = merge_child_into_parent(parent, child, "infores:shepherd", logger)
     msg = merged["message"]
     assert count == 1
     assert set(msg["knowledge_graph"]["nodes"]) == {"n1", "n2"}
-    assert [r["id"] for r in msg["results"]] == ["r1", "r2"]
+    # Distinct answers stay separate.
+    assert len(msg["results"]) == 2
     assert "aux1" in msg["auxiliary_graphs"]
 
 

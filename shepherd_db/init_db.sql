@@ -30,6 +30,9 @@ ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS is_ars_parent BOOLEAN DEFAUL
 -- ``UPDATE ... WHERE ars_tail_launched = FALSE RETURNING`` guarantees exactly
 -- one launch even when child callbacks land concurrently.
 ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS ars_tail_launched BOOLEAN DEFAULT FALSE;
+-- Retain latch (ARS parity): when TRUE the query (and its ARS children) are
+-- excluded from the purge janitor so a user can preserve a result indefinitely.
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS retain BOOLEAN DEFAULT FALSE;
 
 -- One row per (parent ARS query x ARA). This is the cross-ARA completion
 -- counter: a parent query is "done fanning out" when no child row is left in a
