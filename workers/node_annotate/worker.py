@@ -2,26 +2,19 @@
 
 Attaches Biothings annotations to every knowledge-graph node as a
 ``biothings_annotations`` attribute. Runs after normalization so annotations
-attach to canonical curies. Faithful to Relay's ``annotate_nodes``: nodes with no
-annotation are left untouched and a total annotator outage passes the message
-through unchanged.
+attach to canonical curies.
 
-Annotation uses the single-curie ``GET /curie/<curie>`` route, one bounded-
-concurrency request per node. The batch ``POST /curie/`` route needs a trailing
-slash that the public proxy 301-strips -- and httpx can't replay a POST across a
-301 (that redirect is what produced the "301 Moved Permanently" / earlier "405"
-errors) -- whereas the single-curie GET has no trailing slash and is proxy-safe.
+This uses exactly what the ARS uses: the ``biothings_annotator`` package
+(``annotator.Annotator().annotate_curie_list``), not an HTTP API. Faithful to
+Relay's ``annotate_nodes``: nodes with no annotation are left untouched and a
+total annotator failure passes the message through unchanged.
 """
 
 import asyncio
 import logging
 import re
 import uuid
-from urllib.parse import quote
 
-import httpx
-
-from shepherd_utils.config import settings
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
@@ -33,52 +26,39 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
-# Bounded concurrency for the per-node annotation GETs.
-ANNOTATE_CONCURRENCY = 20
 # Valid CURIE shape (prefix:reference); skip anything that doesn't match before
 # sending to the annotator (Relay does the same).
 CURIE_RE = re.compile(r"[\w\.]+:[\w\.]+")
 ANNOTATION_ATTRIBUTE_TYPE = "biothings_annotations"
 
 
-def _single_url(curie: str) -> str:
-    """The proxy-safe single-curie endpoint: ``GET /curie/<curie>``."""
-    base = settings.annotator_url.rstrip("/")
-    # Keep the CURIE's ``:`` literal in the path; encode anything else.
-    return f"{base}/{quote(curie, safe=':')}"
+def _annotate_curie_list(curies: list[str]):
+    """Return the ``biothings_annotator`` coroutine that annotates ``curies``.
+
+    Matches Relay: ``annotator.Annotator().annotate_curie_list(curie_list)``.
+    The import is local so the (git-installed) package is only required at
+    runtime and this seam can be mocked in tests.
+    """
+    from biothings_annotator import annotator
+
+    return annotator.Annotator().annotate_curie_list(curies)
 
 
 async def get_annotations(
     curies: list[str], logger: logging.Logger
 ) -> dict[str, object]:
-    """Return a ``curie -> annotation`` map by GETting each curie concurrently.
+    """Return a ``curie -> annotation`` map via the biothings_annotator package.
 
-    Per-curie failures are tolerated (that node is left unannotated); a total
-    outage yields an empty map so the message passes through unchanged.
+    Returns an empty map on failure so the message passes through unchanged.
     """
-    annotations: dict[str, object] = {}
-    semaphore = asyncio.Semaphore(ANNOTATE_CONCURRENCY)
-
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-
-        async def fetch(curie: str) -> None:
-            async with semaphore:
-                try:
-                    response = await client.get(_single_url(curie))
-                    response.raise_for_status()
-                    data = response.json()
-                except Exception as e:
-                    logger.debug(f"Annotation failed for {curie}: {e}")
-                    return
-            # The endpoint may return {curie: annotation} or the annotation
-            # object directly.
-            if isinstance(data, dict) and curie in data:
-                annotations[curie] = data[curie]
-            else:
-                annotations[curie] = data
-
-        await asyncio.gather(*(fetch(curie) for curie in curies))
-    return annotations
+    if not curies:
+        return {}
+    try:
+        result = await _annotate_curie_list(curies)
+        return dict(result) if result else {}
+    except Exception as e:
+        logger.error(f"Node annotation failed; passing through: {e}")
+        return {}
 
 
 def _is_empty_annotation(annotation) -> bool:

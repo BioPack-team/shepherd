@@ -158,11 +158,13 @@ task complete directly for non-chaining workers.
   through unchanged on a normalizer failure).
 
 ### `workers/node_annotate` — node annotation (`STREAM="node_annotate"`)
-- **`get_annotations(curies, logger)`** — GET each curie against the proxy-safe
-  single-curie route `GET /curie/<curie>` (bounded concurrency), returning a
-  `curie → annotation` map. Per-curie failures are tolerated; a total outage
-  yields an empty map (pass-through). The batch `POST /curie/` route is avoided
-  because the public proxy 301-strips its required trailing slash.
+Uses the same library the ARS uses — the `biothings_annotator` package
+(installed from git), not an HTTP API.
+- **`_annotate_curie_list(curies)`** — the ARS seam:
+  `annotator.Annotator().annotate_curie_list(curies)` (lazy-imported so the
+  package is only needed at runtime and mockable in tests).
+- **`get_annotations(curies, logger)`** — await the package, returning its
+  `curie → annotation` dict; empty on failure (pass-through).
 - **`annotate_message(message, annotations)`** — attach each annotation to its
   node as a `biothings_annotations` attribute; returns the count annotated.
 - **`node_annotate(task, logger)`** — filter to valid CURIEs, annotate, save (or
@@ -362,7 +364,7 @@ New `Settings` fields:
 | Setting | Default | Purpose |
 |---|---|---|
 | `ars_aras` | `["aragorn","arax","bte","sipr"]` | ARAs to fan out to. |
-| `annotator_url` | `https://biothings.ncats.io/curie` | Biothings annotator. |
+| `annotator_url` | `https://biothings.ncats.io/curie` | Legacy; node annotation now uses the `biothings_annotator` package, not this URL. |
 | `appraiser_url` | `https://answerappraiser.ci.transltr.io/get_appraisal` | Answer appraiser. |
 | `ars_overall_timeout_sec` | `360` | Watchdog timeout for a parent query. |
 | `ars_blocklist_path` | `/app/config/blocklist.json` | Blocklist asset path. |
