@@ -33,24 +33,42 @@ CURIE_RE = re.compile(r"[\w\.]+:[\w\.]+")
 ANNOTATION_ATTRIBUTE_TYPE = "biothings_annotations"
 
 
+def _batch_url() -> str:
+    """The Biothings annotator batch endpoint is ``POST /curie/`` -- WITH the
+    trailing slash. ``settings.annotator_url`` points at ``.../curie``; POSTing
+    there (no slash) only matches the GET ``/curie/<curie>`` route and 405s."""
+    return settings.annotator_url.rstrip("/") + "/"
+
+
 async def get_annotations(
     curies: list[str], logger: logging.Logger
 ) -> dict[str, object]:
     """Return a ``curie -> annotation`` map, or empty on failure."""
     annotations: dict[str, object] = {}
+    url = _batch_url()
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             for start in range(0, len(curies), BATCH_SIZE):
                 chunk = curies[start : start + BATCH_SIZE]
-                response = await client.post(
-                    settings.annotator_url, json={"ids": chunk}
-                )
+                response = await client.post(url, json={"ids": chunk})
                 response.raise_for_status()
                 annotations.update(response.json() or {})
     except Exception as e:
         logger.error(f"Node annotation request failed; passing through: {e}")
         return {}
     return annotations
+
+
+def _is_empty_annotation(annotation) -> bool:
+    """True for the annotator's "no data" markers (Relay skips these): an empty
+    dict, or a list whose first entry is ``{"notfound": true}``."""
+    if annotation == {} or annotation == []:
+        return True
+    if isinstance(annotation, list) and annotation:
+        first = annotation[0]
+        if isinstance(first, dict) and first.get("notfound") is True:
+            return True
+    return False
 
 
 def annotate_message(message: dict, annotations: dict[str, object]):
@@ -61,7 +79,7 @@ def annotate_message(message: dict, annotations: dict[str, object]):
     annotated = 0
     for curie, node in nodes.items():
         annotation = annotations.get(curie)
-        if annotation is None:
+        if annotation is None or _is_empty_annotation(annotation):
             continue
         attributes = node.get("attributes")
         if attributes is None:

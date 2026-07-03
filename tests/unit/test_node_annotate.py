@@ -54,7 +54,7 @@ def test_annotate_message_skips_unannotated_nodes():
 @pytest.mark.asyncio
 async def test_get_annotations_batches_and_merges(mocker):
     payload = {"NCBIGene:1": {"symbol": "ABC"}}
-    mocker.patch(
+    post = mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
         return_value=mocker.Mock(
@@ -63,6 +63,29 @@ async def test_get_annotations_batches_and_merges(mocker):
     )
     out = await get_annotations(["NCBIGene:1"], logger)
     assert out == payload
+    # The batch endpoint requires the trailing slash (POST /curie/), otherwise
+    # the service returns 405.
+    called_url = post.call_args.args[0]
+    assert called_url.endswith("/curie/")
+
+
+def test_annotate_message_skips_notfound_and_empty():
+    from workers.node_annotate.worker import _is_empty_annotation
+
+    assert _is_empty_annotation({}) is True
+    assert _is_empty_annotation([{"notfound": True}]) is True
+    assert _is_empty_annotation({"symbol": "ABC"}) is False
+
+    message = _message()
+    count = annotate_message(
+        message,
+        {"NCBIGene:1": [{"notfound": True}], "MONDO:2": {"label": "disease"}},
+    )
+    assert count == 1  # only MONDO:2 attached; the notfound marker is skipped
+    # NCBIGene:1 keeps its (empty) attributes list -- no annotation appended.
+    assert message["message"]["knowledge_graph"]["nodes"]["NCBIGene:1"][
+        "attributes"
+    ] == []
 
 
 @pytest.mark.asyncio
