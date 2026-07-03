@@ -52,21 +52,36 @@ def test_annotate_message_skips_unannotated_nodes():
 
 
 @pytest.mark.asyncio
-async def test_get_annotations_batches_and_merges(mocker):
-    payload = {"NCBIGene:1": {"symbol": "ABC"}}
-    post = mocker.patch(
-        "httpx.AsyncClient.post",
+async def test_get_annotations_per_node_get(mocker):
+    """Annotation is one GET per curie against the proxy-safe /curie/<curie>."""
+    get = mocker.patch(
+        "httpx.AsyncClient.get",
         new_callable=mocker.AsyncMock,
         return_value=mocker.Mock(
-            json=mocker.Mock(return_value=payload), raise_for_status=mocker.Mock()
+            json=mocker.Mock(return_value={"NCBIGene:1": {"symbol": "ABC"}}),
+            raise_for_status=mocker.Mock(),
         ),
     )
     out = await get_annotations(["NCBIGene:1"], logger)
-    assert out == payload
-    # The batch endpoint requires the trailing slash (POST /curie/), otherwise
-    # the service returns 405.
-    called_url = post.call_args.args[0]
-    assert called_url.endswith("/curie/")
+    assert out == {"NCBIGene:1": {"symbol": "ABC"}}
+    # Single-curie GET path, no trailing slash (keeps the CURIE colon literal).
+    assert get.call_args.args[0].endswith("/curie/NCBIGene:1")
+
+
+@pytest.mark.asyncio
+async def test_get_annotations_accepts_bare_annotation_shape(mocker):
+    """When the endpoint returns the annotation object directly (not keyed by
+    curie), it is still attributed to the requested curie."""
+    mocker.patch(
+        "httpx.AsyncClient.get",
+        new_callable=mocker.AsyncMock,
+        return_value=mocker.Mock(
+            json=mocker.Mock(return_value={"symbol": "ABC"}),
+            raise_for_status=mocker.Mock(),
+        ),
+    )
+    out = await get_annotations(["NCBIGene:1"], logger)
+    assert out == {"NCBIGene:1": {"symbol": "ABC"}}
 
 
 def test_annotate_message_skips_notfound_and_empty():
@@ -90,12 +105,13 @@ def test_annotate_message_skips_notfound_and_empty():
 
 @pytest.mark.asyncio
 async def test_get_annotations_empty_on_failure(mocker):
+    """A total outage (every GET fails) yields an empty map -> pass-through."""
     mocker.patch(
-        "httpx.AsyncClient.post",
+        "httpx.AsyncClient.get",
         new_callable=mocker.AsyncMock,
         side_effect=Exception("annotator down"),
     )
-    assert await get_annotations(["X:1"], logger) == {}
+    assert await get_annotations(["X:1", "Y:2"], logger) == {}
 
 
 @pytest.mark.asyncio

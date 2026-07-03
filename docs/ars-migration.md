@@ -158,8 +158,11 @@ task complete directly for non-chaining workers.
   through unchanged on a normalizer failure).
 
 ### `workers/node_annotate` — node annotation (`STREAM="node_annotate"`)
-- **`get_annotations(curies, logger)`** — POST curies to `settings.annotator_url`;
-  returns a `curie → annotation` map (empty on failure).
+- **`get_annotations(curies, logger)`** — GET each curie against the proxy-safe
+  single-curie route `GET /curie/<curie>` (bounded concurrency), returning a
+  `curie → annotation` map. Per-curie failures are tolerated; a total outage
+  yields an empty map (pass-through). The batch `POST /curie/` route is avoided
+  because the public proxy 301-strips its required trailing slash.
 - **`annotate_message(message, annotations)`** — attach each annotation to its
   node as a `biothings_annotations` attribute; returns the count annotated.
 - **`node_annotate(task, logger)`** — filter to valid CURIEs, annotate, save (or

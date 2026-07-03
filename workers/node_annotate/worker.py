@@ -1,16 +1,23 @@
 """Node annotation worker.
 
-Attaches Biothings annotations (``settings.annotator_url``) to every
-knowledge-graph node as a ``biothings_annotations`` attribute. Runs after
-normalization so annotations attach to canonical curies. Faithful to Relay's
-``annotate_nodes``: on any annotator failure the message passes through
-unchanged.
+Attaches Biothings annotations to every knowledge-graph node as a
+``biothings_annotations`` attribute. Runs after normalization so annotations
+attach to canonical curies. Faithful to Relay's ``annotate_nodes``: nodes with no
+annotation are left untouched and a total annotator outage passes the message
+through unchanged.
+
+Annotation uses the single-curie ``GET /curie/<curie>`` route, one bounded-
+concurrency request per node. The batch ``POST /curie/`` route needs a trailing
+slash that the public proxy 301-strips -- and httpx can't replay a POST across a
+301 (that redirect is what produced the "301 Moved Permanently" / earlier "405"
+errors) -- whereas the single-curie GET has no trailing slash and is proxy-safe.
 """
 
 import asyncio
 import logging
 import re
 import uuid
+from urllib.parse import quote
 
 import httpx
 
@@ -26,36 +33,51 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
 
-BATCH_SIZE = 1000
+# Bounded concurrency for the per-node annotation GETs.
+ANNOTATE_CONCURRENCY = 20
 # Valid CURIE shape (prefix:reference); skip anything that doesn't match before
 # sending to the annotator (Relay does the same).
 CURIE_RE = re.compile(r"[\w\.]+:[\w\.]+")
 ANNOTATION_ATTRIBUTE_TYPE = "biothings_annotations"
 
 
-def _batch_url() -> str:
-    """The Biothings annotator batch endpoint is ``POST /curie/`` -- WITH the
-    trailing slash. ``settings.annotator_url`` points at ``.../curie``; POSTing
-    there (no slash) only matches the GET ``/curie/<curie>`` route and 405s."""
-    return settings.annotator_url.rstrip("/") + "/"
+def _single_url(curie: str) -> str:
+    """The proxy-safe single-curie endpoint: ``GET /curie/<curie>``."""
+    base = settings.annotator_url.rstrip("/")
+    # Keep the CURIE's ``:`` literal in the path; encode anything else.
+    return f"{base}/{quote(curie, safe=':')}"
 
 
 async def get_annotations(
     curies: list[str], logger: logging.Logger
 ) -> dict[str, object]:
-    """Return a ``curie -> annotation`` map, or empty on failure."""
+    """Return a ``curie -> annotation`` map by GETting each curie concurrently.
+
+    Per-curie failures are tolerated (that node is left unannotated); a total
+    outage yields an empty map so the message passes through unchanged.
+    """
     annotations: dict[str, object] = {}
-    url = _batch_url()
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            for start in range(0, len(curies), BATCH_SIZE):
-                chunk = curies[start : start + BATCH_SIZE]
-                response = await client.post(url, json={"ids": chunk})
-                response.raise_for_status()
-                annotations.update(response.json() or {})
-    except Exception as e:
-        logger.error(f"Node annotation request failed; passing through: {e}")
-        return {}
+    semaphore = asyncio.Semaphore(ANNOTATE_CONCURRENCY)
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+
+        async def fetch(curie: str) -> None:
+            async with semaphore:
+                try:
+                    response = await client.get(_single_url(curie))
+                    response.raise_for_status()
+                    data = response.json()
+                except Exception as e:
+                    logger.debug(f"Annotation failed for {curie}: {e}")
+                    return
+            # The endpoint may return {curie: annotation} or the annotation
+            # object directly.
+            if isinstance(data, dict) and curie in data:
+                annotations[curie] = data[curie]
+            else:
+                annotations[curie] = data
+
+        await asyncio.gather(*(fetch(curie) for curie in curies))
     return annotations
 
 
