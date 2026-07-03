@@ -159,9 +159,119 @@ def decompress_zstd(blob: bytes) -> bytes:
     return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)).read()
 
 
+# ---------------------------------------------------------------------------
+# ARS schema self-heal
+#
+# Postgres only runs the /docker-entrypoint-initdb.d scripts on a *fresh* data
+# directory, so an existing deployment upgraded to the ARS build never picks up
+# the new tables/columns from init_db.sql -- queries like purge_old_queries then
+# fail with "column retain does not exist". This mirrors the monitor's
+# storage.ensure_schema(): apply the ARS additions idempotently on startup. The
+# DDL is kept in sync with shepherd_db/init_db.sql (that file stays the source of
+# truth for a fresh init; this is the migration path for existing databases).
+# ---------------------------------------------------------------------------
+
+# Advisory-lock key that serializes the concurrent startup DDL across the many
+# services that call initialize_db(), avoiding Postgres's concurrent
+# CREATE-TABLE-IF-NOT-EXISTS race.
+_ARS_SCHEMA_LOCK_KEY = 8274123
+
+ARS_SCHEMA_SQL = """
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS is_ars_parent BOOLEAN DEFAULT FALSE;
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS ars_tail_launched BOOLEAN DEFAULT FALSE;
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS retain BOOLEAN DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS ars_children (
+  parent_qid        varchar(255) REFERENCES shepherd_brain(qid) ON DELETE CASCADE,
+  ara               TEXT NOT NULL,
+  child_qid         varchar(255),
+  child_response_id TEXT,
+  ars_callback_id   TEXT,
+  otel_trace        TEXT,
+  status            TEXT NOT NULL,
+  code              INT,
+  result_count      INT,
+  merged_version    INT DEFAULT 0,
+  start_time        TIMESTAMP DEFAULT NOW(),
+  stop_time         TIMESTAMP,
+  PRIMARY KEY (parent_qid, ara)
+);
+CREATE INDEX IF NOT EXISTS idx_ars_children_parent ON ars_children (parent_qid);
+CREATE INDEX IF NOT EXISTS idx_ars_children_callback ON ars_children (ars_callback_id);
+
+CREATE TABLE IF NOT EXISTS ars_actors (
+  id         SERIAL PRIMARY KEY,
+  infores    TEXT UNIQUE,
+  url        TEXT,
+  channel    TEXT,
+  agent_name TEXT,
+  maturity   TEXT,
+  active     BOOLEAN DEFAULT TRUE,
+  inforev    JSONB
+);
+
+CREATE TABLE IF NOT EXISTS ars_subscribers (
+  id           SERIAL PRIMARY KEY,
+  parent_qid   varchar(255),
+  callback_url TEXT,
+  client_id    TEXT,
+  created      TIMESTAMP DEFAULT NOW()
+);
+ALTER TABLE ars_subscribers ADD COLUMN IF NOT EXISTS client_id TEXT;
+
+CREATE TABLE IF NOT EXISTS ars_agents (
+  name        TEXT PRIMARY KEY,
+  description TEXT,
+  uri         TEXT,
+  contact     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ars_channels (
+  name        TEXT PRIMARY KEY,
+  description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ars_clients (
+  client_id     TEXT PRIMARY KEY,
+  client_secret TEXT,
+  callback_url  TEXT,
+  subscriptions JSONB DEFAULT '[]'::jsonb,
+  active        BOOLEAN DEFAULT TRUE
+);
+"""
+
+
+async def ensure_ars_schema() -> None:
+    """Idempotently apply the ARS tables/columns. Safe to call on every startup.
+
+    Fast-paths out when the schema is already present (sentinel table check), and
+    otherwise serializes the DDL behind a transaction-level advisory lock so the
+    many services starting at once don't race.
+    """
+    logger = logging.getLogger("shepherd.db.schema")
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute("SELECT to_regclass('public.ars_clients')")
+            row = await cur.fetchone()
+            if row is not None and row[0] is not None:
+                return  # already migrated
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)", (_ARS_SCHEMA_LOCK_KEY,)
+                )
+                await cur.execute(ARS_SCHEMA_SQL)
+            await conn.commit()  # releases the xact-level advisory lock
+        logger.info("ARS schema ensured")
+    except Exception as e:
+        logger.error(f"Failed to ensure ARS schema: {e}")
+
+
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
+    # Self-heal the ARS schema for deployments whose data dir predates it.
+    await ensure_ars_schema()
 
 
 async def shutdown_db() -> None:

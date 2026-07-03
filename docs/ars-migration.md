@@ -327,6 +327,13 @@ All follow the existing retry-loop style (exponential backoff on
 All additions are **append-only** (the `shepherd_brain` row is read positionally
 elsewhere, so columns are only ever added at the end).
 
+**Existing deployments:** Postgres only runs `init_db.sql` on a *fresh* data
+directory, so an upgraded database won't pick these up from that file. `db.py`
+therefore ships `ensure_ars_schema()` (the same self-heal pattern the monitor uses
+for its tables), called from `initialize_db()` on every service startup — it
+fast-paths when the schema is present and otherwise applies the idempotent DDL
+behind a Postgres advisory lock. No manual migration is needed.
+
 | Object | Purpose |
 |---|---|
 | `shepherd_brain.is_ars_parent` (col) | Marks a top-level ARS parent query. |
