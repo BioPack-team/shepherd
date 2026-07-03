@@ -176,13 +176,17 @@ task complete directly for non-chaining workers.
 - **`answer_appraise(task, logger)`** — appraise + normalize the merged message.
 
 ### `workers/ars_blocklist` — blocklist filtering (`STREAM="ars_blocklist"`)
-- **`load_blocklist(path, logger)`** — load `(blocked_sources, blocked_nodes)` from
-  `config/blocklist.json` (list form or `{knowledge_sources, nodes}` form).
-- **`apply_blocklist(message, blocked_sources, blocked_nodes, logger)`** — drop
-  edges from a blocked source or touching a blocked node, plus blocked nodes;
-  returns the number removed. **`_edge_is_blocked(...)`** is the per-edge test.
-- **`ars_blocklist(task, logger)`** — apply the blocklist then
-  `filter_kgraph_orphans`.
+Ports Relay's `remove_blocked`. The blocklist file (`config/blocklist.json`) is a
+JSON object **keyed by the blocked node CURIE** (values hold `name`/`type`
+metadata, unused for matching); a plain list of curies is also accepted.
+- **`load_blocklist(path, logger)`** — load the set of blocked node curies.
+- **`apply_blocklist(message, blocked_curies, logger)`** — remove blocked nodes
+  and everything depending on them: edges touching a blocked node, aux graphs
+  whose edges are all removed (and offending edges from mixed aux graphs), edges
+  whose `biolink:support_graphs` lose all their graphs, analyses that lose all
+  edge bindings, and results left with no analyses (or binding a blocked node).
+  Returns a `{nodes, edges, results, auxiliary_graphs, analyses}` counts dict.
+- **`ars_blocklist(task, logger)`** — apply the blocklist to the merged message.
 
 ### `workers/ars_ws` — subscriber / WebSocket fan-out (FastAPI, port 5441)
 - **`_broadcast(event)`** — send an event to every connected WebSocket; drop dead
@@ -386,7 +390,7 @@ New unit tests under `tests/unit/` (full suite green — 479 passed):
 | `test_ars_merge.py` | result dedup, analyses concat, score averaging, aux merge. |
 | `test_node_norm.py` / `test_node_annotate.py` | canonicalize / annotate + pass-through on failure. |
 | `test_answer_appraise.py` | appraise + default-on-failure + percentile ranking. |
-| `test_ars_blocklist.py` | source/node blocking + blocklist loading. |
+| `test_ars_blocklist.py` | curie-keyed blocklist loading + node/edge/aux/result cascade. |
 | `test_ars_filter.py` | hop/score/node_type/spec_node + chaining. |
 | `test_ars_clients.py` | canonize_url, AES decrypt roundtrip, POST/GET HMAC verify. |
 | `test_signature.py` | callback HMAC verify. |
