@@ -2,7 +2,9 @@
 
 import logging
 
+import orjson
 import pytest
+import zstandard
 
 from workers.answer_appraise.worker import (
     DEFAULT_ORDERING_COMPONENTS,
@@ -59,6 +61,7 @@ def test_apply_defaults_sets_missing_components():
 
 @pytest.mark.asyncio
 async def test_appraise_merges_ordering_components(mocker):
+    """Plain (uncompressed) JSON response body parses directly."""
     message = {"message": {"results": _results([0.1, 0.2])}}
     appraised = {
         "message": {
@@ -72,13 +75,34 @@ async def test_appraise_merges_ordering_components(mocker):
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
         return_value=mocker.Mock(
-            json=mocker.Mock(return_value=appraised), raise_for_status=mocker.Mock()
+            content=orjson.dumps(appraised),
+            headers={},
+            raise_for_status=mocker.Mock(),
         ),
     )
     await appraise(message, logger)
     results = message["message"]["results"]
     assert results[0]["ordering_components"] == {"novelty": 1, "confidence": 2}
     assert results[1]["ordering_components"] == {"novelty": 3, "confidence": 4}
+
+
+@pytest.mark.asyncio
+async def test_appraise_decompresses_zstd_response(mocker):
+    """A zstd-compressed response body (the real appraiser behavior) is
+    decompressed instead of triggering a UTF-8 decode error."""
+    message = {"message": {"results": _results([0.1])}}
+    appraised = {"message": {"results": [{"ordering_components": {"novelty": 7}}]}}
+    compressed = zstandard.compress(orjson.dumps(appraised))
+    assert compressed[:4] == b"\x28\xb5\x2f\xfd"  # zstd magic, as seen in the wild
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=mocker.Mock(
+            content=compressed, headers={}, raise_for_status=mocker.Mock()
+        ),
+    )
+    await appraise(message, logger)
+    assert message["message"]["results"][0]["ordering_components"] == {"novelty": 7}
 
 
 @pytest.mark.asyncio

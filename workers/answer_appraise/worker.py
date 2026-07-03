@@ -17,7 +17,7 @@ import zstandard
 from scipy.stats import rankdata
 
 from shepherd_utils.config import settings
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.db import decompress_zstd, get_message, save_message
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
@@ -69,16 +69,32 @@ async def appraise(message: dict, logger: logging.Logger) -> None:
         return
     try:
         payload = zstandard.compress(orjson.dumps({"message": message["message"]}))
+        # Mirrors Relay's appraise(): request + response are both zstd. We ask
+        # for a zstd response via Accept-Encoding and send a zstd body.
         headers = {
-            "Content-Type": "application/json",
             "Content-Encoding": "zstd",
+            "Accept-Encoding": "zstd",
         }
         async with httpx.AsyncClient(timeout=270) as client:
             response = await client.post(
                 settings.appraiser_url, content=payload, headers=headers
             )
             response.raise_for_status()
-        appraised = (response.json() or {}).get("message", {}).get("results", []) or []
+            raw = response.content
+        # The appraiser replies with a zstd-compressed body and does not reliably
+        # set a Content-Encoding header, so httpx won't auto-decompress it --
+        # calling response.json() on the raw frame is what raised the
+        # "'utf-8' codec can't decode byte 0xb5" error (0x28 B5 2F FD is the zstd
+        # magic). Decompress explicitly when the frame is present; if httpx (or a
+        # future appraiser) already handed back plain JSON, use it as-is.
+        if raw[:4] == b"\x28\xb5\x2f\xfd" or "zstd" in response.headers.get(
+            "content-encoding", ""
+        ).lower():
+            try:
+                raw = decompress_zstd(raw)
+            except zstandard.ZstdError:
+                pass  # not actually compressed; fall through to parse raw
+        appraised = (orjson.loads(raw) or {}).get("message", {}).get("results", []) or []
         # The appraiser returns results in the same order; merge by index.
         for result, appraised_result in zip(results, appraised):
             oc = appraised_result.get("ordering_components")
