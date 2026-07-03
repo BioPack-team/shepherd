@@ -25,7 +25,11 @@ from shepherd_utils.shared import get_tasks, run_task_lifecycle
 STREAM = "answer_appraise"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 10
+# Appraising holds several full copies of a (post-annotation, potentially large)
+# message in memory at once -- the message, its serialized request bytes, and the
+# appraiser's full echoed-back response. Keep concurrency low so a handful of big
+# queries can't OOM the container (exit 137).
+TASK_LIMIT = 2
 tracer = setup_tracer(STREAM)
 
 DEFAULT_ORDERING_COMPONENTS = {
@@ -81,6 +85,8 @@ async def appraise(message: dict, logger: logging.Logger) -> None:
             )
             response.raise_for_status()
             raw = response.content
+        # Free the (large) request payload before we build the response copies.
+        del payload
         # The appraiser replies with a zstd-compressed body and does not reliably
         # set a Content-Encoding header, so httpx won't auto-decompress it --
         # calling response.json() on the raw frame is what raised the
@@ -94,14 +100,21 @@ async def appraise(message: dict, logger: logging.Logger) -> None:
                 raw = decompress_zstd(raw)
             except zstandard.ZstdError:
                 pass  # not actually compressed; fall through to parse raw
-        appraised = (orjson.loads(raw) or {}).get("message", {}).get("results", []) or []
+        appraised_message = orjson.loads(raw) or {}
+        # Release the raw response bytes as soon as it's parsed -- the appraiser
+        # echoes the whole (annotated) message back, so ``raw`` is large.
+        del raw
+        appraised = appraised_message.get("message", {}).get("results", []) or []
+        appraised_count = len(appraised)
         # The appraiser returns results in the same order; merge by index.
         for result, appraised_result in zip(results, appraised):
             oc = appraised_result.get("ordering_components")
             if oc is not None:
                 result["ordering_components"] = oc
+        # Drop the full appraiser response now that ordering_components are merged.
+        del appraised_message, appraised
         apply_defaults(results)
-        logger.info(f"Appraised {len(appraised)} results.")
+        logger.info(f"Appraised {appraised_count} results.")
     except Exception as e:
         logger.error(f"Appraiser failed; applying default ordering_components: {e}")
         apply_defaults(results)

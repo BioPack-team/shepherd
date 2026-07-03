@@ -65,8 +65,9 @@ POST /ars/query (or /asyncquery)
         │  when all ARAs are DONE, a single latch winner (claim_ars_tail)
         │  averages accumulated scores and launches the post-merge tail:
         ▼
- node_norm → node_annotate → answer_appraise → ars_blocklist →
+ node_norm → ars_blocklist → node_annotate → answer_appraise →
  filter_results_top_n → finish_query  ──►  POST result to submitter callback
+ (order mirrors the ARS post_process: remove_blocked → annotate → appraise)
 ```
 
 A **watchdog** loop inside the `ars` worker forces timed-out parents through the
@@ -254,8 +255,9 @@ metadata, unused for matching); a plain list of curies is also accepted.
 
 ### `shepherd_utils/ars_workflow.py`
 - **`ARS_TAIL_WORKFLOW`** — the shared post-merge workflow constant
-  `[node_norm, node_annotate, answer_appraise, ars_blocklist,
-  filter_results_top_n]` (`finish_query` is auto-appended).
+  `[node_norm, ars_blocklist, node_annotate, answer_appraise,
+  filter_results_top_n]` (`finish_query` is auto-appended). Order mirrors the ARS
+  `post_process` (remove_blocked → annotate → appraise → normalizeScores).
 
 ### `shepherd_utils/signature.py` — inbound ARS callback signatures
 - **`compute_signature(body, secret)`** — hex HMAC-SHA256 of a body under a secret.
