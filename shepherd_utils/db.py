@@ -284,6 +284,91 @@ async def get_message(
 
 
 # ---------------------------------------------------------------------------
+# Per-query "ready callback" index
+#
+# The merge_message worker coalesces all of a query's arrived-but-unmerged
+# callbacks into a single locked merge. So that one worker can find every ready
+# callback for a query without draining (and thus hoarding) the shared merge
+# stream, each arriving callback is recorded in a Redis set keyed by the query's
+# response_id. The merge worker drains this set under the response_id lock; the
+# per-callback stream message is only a wake signal. Set membership implies the
+# callback payload is already saved (add_ready_callback is called after
+# save_message), and a callback leaves the set only after it has been merged.
+# ---------------------------------------------------------------------------
+
+READY_CALLBACKS_PREFIX = "merge_ready:"
+
+
+def _ready_callbacks_key(response_id: str) -> str:
+    return f"{READY_CALLBACKS_PREFIX}{response_id}"
+
+
+async def add_ready_callback(
+    response_id: str,
+    callback_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Record an arrived callback as ready to merge into ``response_id``."""
+    key = _ready_callbacks_key(response_id)
+    try:
+        async with data_db_client.pipeline(transaction=True) as pipe:
+            pipe.sadd(key, callback_id)
+            pipe.expire(key, settings.redis_ttl)
+            await pipe.execute()
+    except Exception as e:
+        logger.error(f"Failed to record ready callback {callback_id}: {e}")
+
+
+async def get_ready_callbacks(
+    response_id: str,
+    logger: logging.Logger,
+) -> List[str]:
+    """Return the callback ids currently ready to merge for ``response_id``."""
+    key = _ready_callbacks_key(response_id)
+    try:
+        members = await data_db_client.smembers(key)
+    except Exception as e:
+        logger.error(f"Failed to get ready callbacks for {response_id}: {e}")
+        return []
+    return [m.decode() if isinstance(m, bytes) else m for m in members]
+
+
+async def is_ready_callback(
+    response_id: str,
+    callback_id: str,
+    logger: logging.Logger,
+) -> bool:
+    """True if ``callback_id`` is still an unmerged ready callback.
+
+    On error we assume it is still pending so the caller re-enqueues the wake
+    task rather than silently dropping a callback.
+    """
+    key = _ready_callbacks_key(response_id)
+    try:
+        return bool(await data_db_client.sismember(key, callback_id))
+    except Exception as e:
+        logger.error(f"Failed to check ready callback {callback_id}: {e}")
+        return True
+
+
+async def clear_ready_callback(
+    response_id: str,
+    callback_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Remove a merged callback from the ready index.
+
+    Redis deletes the set automatically once its last member is removed, so no
+    explicit key cleanup is needed; the TTL covers abandoned queries.
+    """
+    key = _ready_callbacks_key(response_id)
+    try:
+        await data_db_client.srem(key, callback_id)
+    except Exception as e:
+        logger.error(f"Failed to clear ready callback {callback_id}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Sync variants of get_message / save_message
 #
 # Intended for use inside ProcessPoolExecutor workers, which cannot drive an

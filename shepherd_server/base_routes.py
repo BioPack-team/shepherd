@@ -18,6 +18,7 @@ from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_query,
+    add_ready_callback,
     decompress_zstd,
     get_callback_query_id,
     get_logs,
@@ -301,6 +302,11 @@ async def callback(
     logger.debug(f"Saving callback {callback_id} to redis")
     await save_message(callback_id, response, logger)
     logger.debug(f"Saved callback {callback_id} to redis")
+    # Record this callback in the per-query ready index *before* enqueuing the
+    # wake task, so that whichever merge_message worker picks up the wake signal
+    # can drain every arrived callback for this query under one lock. Set
+    # membership implies the payload above is already saved.
+    await add_ready_callback(response_id, callback_id, logger)
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
     with tracer.start_as_current_span("callback", context=parent_ctx) as span:
