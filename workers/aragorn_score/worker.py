@@ -1256,7 +1256,9 @@ async def poll_for_tasks():
             async for task, parent_ctx, logger, limiter in get_tasks(
                 STREAM, GROUP, CONSUMER, TASK_LIMIT
             ):
-                await process_task(task, parent_ctx, logger, limiter, loop, executor)
+                asyncio.create_task(
+                    process_task(task, parent_ctx, logger, limiter, loop, executor)
+                )
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")
         except Exception as e:
