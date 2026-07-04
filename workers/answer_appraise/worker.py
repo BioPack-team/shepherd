@@ -9,6 +9,7 @@ downstream ordering never sees a missing field.
 
 import asyncio
 import logging
+import time
 import uuid
 
 import httpx
@@ -71,6 +72,7 @@ async def appraise(message: dict, logger: logging.Logger) -> None:
     results = message.get("message", {}).get("results", []) or []
     if not results:
         return
+    start = time.time()
     try:
         payload = zstandard.compress(orjson.dumps({"message": message["message"]}))
         # Mirrors Relay's appraise(): request + response are both zstd. We ask
@@ -79,12 +81,23 @@ async def appraise(message: dict, logger: logging.Logger) -> None:
             "Content-Encoding": "zstd",
             "Accept-Encoding": "zstd",
         }
-        async with httpx.AsyncClient(timeout=270) as client:
+        logger.info(
+            f"POSTing {len(results)} results ({len(payload)} zstd bytes) to "
+            f"appraiser {settings.appraiser_url}"
+        )
+        # Fail fast if the appraiser is unreachable (connect), but allow it a long
+        # read window since scoring a large message legitimately takes a while.
+        timeout = httpx.Timeout(270.0, connect=15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 settings.appraiser_url, content=payload, headers=headers
             )
             response.raise_for_status()
             raw = response.content
+        logger.info(
+            f"Appraiser returned {response.status_code} in {time.time() - start:.1f}s "
+            f"({len(raw)} bytes)"
+        )
         # Free the (large) request payload before we build the response copies.
         del payload
         # The appraiser replies with a zstd-compressed body and does not reliably
@@ -116,7 +129,10 @@ async def appraise(message: dict, logger: logging.Logger) -> None:
         apply_defaults(results)
         logger.info(f"Appraised {appraised_count} results.")
     except Exception as e:
-        logger.error(f"Appraiser failed; applying default ordering_components: {e}")
+        logger.error(
+            f"Appraiser failed after {time.time() - start:.1f}s; applying default "
+            f"ordering_components: {type(e).__name__}: {e}"
+        )
         apply_defaults(results)
 
 
@@ -124,9 +140,17 @@ async def answer_appraise(task, logger: logging.Logger):
     """Appraise and normalize the merged message's results."""
     response_id = task[1]["response_id"]
     message = await get_message(response_id, logger)
+    results = message.get("message", {}).get("results", []) or []
+    nodes = (message.get("message", {}).get("knowledge_graph", {}) or {}).get(
+        "nodes", {}
+    ) or {}
+    logger.info(
+        f"Appraising {response_id}: {len(results)} results, {len(nodes)} kg nodes"
+    )
     await appraise(message, logger)
-    normalize_scores(message.get("message", {}).get("results", []) or [])
+    normalize_scores(results)
     await save_message(response_id, message, logger)
+    logger.info(f"Appraisal complete for {response_id}")
 
 
 async def process_task(task, parent_ctx, logger, limiter):
