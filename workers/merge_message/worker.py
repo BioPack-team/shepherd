@@ -783,9 +783,7 @@ async def poll_for_tasks():
         await asyncio.gather(
             *(clear_ready_callback(response_id, cb, logger) for cb in callback_ids)
         )
-        await asyncio.gather(
-            *(remove_callback_id(cb, logger) for cb in callback_ids)
-        )
+        await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
 
     async def process_query(task, parent_ctx, logger, limiter):
         start = time.time()
