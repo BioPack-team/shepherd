@@ -8,14 +8,17 @@ import uuid
 from enum import Enum
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, Body, Response
-from fastapi.responses import JSONResponse
+import orjson
+import zstandard
+from fastapi import APIRouter, Body, Request, Response
+from fastapi.responses import JSONResponse, ORJSONResponse
 from opentelemetry.propagate import extract, inject
 
 from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_query,
+    decompress_zstd,
     get_callback_query_id,
     get_logs,
     get_message,
@@ -30,6 +33,15 @@ setup_logging()
 tracer = setup_tracer("shepherd-server")
 
 base_router = APIRouter()
+
+
+class QueryIntakeError(Exception):
+    """Raised when a query can't be accepted because its initial state could
+    not be persisted (e.g. the datastore is full or unavailable).
+
+    The message is client-safe -- it's surfaced verbatim in the HTTP response,
+    so it must not leak connection details. The specific underlying cause is
+    logged server-side (see ``PG_DISK_FULL`` in ``shepherd_utils.db``)."""
 
 
 class ARATargetEnum(str, Enum):
@@ -114,7 +126,17 @@ async def run_query(
     # save query to db
     try:
 
-        await add_query(query_id, response_id, query, callback_url, logger)
+        # ``target`` is either an ARATargetEnum (which subclasses str -- value
+        # like "aragorn") or already a plain string for workflow-driven queries.
+        target_name = target.value if hasattr(target, "value") else target
+        await add_query(
+            query_id,
+            response_id,
+            query,
+            callback_url,
+            logger,
+            target=target_name,
+        )
         await add_task(
             target,
             {
@@ -123,12 +145,22 @@ async def run_query(
                 "workflow": json.dumps(workflow),
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
+                "metadata": json.dumps({}),
             },
             logger,
         )
     except Exception as e:
-        logger.error(f"Failed to save query: {e}")
-        # TODO: set query to failed state
+        # Previously this was swallowed and we returned as if the query had been
+        # accepted -- so a full/unavailable datastore left the query unsaved and
+        # unqueued: the sync path then polled a row that never existed until it
+        # timed out (~6 min), and the async path returned a fake 200 Accepted for
+        # a job that would never run. Surface it instead so the caller gets a
+        # real error describing what happened.
+        logger.error(f"Failed to accept query {query_id}: {e}")
+        raise QueryIntakeError(
+            "Unable to accept query: failed to persist initial query state "
+            "(datastore unavailable). Please retry shortly."
+        ) from e
 
     return query_id, response_id, logger
 
@@ -136,11 +168,17 @@ async def run_query(
 async def run_sync_query(
     target: ARATargetEnum,
     query: dict = Body(..., examples=[default_input_query]),
-) -> dict:
+) -> Response:
     """Handle synchronous TRAPI queries."""
     # query_dict = query.dict()
     query_dict = query
-    query_id, response_id, logger = await run_query(target, query_dict)
+    try:
+        query_id, response_id, logger = await run_query(target, query_dict)
+    except QueryIntakeError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=500,
+        )
     start = time.time()
     now = start
     timeout = query_dict.get("parameters", {}).get("timeout", 360)
@@ -157,19 +195,24 @@ async def run_sync_query(
                 response_id = query_state[7]
                 response = await get_message(response_id, logger)
                 if response is None:
-                    return {"status": "ERROR", "description": "Unable to get response"}
+                    return ORJSONResponse(
+                        content={
+                            "status": "ERROR",
+                            "description": "Unable to get response",
+                        }
+                    )
                 logs = await get_logs(response_id, logger)
                 response["logs"] = logs
-                return response
+                return ORJSONResponse(content=response)
         else:
-            logger.warning(f"Failed to get the query state of query id {query_id}")
+            # Debug, not warning: this fires every 0.5s while a query is still
+            # in flight (the row just isn't COMPLETED yet) and would otherwise
+            # flood the logs -- especially if the DB is unreachable.
+            logger.debug(f"Failed to get the query state of query id {query_id}")
         await asyncio.sleep(0.5)
 
     logger.error("Query timed out")
-    return {
-        "status": "TIMEOUT",
-        "description": "Query timeout",
-    }
+    return ORJSONResponse(content={"status": "TIMEOUT", "description": "Query timeout"})
 
 
 async def run_async_query(
@@ -186,7 +229,13 @@ async def run_async_query(
             },
             status_code=422,
         )
-    query_id, _, _ = await run_query(target, query, callback_url)
+    try:
+        query_id, _, _ = await run_query(target, query, callback_url)
+    except QueryIntakeError as e:
+        return JSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=500,
+        )
     return JSONResponse(
         content={
             "status": "Accepted",
@@ -200,9 +249,19 @@ async def run_async_query(
 async def callback(
     target: ARATargetEnum,
     callback_id: str,
-    response: dict,
+    request: Request,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
+    raw = await request.body()
+    try:
+        if "zstd" in request.headers.get("content-encoding", "").lower():
+            raw = decompress_zstd(raw)
+        response = orjson.loads(raw)
+    except (orjson.JSONDecodeError, zstandard.ZstdError):
+        return JSONResponse(
+            content={"detail": "Invalid request body"},
+            status_code=422,
+        )
     # Set up logger
     log_level = response.get("log_level") or "INFO"
     level_number = logging._nameToLevel[log_level]
@@ -244,7 +303,8 @@ async def callback(
     logger.debug(f"Saved callback {callback_id} to redis")
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
-    with tracer.start_as_current_span(f"callback.{callback_id}", context=parent_ctx):
+    with tracer.start_as_current_span("callback", context=parent_ctx) as span:
+        span.set_attribute("callback_id", callback_id)
         span_carrier = {}
         inject(span_carrier)
         # add new task to merge callback response into original message
@@ -257,6 +317,7 @@ async def callback(
                 "callback_id": callback_id,
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
+                "metadata": json.dumps({}),
             },
             logger,
         )
@@ -288,7 +349,7 @@ async def get_query_response(
     logger.addHandler(log_handler)
     response = await get_message(query_id, logger)
     if response is None:
-        return 404
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
     logs = await get_logs(query_id, logger)
     response["logs"] = logs
-    return response
+    return ORJSONResponse(content=response)

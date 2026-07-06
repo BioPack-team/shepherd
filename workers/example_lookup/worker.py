@@ -18,7 +18,7 @@ from shepherd_utils.db import (
     save_message,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
 STREAM = "example.lookup"
@@ -55,7 +55,9 @@ async def example_lookup(task, logger: logging.Logger):
                 callback_id = str(uuid.uuid4())[:8]
                 try:
                     # Put callback UID and query ID in postgres
-                    await add_callback_id(query_id, callback_id, logger)
+                    await add_callback_id(
+                        query_id, callback_id, task[1].get("otel", "{}"), logger
+                    )
                     # put lookup query graph in redis
                     await save_message(
                         f"{callback_id}_query_graph",
@@ -119,24 +121,9 @@ async def example_lookup(task, logger: logging.Logger):
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
-    start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await example_lookup(task, logger)
-        # Always wrap up the task to ACK it in the broker
-        try:
-            await wrap_up_task(STREAM, GROUP, task, logger)
-        except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Finished task {task[0]} in {time.time() - start}")
+    await run_task_lifecycle(
+        STREAM, GROUP, task, parent_ctx, logger, limiter, example_lookup
+    )
 
 
 async def poll_for_tasks():

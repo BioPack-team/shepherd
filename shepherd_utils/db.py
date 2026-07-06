@@ -1,6 +1,7 @@
 """Postgres DB Manager."""
 
 import asyncio
+import io
 import logging
 import time
 from typing import Any, Dict, List, Union
@@ -15,6 +16,29 @@ from psycopg_pool import AsyncConnectionPool
 from .config import settings
 
 PG_RETRIES = 5
+
+# Postgres SQLSTATE 53100 is ``disk_full``. A full data volume surfaces as
+# psycopg.errors.DiskFull, which subclasses OperationalError -- so it lands in
+# the OperationalError branches of the retry loops below, where retrying can
+# never help. We detect it explicitly and emit one stable, greppable marker so
+# a cluster-wide outage caused by a full disk is obvious in every worker's logs
+# instead of hiding behind generic "connection error" noise.
+PG_DISK_FULL_SQLSTATE = "53100"
+
+
+def is_disk_full_error(exc: BaseException) -> bool:
+    """True if *exc* is a Postgres error caused by a full data volume."""
+    return getattr(exc, "sqlstate", None) == PG_DISK_FULL_SQLSTATE
+
+
+def log_pg_disk_full(
+    logger: logging.Logger, operation: str, exc: BaseException
+) -> None:
+    logger.critical(
+        f"PG_DISK_FULL operation={operation} sqlstate={getattr(exc, 'sqlstate', None)}: "
+        f"{exc} -- Postgres is rejecting writes because its data volume is full"
+    )
+
 
 CONNINFO = (
     f"postgresql://postgres:{settings.postgres_password}@"
@@ -34,7 +58,7 @@ async def check_connection(conn):
 
 pool = AsyncConnectionPool(
     conninfo=CONNINFO,
-    timeout=10,
+    timeout=settings.postgres_pool_timeout,
     min_size=5,
     max_size=10,
     max_idle=300,
@@ -124,6 +148,16 @@ def decode_message(blob: bytes) -> Any:
     return orjson.loads(zstandard.decompress(blob))
 
 
+def decompress_zstd(blob: bytes) -> bytes:
+    """Decompress a zstd frame into raw bytes.
+
+    Uses a streaming reader so it handles both frames with an embedded content
+    size and streaming frames that omit it (unlike the one-shot
+    ``zstandard.decompress``).
+    """
+    return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)).read()
+
+
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
@@ -140,12 +174,15 @@ async def add_query(
     query: dict[str, Any],
     callback_url: Union[str, None],
     logger: logging.Logger,
+    target: Union[str, None] = None,
 ):
     """
     Add an initial query to the db.
 
     Args:
         query (Dict): TRAPI query graph
+        target: The ARA the query was routed to (stored in ``domain`` for
+            per-ARA dashboards).
 
     Returns:
         query_id: str
@@ -161,19 +198,22 @@ async def add_query(
         logger.error(f"Failed to save initial query or response: {e}")
         raise Exception("Failed to save initial query or response.")
     try:
-        async with pool.connection(60) as conn:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
             await conn.execute(
                 """
-            INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status) VALUES (
-                %s, NOW(), %s, %s, %s, %s
+            INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status, domain) VALUES (
+                %s, NOW(), %s, %s, %s, %s, %s
             )
             """,
-                (query_id, response_id, callback_url, "QUEUED", "OK"),
+                (query_id, response_id, callback_url, "QUEUED", "OK", target),
             )
             # await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(query_id)))
             await conn.commit()
     except Exception as e:
-        logger.error(f"Failed to save initial query state to db: {e}")
+        if is_disk_full_error(e):
+            log_pg_disk_full(logger, "add_query", e)
+        else:
+            logger.error(f"Failed to save initial query state to db: {e}")
         raise Exception("Failed to save initial query state.")
     logger.debug(f"Adding query took {time.time() - start} seconds")
 
@@ -218,13 +258,23 @@ async def save_message(
 async def get_message(
     message_id: str,
     logger: logging.Logger,
-) -> Dict:
-    """Get the message from db."""
+    raw: bool = False,
+) -> Union[Dict, bytes]:
+    """Get the message from db.
+
+    When *raw* is True, return the decompressed JSON bytes without parsing
+    into a Python object — useful when the caller will forward the payload
+    without inspecting it.
+    """
     start = time.time()
     blob = await data_db_client.get(message_id)
     if blob is None:
-        # failed to get message from db
         raise KeyError(f"Failed to get {message_id} from db")
+
+    if raw:
+        result = zstandard.decompress(blob)
+        logger.debug(f"Getting raw message took {time.time() - start} seconds")
+        return result
 
     start_decomp = time.time()
     message = decode_message(blob)
@@ -327,7 +377,7 @@ async def add_callback_id(
     """Add a callback->query mapping."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 INSERT INTO callbacks (query_id, callback_id, otel_trace) VALUES (
@@ -343,12 +393,16 @@ async def add_callback_id(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "add_callback_id", e)
+                break
             logger.error(f"Connection error on attempt {attempt}: {e}")
             logger.info(f"Pool stats: {pool.get_stats()}")
             await asyncio.sleep(0.1 * (2**attempt))
             continue
         except Exception as e:
             logger.error(f"Failed to save callback: {e}")
+            break
 
 
 async def remove_callback_id(
@@ -358,7 +412,7 @@ async def remove_callback_id(
     """Once a callback has been processed, remove it."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 DELETE FROM callbacks WHERE callback_id = %s
@@ -368,6 +422,9 @@ async def remove_callback_id(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "remove_callback_id", e)
+                break
             logger.error(
                 f"Connection error removing callback id after attempt {attempt}: {e}"
             )
@@ -376,6 +433,7 @@ async def remove_callback_id(
             continue
         except Exception as e:
             logger.error(f"Failed to remove callback after processing: {e}")
+            break
 
 
 async def get_running_callbacks(
@@ -386,7 +444,7 @@ async def get_running_callbacks(
     running_lookups = []
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT callback_id FROM callbacks WHERE query_id = %s
@@ -397,6 +455,9 @@ async def get_running_callbacks(
                 running_lookups = rows
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_running_callbacks", e)
+                break
             logger.error(
                 f"Connection error getting running callbacks after attempt {attempt}: {e}"
             )
@@ -416,7 +477,7 @@ async def cleanup_callbacks(
     """Remove any current running callbacks."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 DELETE FROM callbacks WHERE query_id = %s
@@ -426,6 +487,9 @@ async def cleanup_callbacks(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "cleanup_callbacks", e)
+                break
             logger.error(
                 f"Connection error deleting callbacks after attempt {attempt}: {e}"
             )
@@ -434,6 +498,181 @@ async def cleanup_callbacks(
             continue
         except Exception as e:
             logger.error(f"Failed to remove running lookups: {e}")
+            break
+
+
+async def reap_completed_callbacks(logger: logging.Logger) -> int:
+    """Delete callback rows whose parent query is already COMPLETED.
+
+    Used by the monitor's janitor to clean up rows orphaned by code paths that
+    finished without calling ``cleanup_callbacks``. Returns the number of rows
+    deleted on this call.
+    """
+    deleted = 0
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cur = await conn.execute("""
+                    DELETE FROM callbacks
+                    WHERE query_id IN (
+                        SELECT qid FROM shepherd_brain WHERE state = 'COMPLETED'
+                    )
+                    """)
+                deleted = cur.rowcount or 0
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "reap_completed_callbacks", e)
+                break
+            logger.warning(
+                f"Connection error reaping completed callbacks (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to reap completed callbacks: {e}")
+            break
+    return deleted
+
+
+async def reap_abandoned_queries(
+    max_age_sec: float, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Fail-and-clean queries stuck in a non-terminal state past the budget.
+
+    A query that hasn't reached COMPLETED long after the whole-query upstream
+    budget (~5 min) has elapsed is considered abandoned -- usually because the
+    worker driving it crashed. We mark it ABANDONED, clear its pending callback
+    rows (the rows that otherwise keep ``oldest_callback_age_sec`` climbing and
+    re-firing the callback-age alert every cooldown), and return one record per
+    query so the caller can alert on it exactly once. The state flip means a
+    query is reaped a single time and never rediscovered.
+    """
+    abandoned: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cur = await conn.execute(
+                    """
+                    SELECT b.qid,
+                           EXTRACT(EPOCH FROM (NOW() - b.start_time)) AS age_sec,
+                           COUNT(c.callback_id) AS callbacks
+                    FROM shepherd_brain b
+                    LEFT JOIN callbacks c ON c.query_id = b.qid
+                    WHERE b.state NOT IN ('COMPLETED', 'ABANDONED')
+                      AND b.start_time < NOW() - make_interval(secs => %s)
+                    GROUP BY b.qid, b.start_time
+                    """,
+                    (float(max_age_sec),),
+                )
+                rows = await cur.fetchall()
+                if not rows:
+                    return []
+                qids = [r[0] for r in rows]
+                # Clear callbacks first (FK references shepherd_brain), then
+                # move the parent query to a terminal ABANDONED state.
+                await conn.execute(
+                    "DELETE FROM callbacks WHERE query_id = ANY(%s)", (qids,)
+                )
+                await conn.execute(
+                    """
+                    UPDATE shepherd_brain
+                    SET state = 'ABANDONED', stop_time = NOW(),
+                        status = 'Abandoned: no completion within budget'
+                    WHERE qid = ANY(%s)
+                    """,
+                    (qids,),
+                )
+                await conn.commit()
+                abandoned = [
+                    {
+                        "qid": r[0],
+                        "age_sec": float(r[1] or 0),
+                        "callbacks_deleted": int(r[2] or 0),
+                    }
+                    for r in rows
+                ]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "reap_abandoned_queries", e)
+                break
+            logger.warning(
+                f"Connection error reaping abandoned queries (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to reap abandoned queries: {e}")
+            break
+    return abandoned
+
+
+async def purge_old_queries(
+    retention_days: int, logger: logging.Logger
+) -> Dict[str, int]:
+    """Delete terminal queries (and their leftover callbacks) past retention.
+
+    Postgres has no row-level TTL, so this is the scheduled equivalent for the
+    ``shepherd_brain`` table, which otherwise grows forever (rows only ever flip
+    to COMPLETED/ABANDONED, never get removed). Rows in a terminal state whose
+    work finished longer ago than ``retention_days`` are deleted; in-flight
+    queries are never touched regardless of age -- the abandoned-query reaper is
+    what moves a stuck query into a terminal state, after which it becomes
+    eligible here. Returns ``{"queries": n, "callbacks": m}``.
+    """
+    result = {"queries": 0, "callbacks": 0}
+    if retention_days <= 0:
+        return result
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                # callbacks FK-references shepherd_brain, so clear any leftover
+                # rows for the doomed queries first (most are already reaped on
+                # completion, but a crash can leave stragglers).
+                cur = await conn.execute(
+                    """
+                    DELETE FROM callbacks WHERE query_id IN (
+                        SELECT qid FROM shepherd_brain
+                        WHERE state IN ('COMPLETED', 'ABANDONED')
+                          AND COALESCE(stop_time, start_time)
+                              < NOW() - make_interval(days => %s)
+                    )
+                    """,
+                    (retention_days,),
+                )
+                result["callbacks"] = cur.rowcount or 0
+                cur = await conn.execute(
+                    """
+                    DELETE FROM shepherd_brain
+                    WHERE state IN ('COMPLETED', 'ABANDONED')
+                      AND COALESCE(stop_time, start_time)
+                          < NOW() - make_interval(days => %s)
+                    """,
+                    (retention_days,),
+                )
+                result["queries"] = cur.rowcount or 0
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "purge_old_queries", e)
+                break
+            logger.warning(
+                f"Connection error purging old queries (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to purge old queries: {e}")
+            break
+    if result["queries"] or result["callbacks"]:
+        logger.info(
+            f"Purged {result['queries']} terminal queries and "
+            f"{result['callbacks']} leftover callbacks older than {retention_days}d"
+        )
+    return result
 
 
 async def get_callback_query_id(
@@ -444,7 +683,7 @@ async def get_callback_query_id(
     original_query = None
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT query_id, otel_trace FROM callbacks WHERE callback_id = %s
@@ -456,6 +695,9 @@ async def get_callback_query_id(
                     original_query = row
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_callback_query_id", e)
+                break
             logger.error(
                 f"Connection error getting query id from callback after attempt {attempt}: {e}"
             )
@@ -464,6 +706,7 @@ async def get_callback_query_id(
             continue
         except Exception as e:
             logger.error(f"Failed to get a query id from callback: {e}")
+            break
     return original_query
 
 
@@ -475,7 +718,7 @@ async def get_query_state(
     query_state = None
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT * FROM shepherd_brain WHERE qid = %s
@@ -486,6 +729,9 @@ async def get_query_state(
                 query_state = row
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_query_state", e)
+                break
             logger.error(
                 f"Connection error getting query state after attempt {attempt}: {e}"
             )
@@ -494,6 +740,7 @@ async def get_query_state(
             continue
         except Exception as e:
             logger.error(f"Failed to get query state: {e}")
+            break
     return query_state
 
 
@@ -505,7 +752,7 @@ async def set_query_completed(
     """This query is done."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(60) as conn:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
                     """
                 UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s
@@ -518,6 +765,9 @@ async def set_query_completed(
                 await conn.commit()
             break
         except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "set_query_completed", e)
+                break
             logger.error(
                 f"Connection error setting query completed after attempt {attempt}: {e}"
             )
@@ -526,3 +776,4 @@ async def set_query_completed(
             continue
         except Exception as e:
             logger.error(f"Failed to successfully complete query in db: {e}")
+            break

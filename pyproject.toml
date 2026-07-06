@@ -1,20 +1,19 @@
 [project]
 name = "shepherd"
-version = "1.0.0"
+version = "0.8.7"
 description = "A shared platform for Translator ARAs"
 authors = [{ name = "Max Wang", email = "max@covar.com" }]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
   "fastapi~=0.110",
   "httpx~=0.28",
-  "opentelemetry-api",
-  "opentelemetry-sdk==1.16.0",
-  "opentelemetry-exporter-jaeger",
-  "opentelemetry-exporter-otlp",
-  "opentelemetry-instrumentation-fastapi==0.37b0",
-  "opentelemetry-instrumentation-httpx==0.37b0",
-  "opentelemetry-instrumentation-redis",
+  "opentelemetry-api==1.42.1",
+  "opentelemetry-sdk==1.42.1",
+  "opentelemetry-exporter-otlp==1.42.1",
+  "opentelemetry-instrumentation-fastapi==0.63b1",
+  "opentelemetry-instrumentation-httpx==0.63b1",
+  "opentelemetry-instrumentation-redis==0.63b1",
   "orjson~=3.10",
   "psycopg[binary]~=3.1",
   "psycopg_pool~=3.2",
@@ -32,8 +31,14 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["shepherd_utils", "workers", "shepherd_server"]
-include = ["shepherd_utils.*", "workers.*", "shepherd_server.*"]
+# Scan from the repo root so the first-party packages are installed under their
+# real dotted names (``shepherd_utils``, ``workers.monitor``, ...). The previous
+# config pointed ``where`` *inside* each directory, so discovered names never
+# matched the ``include`` filter and nothing first-party was actually installed
+# -- importability silently depended on the working directory being /app.
+# The trailing ``*`` (not ``.*``) keeps the top-level packages themselves.
+where = ["."]
+include = ["shepherd_utils*", "workers*", "shepherd_server*"]
 
 [tool.setuptools.package-data]
 shepherd_utils = ["*.yml"]

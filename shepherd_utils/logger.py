@@ -4,7 +4,7 @@ import logging
 import logging.config
 import os
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class ReasonerLogEntryFormatter(logging.Formatter):
@@ -23,7 +23,9 @@ class ReasonerLogEntryFormatter(logging.Formatter):
             log_entry |= record.msg
 
         # Add timestamp
-        iso_timestamp = datetime.utcfromtimestamp(record.created).isoformat()
+        iso_timestamp = datetime.fromtimestamp(
+            record.created, tz=timezone.utc
+        ).isoformat()
         log_entry["timestamp"] = iso_timestamp
 
         # Add level
@@ -110,7 +112,16 @@ def get_logging_config():
             "shepherd": {
                 "level": "DEBUG",
                 "handlers": logger_handlers,
-            }
+            },
+            # psycopg's pool retries to keep min_size connections warm and logs
+            # a WARNING on every failed attempt. When the DB is down that floods
+            # the logs from every service; raise the threshold so only genuine
+            # pool errors surface (our own code already logs the outage once).
+            "psycopg.pool": {
+                "level": "ERROR",
+                "handlers": logger_handlers,
+                "propagate": False,
+            },
         },
         "incremental": False,
         "disable_existing_loggers": False,

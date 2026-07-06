@@ -3,10 +3,9 @@
 import asyncio
 import json
 import logging
-import time
 import uuid
 from shepherd_utils.db import get_message, save_message, get_query_state
-from shepherd_utils.shared import get_tasks, handle_task_failure, wrap_up_task
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
@@ -52,23 +51,9 @@ async def sort_results_score(task, logger: logging.Logger):
 
 async def process_task(task, parent_ctx, logger, limiter):
     """Process a given task and ACK in redis."""
-    start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await sort_results_score(task, logger)
-        try:
-            await wrap_up_task(STREAM, GROUP, task, logger)
-        except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled.")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-        await handle_task_failure(STREAM, GROUP, task, logger)
-    finally:
-        span.end()
-        limiter.release()
-        logger.info(f"Task took {time.time() - start}")
+    await run_task_lifecycle(
+        STREAM, GROUP, task, parent_ctx, logger, limiter, sort_results_score
+    )
 
 
 async def poll_for_tasks():

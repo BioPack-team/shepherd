@@ -1,0 +1,48 @@
+{
+  "query_graph": {
+    "nodes": {
+      "$source": {
+        "ids": ["$source_id"],
+        "categories": ["biolink:ChemicalEntity"]
+      },
+      "nA": {
+        "categories": ["biolink:Gene"]
+      },
+      "$target": {
+        "ids": ["$target_id"],
+        "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+      }
+    },
+    "edges": {
+      "eA": {
+        "subject": "$source",
+        "object": "nA",
+        "predicates": ["biolink:affects"],
+        "qualifier_constraints": [
+          {
+            "qualifier_set": [
+              {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "increased"
+              }
+            ]
+          }
+        ]
+      },
+      "eB": {
+        "subject": "nA",
+        "object": "$target",
+        "qualifier_constraints": [
+          {
+            "qualifier_set": [
+              {
+                "qualifier_type_id": "biolink:subject_form_or_variant_qualifier",
+                "qualifier_value": "loss_of_function_variant_form"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

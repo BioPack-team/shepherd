@@ -1,5 +1,5 @@
 # Use RENCI python base image
-FROM ghcr.io/translatorsri/renci-python-image:3.11.5
+FROM ghcr.io/translatorsri/renci-python-image:3.12.13
 
 # Add image info
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd

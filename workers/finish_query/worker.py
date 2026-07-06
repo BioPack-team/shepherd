@@ -5,10 +5,14 @@ import httpx
 import logging
 import time
 import uuid
+import orjson
 
+from opentelemetry.propagate import inject
+from opentelemetry.trace import Status, StatusCode
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
+    cleanup_callbacks,
     get_logs,
     get_message,
     get_query_state,
@@ -21,7 +25,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "finish_query"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 CALLBACK_RETRIES = 3
 
@@ -41,15 +45,38 @@ async def finish_query(task, logger: logging.Logger):
         callback_url = query_state[8]
         if callback_url is not None:
             # this was an async query, need to send message back
-            message = await get_message(response_id, logger)
+            message_bytes = await get_message(response_id, logger, raw=True)
             logs = await get_logs(response_id, logger)
-            message["logs"] = logs
+            logs_bytes = orjson.dumps(logs)
+            # Splice logs into the raw JSON bytes to avoid deserializing and
+            # re-serializing the (potentially huge) message dict. We rebind
+            # message_bytes to the spliced result so the original buffer is
+            # released as soon as the new one is built -- otherwise both full
+            # copies would stay resident for the entire (up to 120s x retries)
+            # POST below, doubling this worker's peak memory under load.
+            if message_bytes and message_bytes[-1:] == b"}":
+                last_brace = message_bytes.rindex(b"}")
+                message_bytes = (
+                    message_bytes[:last_brace] + b',"logs":' + logs_bytes + b"}"
+                )
+            else:
+                message = orjson.loads(message_bytes)
+                message["logs"] = logs
+                message_bytes = orjson.dumps(message)
+                del message
+            headers = {"Content-Type": "application/json"}
+            # Propagate the otel trace context through the callback.
+            # Matches the inject() carrier pattern used by the
+            # lookup workers; the active span comes from process_task's
+            # start_as_current_span.
+            inject(headers)
             for attempt in range(CALLBACK_RETRIES):
                 try:
                     async with httpx.AsyncClient(timeout=120) as client:
                         response = await client.post(
                             callback_url,
-                            json=message,
+                            content=message_bytes,
+                            headers=headers,
                         )
                         response.raise_for_status()
                         logger.info(f"Sent response back to {callback_url}")
@@ -60,28 +87,38 @@ async def finish_query(task, logger: logging.Logger):
 
         await set_query_completed(query_id, status, logger)
 
+    # Always reap any callback rows tied to this query. Lookup workers do this
+    # on timeout, but successful queries previously left rows behind forever.
+    try:
+        await cleanup_callbacks(query_id, logger)
+    except Exception as e:
+        logger.error(f"Failed to clean up callbacks for {query_id}: {e}")
+
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Process a given task and ACK in redis."""
     start = time.time()
-    span = tracer.start_span(STREAM, context=parent_ctx)
-    try:
-        await finish_query(task, logger)
-    except asyncio.CancelledError:
-        logger.warning(f"Task {task[0]} was cancelled")
-    except Exception as e:
-        logger.error(f"Task {task[0]} failed with unhandled error: {e}", exc_info=True)
-    finally:
-        # Always wrap up the task to ACK it in the broker
+    with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
         try:
-            await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+            await finish_query(task, logger)
+        except asyncio.CancelledError:
+            logger.warning(f"Task {task[0]} was cancelled")
         except Exception as e:
-            logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-        span.end()
-        limiter.release()
-        logger.info(f"Finished task {task[0]} in {time.time() - start}")
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            logger.error(
+                f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
+            )
+        finally:
+            # Always wrap up the task to ACK it in the broker
+            try:
+                await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+            except Exception as e:
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+            limiter.release()
+            logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():

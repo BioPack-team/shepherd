@@ -1,20 +1,183 @@
 """Shared Shepherd Utility Functions."""
 
 import asyncio
-import copy
 import json
 import logging
+import os
+import signal
+import sys
+import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
+from opentelemetry import trace
 from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
+from opentelemetry.trace import Status, StatusCode
 
-from .broker import add_task, get_task, mark_task_as_complete
+from .broker import add_task, broker_client, get_task, mark_task_as_complete
 from .config import settings
 from .db import initialize_db, save_logs
+from .heartbeat import Heartbeat
 from .logger import QueryLogger, setup_logging
+from .reclaim import reclaim_orphaned
+
+# Cap each per-stream duration queue so a stopped monitor can't OOM the broker.
+# 10k entries per stream is well above what we'd accumulate in a 30s drain
+# window even at peak load.
+_DURATION_QUEUE_CAP = 10000
+
+
+def _duration_key(stream: str) -> str:
+    return f"monitor:task_durations:{stream}"
+
+
+async def _record_task_duration(
+    stream: str,
+    started_at_str: str,
+    logger: logging.Logger,
+) -> None:
+    """Push ``ms_elapsed`` onto the per-stream duration list for the monitor."""
+    if not started_at_str:
+        return
+    try:
+        duration_ms = max(0, int((time.time() - float(started_at_str)) * 1000))
+    except (TypeError, ValueError):
+        return
+    try:
+        pipe = broker_client.pipeline()
+        pipe.lpush(_duration_key(stream), str(duration_ms))
+        pipe.ltrim(_duration_key(stream), 0, _DURATION_QUEUE_CAP - 1)
+        await pipe.execute()
+    except Exception as e:
+        logger.debug(f"Failed to record task duration for {stream}: {e}")
+
 
 setup_logging()
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown / in-flight drain
+#
+# Kubernetes sends SIGTERM on every rollout, scale-down and node drain. Without
+# handling it the worker is killed mid-task and the work is only recovered later
+# via Redis reclaim. Here we install asyncio-aware signal handlers that flip a
+# shutdown flag; ``get_tasks`` then stops pulling new work and drains anything
+# in flight before the process exits.
+#
+# Draining piggybacks on the concurrency semaphore that ``get_tasks`` already
+# owns: every worker acquires a permit before a task starts and releases it when
+# the task finishes (in run_task_lifecycle / each worker's process_task finally).
+# So "all permits acquired" is equivalent to "no task in flight" -- we don't need
+# the workers to register their background tasks with us.
+# ---------------------------------------------------------------------------
+
+_shutdown = asyncio.Event()
+_active_heartbeat: "Heartbeat | None" = None
+_signal_handlers_installed = False
+
+
+def is_shutting_down() -> bool:
+    return _shutdown.is_set()
+
+
+def _request_shutdown() -> None:
+    _shutdown.set()
+
+
+def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
+    """Install asyncio-aware SIGTERM/SIGINT handlers (idempotent).
+
+    ``loop.add_signal_handler`` is the safe way to react to a signal from inside
+    a running event loop: the callback runs between awaits rather than in the
+    interrupt context, so it can flip an ``asyncio.Event`` the drain loop awaits.
+    """
+    global _signal_handlers_installed, _active_heartbeat
+    # Always update the heartbeat reference so the marker is written for the
+    # currently-active worker even if get_tasks is re-entered after an error.
+    _active_heartbeat = heartbeat
+    if _signal_handlers_installed:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Platforms without loop signal support fall back to signal.signal.
+            try:
+                signal.signal(sig, lambda *_: _request_shutdown())
+            except (ValueError, OSError):
+                pass
+    _signal_handlers_installed = True
+
+
+async def _drain_and_exit(
+    limiter: asyncio.Semaphore,
+    task_limit: int,
+    logger: logging.Logger,
+) -> None:
+    """Wait for in-flight tasks to finish, mark a clean shutdown, then exit.
+
+    Acquiring all ``task_limit`` permits means every in-flight task has released
+    its permit -- i.e. completed. Bounded by ``worker_drain_timeout_sec``;
+    stragglers are left in the stream for Redis reclaim to retry.
+    """
+    logger.info("Shutdown signal received; draining in-flight tasks.")
+    acquired = 0
+
+    async def _acquire_all() -> None:
+        nonlocal acquired
+        for _ in range(task_limit):
+            await limiter.acquire()
+            acquired += 1
+
+    try:
+        await asyncio.wait_for(
+            _acquire_all(), timeout=float(settings.worker_drain_timeout_sec)
+        )
+        logger.info("All in-flight tasks drained cleanly.")
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Drain timed out with ~{task_limit - acquired} task(s) still "
+            "running; leaving them in the stream for Redis reclaim."
+        )
+
+    hb = _active_heartbeat
+    if hb is not None:
+        try:
+            await hb.mark_clean_shutdown()
+        except Exception as e:
+            logger.debug(f"Failed to write clean shutdown marker: {e}")
+        try:
+            await hb.stop()
+        except Exception:
+            pass
+    logger.info("Exiting after graceful drain.")
+    sys.exit(0)
+
+
+def _resolve_task_limit(stream: str, default: int, logger: logging.Logger) -> int:
+    """Allow ops to override a worker's concurrency via the TASK_LIMIT env var.
+
+    Each worker runs as its own container/Deployment, so a single ``TASK_LIMIT``
+    env per Deployment unambiguously tunes that worker without a code change or
+    rebuild. Falls back to the value the worker passed in.
+    """
+    raw = os.getenv("TASK_LIMIT")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        if value < 1:
+            raise ValueError
+    except ValueError:
+        logger.warning(f"Ignoring invalid TASK_LIMIT={raw!r} for {stream}.")
+        return default
+    if value != default:
+        logger.info(f"TASK_LIMIT for {stream} overridden to {value} via env.")
+    return value
 
 
 def get_next_operation(
@@ -30,40 +193,117 @@ def get_next_operation(
     return next_op, workflow
 
 
+def _build_task_context(
+    stream: str,
+    consumer: str,
+    ara_task,
+    level_number: int,
+) -> Tuple[Context, logging.Logger]:
+    """Build the per-task logger and otel context for a fetched/reclaimed task."""
+    log_handler = QueryLogger().log_handler
+    task_logger = logging.getLogger(
+        f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+    )
+    task_log_level = int(ara_task[1].get("log_level", level_number))
+    task_logger.setLevel(task_log_level)
+    task_logger.addHandler(log_handler)
+    task_logger.info(f"Doing task {ara_task}")
+    ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
+    # Stamp the task payload with our delivery time so wrap_up_task /
+    # handle_task_failure can compute the per-task latency without touching
+    # every individual worker. Only set if not already present so a reclaimed
+    # task keeps its original start time.
+    if "_started_at" not in ara_task[1]:
+        ara_task[1]["_started_at"] = str(time.time())
+    return ctx, task_logger
+
+
 async def get_tasks(
     stream: str,
     group: str,
     consumer: str,
     task_limit: int,
+    reclaim_min_idle_sec: int = None,
 ) -> AsyncGenerator[
     Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None
 ]:
-    """Continually monitor the ara queue for tasks."""
+    """Continually monitor the ara queue for tasks.
+
+    ``reclaim_min_idle_sec`` overrides the per-stream default for how long a
+    message must be idle before another consumer can XCLAIM it. Pass an
+    explicit value when the worker knows its worst-case task duration; leave
+    it ``None`` to fall back to ``PER_STREAM_MIN_IDLE_SEC`` / settings.
+    """
     # Set up logger
     level_number = logging._nameToLevel[settings.log_level]
     log_handler = QueryLogger().log_handler
     worker_logger = logging.getLogger(f"shepherd.{stream}.{consumer}")
     worker_logger.setLevel(level_number)
     worker_logger.addHandler(log_handler)
+    # allow ops to tune concurrency per Deployment without a code change
+    task_limit = _resolve_task_limit(stream, task_limit, worker_logger)
     # initialize opens the db connection
     await initialize_db()
     task_limiter = asyncio.Semaphore(task_limit)
+    # register this worker with the monitor via a Redis heartbeat key. The
+    # heartbeat does not install its own (immediate-exit) signal handlers --
+    # install_shutdown_handlers below installs asyncio-aware ones that drain.
+    heartbeat = Heartbeat(stream, consumer, task_limit, manage_signals=False).start()
+    install_shutdown_handlers(heartbeat)
+    # periodic orphan-task reclaim so a worker crash doesn't strand its PEL
+    reclaim_interval = max(5.0, float(settings.reclaim_interval_sec))
+    last_reclaim = 0.0
     # continuously poll the broker for new tasks
     while True:
+        # On shutdown, stop taking new work and drain anything in flight.
+        if is_shutting_down():
+            await _drain_and_exit(task_limiter, task_limit, worker_logger)
+            return
+        # Before fetching new work, check whether any pending messages on this
+        # stream belong to a dead consumer and claim them. Heartbeat + idle
+        # filtering inside ``reclaim_orphaned`` keep live consumers safe.
+        now = time.time()
+        if now - last_reclaim >= reclaim_interval:
+            last_reclaim = now
+            try:
+                reclaimed = await reclaim_orphaned(
+                    stream,
+                    group,
+                    consumer,
+                    worker_logger,
+                    min_idle_sec=reclaim_min_idle_sec,
+                )
+            except Exception as e:
+                worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
+                reclaimed = []
+            for ara_task in reclaimed:
+                await task_limiter.acquire()
+                try:
+                    ctx, task_logger = _build_task_context(
+                        stream, consumer, ara_task, level_number
+                    )
+                except Exception as e:
+                    worker_logger.error(
+                        f"Failed to build context for reclaimed task {ara_task}: {e}"
+                    )
+                    task_limiter.release()
+                    continue
+                yield ara_task, ctx, task_logger, task_limiter
+
         # check if we can take another task
         await task_limiter.acquire()
+        # A shutdown may have arrived while we waited for a free slot; don't
+        # fetch new work in that case -- release and drain.
+        if is_shutting_down():
+            task_limiter.release()
+            await _drain_and_exit(task_limiter, task_limit, worker_logger)
+            return
         # get a new task for the given target
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
-            log_handler = QueryLogger().log_handler
-            task_logger = logging.getLogger(
-                f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+            ctx, task_logger = _build_task_context(
+                stream, consumer, ara_task, level_number
             )
-            task_log_level = int(ara_task[1].get("log_level", level_number))
-            task_logger.setLevel(task_log_level)
-            task_logger.addHandler(log_handler)
-            task_logger.info(f"Doing task {ara_task}")
-            ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
             yield ara_task, ctx, task_logger, task_limiter
@@ -74,7 +314,7 @@ async def get_tasks(
 async def wrap_up_task(
     stream: str,
     group: str,
-    task: Tuple[str, dict],
+    task: tuple[str, dict],
     logger: logging.Logger,
 ):
     """Call the next task and mark this one as complete."""
@@ -98,12 +338,14 @@ async def wrap_up_task(
             "workflow": json.dumps(workflow),
             "log_level": task[1].get("log_level", 20),
             "otel": task[1]["otel"],
+            "metadata": task[1]["metadata"],
         },
         logger,
     )
 
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
+    await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
 
 
 async def handle_task_failure(
@@ -115,6 +357,7 @@ async def handle_task_failure(
     """Handle any full query failures."""
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
+    await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
     logger.error("Sending task straight to finish_query.")
     await add_task(
         "finish_query",
@@ -125,9 +368,59 @@ async def handle_task_failure(
             "log_level": task[1].get("log_level", 20),
             "otel": task[1]["otel"],
             "status": "ERROR",
+            "metadata": task[1]["metadata"],
         },
         logger,
     )
+
+
+# Proxy tracer: resolves to whatever provider the worker process set up via
+# setup_tracer(STREAM) at the time a span is created, so the outer task span
+# inherits the worker's service.name without shared.py needing to know it.
+_tracer = trace.get_tracer(__name__)
+
+
+async def run_task_lifecycle(
+    stream: str,
+    group: str,
+    task: Tuple[str, dict],
+    parent_ctx: Context,
+    logger: logging.Logger,
+    limiter: asyncio.Semaphore,
+    worker_fn,
+) -> None:
+    """Span-wrapped task lifecycle shared by the standard workers.
+
+    Activates the per-task span as current so auto-instrumented (httpx) and
+    manual child spans nest under it, records exceptions + ERROR status on the
+    span, runs ``worker_fn(task, logger)`` then ``wrap_up_task`` on success or
+    ``handle_task_failure`` on an unhandled error, and always releases the
+    limiter.
+
+    ``worker_fn`` is an async callable ``(task, logger) -> None`` holding the
+    per-worker logic (or a closure for workers that dispatch to a process pool).
+    """
+    start = time.time()
+    with _tracer.start_as_current_span(stream, context=parent_ctx) as span:
+        try:
+            await worker_fn(task, logger)
+            # Always wrap up the task to ACK it in the broker
+            try:
+                await wrap_up_task(stream, group, task, logger)
+            except Exception as e:
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+        except asyncio.CancelledError:
+            logger.warning(f"Task {task[0]} was cancelled")
+        except Exception as e:
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            logger.error(
+                f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
+            )
+            await handle_task_failure(stream, group, task, logger)
+        finally:
+            limiter.release()
+            logger.info(f"Finished task {task[0]} in {time.time() - start}")
 
 
 def recursive_get_edge_support_graphs(
@@ -140,25 +433,27 @@ def recursive_get_edge_support_graphs(
 ):
     """Recursive method to find auxiliary graphs to keep when filtering. Each auxiliary
     graph then has its edges filterd."""
+    if edge in edges:
+        # Already visited; short-circuit to avoid exponential re-traversal
+        # when many edges/aux graphs share the same support structure.
+        return edges, auxgraphs, nodes
     edges.add(edge)
-    nodes.add(message_edges[edge]["subject"])
-    nodes.add(message_edges[edge]["object"])
-    for attribute in message_edges.get(edge, {}).get("attributes", {}):
-        if attribute.get("attribute_type_id", None) == "biolink:support_graphs":
+    edge_data = message_edges[edge]
+    nodes.add(edge_data["subject"])
+    nodes.add(edge_data["object"])
+    for attribute in edge_data.get("attributes", []) or []:
+        if attribute.get("attribute_type_id") == "biolink:support_graphs":
             for auxgraph in attribute.get("value", []):
                 if auxgraph not in message_auxgraphs:
                     raise KeyError(f"auxgraph {auxgraph} not in auxiliary_graphs")
-                try:
-                    edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
-                        auxgraph,
-                        edges,
-                        auxgraphs,
-                        message_edges,
-                        message_auxgraphs,
-                        nodes,
-                    )
-                except KeyError as e:
-                    raise e
+                edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
+                    auxgraph,
+                    edges,
+                    auxgraphs,
+                    message_edges,
+                    message_auxgraphs,
+                    nodes,
+                )
     return edges, auxgraphs, nodes
 
 
@@ -172,17 +467,16 @@ def recursive_get_auxgraph_edges(
 ):
     """Recursive method to find edges to keep when filtering. Each edge then
     has support graphs filtered."""
+    if auxgraph in auxgraphs:
+        return edges, auxgraphs, nodes
     auxgraphs.add(auxgraph)
     aux_edges = message_auxgraphs.get(auxgraph, {}).get("edges", [])
     for aux_edge in aux_edges:
         if aux_edge not in message_edges:
             raise KeyError(f"aux_edge {aux_edge} not in knowledge_graph.edges")
-        try:
-            edges, auxgraphs, nodes = recursive_get_edge_support_graphs(
-                aux_edge, edges, auxgraphs, message_edges, message_auxgraphs, nodes
-            )
-        except KeyError as e:
-            raise e
+        edges, auxgraphs, nodes = recursive_get_edge_support_graphs(
+            aux_edge, edges, auxgraphs, message_edges, message_auxgraphs, nodes
+        )
     return edges, auxgraphs, nodes
 
 
@@ -220,134 +514,118 @@ def validate_message(message, logger):
 
 
 def combine_unique_dicts(list1, list2, logger: logging.Logger):
-    """Combine two lists of dicts, keeping only unique dictionaries"""
+    """Combine two lists of dicts, keeping only unique dictionaries.
 
-    def make_list_hashable(l):
-        """Convert list to tuples."""
-        frozen_items = []
-        for item in l:
-            if isinstance(item, list):
-                frozen_items.append(make_list_hashable(item))
-            elif isinstance(item, dict):
-                frozen_items.append(make_hashable(item))
-            else:
-                frozen_items.append(item)
-        return tuple(sorted(frozen_items))
-
-    def make_hashable(d):
-        """Convert lists to tuples to make dict hashable"""
-        hashable_items = []
-        for key, value in d.items():
-            if isinstance(value, list):
-                if all(isinstance(item, str) for item in value):
-                    hashable_items.append((key, tuple(value)))
-                else:
-                    make_list_hashable(value)
-            elif isinstance(value, dict):
-                # Handle nested dicts recursively
-                hashable_items.append((key, frozenset(make_hashable(value))))
-            else:
-                hashable_items.append((key, value))
-        return tuple(sorted(hashable_items))
-
+    Uses ``json.dumps(..., sort_keys=True)`` as a stable signature -- it's
+    implemented in C and faster than the recursive Python hashing the prior
+    implementation used. ``default=str`` keeps it forgiving for the rare
+    non-JSON-serializable value (datetime, Decimal, etc.) instead of dropping
+    the item silently.
+    """
     seen = set()
     result = []
-
-    for d in list1 + list2:  # This processes ALL items from BOTH lists
-        dict_signature = make_hashable(d)
+    for d in list1:
         try:
-            if dict_signature not in seen:
-                seen.add(dict_signature)
-                result.append(d)  # Adds to result if not seen before
-        except Exception:
-            logger.error(f"Failed to hash this: {dict_signature}")
-
+            sig = json.dumps(d, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            logger.error(f"Failed to hash this: {d}")
+            continue
+        if sig not in seen:
+            seen.add(sig)
+            result.append(d)
+    for d in list2:
+        try:
+            sig = json.dumps(d, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            logger.error(f"Failed to hash this: {d}")
+            continue
+        if sig not in seen:
+            seen.add(sig)
+            result.append(d)
     return result
 
 
 def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
-    """Merge two TRAPI kgraphs together."""
-    merged_kgraph = copy.deepcopy(og_message)
+    """Merge ``new_message`` into ``og_message`` in place and return it.
+
+    Previously this allocated a deep copy of ``og_message`` and mutated that.
+    The deep copy dominated runtime on large kgraphs (thousands of edges,
+    each with attribute lists). The accumulator-style call sites
+    (``acc = merge_kgraph(acc, kg, ...)``) discard ``og_message`` after
+    each call, so mutating it directly is safe and dramatically faster.
+    Newly adopted nodes/edges are not copied either -- ``new_message``
+    is also discarded by the caller after merging.
+    """
+    aggregator_source = {
+        "resource_id": source,
+        "resource_role": "aggregator_knowledge_source",
+        "upstream_resource_ids": ["infores:retriever"],
+    }
+    og_nodes = og_message["nodes"]
+    og_edges = og_message["edges"]
+
     for key, value in new_message["nodes"].items():
-        existing = og_message["nodes"].get(key, None)
-        if existing is not None:
-            # merge
-            if value["name"]:
-                merged_kgraph["nodes"][key]["name"] = value["name"]
-            if value["categories"]:
-                if existing["categories"]:
-                    all_categories = (
-                        merged_kgraph["nodes"][key]["categories"] + value["categories"]
-                    )
-                    merged_kgraph["nodes"][key]["categories"] = list(
-                        set(all_categories)
-                    )
-                else:
-                    merged_kgraph["nodes"][key]["categories"] = value["categories"]
-            if value["attributes"]:
-                if existing["attributes"]:
-                    merged_kgraph["nodes"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"],
-                        value["attributes"],
-                        logger,
-                    )
-                else:
-                    merged_kgraph["nodes"][key]["attributes"] = value["attributes"]
-        else:
-            merged_kgraph["nodes"][key] = value
+        existing = og_nodes.get(key)
+        if existing is None:
+            og_nodes[key] = value
+            continue
+        # Overlapping node: merge fields onto the existing entry.
+        if value["name"]:
+            existing["name"] = value["name"]
+        new_categories = value["categories"]
+        if new_categories:
+            existing_categories = existing["categories"]
+            if existing_categories:
+                existing["categories"] = list(
+                    set(existing_categories) | set(new_categories)
+                )
+            else:
+                existing["categories"] = new_categories
+        new_attrs = value["attributes"]
+        if new_attrs:
+            existing_attrs = existing["attributes"]
+            if existing_attrs:
+                existing["attributes"] = combine_unique_dicts(
+                    existing_attrs, new_attrs, logger
+                )
+            else:
+                existing["attributes"] = new_attrs
 
     for key, value in new_message["edges"].items():
-        existing = og_message["edges"].get(key, None)
-        if existing is not None:
-            # merge
-            if value["attributes"]:
-                if existing["attributes"]:
-                    new_attributes = []
-                    # just filtering out the new knowledge_level and agent_type attributes
-                    for attribute in value["attributes"]:
-                        if attribute["attribute_type_id"] not in (
-                            "biolink:knowledge_level",
-                            "biolink:agent_type",
-                        ):
-                            # don't add any new KL/AT
-                            new_attributes.append(attribute)
-                    merged_kgraph["edges"][key]["attributes"] = combine_unique_dicts(
-                        existing["attributes"],
-                        value["attributes"],
-                        logger,
-                    )
-                else:
-                    merged_kgraph["edges"][key]["attributes"] = value["attributes"]
-
-            if value["sources"]:
-                if existing["sources"]:
-                    new_sources = combine_unique_dicts(
-                        existing["sources"],
-                        value["sources"],
-                        logger,
-                    )
-                    # TODO: there might need to be some sort of upstream resource id merging to do past this?
-                    merged_kgraph["edges"][key]["sources"] = new_sources
-                else:
-                    merged_kgraph["edges"][key]["sources"] = value["sources"]
-        else:
-            merged_kgraph["edges"][key] = value
-
-            if value.get("sources") and not is_support_edge(value):
-                new_sources = combine_unique_dicts(
-                    value["sources"],
-                    [
-                        {
-                            "resource_id": source,
-                            "resource_role": "aggregator_knowledge_source",
-                            "upstream_resource_ids": ["infores:retriever"],
-                        }
-                    ],
-                    logger,
+        existing = og_edges.get(key)
+        if existing is None:
+            og_edges[key] = value
+            sources = value.get("sources")
+            if sources and not is_support_edge(value):
+                # Append the aggregator source if it isn't already present.
+                # Avoids the heavy combine_unique_dicts hashing for what is
+                # almost always a 3-element list.
+                if aggregator_source not in sources:
+                    sources.append(aggregator_source)
+            continue
+        # Overlapping edge: merge attributes and sources.
+        new_attrs = value["attributes"]
+        if new_attrs:
+            existing_attrs = existing["attributes"]
+            if existing_attrs:
+                existing["attributes"] = combine_unique_dicts(
+                    existing_attrs, new_attrs, logger
                 )
-                merged_kgraph["edges"][key]["sources"] = new_sources
+            else:
+                existing["attributes"] = new_attrs
 
-    return merged_kgraph
+        new_sources = value["sources"]
+        if new_sources:
+            existing_sources = existing["sources"]
+            if existing_sources:
+                # TODO: there might need to be some sort of upstream resource id merging to do past this?
+                existing["sources"] = combine_unique_dicts(
+                    existing_sources, new_sources, logger
+                )
+            else:
+                existing["sources"] = new_sources
+
+    return og_message
 
 
 def filter_kgraph_orphans(message, logger: logging.Logger):
@@ -454,3 +732,54 @@ def filter_kgraph_orphans(message, logger: logging.Logger):
         # can't find the right structure of message
         logger.error(f"Error filtering kgraph orphans: {e}")
         # return message, 400
+
+
+def examine_query(message):
+    """Decides whether the input is an infer. Returns the grouping node"""
+    # Currently, we support:
+    # queries that are any shape with all lookup edges
+    # OR
+    # A 1-hop infer query.
+    # OR
+    # Pathfinder query
+    try:
+        # this can still fail if the input looks like e.g.:
+        #  "query_graph": None
+        qedges = message.get("message", {}).get("query_graph", {}).get("edges", {})
+    except KeyError:
+        qedges = {}
+    try:
+        # this can still fail if the input looks like e.g.:
+        #  "query_graph": None
+        qpaths = message.get("message", {}).get("query_graph", {}).get("paths", {})
+    except KeyError:
+        qpaths = {}
+    if len(qpaths) > 1:
+        raise Exception("Only a single path is supported")
+    if (len(qpaths) > 0) and (len(qedges) > 0):
+        raise Exception("Mixed mode pathfinder queries are not supported")
+    pathfinder = len(qpaths) == 1
+    n_infer_edges = 0
+    for edge_id in qedges:
+        if qedges.get(edge_id, {}).get("knowledge_type", "lookup") == "inferred":
+            n_infer_edges += 1
+    if n_infer_edges > 1 and n_infer_edges:
+        raise Exception("Only a single infer edge is supported")
+    if (n_infer_edges > 0) and (n_infer_edges < len(qedges)):
+        raise Exception("Mixed infer and lookup queries not supported")
+    infer = n_infer_edges == 1
+    if not infer:
+        return infer, None, None, pathfinder
+    qnodes = message.get("message", {}).get("query_graph", {}).get("nodes", {})
+    question_node = None
+    answer_node = None
+    for qnode_id, qnode in qnodes.items():
+        if qnode.get("ids", None) is None:
+            answer_node = qnode_id
+        else:
+            question_node = qnode_id
+    if answer_node is None:
+        raise Exception("Both nodes of creative edge pinned")
+    if question_node is None:
+        raise Exception("No nodes of creative edge pinned")
+    return infer, question_node, answer_node, pathfinder

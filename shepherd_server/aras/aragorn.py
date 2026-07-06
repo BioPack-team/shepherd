@@ -36,9 +36,9 @@ async def async_query(
 @ARAGORN.post("/callback/{callback_id}", status_code=200, include_in_schema=False)
 async def handle_callback(
     callback_id: str,
-    response: dict,
+    request: Request,
 ) -> Response:
-    response = await callback(ARATargetEnum.ARAGORN, callback_id, response)
+    response = await callback(ARATargetEnum.ARAGORN, callback_id, request)
     return response
 
 
