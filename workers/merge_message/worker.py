@@ -14,10 +14,20 @@ from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
 from typing import Any, Union
 
-from shepherd_utils.broker import acquire_lock, mark_task_as_complete, remove_lock
+from shepherd_utils.broker import (
+    add_task,
+    mark_task_as_complete,
+    refresh_lock,
+    remove_lock,
+    try_lock,
+)
+from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    clear_ready_callback,
     get_message,
     get_message_sync,
+    get_ready_callbacks,
+    is_ready_callback,
     remove_callback_id,
     save_message_sync,
 )
@@ -663,32 +673,67 @@ def _init_worker():
     )
 
 
+def merge_messages_by_ids(
+    target: str,
+    query_id: str,
+    response_id: str,
+    callback_ids: list[str],
+) -> list[str]:
+    """Worker-side batched merge: fetch by id, fold every callback into the
+    accumulating response, write back once. No payloads cross IPC.
+
+    The query and the accumulating response are loaded a single time; each
+    callback is folded into the in-memory accumulator, and the result is saved
+    once. Folding sequentially is equivalent to merging the callbacks one at a
+    time (which is how they were processed before), but avoids re-loading and
+    re-saving the ever-growing response blob per callback.
+
+    Returns the list of callback ids that were actually folded in, so the caller
+    knows which to clear from the ready index and the callbacks table. A single
+    missing callback is skipped rather than aborting the whole batch.
+    """
+    worker_logger = logging.getLogger(f"merge_message.worker.{os.getpid()}")
+    try:
+        original_query = get_message_sync(query_id)
+        accumulator = get_message_sync(response_id)
+    except KeyError as e:
+        worker_logger.error(f"Missing message in worker: {e}")
+        raise
+
+    original_query_graph = original_query["message"]["query_graph"]
+    merged: list[str] = []
+    for callback_id in callback_ids:
+        try:
+            callback_response = get_message_sync(callback_id)
+        except KeyError:
+            worker_logger.error(
+                f"Missing callback {callback_id} while folding; skipping."
+            )
+            continue
+        accumulator = merge_messages(
+            target,
+            original_query_graph,
+            accumulator,
+            callback_response,
+            worker_logger,
+        )
+        merged.append(callback_id)
+
+    if merged:
+        save_message_sync(response_id, accumulator)
+    return merged
+
+
 def merge_messages_by_id(
     target: str,
     query_id: str,
     response_id: str,
     callback_id: str,
 ) -> bool:
-    """Worker-side merge: fetch by id, merge, write back. No payloads cross IPC."""
-    worker_logger = logging.getLogger(f"merge_message.worker.{os.getpid()}")
-    try:
-        original_query = get_message_sync(query_id)
-        original_response = get_message_sync(response_id)
-        callback_response = get_message_sync(callback_id)
-    except KeyError as e:
-        worker_logger.error(f"Missing message in worker: {e}")
-        raise
-
-    original_query_graph = original_query["message"]["query_graph"]
-    merged_message = merge_messages(
-        target,
-        original_query_graph,
-        original_response,
-        callback_response,
-        worker_logger,
-    )
-    save_message_sync(response_id, merged_message)
-    return True
+    """Worker-side merge of a single callback (thin delegate to the batched
+    path). Retained for callers/tests that merge one callback at a time."""
+    merged = merge_messages_by_ids(target, query_id, response_id, [callback_id])
+    return bool(merged)
 
 
 def _make_executor(max_workers: int) -> ProcessPoolExecutor:
@@ -700,100 +745,176 @@ def _make_executor(max_workers: int) -> ProcessPoolExecutor:
     )
 
 
+async def _reenqueue_wake_task(task, logger):
+    """Put a fresh merge_message wake task back on the stream.
+
+    Used when this worker can't make progress on a callback right now (the
+    query's lock is held by someone else, or a merge failed). The callback's
+    entry in the ready index is left intact; the new wake task simply drives
+    another drain attempt later, so callbacks are retried rather than dropped.
+    """
+    fields = {k: v for k, v in task[1].items() if k != "_started_at"}
+    await add_task(STREAM, fields, logger)
+
+
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
-    executor = _make_executor(cpu_count)
+    # Single-element holder so concurrent process_query coroutines and the
+    # crash-recovery path share one executor reference even when it is swapped
+    # out after a BrokenProcessPool.
+    executor_holder = {"executor": _make_executor(cpu_count)}
+    executor_lock = asyncio.Lock()
+
+    async def _recreate_executor(broken):
+        async with executor_lock:
+            if executor_holder["executor"] is broken:
+                broken.shutdown(wait=False, cancel_futures=True)
+                executor_holder["executor"] = _make_executor(cpu_count)
+
+    async def _clear_batch(response_id, callback_ids, logger):
+        """Drop a processed batch from the ready index and callbacks table.
+
+        Every callback we attempted is removed (not just the ones that merged)
+        so a callback whose payload has vanished can't wedge the drain loop.
+        """
+        await asyncio.gather(
+            *(clear_ready_callback(response_id, cb, logger) for cb in callback_ids)
+        )
+        await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
+
+    async def process_query(task, parent_ctx, logger, limiter):
+        start = time.time()
+        query_id = task[1]["query_id"]
+        response_id = task[1]["response_id"]
+        callback_id = task[1]["callback_id"]
+        target = task[1]["target"]
+        drained = 0
+        try:
+            with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
+                span.set_attribute("callback_id", callback_id)
+                span.set_attribute("response_id", response_id)
+
+                # Non-blocking: never wait on the lock. The worker that holds it
+                # drains the whole query, so a loser has nothing useful to add.
+                got_lock = await try_lock(response_id, CONSUMER, logger)
+                if not got_lock:
+                    still_pending = await is_ready_callback(
+                        response_id, callback_id, logger
+                    )
+                    if still_pending:
+                        # The holder may finish just before it would have swept
+                        # us; re-enqueue (after a short backoff) so we're retried.
+                        await asyncio.sleep(settings.merge_contention_backoff)
+                        await _reenqueue_wake_task(task, logger)
+                        logger.debug(
+                            f"[{callback_id}] Lock busy; re-enqueued wake task."
+                        )
+                    else:
+                        # Already merged by the lock holder -- nothing to do.
+                        logger.debug(
+                            f"[{callback_id}] Already merged by holder; acking."
+                        )
+                    return
+
+                logger.info(f"[{callback_id}] Obtained lock for {response_id}.")
+                # Sanity check: if the original query is gone, every ready
+                # callback for it is undeliverable -- clean them all up.
+                try:
+                    await get_message(query_id, logger)
+                except KeyError:
+                    logger.error(
+                        f"Failed to get original query for {query_id}. "
+                        "Discarding ready callbacks."
+                    )
+                    orphans = await get_ready_callbacks(response_id, logger)
+                    await _clear_batch(response_id, orphans, logger)
+                    await remove_lock(response_id, CONSUMER, logger)
+                    return
+
+                lock_time = time.time()
+                # Drain the query to empty: one load + one save per iteration.
+                # Re-reading the set each pass sweeps up callbacks that arrived
+                # while we were merging, so the holder does all of this query's
+                # ready work.
+                try:
+                    while True:
+                        ready = await get_ready_callbacks(response_id, logger)
+                        if not ready:
+                            break
+                        if settings.merge_max_fold > 0:
+                            ready = ready[: settings.merge_max_fold]
+                        merged = await loop.run_in_executor(
+                            executor_holder["executor"],
+                            merge_messages_by_ids,
+                            target,
+                            query_id,
+                            response_id,
+                            ready,
+                        )
+                        await _clear_batch(response_id, ready, logger)
+                        drained += len(merged)
+                        # Keep our lock alive across a long multi-pass drain.
+                        await refresh_lock(response_id, CONSUMER, 45000, logger)
+                except BrokenProcessPool:
+                    logger.error(
+                        f"[{callback_id}] Process pool broken; recreating and "
+                        "re-enqueuing."
+                    )
+                    await _recreate_executor(executor_holder["executor"])
+                    await remove_lock(response_id, CONSUMER, logger)
+                    await _reenqueue_wake_task(task, logger)
+                    span.set_attribute("drained_callbacks", drained)
+                    return
+                except Exception:
+                    logger.error(
+                        f"[{callback_id}] Error merging messages: "
+                        f"{traceback.format_exc()}"
+                    )
+                    await remove_lock(response_id, CONSUMER, logger)
+                    await _reenqueue_wake_task(task, logger)
+                    span.set_attribute("drained_callbacks", drained)
+                    return
+
+                span.set_attribute("drained_callbacks", drained)
+                logger.info(
+                    f"[{callback_id}] Drained {drained} callback(s) in "
+                    f"{time.time() - lock_time:.2f}s"
+                )
+                await remove_lock(response_id, CONSUMER, logger)
+        except Exception as e:
+            logger.error(
+                f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
+            )
+        finally:
+            try:
+                await mark_task_as_complete(STREAM, GROUP, task[0], logger)
+            except Exception as e:
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+            logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+            limiter.release()
+
+    inflight = set()
     while True:
         try:
+            # Dispatch each wake task concurrently. Distinct queries never share
+            # a lock, so their merges run in parallel on the process pool; the
+            # task_limiter semaphore (sized to cpu_count) bounds concurrency.
             async for task, parent_ctx, logger, limiter in get_tasks(
                 STREAM, GROUP, CONSUMER, cpu_count
             ):
-                start = time.time()
-                try:
-                    query_id = task[1]["query_id"]
-                    response_id = task[1]["response_id"]
-                    callback_id = task[1]["callback_id"]
-                    target = task[1]["target"]
-                    with tracer.start_as_current_span(
-                        STREAM, context=parent_ctx
-                    ) as span:
-                        span.set_attribute("callback_id", callback_id)
-                        got_lock = await acquire_lock(response_id, CONSUMER, logger)
-                        if got_lock:
-                            logger.info(f"[{callback_id}] Obtained lock.")
-
-                            # Sanity check: confirm the original query exists before
-                            # handing off to the worker. The worker will refetch it
-                            # itself, but we want a clean discard path here if it's
-                            # missing rather than letting the worker raise.
-                            try:
-                                await get_message(query_id, logger)
-                            except KeyError:
-                                logger.error(
-                                    f"Failed to get original query for {query_id}. Discarding callback response."
-                                )
-                                await remove_lock(response_id, CONSUMER, logger)
-                                await remove_callback_id(callback_id, logger)
-                                continue
-
-                            lock_time = time.time()
-                            # Hand merge off to a worker. Only ids cross the
-                            # process boundary; the worker fetches and writes
-                            # the actual messages itself.
-                            try:
-                                await loop.run_in_executor(
-                                    executor,
-                                    merge_messages_by_id,
-                                    target,
-                                    query_id,
-                                    response_id,
-                                    callback_id,
-                                )
-                            except BrokenProcessPool:
-                                logger.error(
-                                    f"[{callback_id}] Process pool is broken; recreating."
-                                )
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                executor = _make_executor(cpu_count)
-                                # The task itself is unfinished. We fall through
-                                # to release the lock and mark complete; the
-                                # callback is effectively dropped. If you want
-                                # at-least-once semantics, NACK back to the
-                                # stream here instead.
-                            except Exception:
-                                logger.error(
-                                    f"[{callback_id}] Error merging message: {traceback.format_exc()}"
-                                )
-                            logger.info(
-                                f"[{callback_id}] Kept the lock for {time.time() - lock_time} seconds"
-                            )
-                            # remove lock so others can now modify message
-                            await remove_lock(response_id, CONSUMER, logger)
-                            await remove_callback_id(callback_id, logger)
-                        else:
-                            logger.error(
-                                f"Failed to obtain lock for {query_id}. Discarding callback response."
-                            )
-                except Exception as e:
-                    logger.error(
-                        f"Task {task[0]} failed with unhandled error: {e}",
-                        exc_info=True,
-                    )
-                finally:
-                    try:
-                        await mark_task_as_complete(STREAM, GROUP, task[0], logger)
-                    except Exception as e:
-                        logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-                    logger.info(
-                        f"Finished task {task[0]} in {time.time() - start:.2f}s"
-                    )
-                    limiter.release()
+                t = asyncio.create_task(
+                    process_query(task, parent_ctx, logger, limiter)
+                )
+                inflight.add(t)
+                t.add_done_callback(inflight.discard)
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")
-            executor.shutdown(wait=False, cancel_futures=True)
+            for t in inflight:
+                t.cancel()
+            executor_holder["executor"].shutdown(wait=False, cancel_futures=True)
             return
         except Exception as e:
             logging.error(f"Error in task polling loop: {e}", exc_info=True)

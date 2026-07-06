@@ -121,6 +121,27 @@ async def mark_task_as_complete(
             )
 
 
+async def try_lock(
+    response_id: str,
+    consumer_id: str,
+    logger: logging.Logger,
+    ttl_sec: int = 45,
+) -> bool:
+    """Non-blocking lock attempt: a single ``SET NX EX``.
+
+    Unlike ``acquire_lock`` this never waits for a held lock to be released. The
+    merge_message worker uses it so that a worker which loses the race for a
+    query's lock returns immediately to do other work instead of sitting idle --
+    the worker that holds the lock drains the whole query anyway.
+    """
+    try:
+        acquired = await lock_client.set(response_id, consumer_id, ex=ttl_sec, nx=True)
+        return bool(acquired)
+    except Exception as e:
+        logger.error(f"Failed to attempt lock: {e}")
+        return False
+
+
 async def acquire_lock(
     response_id: str,
     consumer_id: str,
@@ -176,3 +197,33 @@ async def remove_lock(
         await unlock_script(keys=[response_id], args=[consumer_id])
     except Exception as e:
         logger.error(f"Failed to successfully unlock message: {e}")
+
+
+REFRESH_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("pexpire", KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
+
+async def refresh_lock(
+    response_id: str,
+    consumer_id: str,
+    ttl_ms: int,
+    logger: logging.Logger,
+) -> bool:
+    """Extend our own lock's TTL (compare-and-PEXPIRE).
+
+    Only refreshes if we still hold the lock, so a lock that already expired and
+    was re-acquired by someone else is never clobbered. Used by the merge worker
+    to keep a long drain from letting the lock lapse mid-merge.
+    """
+    try:
+        refresh_script = lock_client.register_script(REFRESH_SCRIPT)
+        result = await refresh_script(keys=[response_id], args=[consumer_id, ttl_ms])
+        return bool(result)
+    except Exception as e:
+        logger.error(f"Failed to refresh lock: {e}")
+        return False

@@ -115,6 +115,17 @@ class Settings(BaseSettings):
     # Keep this comfortably below the deployment's terminationGracePeriodSeconds.
     worker_drain_timeout_sec: float = 30.0
 
+    # merge_message worker. Callbacks for one query are coalesced into a single
+    # locked merge (one load/save of the growing response blob) and different
+    # queries merge concurrently. A worker that loses the race for a query's
+    # lock never waits -- it re-enqueues its wake task after this backoff and
+    # goes to do other work, so the lock holder drains the query alone.
+    merge_contention_backoff: float = 0.1
+    # Cap on callbacks folded per lock-hold iteration to bound lock-hold time
+    # under pathological bursts; leftover ready callbacks are swept by the next
+    # drain iteration. 0 disables the cap (fold everything ready in one pass).
+    merge_max_fold: int = 25
+
     # Monitor (dashboard) worker
     monitor_port: int = 5440
     monitor_poll_interval_sec: float = 3.0

@@ -15,7 +15,9 @@ from shepherd_utils.broker import (
     create_consumer_group,
     get_task,
     mark_task_as_complete,
+    refresh_lock,
     remove_lock,
+    try_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,3 +151,50 @@ async def test_acquire_lock_blocks_until_other_consumer_releases(redis_mock, moc
     assert got is False
     # And the original holder's value is unchanged.
     assert await redis_mock["lock"].get("resource-3") == "consumer-A"
+
+
+@pytest.mark.asyncio
+async def test_try_lock_is_non_blocking(redis_mock):
+    """try_lock grabs a free lock and, crucially, returns immediately (False)
+    when the lock is already held -- it never waits. This is what lets a
+    contended merge_message worker go do other work instead of sitting idle."""
+    assert await try_lock("resource-tl", "consumer-A", logger) is True
+    assert await redis_mock["lock"].get("resource-tl") == "consumer-A"
+
+    # Second attempt while held returns immediately, without blocking.
+    got = await asyncio.wait_for(
+        try_lock("resource-tl", "consumer-B", logger), timeout=1
+    )
+    assert got is False
+    assert await redis_mock["lock"].get("resource-tl") == "consumer-A"
+
+
+@pytest.mark.asyncio
+async def test_refresh_lock_extends_only_own_lock(redis_mock, mocker):
+    """refresh_lock (compare-and-pexpire) bumps the TTL only when we still hold
+    the lock. fakeredis lacks evalsha, so emulate the Lua compare-and-pexpire."""
+
+    def fake_register_script(_script):
+        async def _runner(keys, args):
+            (key,) = keys
+            token, ttl_ms = args
+            current = await redis_mock["lock"].get(key)
+            if current == token:
+                await redis_mock["lock"].pexpire(key, int(ttl_ms))
+                return 1
+            return 0
+
+        return _runner
+
+    mocker.patch.object(
+        redis_mock["lock"], "register_script", side_effect=fake_register_script
+    )
+
+    await try_lock("resource-rl", "consumer-A", logger, ttl_sec=45)
+    # Owner refreshes -> bumps TTL and returns True.
+    assert await refresh_lock("resource-rl", "consumer-A", 60000, logger) is True
+    ttl = await redis_mock["lock"].pttl("resource-rl")
+    assert ttl > 45000
+
+    # A non-owner cannot refresh.
+    assert await refresh_lock("resource-rl", "consumer-B", 90000, logger) is False
