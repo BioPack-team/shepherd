@@ -87,8 +87,15 @@ class Settings(BaseSettings):
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
 
-    # ttl in seconds
-    redis_ttl: int = 1210000
+    # TTL (seconds) for every payload we stash in Redis: the query/response
+    # blobs, each per-callback blob, the ready-callback set, and the logs. We
+    # deliberately keep callbacks around after a query finishes so the
+    # ``/response`` endpoint can serve them for debugging, but that made Redis
+    # accumulate ~14 days of finished-query blobs under load and hit its
+    # ``maxmemory`` cap. 3 days keeps recent queries debuggable while bounding
+    # the working set; the broker's ``volatile-ttl`` eviction policy then drops
+    # the oldest (nearest-expiry) blobs first if the cap is still reached.
+    redis_ttl: int = 259200  # 3 days
 
     # Retention for the durable query-state table (``shepherd_brain``). Postgres
     # has no native row TTL, so the monitor janitor purges terminal queries
