@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     # answer appraiser (adds ``ordering_components``). ``node_norm`` above is the
     # node normalizer used to canonicalize curies before annotation.
     annotator_url: str = "https://biothings.ncats.io/curie"
-    appraiser_url: str = "https://answerappraiser.ci.transltr.io/get_appraisal"
+    appraiser_url: str = "https://answerappraiser.renci.org/get_appraisal"
     # A parent ARS query whose child ARAs haven't all returned within its budget
     # is forced to finish with whatever partial results have arrived, so the
     # submitter is still notified. The budget is per-tier (ARS catch_timeout_async
