@@ -73,7 +73,12 @@ Listed so the "do we match this?" decision is explicit per item.
 
 ## B. Correctness gaps (affect output)
 
-### B1 — Final ranking (Sugeno integral + weighted mean) 🔴  ·  priority: HIGH · effort: M
+### B1 — Final ranking (Sugeno integral + weighted mean) 🟢 DONE · priority: HIGH · effort: M
+> **Done:** ported ARS `scoring.py` to `shepherd_utils/ars_scoring.py`
+> (`compute_from_results`, faithful; lambda solved once + `weight_sets` via an
+> explicit dict, output cross-checked bit-for-bit against the reference). Runs at
+> the end of `answer_appraise`, writing `sugeno`/`weighted_mean`/`rank` and sorting
+> by rank so `filter_results_top_n` trims the ARS-ordered results.
 - **ARS:** `scoring.compute_from_results(results)` computes a Sugeno integral and a
   weighted mean from each result's `ordering_components`, writes `rank`, `sugeno`,
   `weighted_mean` onto each result, and **sorts results by rank** (spec §9.5).
@@ -94,7 +99,13 @@ Listed so the "do we match this?" decision is explicit per item.
   `rank`/`sugeno`/`weighted_mean` only? Does `filter_results_top_n` need to sort by
   the new `rank` instead of score?
 
-### B2 — Normalize-before-merge → cross-ARA dedup correctness 🟡 · priority: HIGH · effort: M
+### B2 — Normalize-before-merge → cross-ARA dedup correctness 🟢 DONE · priority: HIGH · effort: M
+> **Done (option a):** canonicalization moved to `shepherd_utils/ars_norm.py` and
+> now runs **per ARA response before the merge** in `ars_accumulate` (outside the
+> parent lock). The merge then sees canonical ids, so `merge_result_maps` collapses
+> the same entity returned by two ARAs under different curies. `node_norm` dropped
+> from `ARS_TAIL_WORKFLOW` (tail now starts at `ars_blocklist`); the `node_norm`
+> worker remains a valid standalone op delegating to `ars_norm`.
 - **ARS:** `pre_merge_process` canonicalizes each ARA response's node ids **before**
   the merge, so the same entity returned by two ARAs under different curies collapses
   to one node/answer during merge (spec §6.2, §13.3).
@@ -114,7 +125,10 @@ Listed so the "do we match this?" decision is explicit per item.
   arrives (more calls to the normalizer) or normalize the accumulating parent
   incrementally? Interaction with B1 (dedup changes scores).
 
-### B3 — `normalized_score` computed twice / dead value 🟡 · priority: MED · effort: S
+### B3 — `normalized_score` computed twice / dead value 🟢 DONE · priority: MED · effort: S
+> **Done:** removed the dead merge-time `average_result_scores` call (+ its extra
+> lock round-trip) in `ars_accumulate`. Result scoring is now owned solely by the
+> appraiser tail (`normalize_scores` + Sugeno `compute_from_results`).
 - **ARS:** `normalized_score` is accumulated as a list across merges and **averaged
   once** at the end of a merge fold (spec §8, §14).
 - **Shepherd:** `ars_merge.average_result_scores` averages it during accumulate, then
@@ -155,7 +169,11 @@ Listed so the "do we match this?" decision is explicit per item.
   came from — if we stay batch (B2(b)), we lose the per-edge ARA attribution and can
   only tag `infores:shepherd`. Acceptable?
 
-### B6 — Node canonization `biolink:xref` / `biolink:same_as` 🟡 · priority: MED · effort: S
+### B6 — Node canonization `biolink:xref` / `biolink:same_as` 🟢 DONE · priority: MED · effort: S
+> **Done:** `get_normalized_nodes` now keeps the normalizer's
+> `equivalent_identifiers`; on re-keying a node `canonize_message` appends a
+> `biolink:xref` (original id) and `biolink:same_as` (equivalent ids) attribute in
+> the ARS `canonizeMessage` shapes (`metatype:NodeIdentifier`).
 - **ARS:** on re-keying a node to its canonical id, adds `biolink:xref` (original id)
   and `biolink:same_as` (equivalent identifiers) attributes; backfills categories
   (spec §6.2).
@@ -200,7 +218,10 @@ Listed so the "do we match this?" decision is explicit per item.
   status/stats are surfaced (C5).
 - **Open questions:** where to persist result_stat given our flat model.
 
-### B10 — Async-callback idempotency 🔴 · priority: HIGH · effort: S
+### B10 — Async-callback idempotency 🟢 DONE · priority: HIGH · effort: S
+> **Done:** `ars_callback` rejects duplicates (already-DONE→200, has results→409,
+> ERROR→400); `ars_accumulate` re-checks status under the parent lock and marks
+> DONE inside it so concurrent duplicates serialize and can't double-merge.
 - **ARS:** the async ingest endpoint rejects duplicates — child already Done → 200
   "already received"; child already has `result_count>0` → 409; child already Error →
   400 (spec §5.5).

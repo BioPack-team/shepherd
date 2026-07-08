@@ -17,6 +17,7 @@ import orjson
 import zstandard
 from scipy.stats import rankdata
 
+from shepherd_utils.ars_scoring import compute_from_results
 from shepherd_utils.config import settings
 from shepherd_utils.db import decompress_zstd, get_message, save_message
 from shepherd_utils.otel import setup_tracer
@@ -149,6 +150,10 @@ async def answer_appraise(task, logger: logging.Logger):
     )
     await appraise(message, logger)
     normalize_scores(results)
+    # Final ARS ordering (parity with post_process): rank every result by a Sugeno
+    # integral over its ordering_components and sort by rank (best first). This is
+    # the authoritative order the downstream filter_results_top_n trims against.
+    message["message"]["results"] = compute_from_results(results)
     await save_message(response_id, message, logger)
     logger.info(f"Appraisal complete for {response_id}")
 

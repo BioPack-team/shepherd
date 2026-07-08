@@ -38,6 +38,7 @@ from shepherd_utils.ars_merge import (
     merge_aux_graphs,
     merge_result_maps,
 )
+from shepherd_utils.ars_norm import normalize_message
 from shepherd_utils.ars_notify import publish_ars_event
 from shepherd_utils.ars_workflow import ARS_TAIL_WORKFLOW as TAIL_WORKFLOW
 from shepherd_utils.otel import setup_tracer
@@ -91,6 +92,13 @@ async def ars_accumulate(task, logger: logging.Logger):
     log_level = task[1].get("log_level", 20)
     otel = task[1]["otel"]
 
+    # Normalize this ARA's response to canonical node ids BEFORE the merge (ARS
+    # pre_merge_process): the same entity returned by two ARAs under different
+    # curies then collapses to one node/answer during merge. Done outside the
+    # parent lock -- the normalizer HTTP call must not block other ARAs' merges.
+    child_msg = await get_message(callback_id, logger)
+    await normalize_message(child_msg, logger)
+
     got_lock = await acquire_lock(parent_response_id, CONSUMER, logger)
     if not got_lock:
         logger.error(
@@ -112,7 +120,6 @@ async def ars_accumulate(task, logger: logging.Logger):
             )
         else:
             parent_msg = await get_message(parent_response_id, logger)
-            child_msg = await get_message(callback_id, logger)
             parent_msg, result_count = await asyncio.to_thread(
                 merge_child_into_parent, parent_msg, child_msg, "infores:shepherd", logger
             )
@@ -150,18 +157,15 @@ async def ars_accumulate(task, logger: logging.Logger):
         logger.info(
             f"All ARAs done for {parent_qid}; launching post-merge tail."
         )
-        # NOTE: result scoring is the appraiser tail's job (answer_appraise.
-        # normalize_scores is the single source of truth for now). We deliberately
-        # do NOT average normalized_score here -- ARA responses don't carry a
-        # normalized_score at cross-ARA merge time (that needs per-response
-        # normalization, gap B2), so a merge-time average is a no-op that was only
-        # overwritten downstream. Revisit when per-response normalization + Sugeno
-        # ranking (gaps B1/B2) land.
+        # Each child was already canonicalized before merge (normalize_message
+        # above), so the accumulated parent is fully normalized -- the tail starts
+        # at the blocklist. Final result scoring/ordering is the appraiser tail's
+        # job (answer_appraise runs normalize_scores + the Sugeno ranking).
         await publish_ars_event(
             {"parent_qid": parent_qid, "status": "merging"}, logger
         )
         await add_task(
-            "node_norm",
+            TAIL_WORKFLOW[0]["id"],
             {
                 "query_id": parent_qid,
                 "response_id": parent_response_id,

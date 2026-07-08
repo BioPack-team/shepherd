@@ -97,6 +97,9 @@ def _patch_common(mocker, *, pending, claim=True, lock=True, child_status="QUEUE
 
     am("acquire_lock", return_value=lock)
     am("remove_lock", return_value=None)
+    # Per-response normalization runs before the merge; stub it to a no-op so no
+    # normalizer HTTP call is made (dedup correctness is covered in test_ars_merge).
+    am("normalize_message", return_value=False)
     # QUEUED = not yet reported, so the merge proceeds (the duplicate-guard test
     # overrides this to DONE).
     am("get_ars_child_status", return_value=child_status)
@@ -124,7 +127,9 @@ async def test_accumulate_full_winner_launches_tail(mocker):
     await ars_accumulate(_task(), logger)
     add_task.assert_called_once()
     stream, payload = add_task.call_args.args[0], add_task.call_args.args[1]
-    assert stream == "node_norm"
+    # Tail head is the blocklist -- normalization already happened per-response.
+    assert stream == "ars_blocklist"
+    assert stream == TAIL_WORKFLOW[0]["id"]
     assert payload["query_id"] == "parent-1"
     assert payload["response_id"] == "presp-1"
     assert json.loads(payload["workflow"]) == TAIL_WORKFLOW
@@ -167,3 +172,16 @@ async def test_accumulate_duplicate_callback_skips_merge(mocker):
     save.assert_not_called()
     set_status.assert_not_called()
     add_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_accumulate_normalizes_child_before_merge(mocker):
+    """The child response is canonicalized (per-response) before it is merged."""
+    _patch_common(mocker, pending=["bte"])
+    normalize = mocker.patch(
+        "workers.ars_accumulate.worker.normalize_message",
+        new_callable=mocker.AsyncMock,
+        return_value=True,
+    )
+    await ars_accumulate(_task(), logger)
+    normalize.assert_awaited_once()

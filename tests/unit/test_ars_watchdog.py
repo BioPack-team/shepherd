@@ -47,7 +47,8 @@ async def test_watchdog_forces_tail_for_timed_out_parent(mocker):
     errored.assert_awaited_once_with("p1", ["bte", "sipr"], logger)
     add_task.assert_awaited_once()
     stream, payload = add_task.await_args.args[0], add_task.await_args.args[1]
-    assert stream == "node_norm"
+    assert stream == "ars_blocklist"
+    assert stream == ARS_TAIL_WORKFLOW[0]["id"]
     assert payload["query_id"] == "p1"
     assert payload["response_id"] == "r1"
     assert json.loads(payload["workflow"]) == ARS_TAIL_WORKFLOW

@@ -146,7 +146,7 @@ async def run_watchdog_once(logger: logging.Logger):
         )
         if await claim_ars_tail(parent_qid, logger):
             await add_task(
-                "node_norm",
+                ARS_TAIL_WORKFLOW[0]["id"],
                 {
                     "query_id": parent_qid,
                     "response_id": parent["response_id"],
