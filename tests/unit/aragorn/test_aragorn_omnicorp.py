@@ -370,54 +370,20 @@ def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
     assert co_occurrence_edges == []
 
 
-def test_aragorn_omnicorp_runs_overlay_and_preserves_workflow(lmdb_envs):
-    """The executor entrypoint runs the overlay on a loaded message in place.
-
-    ``aragorn_omnicorp`` is the CPU-bound function dispatched to the process
-    pool: it takes an already-loaded message, applies the overlay, and returns
-    it (DB load/save are handled by ``process_task`` on the event loop). It
-    must also strip and restore any top-level ``workflow`` around the overlay.
-    """
-    in_message = {
-        "workflow": [{"id": "aragorn.omnicorp"}],
-        "message": {
-            "query_graph": {
-                "nodes": {"n0": {"set_interpretation": "BATCH"}},
-                "edges": {},
-            },
-            "knowledge_graph": {
-                "nodes": {"MONDO:0001": {"attributes": []}},
-                "edges": {},
-            },
-            "results": [],
-        },
-    }
-
-    logger = logging.getLogger(__name__)
-
-    out = worker.aragorn_omnicorp(copy.deepcopy(in_message), logger)
-
-    # The workflow is stripped before the overlay and restored afterwards.
-    assert out["workflow"] == [{"id": "aragorn.omnicorp"}]
-
-    saved_node = out["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
-    article_attrs = [
-        a
-        for a in saved_node["attributes"]
-        if a.get("original_attribute_name") == "omnicorp_article_count"
-    ]
-    assert article_attrs and article_attrs[0]["value"] == 100
-
-
-def test_run_overlay_from_db_loads_overlays_and_saves(lmdb_envs, monkeypatch):
+def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
+    lmdb_envs, monkeypatch
+):
     """The process-pool entrypoint reads by id, overlays, and writes back.
 
-    Only the ``response_id`` should cross into the worker: it loads the message
-    from Redis via ``get_message_sync``, runs the overlay, and persists it with
+    ``aragorn_omnicorp`` is the function dispatched to the process pool: only
+    the ``response_id`` crosses the boundary. It loads the message from Redis via
+    ``get_message_sync``, applies the overlay, and persists it with
     ``save_message_sync`` -- the large payload never has to be passed in or
-    returned across the process boundary.
+    returned across the process boundary. It must also strip and restore any
+    top-level ``workflow`` around the overlay.
     """
     loaded = {
+        "workflow": [{"id": "aragorn.omnicorp"}],
         "message": {
             "query_graph": {
                 "nodes": {"n0": {"set_interpretation": "BATCH"}},
@@ -442,11 +408,16 @@ def test_run_overlay_from_db_loads_overlays_and_saves(lmdb_envs, monkeypatch):
     )
 
     logger = logging.getLogger(__name__)
-    worker.run_overlay_from_db("resp-1", logger)
+    worker.aragorn_omnicorp("resp-1", logger)
 
-    # The overlay ran and the annotated message was written back under its id.
+    # The overlaid message was written back under its id.
     assert "resp-1" in saved
-    node = saved["resp-1"]["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
+    out = saved["resp-1"]
+
+    # The workflow is stripped before the overlay and restored afterwards.
+    assert out["workflow"] == [{"id": "aragorn.omnicorp"}]
+
+    node = out["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
     article_attrs = [
         a
         for a in node["attributes"]

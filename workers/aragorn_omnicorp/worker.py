@@ -476,26 +476,7 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     return in_message
 
 
-def aragorn_omnicorp(message: dict, logger: logging.Logger) -> dict:
-    """Run the omnicorp overlay on an already-loaded message.
-
-    Pure (aside from logging): takes a loaded message, applies the overlay, and
-    returns it. The DB load/save happen in ``run_overlay_from_db`` so this stays
-    easy to unit test.
-    """
-    workflow = None
-    if "workflow" in message:
-        workflow = message["workflow"]
-        del message["workflow"]
-
-    response = omnicorp_overlay(message, logger)
-
-    if workflow is not None:
-        response["workflow"] = workflow
-    return response
-
-
-def run_overlay_from_db(response_id: str, logger: logging.Logger) -> None:
+def aragorn_omnicorp(response_id: str, logger: logging.Logger) -> None:
     """Process-pool entrypoint: load, overlay, and save entirely in the child.
 
     Only the small ``response_id`` string crosses the process-pool boundary; the
@@ -507,10 +488,17 @@ def run_overlay_from_db(response_id: str, logger: logging.Logger) -> None:
     and writing here keeps the payload off the parent's heap entirely.
     """
     message = get_message_sync(response_id)
-    response = aragorn_omnicorp(message, logger)
-    if response is None:
-        logger.error("Omnicorp overlay returned nothing. Saving unchanged.")
-        response = message
+
+    workflow = None
+    if "workflow" in message:
+        workflow = message["workflow"]
+        del message["workflow"]
+
+    response = omnicorp_overlay(message, logger)
+
+    if workflow is not None:
+        response["workflow"] = workflow
+
     save_message_sync(response_id, response)
 
 
@@ -524,15 +512,15 @@ async def process_task(
     and finish other tasks while a single (potentially very large) overlay is
     crunching -- previously the overlay ran inline on the loop and blocked
     everything else until it finished. Only the ``response_id`` is handed to the
-    child; the message load/save happen there (see ``run_overlay_from_db``) so
-    the payload never crosses the process boundary.
+    child; the message load/save happen there (see ``aragorn_omnicorp``) so the
+    payload never crosses the process boundary.
     """
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
         await loop.run_in_executor(
             executor,
-            run_overlay_from_db,
+            aragorn_omnicorp,
             response_id,
             logger,
         )
