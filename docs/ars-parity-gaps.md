@@ -141,7 +141,11 @@ Listed so the "do we match this?" decision is explicit per item.
   overwrite, or vice-versa. Remove the dead path.
 - **Open questions:** folded into B1's decision.
 
-### B4 — `scrub_null_attributes` 🔴 · priority: MED · effort: S
+### B4 — `scrub_null_attributes` 🟢 DONE · priority: MED · effort: S
+> **Done:** `shepherd_utils/ars_clean.py::scrub_null_attributes`, run per-response
+> (pre-merge) in `ars_accumulate`. Drops null node/edge attributes, removes edge
+> sources with a null `resource_id`, defaults/​cleans `upstream_resource_ids`, and
+> defaults aux-graph `attributes` to `[]`.
 - **ARS:** removes `None` entries from node/edge attribute lists; ensures edge
   `sources` have non-null `resource_id` (drops bad sources) and list-valued
   `upstream_resource_ids`; defaults aux graphs to `attributes:[]` (spec §6.1, §9.2).
@@ -152,7 +156,12 @@ Listed so the "do we match this?" decision is explicit per item.
   (pre-merge, if B2(a)) and/or at the head of the tail.
 - **Open questions:** where to run it (per-response vs on merged) depends on B2.
 
-### B5 — `decorate_edges_with_infores` 🟡 · priority: MED · effort: S
+### B5 — `decorate_edges_with_infores` 🟢 DONE · priority: MED · effort: S
+> **Done:** `ars_clean.decorate_edges_with_infores(message, inforesid)`, run
+> per-response so the source ARA is known (config `ars_ara_infores` maps each ARA
+> to its infores id; fallback `infores:<ara>`). Edges with no sources get self as
+> primary; otherwise self is added as an aggregator alongside the existing primary.
+> `merge_kgraph` still stamps the `infores:shepherd` aggregator during merge.
 - **ARS:** ensures each KG edge has a `sources` entry for the responding ARA's
   inforesid — add a `primary_knowledge_source` if none exist, else add self as
   `aggregator_knowledge_source` (spec §6.3).
@@ -186,7 +195,10 @@ Listed so the "do we match this?" decision is explicit per item.
 - **Open questions:** attribute value shapes (list of curies? attribute objects?) —
   confirm against a real normalizer response.
 
-### B7 — `remove_phantom_support_graphs` 🔴 · priority: LOW · effort: S
+### B7 — `remove_phantom_support_graphs` 🟢 DONE · priority: LOW · effort: S
+> **Done:** `ars_clean.remove_phantom_support_graphs`, run per-response after
+> decoration. Strips `biolink:support_graphs` attributes referencing auxiliary
+> graphs that don't exist. (B8 TRAPI validation still pending, deferred.)
 - **ARS:** before validation, strips `biolink:support_graphs` references to aux
   graphs that don't exist (spec §4.8, §5.6).
 - **Shepherd:** none. `shared.py::validate_message` only *logs* dangling aux refs

@@ -78,6 +78,15 @@ class Settings(BaseSettings):
     # normalizes + annotates nodes, runs the answer appraiser, then notifies the
     # submitter. See workers/ars and workers/ars_accumulate.
     ars_aras: list[str] = ["aragorn", "arax", "bte", "sipr"]
+    # Maps each fan-out ARA (stream name) to the infores id stamped on its edges as
+    # a knowledge source before the cross-ARA merge (ARS decorate_edges_with_infores).
+    # Anything not listed falls back to ``infores:<ara>``.
+    ars_ara_infores: dict[str, str] = {
+        "aragorn": "infores:aragorn",
+        "arax": "infores:arax",
+        "bte": "infores:biothings-explorer",
+        "sipr": "infores:service-provider",
+    }
     # Biothings annotator (adds ``biothings_annotations`` node attributes) and the
     # answer appraiser (adds ``ordering_components``). ``node_norm`` above is the
     # node normalizer used to canonicalize curies before annotation.

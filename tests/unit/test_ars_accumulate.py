@@ -185,3 +185,20 @@ async def test_accumulate_normalizes_child_before_merge(mocker):
     )
     await ars_accumulate(_task(), logger)
     normalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_accumulate_runs_per_response_hygiene(mocker):
+    """scrub / decorate(infores) / phantom-strip run per-response before merge."""
+    _patch_common(mocker, pending=["bte"])
+    scrub = mocker.patch("workers.ars_accumulate.worker.scrub_null_attributes")
+    decorate = mocker.patch("workers.ars_accumulate.worker.decorate_edges_with_infores")
+    phantom = mocker.patch(
+        "workers.ars_accumulate.worker.remove_phantom_support_graphs"
+    )
+    await ars_accumulate(_task(ara="aragorn"), logger)
+    scrub.assert_called_once()
+    phantom.assert_called_once()
+    # The responding ARA's infores id is stamped on its edges.
+    decorate.assert_called_once()
+    assert decorate.call_args.args[1] == "infores:aragorn"

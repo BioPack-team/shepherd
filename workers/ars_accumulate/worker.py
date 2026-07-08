@@ -34,6 +34,11 @@ from shepherd_utils.db import (
     save_message,
     set_ars_child_status,
 )
+from shepherd_utils.ars_clean import (
+    decorate_edges_with_infores,
+    remove_phantom_support_graphs,
+    scrub_null_attributes,
+)
 from shepherd_utils.ars_merge import (
     merge_aux_graphs,
     merge_result_maps,
@@ -41,6 +46,7 @@ from shepherd_utils.ars_merge import (
 from shepherd_utils.ars_norm import normalize_message
 from shepherd_utils.ars_notify import publish_ars_event
 from shepherd_utils.ars_workflow import ARS_TAIL_WORKFLOW as TAIL_WORKFLOW
+from shepherd_utils.config import settings
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, merge_kgraph
 
@@ -92,12 +98,19 @@ async def ars_accumulate(task, logger: logging.Logger):
     log_level = task[1].get("log_level", 20)
     otel = task[1]["otel"]
 
-    # Normalize this ARA's response to canonical node ids BEFORE the merge (ARS
-    # pre_merge_process): the same entity returned by two ARAs under different
-    # curies then collapses to one node/answer during merge. Done outside the
-    # parent lock -- the normalizer HTTP call must not block other ARAs' merges.
+    # Per-response hygiene + canonicalization BEFORE the merge (ARS
+    # pre_merge_process), all outside the parent lock so the normalizer HTTP call
+    # doesn't block other ARAs' merges:
+    #   scrub null attrs -> canonicalize ids (same entity from two ARAs under
+    #   different curies then collapses on merge) -> stamp this ARA's provenance
+    #   on every edge -> drop phantom support-graph references.
     child_msg = await get_message(callback_id, logger)
+    scrub_null_attributes(child_msg)
     await normalize_message(child_msg, logger)
+    decorate_edges_with_infores(
+        child_msg, settings.ars_ara_infores.get(ara, f"infores:{ara}")
+    )
+    remove_phantom_support_graphs(child_msg)
 
     got_lock = await acquire_lock(parent_response_id, CONSUMER, logger)
     if not got_lock:
