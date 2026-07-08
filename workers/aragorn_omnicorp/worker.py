@@ -27,7 +27,7 @@ from uuid import uuid4
 import lmdb
 
 from shepherd_utils.config import settings
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
@@ -67,6 +67,12 @@ def _get_curies_env():
             readonly=True,
             lock=False,
             max_readers=512,
+            # These datasets are larger than the pod's memory budget and the
+            # reads are effectively random, so the kernel's default readahead
+            # just faults in neighbouring pages we never use -- inflating the
+            # page cache (and the pod's reported memory) for nothing. Disable
+            # it (MDB_NORDAHEAD), matching the score_paths worker.
+            readahead=False,
         )
     return _curies_env
 
@@ -80,6 +86,9 @@ def _get_shared_counts_env():
             readonly=True,
             lock=False,
             max_readers=512,
+            # See _get_curies_env: random reads over a dataset bigger than RAM,
+            # so skip readahead to keep the page cache from ballooning.
+            readahead=False,
         )
     return _shared_counts_env
 
@@ -237,7 +246,20 @@ def add_shared_pmid_counts(message, values, pair_to_answer):
             aux_graphs[omnisupport]["edges"].append(uid)
 
 
-def generate_curie_pairs(answers, qgraph_setnodes, node_pub_counts, message, logger):
+def generate_curie_pairs(
+    answers, qgraph_setnodes, node_pub_counts, message, logger, max_pairs=None
+):
+    """Build the ``{curie_pair: {(answer_idx, analysis_idx)}}`` mapping.
+
+    When ``max_pairs`` is set, generation stops as soon as that many distinct
+    pairs have been collected and the (capped) mapping is returned early. The
+    overlay skips queries at/above ``OMNICORP_MAX_CURIE_PAIRS`` anyway, so there
+    is no point fully materializing the mapping first: a pathological query can
+    generate many millions of pairs (the per-analysis ``combinations`` is
+    O(n**2)), and allocating all of them before the caller's size check was a
+    primary source of the worker's memory blow-up. Bailing here bounds the
+    mapping at ~``max_pairs`` entries.
+    """
     pair_to_answer = defaultdict(set)
 
     for ans_idx, answer_map in enumerate(answers):
@@ -294,18 +316,24 @@ def generate_curie_pairs(answers, qgraph_setnodes, node_pub_counts, message, log
 
             for node_pair in combinations(lookup_nodes, 2):
                 pair_to_answer[node_pair].add((ans_idx, analysis_idx))
+                if max_pairs is not None and len(pair_to_answer) >= max_pairs:
+                    return pair_to_answer
 
             for qg_id, snodes in setnodes.items():
                 for snode in snodes:
                     for node in lookup_nodes:
                         node_pair = tuple(sorted((node, snode)))
                         pair_to_answer[node_pair].add((ans_idx, analysis_idx))
+                        if max_pairs is not None and len(pair_to_answer) >= max_pairs:
+                            return pair_to_answer
 
             for qga, qgb in combinations(setnodes.keys(), 2):
                 for anode in setnodes[qga]:
                     for bnode in setnodes[qgb]:
                         node_pair = tuple(sorted((anode, bnode)))
                         pair_to_answer[node_pair].add((ans_idx, analysis_idx))
+                        if max_pairs is not None and len(pair_to_answer) >= max_pairs:
+                            return pair_to_answer
 
     return pair_to_answer
 
@@ -378,8 +406,15 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
         )
 
         t1 = datetime.now()
+        # Cap generation at the skip threshold: if we hit it we bail out of the
+        # overlay below anyway, so there's no reason to keep allocating pairs.
         pair_to_answer = generate_curie_pairs(
-            answers, qgraph_setnodes, node_pub_counts, message, logger
+            answers,
+            qgraph_setnodes,
+            node_pub_counts,
+            message,
+            logger,
+            max_pairs=OMNICORP_MAX_CURIE_PAIRS,
         )
         t2 = datetime.now()
         logger.info(
@@ -444,9 +479,9 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
 def aragorn_omnicorp(message: dict, logger: logging.Logger) -> dict:
     """Run the omnicorp overlay on an already-loaded message.
 
-    CPU-bound; intended to run inside a process pool executor, so it stays
-    synchronous. The DB load/save are handled by the async ``process_task``
-    on the event loop, not here.
+    Pure (aside from logging): takes a loaded message, applies the overlay, and
+    returns it. The DB load/save happen in ``run_overlay_from_db`` so this stays
+    easy to unit test.
     """
     workflow = None
     if "workflow" in message:
@@ -460,6 +495,25 @@ def aragorn_omnicorp(message: dict, logger: logging.Logger) -> dict:
     return response
 
 
+def run_overlay_from_db(response_id: str, logger: logging.Logger) -> None:
+    """Process-pool entrypoint: load, overlay, and save entirely in the child.
+
+    Only the small ``response_id`` string crosses the process-pool boundary; the
+    (potentially very large) message is read from Redis, mutated, and written
+    back inside the child process. Previously the whole message was pickled into
+    the child and the mutated copy pickled back out, so a single big query was
+    resident several times over -- across the parent event loop, the pickle
+    buffers, and the child -- which is what pushed this worker into OOM. Reading
+    and writing here keeps the payload off the parent's heap entirely.
+    """
+    message = get_message_sync(response_id)
+    response = aragorn_omnicorp(message, logger)
+    if response is None:
+        logger.error("Omnicorp overlay returned nothing. Saving unchanged.")
+        response = message
+    save_message_sync(response_id, response)
+
+
 async def process_task(
     task, parent_ctx, logger: logging.Logger, limiter, loop, executor
 ):
@@ -469,26 +523,19 @@ async def process_task(
     ``run_in_executor``. That keeps the event loop free to poll for, dispatch,
     and finish other tasks while a single (potentially very large) overlay is
     crunching -- previously the overlay ran inline on the loop and blocked
-    everything else until it finished.
+    everything else until it finished. Only the ``response_id`` is handed to the
+    child; the message load/save happen there (see ``run_overlay_from_db``) so
+    the payload never crosses the process boundary.
     """
 
     async def _run(task, logger):
-        # given a task, get the message from the db (async I/O on the loop)
         response_id = task[1]["response_id"]
-        message = await get_message(response_id, logger)
-        if message is not None:
-            response = await loop.run_in_executor(
-                executor,
-                aragorn_omnicorp,
-                message,
-                logger,
-            )
-            if response is None:
-                logger.error("Omnicorp overlay returned nothing. Saving unchanged.")
-                response = message
-            await save_message(response_id, response, logger)
-        else:
-            logger.error(f"Failed to get {response_id} for omnicorp overlay.")
+        await loop.run_in_executor(
+            executor,
+            run_overlay_from_db,
+            response_id,
+            logger,
+        )
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
