@@ -370,15 +370,19 @@ def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
     assert co_occurrence_edges == []
 
 
-def test_aragorn_omnicorp_runs_overlay_and_preserves_workflow(lmdb_envs):
-    """The executor entrypoint runs the overlay on a loaded message in place.
+def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
+    lmdb_envs, monkeypatch
+):
+    """The process-pool entrypoint reads by id, overlays, and writes back.
 
-    ``aragorn_omnicorp`` is the CPU-bound function dispatched to the process
-    pool: it takes an already-loaded message, applies the overlay, and returns
-    it (DB load/save are handled by ``process_task`` on the event loop). It
-    must also strip and restore any top-level ``workflow`` around the overlay.
+    ``aragorn_omnicorp`` is the function dispatched to the process pool: only
+    the ``response_id`` crosses the boundary. It loads the message from Redis via
+    ``get_message_sync``, applies the overlay, and persists it with
+    ``save_message_sync`` -- the large payload never has to be passed in or
+    returned across the process boundary. It must also strip and restore any
+    top-level ``workflow`` around the overlay.
     """
-    in_message = {
+    loaded = {
         "workflow": [{"id": "aragorn.omnicorp"}],
         "message": {
             "query_graph": {
@@ -393,17 +397,56 @@ def test_aragorn_omnicorp_runs_overlay_and_preserves_workflow(lmdb_envs):
         },
     }
 
-    logger = logging.getLogger(__name__)
+    saved = {}
+    monkeypatch.setattr(
+        worker, "get_message_sync", lambda response_id: copy.deepcopy(loaded)
+    )
+    monkeypatch.setattr(
+        worker,
+        "save_message_sync",
+        lambda response_id, message: saved.update({response_id: message}),
+    )
 
-    out = worker.aragorn_omnicorp(copy.deepcopy(in_message), logger)
+    logger = logging.getLogger(__name__)
+    worker.aragorn_omnicorp("resp-1", logger)
+
+    # The overlaid message was written back under its id.
+    assert "resp-1" in saved
+    out = saved["resp-1"]
 
     # The workflow is stripped before the overlay and restored afterwards.
     assert out["workflow"] == [{"id": "aragorn.omnicorp"}]
 
-    saved_node = out["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
+    node = out["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
     article_attrs = [
         a
-        for a in saved_node["attributes"]
+        for a in node["attributes"]
         if a.get("original_attribute_name") == "omnicorp_article_count"
     ]
     assert article_attrs and article_attrs[0]["value"] == 100
+
+
+def test_generate_curie_pairs_stops_at_max_pairs():
+    """``max_pairs`` bounds the mapping instead of materializing every pair."""
+    from workers.aragorn_omnicorp.worker import generate_curie_pairs
+
+    # One analysis over 50 nonset nodes => C(50, 2) = 1225 candidate pairs.
+    node_ids = [f"N{i}" for i in range(50)]
+    answers = [
+        {
+            "node_bindings": {"qother": [{"id": nid} for nid in node_ids]},
+            "analyses": [{"edge_bindings": {}}],
+        }
+    ]
+    node_pub_counts = {nid: 1 for nid in node_ids}
+    message = {"knowledge_graph": {"edges": {}}, "auxiliary_graphs": {}}
+    logger = logging.getLogger(__name__)
+
+    # Uncapped materializes all 1225; capped stops at the threshold.
+    full = generate_curie_pairs(answers, set(), node_pub_counts, message, logger)
+    assert len(full) == 1225
+
+    capped = generate_curie_pairs(
+        answers, set(), node_pub_counts, message, logger, max_pairs=100
+    )
+    assert len(capped) == 100

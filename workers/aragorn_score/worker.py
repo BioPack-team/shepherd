@@ -13,7 +13,7 @@ from itertools import combinations
 
 import numpy as np
 
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
@@ -1175,8 +1175,20 @@ def get_edge_support_kg(edge_id, kg, aux_graphs, edge_kg=None):
     return edge_kg
 
 
-def aragorn_score(in_message, logger: logging.Logger):
-    """Use Aragorn Ranking to give all results a score."""
+def aragorn_score(response_id: str, logger: logging.Logger) -> None:
+    """Process-pool entrypoint: load, score, and save entirely in the child.
+
+    Only the small ``response_id`` string crosses the process-pool boundary; the
+    (potentially very large) message is read from Redis, scored in place, and
+    written back inside the child process. Previously the whole message was
+    pickled into the child and the scored copy pickled back out, so a single big
+    query was resident several times over -- across the parent event loop, the
+    pickle buffers, and the child. Reading and writing here keeps the payload
+    off the parent's heap entirely. When there are no results to score the
+    message is saved back unchanged.
+    """
+    in_message = get_message_sync(response_id)
+
     # save the logs for the response (if any)
     if "logs" not in in_message or in_message["logs"] is None:
         in_message["logs"] = []
@@ -1188,7 +1200,9 @@ def aragorn_score(in_message, logger: logging.Logger):
 
     message = in_message["message"]
     if ("results" not in message) or (message["results"] is None):
-        # No results to weight. abort
+        # No results to weight; save unchanged and abort.
+        logger.info("No results to score. Saving unscored.")
+        save_message_sync(response_id, in_message)
         return
 
     # get a reference to the results
@@ -1211,35 +1225,27 @@ def aragorn_score(in_message, logger: logging.Logger):
         # save any log entries
         # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
 
-    # return the result to the caller
-    logger.info("Score complete. Returning")
-    return in_message
+    logger.info("Score complete. Saving.")
+    save_message_sync(response_id, in_message)
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, executor):
     """Process a given task and ACK in redis.
 
     Scoring is CPU-bound, so it is dispatched to a process pool while the
-    span, wrap-up, and error handling are shared with every worker.
+    span, wrap-up, and error handling are shared with every worker. Only the
+    ``response_id`` is handed to the child; the message load/save happen there
+    (see ``aragorn_score``) so the payload never crosses the process boundary.
     """
 
     async def _run(task, logger):
-        # given a task, get the message from the db
         response_id = task[1]["response_id"]
-        message = await get_message(response_id, logger)
-        if message is not None:
-            scored_message = await loop.run_in_executor(
-                executor,
-                aragorn_score,
-                message,
-                logger,
-            )
-            if scored_message is None:
-                logger.error("Failed to score message. Returning unscored.")
-                scored_message = message
-            await save_message(response_id, scored_message, logger)
-        else:
-            logger.error(f"Failed to get {response_id} for scoring.")
+        await loop.run_in_executor(
+            executor,
+            aragorn_score,
+            response_id,
+            logger,
+        )
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
