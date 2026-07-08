@@ -10,15 +10,17 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Set
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from shepherd_utils.ars_clients import sign_notification
 from shepherd_utils.ars_notify import subscribe_ars_events
 from shepherd_utils.config import settings
-from shepherd_utils.db import initialize_db, list_subscribers, shutdown_db
+from shepherd_utils.db import initialize_db, list_subscriber_targets, shutdown_db
 from shepherd_utils.logger import setup_logging
 
 setup_logging()
@@ -47,22 +49,41 @@ async def _broadcast(event: Dict[str, Any]) -> None:
                 _clients.discard(ws)
 
 
+def _to_notification(event: Dict[str, Any], parent_qid: str) -> Dict[str, Any]:
+    """Shape an internal event into the ARS subscriber notification envelope.
+
+    Routing-only ``parent_qid`` becomes ``pk``; a timestamp and default ``code``
+    are added if absent (ARS notify_subscribers_task shape).
+    """
+    notification = {k: v for k, v in event.items() if k != "parent_qid"}
+    notification["pk"] = parent_qid
+    notification.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+    notification.setdefault("code", 200)
+    return notification
+
+
 async def _notify_subscribers(event: Dict[str, Any]) -> None:
-    """POST the event to any callback subscribed to this parent query."""
+    """POST the (signed) event to any callback subscribed to this parent query."""
     parent_qid = event.get("parent_qid")
     if not parent_qid:
         return
     try:
-        urls = await list_subscribers(parent_qid, logger)
+        targets = await list_subscriber_targets(parent_qid, logger)
     except Exception as e:
         logger.error(f"Failed to load subscribers for {parent_qid}: {e}")
         return
-    if not urls:
+    if not targets:
         return
-    async with httpx.AsyncClient(timeout=30) as client:
-        for url in urls:
+    notification = _to_notification(event, parent_qid)
+    async with httpx.AsyncClient(timeout=10) as client:
+        for target in targets:
+            url = target["callback_url"]
+            # Sign per-client: identical canonical body, per-secret signature.
+            body, headers = await sign_notification(
+                notification, target.get("client_id"), logger
+            )
             try:
-                await client.post(url, json=event)
+                await client.post(url, content=body, headers=headers)
             except Exception as e:
                 logger.error(f"Failed to notify subscriber {url}: {e}")
 

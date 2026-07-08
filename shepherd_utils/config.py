@@ -92,11 +92,16 @@ class Settings(BaseSettings):
     # node normalizer used to canonicalize curies before annotation.
     annotator_url: str = "https://biothings.ncats.io/curie"
     appraiser_url: str = "https://answerappraiser.ci.transltr.io/get_appraisal"
-    # A parent ARS query whose child ARAs haven't all returned within this many
-    # seconds is forced to finish with whatever partial results have arrived, so
-    # the submitter is still notified. Must comfortably exceed a single ARA's
-    # whole-query budget (~5 min).
+    # A parent ARS query whose child ARAs haven't all returned within its budget
+    # is forced to finish with whatever partial results have arrived, so the
+    # submitter is still notified. The budget is per-tier (ARS catch_timeout_async
+    # parity): standard queries get ``ars_timeout_standard_sec``, pathfinder
+    # queries the (longer) ``ars_timeout_pathfinder_sec``. ``ars_overall_timeout_sec``
+    # is retained as a fallback default. Each must comfortably exceed a single
+    # ARA's whole-query budget.
     ars_overall_timeout_sec: int = 360
+    ars_timeout_standard_sec: int = 360
+    ars_timeout_pathfinder_sec: int = 600
     # Blocklist of knowledge-source infores ids whose edges are dropped from the
     # merged result. Mounted into the ars_blocklist worker container.
     ars_blocklist_path: str = "/app/config/blocklist.json"

@@ -254,7 +254,14 @@ Listed so the "do we match this?" decision is explicit per item.
 
 ## C. Notification / subscription gaps
 
-### C1 — Event vocabulary + completion event 🟡 · priority: MED · effort: M
+### C1 — Event vocabulary + completion event 🟢 DONE · priority: MED · effort: M
+> **Done:** the per-ARA DONE event now uses the ARS `ara_response_complete`
+> vocabulary (ara_name/child_uuid/ara_response_status/ara_n_results); `finish_query`
+> emits a `last_merged_completed` completion event (complete:true, code 200, with
+> result/aux stats) for ARS parents, and the watchdog timeout path yields a
+> completion carrying the distinct 598 terminal code. `ars_ws` reshapes internal
+> events into the ARS subscriber envelope (parent_qid→pk, timestamp, code).
+> (`merged_version_*` events remain out of scope -- they depend on A4.)
 - **ARS:** emits `ara_response_complete`, `ara_failed_validation`,
   `merged_version_begun`, `merged_version_available`, `last_merged_completed`, and
   `admin`/`ars_error` with `complete:true` (spec §12).
@@ -269,7 +276,13 @@ Listed so the "do we match this?" decision is explicit per item.
   Minimum viable: `ara_response_complete`, `last_merged_completed`/`complete`,
   `ars_error`.
 
-### C2 — Signed outbound notifications 🔴 · priority: MED · effort: S
+### C2 — Signed outbound notifications 🟢 DONE · priority: MED · effort: S
+> **Done:** `ars_clients.sign_notification` canonicalizes a notification
+> (sorted-keys, compact JSON) and HMAC-SHA256 signs it with the subscriber's
+> decrypted client secret, attaching `x-event-signature`. `ars_ws._notify_subscribers`
+> joins `ars_subscribers → ars_clients` (`list_subscriber_targets`) and signs
+> per client; subscribers without a registered secret still receive the event
+> unsigned. (Delivery retries/concurrency = C4, still pending.)
 - **ARS:** each notification POST carries HMAC-SHA256 `x-event-signature` over
   canonical (sorted-keys, no-space) JSON using the client's decrypted secret
   (spec §12.3).
@@ -283,7 +296,9 @@ Listed so the "do we match this?" decision is explicit per item.
   `client_id`); need the client's secret at notify time — join `ars_subscribers` →
   `ars_clients`.
 
-### C3 — Auto-unsubscribe on completion 🔴 · priority: LOW · effort: S
+### C3 — Auto-unsubscribe on completion 🟢 DONE · priority: LOW · effort: S
+> **Done:** `finish_query` calls `remove_all_subscribers(parent_qid)` when an ARS
+> parent lands terminal, right after emitting the completion event.
 - **ARS:** on terminal parent, calls `query_event_unsubscribe(None, pk)` to detach
   all clients (spec §10.5, §12).
 - **Shepherd:** only explicit `/query_event_unsubscribe`; completion path never
@@ -336,7 +351,16 @@ Listed so the "do we match this?" decision is explicit per item.
 - **Open questions:** does the empty-query output need to look like ARS's synthetic
   merged message? Do partial-failure completion semantics matter for your clients?
 
-### D2 — Timeout tiers + query_type 🟡 · priority: MED · effort: S
+### D2 — Timeout tiers + query_type 🟢 DONE (adapted) · priority: MED · effort: S
+> **Done (option a, keeping the parent-timeout model):** `query_type`
+> (standard | pathfinder) is derived at submit via `examine_query` and stored on
+> the parent; the watchdog applies per-tier budgets (`ars_timeout_standard_sec` /
+> `ars_timeout_pathfinder_sec`) via a `CASE` in `get_timed_out_ars_parents`. A
+> timed-out parent is flagged (`ars_timed_out`) so `finish_query` records a
+> distinct `TIMEOUT` terminal state + code 598 in its completion notification.
+> We keep our parent-level timeout (ARS times out children/merged with the parent
+> exempt) because that follows the batch-merge decision (A4); restructuring to
+> ARS's child-tier timeouts is an A-level change, out of scope.
 - **ARS:** per-tier timeouts via `catch_timeout_async` beat — standard 5 min,
   pathfinder (own threshold), merged 8 min; **parent exempt**; straggler →
   `code=598`/`E` (spec §11). `query_type` (standard/pathfinder) derived at submit

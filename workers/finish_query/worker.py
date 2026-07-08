@@ -10,12 +10,15 @@ import orjson
 from opentelemetry.propagate import inject
 from opentelemetry.trace import Status, StatusCode
 
+from shepherd_utils.ars_notify import publish_ars_event
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
     cleanup_callbacks,
+    get_ars_parent_completion_meta,
     get_logs,
     get_message,
     get_query_state,
+    remove_all_subscribers,
     set_query_completed,
 )
 from shepherd_utils.shared import get_tasks
@@ -28,6 +31,34 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 CALLBACK_RETRIES = 3
+
+
+async def _notify_ars_completion(
+    query_id: str, response_id: str, timed_out: bool, logger: logging.Logger
+) -> None:
+    """Publish the ARS parent completion event (last_merged_completed).
+
+    Carries result/aux-graph stats and, on a watchdog-forced timeout, the
+    distinct 598 terminal code. Fans out to subscribers via the ars_ws service.
+    """
+    stats = {"results": 0, "auxiliary_graphs": 0}
+    try:
+        message = await get_message(response_id, logger)
+        msg = (message or {}).get("message", {}) or {}
+        stats["results"] = len(msg.get("results") or [])
+        stats["auxiliary_graphs"] = len(msg.get("auxiliary_graphs") or {})
+    except Exception as e:
+        logger.error(f"Could not compute ARS completion stats for {query_id}: {e}")
+    event = {
+        "parent_qid": query_id,
+        "event_type": "last_merged_completed",
+        "complete": True,
+        "code": 598 if timed_out else 200,
+        "stats": stats,
+    }
+    if timed_out:
+        event["timed_out"] = True
+    await publish_ars_event(event, logger)
 
 
 async def finish_query(task, logger: logging.Logger):
@@ -84,6 +115,19 @@ async def finish_query(task, logger: logging.Logger):
                 except Exception as e:
                     logger.error(f"Failed to send callback to {callback_url}: {e}")
                     await asyncio.sleep(1 * (2**attempt))
+
+        # ARS parent lifecycle (parity): emit the completion event (with a distinct
+        # timed-out terminal state), then auto-unsubscribe all clients.
+        ars_meta = await get_ars_parent_completion_meta(query_id, logger)
+        if ars_meta and ars_meta["is_ars_parent"]:
+            timed_out = ars_meta["timed_out"]
+            if timed_out:
+                status = "TIMEOUT"
+            await _notify_ars_completion(query_id, response_id, timed_out, logger)
+            try:
+                await remove_all_subscribers(query_id, logger)
+            except Exception as e:
+                logger.error(f"Failed to auto-unsubscribe {query_id}: {e}")
 
         await set_query_completed(query_id, status, logger)
 

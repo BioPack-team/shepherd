@@ -11,8 +11,11 @@ from Crypto.Util.Padding import pad
 
 from shepherd_utils import ars_clients
 from shepherd_utils.ars_clients import (
+    EVENT_SIGNATURE_HEADER,
+    canonical_notification_bytes,
     canonize_url,
     decrypt_secret,
+    sign_notification,
     verify_get_signature,
     verify_post_signature,
 )
@@ -85,3 +88,49 @@ async def test_verify_get_signature_returns_subscriptions(mocker):
     out = await verify_get_signature(sig, url, "c1", logger)
     assert out["verified"] is True
     assert out["pks"] == ["p1", "p2"]
+
+
+# --- outbound signing (C2) -------------------------------------------------
+
+
+def test_canonical_notification_bytes_sorted_compact():
+    body = canonical_notification_bytes({"b": 2, "a": 1})
+    assert body == b'{"a":1,"b":2}'
+
+
+@pytest.mark.asyncio
+async def test_sign_notification_signs_with_client_secret(mocker):
+    master_key = b"0" * 32
+    mocker.patch.object(
+        ars_clients.settings, "aes_master_key", base64.b64encode(master_key).decode()
+    )
+    mocker.patch.object(
+        ars_clients,
+        "get_client",
+        new_callable=mocker.AsyncMock,
+        return_value={"client_secret": _encrypt("k", master_key), "subscriptions": []},
+    )
+    notification = {"pk": "p1", "event_type": "last_merged_completed", "code": 200}
+    body, headers = await sign_notification(notification, "c1", logger)
+    expected_body = canonical_notification_bytes(notification)
+    assert body == expected_body
+    expected_sig = hmac.new(b"k", expected_body, hashlib.sha256).hexdigest()
+    assert headers[EVENT_SIGNATURE_HEADER] == expected_sig
+    assert headers["Content-Type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_sign_notification_unsigned_without_master_key(mocker):
+    mocker.patch.object(ars_clients.settings, "aes_master_key", "")
+    body, headers = await sign_notification({"pk": "p1"}, "c1", logger)
+    assert body == b'{"pk":"p1"}'
+    assert EVENT_SIGNATURE_HEADER not in headers
+
+
+@pytest.mark.asyncio
+async def test_sign_notification_unsigned_without_client_id(mocker):
+    mocker.patch.object(
+        ars_clients.settings, "aes_master_key", base64.b64encode(b"0" * 32).decode()
+    )
+    body, headers = await sign_notification({"pk": "p1"}, None, logger)
+    assert EVENT_SIGNATURE_HEADER not in headers

@@ -909,14 +909,20 @@ ARS_TERMINAL_CHILD_STATES = ("DONE", "ERROR")
 async def set_query_ars_parent(
     query_id: str,
     logger: logging.Logger,
+    query_type: str = "standard",
 ):
-    """Mark a query as a top-level ARS parent (so /ars/messages can list it)."""
+    """Mark a query as a top-level ARS parent and record its query type.
+
+    ``query_type`` (``standard`` | ``pathfinder``) drives the per-tier timeout the
+    watchdog applies.
+    """
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(settings.postgres_pool_timeout) as conn:
                 await conn.execute(
-                    "UPDATE shepherd_brain SET is_ars_parent = TRUE WHERE qid = %s",
-                    (query_id,),
+                    "UPDATE shepherd_brain SET is_ars_parent = TRUE, "
+                    "query_type = %s WHERE qid = %s",
+                    (query_type, query_id),
                 )
                 await conn.commit()
             break
@@ -931,6 +937,71 @@ async def set_query_ars_parent(
             continue
         except Exception as e:
             logger.error(f"Failed to mark query {query_id} as ARS parent: {e}")
+            break
+
+
+async def get_ars_parent_completion_meta(
+    query_id: str,
+    logger: logging.Logger,
+) -> Union[Dict[str, Any], None]:
+    """Return ``{is_ars_parent, timed_out}`` for a query, or None on error.
+
+    Used by ``finish_query`` to decide whether to emit an ARS completion event
+    (and whether it should carry the timed-out terminal state).
+    """
+    meta = None
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT is_ars_parent, ars_timed_out FROM shepherd_brain "
+                    "WHERE qid = %s",
+                    (query_id,),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    meta = {"is_ars_parent": bool(row[0]), "timed_out": bool(row[1])}
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_ars_parent_completion_meta", e)
+                break
+            logger.error(
+                f"Connection error getting ARS parent meta after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get ARS parent meta for {query_id}: {e}")
+            break
+    return meta
+
+
+async def mark_ars_parent_timed_out(
+    query_id: str,
+    logger: logging.Logger,
+):
+    """Flag an ARS parent as timed out (watchdog forced its completion)."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    "UPDATE shepherd_brain SET ars_timed_out = TRUE WHERE qid = %s",
+                    (query_id,),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "mark_ars_parent_timed_out", e)
+                break
+            logger.error(
+                f"Connection error marking ARS parent timed out after {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to mark {query_id} timed out: {e}")
             break
 
 
@@ -1468,6 +1539,70 @@ async def list_subscribers(
     return urls
 
 
+async def list_subscriber_targets(
+    parent_qid: str,
+    logger: logging.Logger,
+) -> List[Dict[str, Any]]:
+    """Return ``[{callback_url, client_id}]`` for a parent's subscribers.
+
+    Carries ``client_id`` so outbound notifications can be signed with the
+    client's secret (ARS x-event-signature parity).
+    """
+    targets: List[Dict[str, Any]] = []
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT callback_url, client_id FROM ars_subscribers "
+                    "WHERE parent_qid = %s",
+                    (parent_qid,),
+                )
+                rows = await cursor.fetchall()
+                targets = [{"callback_url": r[0], "client_id": r[1]} for r in rows]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "list_subscriber_targets", e)
+                break
+            logger.error(
+                f"Connection error listing subscriber targets after {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to list subscriber targets for {parent_qid}: {e}")
+            raise
+    return targets
+
+
+async def remove_all_subscribers(
+    parent_qid: str,
+    logger: logging.Logger,
+):
+    """Remove every subscriber for a parent (auto-unsubscribe on completion)."""
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                await conn.execute(
+                    "DELETE FROM ars_subscribers WHERE parent_qid = %s",
+                    (parent_qid,),
+                )
+                await conn.commit()
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "remove_all_subscribers", e)
+                break
+            logger.error(
+                f"Connection error removing all subscribers after {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to remove all subscribers for {parent_qid}: {e}")
+            break
+
+
 async def upsert_agent(
     name: str,
     logger: logging.Logger,
@@ -1722,15 +1857,18 @@ async def set_client_subscriptions(
 
 
 async def get_timed_out_ars_parents(
-    timeout_sec: float,
+    standard_timeout_sec: float,
+    pathfinder_timeout_sec: float,
     logger: logging.Logger,
 ) -> List[Dict[str, Any]]:
-    """Find ARS parents past their budget with children still pending.
+    """Find ARS parents past their (per-tier) budget with children still pending.
 
-    Returns one record per timed-out parent: ``{qid, response_id, pending}``
-    where ``pending`` is the list of ARAs that never reported back. The caller
-    (the watchdog) marks those children ERROR and forces the post-merge tail so
-    partial results still reach the submitter.
+    Pathfinder parents get ``pathfinder_timeout_sec``, everything else
+    ``standard_timeout_sec`` (ARS catch_timeout_async tiers). Returns one record
+    per timed-out parent: ``{qid, response_id, pending}`` where ``pending`` is the
+    list of ARAs that never reported back. The caller (the watchdog) marks those
+    children ERROR and forces the post-merge tail so partial results still reach
+    the submitter.
     """
     timed_out: List[Dict[str, Any]] = []
     for attempt in range(PG_RETRIES):
@@ -1745,11 +1883,12 @@ async def get_timed_out_ars_parents(
                     WHERE b.is_ars_parent = TRUE
                       AND b.state NOT IN ('COMPLETED', 'ABANDONED')
                       AND b.ars_tail_launched = FALSE
-                      AND b.start_time < NOW() - make_interval(secs => %s)
+                      AND b.start_time < NOW() - make_interval(secs =>
+                          CASE WHEN b.query_type = 'pathfinder' THEN %s ELSE %s END)
                       AND c.status NOT IN ('DONE', 'ERROR')
                     GROUP BY b.qid, b.response_id
                     """,
-                    (float(timeout_sec),),
+                    (float(pathfinder_timeout_sec), float(standard_timeout_sec)),
                 )
                 rows = await cursor.fetchall()
                 timed_out = [

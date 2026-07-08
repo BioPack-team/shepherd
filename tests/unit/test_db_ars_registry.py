@@ -89,15 +89,63 @@ async def test_list_subscribers_flattens(mocker):
     assert await db.list_subscribers("p1", logger) == ["http://a", "http://b"]
 
 
+@pytest.mark.asyncio
+async def test_list_subscriber_targets_maps_url_and_client(mocker):
+    _install_pool_mock(
+        mocker, cursor_fetchall=[("http://a", "c1"), ("http://b", None)]
+    )
+    assert await db.list_subscriber_targets("p1", logger) == [
+        {"callback_url": "http://a", "client_id": "c1"},
+        {"callback_url": "http://b", "client_id": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remove_all_subscribers_deletes_by_parent(mocker):
+    conn = _install_pool_mock(mocker)
+    await db.remove_all_subscribers("p1", logger)
+    sql, params = conn.execute.call_args.args
+    assert "DELETE FROM ars_subscribers WHERE parent_qid = %s" in sql
+    assert params == ("p1",)
+
+
+# --- ARS parent completion meta / timeout ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_ars_parent_completion_meta_maps_row(mocker):
+    _install_pool_mock(mocker, cursor_fetchone=(True, False))
+    out = await db.get_ars_parent_completion_meta("p1", logger)
+    assert out == {"is_ars_parent": True, "timed_out": False}
+
+
+@pytest.mark.asyncio
+async def test_get_ars_parent_completion_meta_none_when_missing(mocker):
+    _install_pool_mock(mocker, cursor_fetchone=None)
+    assert await db.get_ars_parent_completion_meta("nope", logger) is None
+
+
+@pytest.mark.asyncio
+async def test_mark_ars_parent_timed_out_runs_update(mocker):
+    conn = _install_pool_mock(mocker)
+    await db.mark_ars_parent_timed_out("p1", logger)
+    sql, params = conn.execute.call_args.args
+    assert "SET ars_timed_out = TRUE" in sql
+    assert params == ("p1",)
+
+
 # --- watchdog helpers -----------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_get_timed_out_ars_parents_maps_array_agg(mocker):
     rows = [("p1", "r1", ["bte", "sipr"])]
-    _install_pool_mock(mocker, cursor_fetchall=rows)
-    out = await db.get_timed_out_ars_parents(360, logger)
+    conn = _install_pool_mock(mocker, cursor_fetchall=rows)
+    out = await db.get_timed_out_ars_parents(360, 600, logger)
     assert out == [{"qid": "p1", "response_id": "r1", "pending": ["bte", "sipr"]}]
+    # Per-tier thresholds: pathfinder first, then standard (matches the CASE).
+    _, params = conn.execute.call_args.args
+    assert params == (600.0, 360.0)
 
 
 @pytest.mark.asyncio

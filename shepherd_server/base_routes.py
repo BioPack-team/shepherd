@@ -29,6 +29,7 @@ from shepherd_utils.db import (
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.shared import examine_query
 from shepherd_utils.signature import is_signature_valid
 
 setup_logging()
@@ -173,9 +174,18 @@ async def run_query(
         ) from e
 
     # Flag top-level ARS parent queries so /ars/messages can list them and the
-    # trace API can distinguish a parent from its per-ARA child queries.
+    # trace API can distinguish a parent from its per-ARA child queries. Derive
+    # the query type (standard | pathfinder) so the watchdog can apply the right
+    # timeout tier.
     if target_name == "ars":
-        await set_query_ars_parent(query_id, logger)
+        query_type = "standard"
+        try:
+            *_, pathfinder = examine_query(query)
+            if pathfinder:
+                query_type = "pathfinder"
+        except Exception as e:
+            logger.warning(f"Could not determine ARS query type; defaulting: {e}")
+        await set_query_ars_parent(query_id, logger, query_type=query_type)
 
     return query_id, response_id, logger
 

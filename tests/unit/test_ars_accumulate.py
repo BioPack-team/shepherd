@@ -188,6 +188,22 @@ async def test_accumulate_normalizes_child_before_merge(mocker):
 
 
 @pytest.mark.asyncio
+async def test_accumulate_publishes_ara_response_complete(mocker):
+    """The per-ARA DONE event uses the ARS ara_response_complete vocabulary."""
+    _patch_common(mocker, pending=["bte"])
+    publish = mocker.patch(
+        "workers.ars_accumulate.worker.publish_ars_event",
+        new_callable=mocker.AsyncMock,
+    )
+    await ars_accumulate(_task(ara="aragorn"), logger)
+    event = publish.await_args_list[0].args[0]
+    assert event["event_type"] == "ara_response_complete"
+    assert event["ara_name"] == "infores:aragorn"
+    assert event["ara_response_status"] == "D"
+    assert event["parent_qid"] == "parent-1"
+
+
+@pytest.mark.asyncio
 async def test_accumulate_runs_per_response_hygiene(mocker):
     """scrub / decorate(infores) / phantom-strip run per-response before merge."""
     _patch_common(mocker, pending=["bte"])

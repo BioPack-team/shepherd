@@ -154,9 +154,14 @@ async def ars_accumulate(task, logger: logging.Logger):
     await publish_ars_event(
         {
             "parent_qid": parent_qid,
+            "event_type": "ara_response_complete",
+            "ara_name": settings.ars_ara_infores.get(ara, f"infores:{ara}"),
+            "child_uuid": callback_id,
+            "ara_response_status": "D",
+            "ara_n_results": result_count,
+            "code": 200,
+            # Internal routing / diagnostics (dropped from the subscriber envelope).
             "ara": ara,
-            "status": "DONE",
-            "result_count": result_count,
             "pending": pending,
         },
         logger,

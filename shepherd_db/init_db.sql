@@ -33,6 +33,12 @@ ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS ars_tail_launched BOOLEAN DE
 -- Retain latch (ARS parity): when TRUE the query (and its ARS children) are
 -- excluded from the purge janitor so a user can preserve a result indefinitely.
 ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS retain BOOLEAN DEFAULT FALSE;
+-- ARS query type (standard | pathfinder), derived at submit. Drives the per-tier
+-- timeout budget applied by the watchdog (ARS catch_timeout_async parity).
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS query_type varchar(32) DEFAULT 'standard';
+-- Set TRUE by the watchdog when it forces a parent to finish on timeout, so the
+-- completion notification can report a distinct timed-out terminal state (598).
+ALTER TABLE shepherd_brain ADD COLUMN IF NOT EXISTS ars_timed_out BOOLEAN DEFAULT FALSE;
 
 -- One row per (parent ARS query x ARA). This is the cross-ARA completion
 -- counter: a parent query is "done fanning out" when no child row is left in a

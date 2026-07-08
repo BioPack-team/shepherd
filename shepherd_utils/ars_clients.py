@@ -9,8 +9,9 @@ encrypted and decrypted with ``settings.aes_master_key``.
 import base64
 import hashlib
 import hmac
+import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 from urllib.parse import parse_qsl, unquote, urlparse
 
 from shepherd_utils.config import settings
@@ -75,6 +76,40 @@ async def verify_post_signature(
         return False
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+def canonical_notification_bytes(notification: Dict[str, Any]) -> bytes:
+    """Deterministic byte representation of a notification (sorted keys, compact).
+
+    Matches the ARS ``notify_one_client_task`` canonicalization so a signature
+    computed here verifies against the subscriber's recomputation.
+    """
+    return json.dumps(
+        notification, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+
+
+async def sign_notification(
+    notification: Dict[str, Any],
+    client_id: str,
+    logger: logging.Logger,
+) -> Tuple[bytes, Dict[str, str]]:
+    """Canonicalize + HMAC-sign an outbound notification for one client.
+
+    Returns ``(body_bytes, headers)``. When the client id / secret / master key
+    is unavailable the canonical body is still returned but unsigned (best
+    effort) so a subscriber without a registered secret still gets the event.
+    """
+    body = canonical_notification_bytes(notification)
+    headers = {"Content-Type": "application/json"}
+    if not client_id or not settings.aes_master_key:
+        return body, headers
+    secret, _ = await _client_secret(client_id, logger)
+    if secret is None:
+        return body, headers
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    headers[EVENT_SIGNATURE_HEADER] = digest
+    return body, headers
 
 
 async def verify_get_signature(

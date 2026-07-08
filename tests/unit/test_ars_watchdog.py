@@ -22,6 +22,9 @@ def _patch(mocker, *, timed_out, claim=True):
         ars_worker, "mark_ars_children_errored", new_callable=mocker.AsyncMock
     )
     mocker.patch.object(
+        ars_worker, "mark_ars_parent_timed_out", new_callable=mocker.AsyncMock
+    )
+    mocker.patch.object(
         ars_worker, "claim_ars_tail", new_callable=mocker.AsyncMock, return_value=claim
     )
     mocker.patch.object(
@@ -42,9 +45,11 @@ async def test_watchdog_forces_tail_for_timed_out_parent(mocker):
         ],
         claim=True,
     )
+    marked = ars_worker.mark_ars_parent_timed_out
     await ars_worker.run_watchdog_once(logger)
 
     errored.assert_awaited_once_with("p1", ["bte", "sipr"], logger)
+    marked.assert_awaited_once_with("p1", logger)
     add_task.assert_awaited_once()
     stream, payload = add_task.await_args.args[0], add_task.await_args.args[1]
     assert stream == "ars_blocklist"

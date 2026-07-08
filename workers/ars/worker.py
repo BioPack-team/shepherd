@@ -28,6 +28,7 @@ from shepherd_utils.db import (
     get_message,
     get_timed_out_ars_parents,
     mark_ars_children_errored,
+    mark_ars_parent_timed_out,
 )
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks
@@ -131,12 +132,17 @@ async def run_watchdog_once(logger: logging.Logger):
     the post-merge tail on whatever partial results have accumulated.
     """
     timed_out = await get_timed_out_ars_parents(
-        settings.ars_overall_timeout_sec, logger
+        settings.ars_timeout_standard_sec,
+        settings.ars_timeout_pathfinder_sec,
+        logger,
     )
     for parent in timed_out:
         parent_qid = parent["qid"]
         pending = parent["pending"]
         await mark_ars_children_errored(parent_qid, pending, logger)
+        # Flag the parent so finish_query can report the distinct timed-out
+        # terminal state (598) in its completion notification.
+        await mark_ars_parent_timed_out(parent_qid, logger)
         logger.warning(
             f"ARS parent {parent_qid} timed out; errored pending ARAs {pending}."
         )

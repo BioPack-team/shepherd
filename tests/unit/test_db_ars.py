@@ -49,10 +49,11 @@ def _install_pool_mock(
 @pytest.mark.asyncio
 async def test_set_query_ars_parent_runs_update(mocker):
     mock_conn, _ = _install_pool_mock(mocker)
-    await db.set_query_ars_parent("qid-1", logger)
+    await db.set_query_ars_parent("qid-1", logger, query_type="pathfinder")
     sql, params = mock_conn.execute.call_args.args
     assert "UPDATE shepherd_brain SET is_ars_parent = TRUE" in sql
-    assert params == ("qid-1",)
+    assert "query_type = %s" in sql
+    assert params == ("pathfinder", "qid-1")
     assert mock_conn.commit.called
 
 
