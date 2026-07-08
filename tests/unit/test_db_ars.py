@@ -175,6 +175,54 @@ async def test_get_ars_children_maps_rows_to_dicts(mocker):
     ]
 
 
+# --- get_ars_child_by_callback --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_ars_child_by_callback_maps_row(mocker):
+    """The resolver returns status + result_count for the idempotency guard."""
+    row = ("parent-1", "aragorn", "cq-a", "cr-a", "{}", "QUEUED", 0)
+    mock_conn, _ = _install_pool_mock(mocker, cursor_fetchone=row)
+    out = await db.get_ars_child_by_callback("cb-a", logger)
+    sql, params = mock_conn.execute.call_args.args
+    assert "WHERE ars_callback_id = %s" in sql
+    assert params == ("cb-a",)
+    assert out == {
+        "parent_qid": "parent-1",
+        "ara": "aragorn",
+        "child_qid": "cq-a",
+        "child_response_id": "cr-a",
+        "otel_trace": "{}",
+        "status": "QUEUED",
+        "result_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_ars_child_by_callback_none_when_unknown(mocker):
+    _install_pool_mock(mocker, cursor_fetchone=None)
+    assert await db.get_ars_child_by_callback("nope", logger) is None
+
+
+# --- get_ars_child_status -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_ars_child_status_returns_status(mocker):
+    mock_conn, _ = _install_pool_mock(mocker, cursor_fetchone=("DONE",))
+    out = await db.get_ars_child_status("parent-1", "aragorn", logger)
+    sql, params = mock_conn.execute.call_args.args
+    assert "SELECT status FROM ars_children" in sql
+    assert params == ("parent-1", "aragorn")
+    assert out == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_get_ars_child_status_none_when_missing(mocker):
+    _install_pool_mock(mocker, cursor_fetchone=None)
+    assert await db.get_ars_child_status("parent-1", "aragorn", logger) is None
+
+
 # --- claim_ars_tail -------------------------------------------------------
 
 

@@ -1143,7 +1143,8 @@ async def get_ars_child_by_callback(
             async with pool.connection(settings.postgres_pool_timeout) as conn:
                 cursor = await conn.execute(
                     """
-                SELECT parent_qid, ara, child_qid, child_response_id, otel_trace
+                SELECT parent_qid, ara, child_qid, child_response_id, otel_trace,
+                       status, result_count
                 FROM ars_children WHERE ars_callback_id = %s
                 """,
                     (callback_id,),
@@ -1156,6 +1157,8 @@ async def get_ars_child_by_callback(
                         "child_qid": row[2],
                         "child_response_id": row[3],
                         "otel_trace": row[4],
+                        "status": row[5],
+                        "result_count": row[6],
                     }
             break
         except OperationalError as e:
@@ -1171,6 +1174,40 @@ async def get_ars_child_by_callback(
             logger.error(f"Failed to get ARS child by callback {callback_id}: {e}")
             break
     return child
+
+
+async def get_ars_child_status(
+    parent_qid: str,
+    ara: str,
+    logger: logging.Logger,
+) -> Union[str, None]:
+    """Return one ARA child's current status (for the idempotent-merge guard)."""
+    status = None
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    "SELECT status FROM ars_children "
+                    "WHERE parent_qid = %s AND ara = %s",
+                    (parent_qid, ara),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    status = row[0]
+            break
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_ars_child_status", e)
+                break
+            logger.error(
+                f"Connection error getting ARS child status after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to get ARS child status for {parent_qid}/{ara}: {e}")
+            break
+    return status
 
 
 async def claim_ars_tail(

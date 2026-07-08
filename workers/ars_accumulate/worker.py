@@ -28,13 +28,13 @@ from shepherd_utils.broker import (
 )
 from shepherd_utils.db import (
     claim_ars_tail,
+    get_ars_child_status,
     get_message,
     get_pending_ars_children,
     save_message,
     set_ars_child_status,
 )
 from shepherd_utils.ars_merge import (
-    average_result_scores,
     merge_aux_graphs,
     merge_result_maps,
 )
@@ -98,25 +98,37 @@ async def ars_accumulate(task, logger: logging.Logger):
         )
         return
 
+    merged = False
     try:
-        parent_msg = await get_message(parent_response_id, logger)
-        child_msg = await get_message(callback_id, logger)
-        source = "infores:shepherd"
-        parent_msg, result_count = await asyncio.to_thread(
-            merge_child_into_parent, parent_msg, child_msg, source, logger
-        )
-        await save_message(parent_response_id, parent_msg, logger)
-        logger.info(
-            f"Merged {result_count} results from {ara} into parent {parent_qid}."
-        )
+        # Idempotency (ARS parity): if this ARA already reported -- a duplicate or
+        # late callback -- do NOT merge again. Checked and marked DONE under the
+        # response lock so concurrent duplicates serialize: the first merges +
+        # marks DONE, the rest see DONE and skip, preventing a double-merge.
+        status = await get_ars_child_status(parent_qid, ara, logger)
+        if status in ("DONE", "ERROR"):
+            logger.info(
+                f"Duplicate/late callback for {ara} on {parent_qid} "
+                f"(status {status}); skipping merge."
+            )
+        else:
+            parent_msg = await get_message(parent_response_id, logger)
+            child_msg = await get_message(callback_id, logger)
+            parent_msg, result_count = await asyncio.to_thread(
+                merge_child_into_parent, parent_msg, child_msg, "infores:shepherd", logger
+            )
+            await save_message(parent_response_id, parent_msg, logger)
+            await set_ars_child_status(
+                parent_qid, ara, "DONE", logger, result_count=result_count
+            )
+            merged = True
+            logger.info(
+                f"Merged {result_count} results from {ara} into parent {parent_qid}."
+            )
     finally:
         await remove_lock(parent_response_id, CONSUMER, logger)
 
-    # Mark this ARA done only after its results are safely merged, so the
-    # completion gate below never fires before the last merge has landed.
-    await set_ars_child_status(
-        parent_qid, ara, "DONE", logger, result_count=result_count
-    )
+    if not merged:
+        return  # duplicate/late callback -- completion was already handled
 
     pending = await get_pending_ars_children(parent_qid, logger)
     await publish_ars_event(
@@ -138,20 +150,13 @@ async def ars_accumulate(task, logger: logging.Logger):
         logger.info(
             f"All ARAs done for {parent_qid}; launching post-merge tail."
         )
-        # Finalize once: average any accumulated normalized_score lists across
-        # the deduped answers (Relay mergeMessagesRecursive finalize). The latch
-        # guarantees a single winner, so this runs exactly once.
-        got_final_lock = await acquire_lock(parent_response_id, CONSUMER, logger)
-        if got_final_lock:
-            try:
-                final_msg = await get_message(parent_response_id, logger)
-                await asyncio.to_thread(
-                    average_result_scores,
-                    final_msg.get("message", {}).get("results") or [],
-                )
-                await save_message(parent_response_id, final_msg, logger)
-            finally:
-                await remove_lock(parent_response_id, CONSUMER, logger)
+        # NOTE: result scoring is the appraiser tail's job (answer_appraise.
+        # normalize_scores is the single source of truth for now). We deliberately
+        # do NOT average normalized_score here -- ARA responses don't carry a
+        # normalized_score at cross-ARA merge time (that needs per-response
+        # normalization, gap B2), so a merge-time average is a no-op that was only
+        # overwritten downstream. Revisit when per-response normalization + Sugeno
+        # ranking (gaps B1/B2) land.
         await publish_ars_event(
             {"parent_qid": parent_qid, "status": "merging"}, logger
         )

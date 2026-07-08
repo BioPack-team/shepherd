@@ -81,10 +81,11 @@ def _task(**overrides):
     return ("msg-id", payload)
 
 
-def _patch_common(mocker, *, pending, claim=True, lock=True):
+def _patch_common(mocker, *, pending, claim=True, lock=True, child_status="QUEUED"):
     """Patch the worker's db/broker dependencies. Returns the add_task mock.
 
     Every patched dependency is awaited inside the worker, so all are AsyncMocks.
+    ``child_status`` seeds the idempotency guard (QUEUED = merge proceeds).
     """
 
     def am(name, **kwargs):
@@ -96,6 +97,9 @@ def _patch_common(mocker, *, pending, claim=True, lock=True):
 
     am("acquire_lock", return_value=lock)
     am("remove_lock", return_value=None)
+    # QUEUED = not yet reported, so the merge proceeds (the duplicate-guard test
+    # overrides this to DONE).
+    am("get_ars_child_status", return_value=child_status)
     am(
         "get_message",
         side_effect=lambda mid, log: _msg(nodes={"n": _node()}, results=[{"id": mid}]),
@@ -143,4 +147,23 @@ async def test_accumulate_lock_failure_discards(mocker):
     )
     await ars_accumulate(_task(), logger)
     save.assert_not_called()
+    add_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_accumulate_duplicate_callback_skips_merge(mocker):
+    """A callback for an ARA already DONE must not merge again (idempotency)."""
+    add_task = _patch_common(mocker, pending=[], claim=True, child_status="DONE")
+    save = mocker.patch(
+        "workers.ars_accumulate.worker.save_message",
+        new_callable=mocker.AsyncMock,
+    )
+    set_status = mocker.patch(
+        "workers.ars_accumulate.worker.set_ars_child_status",
+        new_callable=mocker.AsyncMock,
+    )
+    await ars_accumulate(_task(), logger)
+    # No merge write, no re-mark, no tail launch -- the duplicate is dropped.
+    save.assert_not_called()
+    set_status.assert_not_called()
     add_task.assert_not_called()

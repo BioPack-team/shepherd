@@ -384,6 +384,16 @@ async def ars_callback(
         return Response("Couldn't find original ARS query.", 500)
     parent_qid = child["parent_qid"]
     ara = child["ara"]
+
+    # Idempotency (ARS parity): a duplicate/late callback for an ARA that already
+    # reported must not be merged again. Reject before saving/enqueuing.
+    if child.get("status") == "DONE":
+        return Response("Already received.", 200)
+    if child.get("result_count"):
+        return Response("Results already recorded for this ARA.", 409)
+    if child.get("status") == "ERROR":
+        return Response("This ARA response already errored.", 400)
+
     logger.info(
         f"Got {len(message['results'])} results back from {ara} "
         f"for parent {parent_qid}."
