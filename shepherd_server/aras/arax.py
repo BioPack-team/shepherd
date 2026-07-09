@@ -11,7 +11,7 @@ from shepherd_server.base_routes import (
     run_async_query,
     run_sync_query,
 )
-from shepherd_server.openapi import construct_open_api_schema
+from shepherd_server.openapi import set_open_api_schema
 
 ARAX = FastAPI(title="Shepherd ARAX")
 
@@ -48,6 +48,6 @@ async def custom_swagger_ui_html(req: Request) -> HTMLResponse:
     )
 
 
-ARAX.openapi_schema = construct_open_api_schema(
+set_open_api_schema(
     ARAX, infores="infores:shepherd-arax", subpath="/arax"
 )
