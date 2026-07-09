@@ -322,7 +322,13 @@ def _worker_type_from_stream(stream: str) -> str:
 def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Group heartbeats by worker type (stream)."""
     grouped: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"alive": 0, "stale": 0, "consumers": [], "task_limit_total": 0}
+        lambda: {
+            "alive": 0,
+            "stale": 0,
+            "consumers": [],
+            "task_limit_total": 0,
+            "in_flight_total": 0,
+        }
     )
     for hb in workers:
         wtype = _worker_type_from_stream(hb.get("stream", "unknown"))
@@ -337,10 +343,14 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "started_at": hb.get("started_at"),
                 "last_seen": hb.get("last_seen"),
                 "task_limit": hb.get("task_limit"),
+                "in_flight": hb.get("in_flight"),
+                "rss_bytes": hb.get("rss_bytes"),
+                "cpu_pct": hb.get("cpu_pct"),
                 "stale": hb.get("stale", False),
             }
         )
         bucket["task_limit_total"] += int(hb.get("task_limit", 0) or 0)
+        bucket["in_flight_total"] += int(hb.get("in_flight") or 0)
     return dict(grouped)
 
 
@@ -406,7 +416,13 @@ async def _resolve_worker_states(
     for stream in sorted(all_streams):
         info = workers_rollup.get(
             stream,
-            {"alive": 0, "stale": 0, "consumers": [], "task_limit_total": 0},
+            {
+                "alive": 0,
+                "stale": 0,
+                "consumers": [],
+                "task_limit_total": 0,
+                "in_flight_total": 0,
+            },
         )
         prev = await _load_worker_state(stream)
         prev_state = prev.get("state", "unknown")

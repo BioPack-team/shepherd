@@ -248,7 +248,9 @@ async def get_tasks(
     # register this worker with the monitor via a Redis heartbeat key. The
     # heartbeat does not install its own (immediate-exit) signal handlers --
     # install_shutdown_handlers below installs asyncio-aware ones that drain.
-    heartbeat = Heartbeat(stream, consumer, task_limit, manage_signals=False).start()
+    heartbeat = Heartbeat(
+        stream, consumer, task_limit, manage_signals=False, limiter=task_limiter
+    ).start()
     install_shutdown_handlers(heartbeat)
     # periodic orphan-task reclaim so a worker crash doesn't strand its PEL
     reclaim_interval = max(5.0, float(settings.reclaim_interval_sec))
