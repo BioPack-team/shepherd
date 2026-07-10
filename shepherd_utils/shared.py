@@ -14,7 +14,13 @@ from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
 from opentelemetry.trace import Status, StatusCode
 
-from .broker import add_task, broker_client, get_task, mark_task_as_complete
+from .broker import (
+    add_task,
+    broker_client,
+    broker_health,
+    get_task,
+    mark_task_as_complete,
+)
 from .config import settings
 from .db import initialize_db, save_logs
 from .heartbeat import Heartbeat
@@ -158,6 +164,35 @@ async def _drain_and_exit(
     sys.exit(0)
 
 
+def _exit_if_broker_wedged(stream: str, logger: logging.Logger) -> None:
+    """Self-heal: exit so Kubernetes replaces a worker wedged off the broker.
+
+    A single worker can lose its broker connection (half-open socket, stale
+    conntrack entry, a broker endpoint that moved) while every peer stays
+    healthy. Its own retry loop can't recover because each reconnect traverses
+    the same broken path -- but a rescheduled pod gets a fresh network setup.
+    ``get_task`` keeps ``broker_health`` current; once we've gone longer than the
+    configured window without a single successful read we exit non-zero.
+
+    The window (``broker_unhealthy_exit_sec``) is generous on purpose so a real
+    broker outage recycles the fleet slowly instead of crash-looping: every pod
+    runs the full window before exiting, and the health clock starts fresh on
+    boot. 0 disables the self-exit.
+    """
+    limit = float(settings.broker_unhealthy_exit_sec)
+    if limit <= 0:
+        return
+    stale = broker_health.seconds_since_success()
+    if stale >= limit:
+        logger.error(
+            f"Broker unreachable for {stale:.0f}s (>= {limit:.0f}s threshold) "
+            f"after {broker_health.consecutive_failures} consecutive failures; "
+            f"exiting so this {stream} worker is rescheduled with a fresh "
+            "broker connection."
+        )
+        sys.exit(1)
+
+
 def _resolve_task_limit(stream: str, default: int, logger: logging.Logger) -> int:
     """Allow ops to override a worker's concurrency via the TASK_LIMIT env var.
 
@@ -261,6 +296,11 @@ async def get_tasks(
         if is_shutting_down():
             await _drain_and_exit(task_limiter, task_limit, worker_logger)
             return
+        # Self-heal: if this worker has been unable to reach the broker for the
+        # whole configured window, exit so Kubernetes reschedules it with a
+        # fresh connection (its peers stay up; a wedged connection won't recover
+        # on its own).
+        _exit_if_broker_wedged(stream, worker_logger)
         # Before fetching new work, check whether any pending messages on this
         # stream belong to a dead consumer and claim them. Heartbeat + idle
         # filtering inside ``reclaim_orphaned`` keep live consumers safe.
