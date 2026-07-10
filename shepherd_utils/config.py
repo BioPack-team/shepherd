@@ -64,6 +64,13 @@ class Settings(BaseSettings):
 
     lookup_timeout: int = 210
     callback_host: str = "http://host.docker.internal:5439"
+    # Maximum accepted request body size for the ``/callback`` endpoint.
+    # Subservices POST their TRAPI responses there; an oversized payload risks
+    # OOMing the server buffering it and, once merged, the downstream CPU-bound
+    # workers. Anything larger is rejected with 413 before it is read into
+    # memory. Accepts Kubernetes-style sizes ("100MB", "512Mi", ...) or a plain
+    # byte count; 0 (or unparseable) disables the limit.
+    callback_max_request_size: str = "100MB"
     kg_retrieval_url: str = "http://host.docker.internal:8080/asyncquery"
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
     kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
@@ -186,6 +193,11 @@ class Settings(BaseSettings):
     def pg_volume_capacity_bytes(self) -> int:
         """Configured Postgres volume size in bytes (0 if unset)."""
         return parse_size_to_bytes(self.pg_volume_capacity)
+
+    @property
+    def callback_max_request_size_bytes(self) -> int:
+        """Max accepted ``/callback`` body in bytes (0 disables the limit)."""
+        return parse_size_to_bytes(self.callback_max_request_size)
 
     class Config:
         env_file = ".env"
