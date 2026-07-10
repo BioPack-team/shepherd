@@ -9,6 +9,7 @@ oversized payload can OOM the server (and, once merged, the downstream workers).
 import pytest
 from starlette.requests import Request
 
+from shepherd_server import base_routes
 from shepherd_server.base_routes import ARATargetEnum, _read_body_within_limit, callback
 from shepherd_utils.config import settings
 
@@ -80,11 +81,24 @@ async def test_zero_limit_disables_the_cap():
     assert await _read_body_within_limit(request, 0) == body
 
 
-async def test_callback_returns_413_for_oversized_payload(monkeypatch):
+async def test_callback_returns_413_and_drops_callback_for_oversized_payload(
+    monkeypatch,
+):
     monkeypatch.setattr(settings, "callback_max_request_size", "1000")
+    removed = []
+
+    async def _fake_remove(callback_id, logger):
+        removed.append(callback_id)
+
+    # Patch the name as imported into base_routes.
+    monkeypatch.setattr(base_routes, "remove_callback_id", _fake_remove)
+
     body = b"x" * 5000
     request = _make_request(body, {"content-length": len(body)})
 
     response = await callback(ARATargetEnum.ARAGORN, "cb-1", request)
 
     assert response.status_code == 413
+    # The rejected callback must be dropped from the running set so the lookup
+    # worker doesn't hang waiting for it until its timeout.
+    assert removed == ["cb-1"]

@@ -24,6 +24,7 @@ from shepherd_utils.db import (
     get_logs,
     get_message,
     get_query_state,
+    remove_callback_id,
     save_message,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
@@ -288,6 +289,16 @@ async def callback(
     max_bytes = settings.callback_max_request_size_bytes
     raw = await _read_body_within_limit(request, max_bytes)
     if raw is None:
+        logger = logging.getLogger(f"shepherd.{callback_id}")
+        logger.warning(
+            f"Rejecting callback {callback_id}: request body exceeds the maximum "
+            f"allowed size of {max_bytes} bytes."
+        )
+        # Drop this callback from the running set so the lookup worker stops
+        # waiting on it. Without this the lookup blocks until its whole-query
+        # timeout, since a callback only leaves the set once merge_message has
+        # processed it -- which never happens for a payload we refused to read.
+        await remove_callback_id(callback_id, logger)
         return JSONResponse(
             content={
                 "detail": (
