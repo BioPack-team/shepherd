@@ -19,6 +19,7 @@ import os
 import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
 from itertools import combinations
 from typing import Dict, List
@@ -50,6 +51,35 @@ LMDB_BATCH_SIZE = 1000
 # disk-bound random LMDB lookups for very large queries, pushing latency from
 # seconds to 45 minutes-3 hours. Override via the env var if needed.
 OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 1_000_000))
+
+
+def _parse_max_tasks_per_child():
+    """Optional ceiling on overlays a single pool child runs before it recycles.
+
+    Recycling a child returns the memory a very large message forced it to grow
+    (peak resident size persists for the process's lifetime) back to the OS
+    instead of letting it accumulate across tasks, so the child stays well below
+    the OOM line. Left unset (``None``) by default because enabling it makes the
+    ``ProcessPoolExecutor`` fall back to the ``spawn`` start method -- a Python
+    requirement of ``max_tasks_per_child`` -- which re-imports this worker in
+    each fresh child. Opt in via ``OMNICORP_MAX_TASKS_PER_CHILD`` on a
+    memory-pressured deployment.
+    """
+    raw = os.environ.get("OMNICORP_MAX_TASKS_PER_CHILD")
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.warning(
+            f"Ignoring invalid OMNICORP_MAX_TASKS_PER_CHILD={raw!r}; leaving pool "
+            "children un-recycled."
+        )
+        return None
+    return value if value > 0 else None
+
+
+OMNICORP_MAX_TASKS_PER_CHILD = _parse_max_tasks_per_child()
 
 # Both LMDBs are opened lazily on first use so importing the worker (e.g. in
 # tests) does not require the live data files. Static datasets, so we open
@@ -502,8 +532,64 @@ def aragorn_omnicorp(response_id: str, logger: logging.Logger) -> None:
     save_message_sync(response_id, response)
 
 
+class PoolManager:
+    """Owns the process pool and transparently replaces it once it breaks.
+
+    A single child dying abruptly -- most often an OOM kill while overlaying a
+    very large message -- puts a ``ProcessPoolExecutor`` into a *permanently*
+    broken state: every subsequent submission raises ``BrokenProcessPool``, not
+    just the one whose child died. Because ``poll_for_tasks`` reused one executor
+    for the worker's whole lifetime, that turned a single oversized query into a
+    wedged worker that failed every following task ("A process in the process
+    pool was terminated abruptly...") until the pod restarted. This wrapper
+    catches the breakage, tears the dead pool down, and stands up a fresh one so
+    the worker recovers on its next task.
+    """
+
+    def __init__(self, max_workers: int):
+        self._max_workers = max_workers
+        self._lock = asyncio.Lock()
+        self._executor = self._new_executor()
+
+    def _new_executor(self) -> ProcessPoolExecutor:
+        kwargs = {"max_workers": self._max_workers}
+        if OMNICORP_MAX_TASKS_PER_CHILD is not None:
+            kwargs["max_tasks_per_child"] = OMNICORP_MAX_TASKS_PER_CHILD
+        return ProcessPoolExecutor(**kwargs)
+
+    async def run(self, loop, fn, *args):
+        """Run ``fn`` in the pool, recreating it if it was broken by the call."""
+        executor = self._executor
+        try:
+            return await loop.run_in_executor(executor, fn, *args)
+        except BrokenProcessPool:
+            # A child died; the whole executor is now unusable. Replace it before
+            # re-raising so this task fails cleanly (handled by run_task_lifecycle)
+            # while the next task gets a healthy pool.
+            await self._replace(executor)
+            raise
+
+    async def _replace(self, broken: ProcessPoolExecutor) -> None:
+        async with self._lock:
+            # When a child dies, every future in flight on that pool raises
+            # BrokenProcessPool at once, so several tasks may race here. Only the
+            # first to see this particular pool swaps it; the rest are no-ops.
+            if self._executor is not broken:
+                return
+            logging.error(
+                "aragorn.omnicorp process pool broke (a child likely died or was "
+                "OOM-killed on a large message); replacing it so the worker keeps "
+                "processing tasks."
+            )
+            try:
+                broken.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            self._executor = self._new_executor()
+
+
 async def process_task(
-    task, parent_ctx, logger: logging.Logger, limiter, loop, executor
+    task, parent_ctx, logger: logging.Logger, limiter, loop, pool: "PoolManager"
 ):
     """Process a given task and ACK in redis.
 
@@ -514,16 +600,14 @@ async def process_task(
     everything else until it finished. Only the ``response_id`` is handed to the
     child; the message load/save happen there (see ``aragorn_omnicorp``) so the
     payload never crosses the process boundary.
+
+    Dispatch goes through ``pool`` (not a raw executor) so a child dying on an
+    oversized message replaces the pool instead of poisoning it for good.
     """
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        await loop.run_in_executor(
-            executor,
-            aragorn_omnicorp,
-            response_id,
-            logger,
-        )
+        await pool.run(loop, aragorn_omnicorp, response_id, logger)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
@@ -537,14 +621,14 @@ async def poll_for_tasks():
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
-    executor = ProcessPoolExecutor(max_workers=cpu_count)
+    pool = PoolManager(cpu_count)
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
                 STREAM, GROUP, CONSUMER, TASK_LIMIT
             ):
                 asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, executor)
+                    process_task(task, parent_ctx, logger, limiter, loop, pool)
                 )
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")
