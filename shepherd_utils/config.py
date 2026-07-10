@@ -122,6 +122,22 @@ class Settings(BaseSettings):
     # Keep this comfortably below the deployment's terminationGracePeriodSeconds.
     worker_drain_timeout_sec: float = 30.0
 
+    # Broker liveness self-heal. Each task-processing worker tracks how long it
+    # has gone without a successful broker read. If that exceeds this many
+    # seconds the worker exits non-zero so Kubernetes reschedules it with a fresh
+    # connection -- this recovers a single worker whose connection has wedged
+    # (half-open socket, stale conntrack entry) while its peers stay healthy.
+    #
+    # Deliberately generous: a brief broker blip self-heals via reconnect long
+    # before this trips, and during a real fleet-wide broker outage every worker
+    # runs this full window before exiting, so Kubernetes recycles the fleet
+    # slowly (one restart per window per pod) instead of a tight crash loop. The
+    # health clock also starts fresh on boot, so a pod that starts during an
+    # outage gets a full window before exiting. A single wedged worker's in-flight
+    # tasks are reclaimed by its peers meanwhile, so a long window is cheap. Set
+    # to 0 to disable the self-exit entirely.
+    broker_unhealthy_exit_sec: float = 300.0
+
     # merge_message worker. Callbacks for one query are coalesced into a single
     # locked merge (one load/save of the growing response blob) and different
     # queries merge concurrently. A worker that loses the race for a query's

@@ -132,6 +132,38 @@ async def test_drain_and_exit_times_out_but_still_exits(monkeypatch):
     assert hb.marked is True
 
 
+# --- broker liveness self-exit ----------------------------------------------
+
+
+def test_exit_if_broker_wedged_stays_quiet_when_healthy(monkeypatch):
+    """A recently-successful broker read must never trigger the self-exit."""
+    monkeypatch.setattr(settings, "broker_unhealthy_exit_sec", 300.0)
+    monkeypatch.setattr(shared.broker_health, "seconds_since_success", lambda: 5.0)
+    # Should simply return, not raise SystemExit.
+    shared._exit_if_broker_wedged("aragorn.score", logger)
+
+
+def test_exit_if_broker_wedged_exits_after_threshold(monkeypatch):
+    """Once the broker has been unreachable past the window, the worker exits
+    non-zero so Kubernetes reschedules it."""
+    monkeypatch.setattr(settings, "broker_unhealthy_exit_sec", 300.0)
+    monkeypatch.setattr(shared.broker_health, "seconds_since_success", lambda: 301.0)
+
+    with pytest.raises(SystemExit) as exc:
+        shared._exit_if_broker_wedged("aragorn.score", logger)
+    assert exc.value.code == 1
+
+
+def test_exit_if_broker_wedged_disabled_with_zero(monkeypatch):
+    """A zero threshold disables the self-exit even when the broker is long gone
+    -- an escape hatch so ops can turn the behavior off without a code change."""
+    monkeypatch.setattr(settings, "broker_unhealthy_exit_sec", 0.0)
+    monkeypatch.setattr(
+        shared.broker_health, "seconds_since_success", lambda: 100_000.0
+    )
+    shared._exit_if_broker_wedged("aragorn.score", logger)
+
+
 # --- clean shutdown marker --------------------------------------------------
 
 

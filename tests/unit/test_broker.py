@@ -9,9 +9,13 @@ import logging
 
 import pytest
 
+from shepherd_utils import broker as broker_module
 from shepherd_utils.broker import (
+    BrokerHealth,
+    _KEEPALIVE_OPTIONS,
     acquire_lock,
     add_task,
+    broker_health,
     create_consumer_group,
     get_task,
     mark_task_as_complete,
@@ -54,6 +58,75 @@ async def test_get_task_returns_none_when_no_messages(redis_mock):
     # are in the stream after the group is created.
     out = await get_task("empty_stream", "consumer", "test", logger)
     assert out is None
+
+
+# --- broker health tracking -------------------------------------------------
+
+
+def test_broker_health_starts_fresh_and_tracks_failures():
+    """A new tracker reads as recently-successful so a worker booting during an
+    outage gets a full grace window; failures accumulate until a success."""
+    h = BrokerHealth()
+    assert h.seconds_since_success() < 1.0
+    assert h.consecutive_failures == 0
+
+    h.record_failure()
+    h.record_failure()
+    assert h.consecutive_failures == 2
+
+    h.record_success()
+    assert h.consecutive_failures == 0
+    assert h.seconds_since_success() < 1.0
+
+
+def test_broker_health_seconds_since_success_grows(monkeypatch):
+    """seconds_since_success reflects wall-clock (monotonic) time since the last
+    successful read -- this is what the self-exit threshold is compared against."""
+    h = BrokerHealth()
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(broker_module.time, "monotonic", lambda: clock["t"])
+    h.record_success()
+    clock["t"] += 42.0
+    assert h.seconds_since_success() == pytest.approx(42.0)
+
+
+@pytest.mark.asyncio
+async def test_get_task_records_success_on_empty_read(redis_mock):
+    """An empty (but answered) read counts as broker health, resetting failures."""
+    broker_health.record_failure()
+    assert broker_health.consecutive_failures >= 1
+    out = await get_task("empty_stream2", "consumer", "test", logger)
+    assert out is None
+    assert broker_health.consecutive_failures == 0
+    assert broker_health.seconds_since_success() < 1.0
+
+
+@pytest.mark.asyncio
+async def test_get_task_records_failure_on_broker_error(redis_mock, mocker):
+    """A raising xreadgroup is swallowed (returns None) but bumps the failure
+    count so the poll loop can eventually self-exit."""
+    broker_health.record_success()
+    mocker.patch.object(
+        broker_module.broker_client,
+        "xreadgroup",
+        side_effect=ConnectionError("Timeout reading from shepherd-broker:6379"),
+    )
+    out = await get_task("some_stream", "consumer", "test", logger)
+    assert out is None
+    assert broker_health.consecutive_failures == 1
+    # Leave the shared singleton healthy for other tests.
+    broker_health.record_success()
+
+
+def test_keepalive_options_are_configured():
+    """On Linux the pools get explicit TCP keepalive tuning (empty dict on
+    platforms that don't expose the options, e.g. a macOS dev box)."""
+    import socket
+
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        assert _KEEPALIVE_OPTIONS[socket.TCP_KEEPIDLE] == 30
+        assert _KEEPALIVE_OPTIONS[socket.TCP_KEEPINTVL] == 10
+        assert _KEEPALIVE_OPTIONS[socket.TCP_KEEPCNT] == 3
 
 
 @pytest.mark.asyncio
