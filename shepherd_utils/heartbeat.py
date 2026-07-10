@@ -137,7 +137,9 @@ class Heartbeat:
         ):
             elapsed = now_wall - self._last_cpu_wall
             if elapsed > 0:
-                pct = max(0.0, round(100.0 * (now_cpu - self._last_cpu_sec) / elapsed, 1))
+                pct = max(
+                    0.0, round(100.0 * (now_cpu - self._last_cpu_sec) / elapsed, 1)
+                )
         self._last_cpu_sec = now_cpu
         self._last_cpu_wall = now_wall
         return pct
