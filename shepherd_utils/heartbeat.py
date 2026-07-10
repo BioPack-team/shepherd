@@ -50,6 +50,39 @@ def shutdown_key(stream: str, consumer: str) -> str:
     return f"{SHUTDOWN_PREFIX}:{stream}:{consumer}"
 
 
+def _read_rss_bytes() -> "int | None":
+    """Resident set size of this process in bytes, read from ``/proc/self``.
+
+    Dependency-free (no psutil) so it adds nothing to worker images. Returns
+    ``None`` off Linux or if ``/proc`` isn't readable.
+    """
+    try:
+        with open("/proc/self/statm", encoding="ascii") as f:
+            # Fields are in pages; the second is resident set size.
+            rss_pages = int(f.read().split()[1])
+        return rss_pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_cpu_seconds() -> "float | None":
+    """Cumulative CPU time (user + system) of this process in seconds.
+
+    Parsed from ``/proc/self/stat``. The ``comm`` field can contain spaces and
+    parentheses, so we split after the final ``)`` to keep field offsets stable.
+    """
+    try:
+        with open("/proc/self/stat", encoding="ascii") as f:
+            data = f.read()
+        # Everything after the last ')' starts at the ``state`` field (field 3),
+        # so utime (field 14) is index 11 and stime (field 15) is index 12.
+        rest = data[data.rfind(")") + 2 :].split()
+        ticks = int(rest[11]) + int(rest[12])
+        return ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        return None
+
+
 class Heartbeat:
     """Background task that periodically refreshes a presence key in Redis."""
 
@@ -59,11 +92,20 @@ class Heartbeat:
         consumer: str,
         task_limit: int,
         manage_signals: bool = True,
+        limiter: "asyncio.Semaphore | None" = None,
     ):
         self.stream = stream
         self.consumer = consumer
         self.task_limit = task_limit
         self.started_at = time.time()
+        # The concurrency semaphore ``get_tasks`` owns. We read its available
+        # permits to report how many tasks are currently in flight; left None
+        # (e.g. in tests) the in-flight count is simply omitted.
+        self._limiter = limiter
+        # Previous CPU sample, so each ping can report utilization over the
+        # interval since the last one rather than since process start.
+        self._last_cpu_sec: float | None = None
+        self._last_cpu_wall: float | None = None
         self._task: asyncio.Task | None = None
         self._logger = logging.getLogger(f"shepherd.heartbeat.{stream}")
         # When False, this Heartbeat does not install its own SIGTERM/SIGINT
@@ -73,6 +115,35 @@ class Heartbeat:
         self._signal_installed = False
         self._prev_handlers: dict = {}
 
+    def _in_flight(self) -> "int | None":
+        """Tasks currently running = task_limit minus the semaphore's free permits."""
+        if self._limiter is None:
+            return None
+        available = getattr(self._limiter, "_value", None)
+        if available is None:
+            return None
+        return max(0, self.task_limit - int(available))
+
+    def _cpu_pct(self) -> "float | None":
+        """Percent of a single core used since the previous ping (top-style; can
+        exceed 100 on multi-core work)."""
+        now_wall = time.time()
+        now_cpu = _read_cpu_seconds()
+        pct: float | None = None
+        if (
+            now_cpu is not None
+            and self._last_cpu_sec is not None
+            and self._last_cpu_wall is not None
+        ):
+            elapsed = now_wall - self._last_cpu_wall
+            if elapsed > 0:
+                pct = max(
+                    0.0, round(100.0 * (now_cpu - self._last_cpu_sec) / elapsed, 1)
+                )
+        self._last_cpu_sec = now_cpu
+        self._last_cpu_wall = now_wall
+        return pct
+
     async def _ping(self) -> None:
         payload = json.dumps(
             {
@@ -81,6 +152,9 @@ class Heartbeat:
                 "started_at": self.started_at,
                 "last_seen": time.time(),
                 "task_limit": self.task_limit,
+                "in_flight": self._in_flight(),
+                "rss_bytes": _read_rss_bytes(),
+                "cpu_pct": self._cpu_pct(),
             }
         )
         try:

@@ -154,6 +154,70 @@ def test_heartbeat_manage_signals_flag_defaults_true():
     assert Heartbeat("s", "c", 1, manage_signals=False).manage_signals is False
 
 
+# --- resource / in-flight reporting -----------------------------------------
+
+
+def test_heartbeat_in_flight_from_semaphore():
+    """``_in_flight`` = task_limit minus the semaphore's free permits."""
+    limiter = asyncio.Semaphore(10)
+    hb = Heartbeat("merge_message", "c1", 10, manage_signals=False, limiter=limiter)
+    assert hb._in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_in_flight_tracks_acquired_permits():
+    limiter = asyncio.Semaphore(10)
+    await limiter.acquire()
+    await limiter.acquire()
+    hb = Heartbeat("merge_message", "c1", 10, manage_signals=False, limiter=limiter)
+    assert hb._in_flight() == 2
+
+
+def test_heartbeat_in_flight_none_without_limiter():
+    """Workers/tests that don't pass a limiter simply omit the count."""
+    hb = Heartbeat("merge_message", "c1", 10, manage_signals=False)
+    assert hb._in_flight() is None
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_ping_payload_includes_resources(redis_mock, monkeypatch):
+    """A ping writes in-flight, RSS and CPU fields for the monitor to surface."""
+    import json
+
+    from shepherd_utils.heartbeat import heartbeat_key
+
+    monkeypatch.setattr(heartbeat_module, "broker_client", redis_mock["broker"])
+    limiter = asyncio.Semaphore(8)
+    await limiter.acquire()
+    hb = Heartbeat("merge_message", "abc", 8, manage_signals=False, limiter=limiter)
+
+    await hb._ping()
+
+    raw = await redis_mock["broker"].get(heartbeat_key("merge_message", "abc"))
+    payload = json.loads(raw)
+    assert payload["in_flight"] == 1
+    assert payload["task_limit"] == 8
+    # Keys are always present; values are best-effort (None off Linux / no /proc).
+    assert "rss_bytes" in payload
+    assert "cpu_pct" in payload
+    # The very first ping has no prior CPU sample to diff against.
+    assert payload["cpu_pct"] is None
+
+
+def test_heartbeat_cpu_pct_computes_after_two_samples(monkeypatch):
+    """CPU% is a delta between consecutive samples, so it lands on the 2nd read."""
+    # Build the heartbeat before patching the clock so its ``started_at`` read
+    # doesn't consume one of our scripted wall-clock samples.
+    hb = Heartbeat("s", "c", 1, manage_signals=False)
+    samples = iter([1.0, 1.5])  # +0.5 cpu-seconds between pings
+    walls = iter([100.0, 101.0])  # over 1.0 wall-second -> 50% of a core
+    monkeypatch.setattr(heartbeat_module, "_read_cpu_seconds", lambda: next(samples))
+    monkeypatch.setattr(heartbeat_module.time, "time", lambda: next(walls))
+
+    assert hb._cpu_pct() is None  # first sample: nothing to diff
+    assert hb._cpu_pct() == 50.0
+
+
 # --- get_tasks integration: shutdown short-circuits the poll loop -----------
 
 

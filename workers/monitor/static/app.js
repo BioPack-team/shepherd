@@ -27,6 +27,15 @@
   // so we mirror it here (keyed by series label) and re-apply on each rebuild.
   const xlenHiddenSeries = new Set();
 
+  // Most recent workers rollup, kept so the open modal can live-refresh on each
+  // snapshot. ``openModalWorker`` is the worker name whose modal is showing (or
+  // null when closed).
+  let latestWorkers = {};
+  let openModalWorker = null;
+  const modalEl = document.getElementById("worker-modal");
+  const modalTitleEl = document.getElementById("modal-title");
+  const modalBodyEl = document.getElementById("modal-body");
+
   function fmt(n) {
     if (n === null || n === undefined) return "-";
     if (typeof n !== "number") return n;
@@ -130,6 +139,7 @@
   }
 
   function updateWorkers(workers) {
+    latestWorkers = workers;
     const names = Object.keys(workers).sort();
     workersEl.innerHTML = "";
     if (names.length === 0) {
@@ -140,12 +150,13 @@
       const w = workers[name];
       const state = w.state || (w.alive > 0 ? "alive" : "unknown");
       const card = document.createElement("div");
-      card.className = `card state-${state}`;
+      card.className = `card state-${state} clickable`;
 
       // For non-alive workers, fall back to the previously recorded alive count
       // so the user can see how many were running before things went bad.
       const aliveDisplay = w.alive > 0 ? w.alive : 0;
       const capacityDisplay = w.alive > 0 ? w.task_limit_total : (w.last_alive_count || 0);
+      const runningDisplay = w.alive > 0 ? (w.in_flight_total || 0) : 0;
       const backlog = w.backlog || 0;
       const utilization = w.utilization || 0;
       const utilWidth = Math.min(100, Math.round(utilization * 100));
@@ -169,14 +180,97 @@
         </div>
         <div class="counts">
           <span><span class="label">Alive</span><span class="value alive">${aliveDisplay}</span></span>
+          <span><span class="label">Running</span><span class="value">${fmt(runningDisplay)}</span></span>
           <span><span class="label">Backlog</span><span class="value">${fmt(backlog)}</span></span>
           <span><span class="label">Capacity</span><span class="value">${fmt(capacityDisplay)}</span></span>
         </div>
         <div class="util-bar"><div class="fill ${utilClass}" style="width: ${utilWidth}%"></div></div>
         <div class="meta">${metaText}</div>
       `;
+      card.addEventListener("click", () => openWorkerModal(name));
       workersEl.appendChild(card);
     }
+    // Keep an open modal in sync with the freshest snapshot.
+    if (openModalWorker) renderModal(openModalWorker);
+  }
+
+  // ---- worker detail modal ------------------------------------------------
+
+  function openWorkerModal(name) {
+    openModalWorker = name;
+    renderModal(name);
+    modalEl.classList.remove("hidden");
+  }
+
+  function closeWorkerModal() {
+    openModalWorker = null;
+    modalEl.classList.add("hidden");
+  }
+
+  function renderModal(name) {
+    const w = latestWorkers[name];
+    if (!w) {
+      // Worker vanished from the snapshot (e.g. forgotten); close politely.
+      closeWorkerModal();
+      return;
+    }
+    modalTitleEl.textContent = name;
+
+    const backlog = w.backlog || 0;
+    const runningTotal = w.alive > 0 ? (w.in_flight_total || 0) : 0;
+    const capacityTotal = w.alive > 0 ? (w.task_limit_total || 0) : 0;
+    const replicaCount = (w.consumers || []).length;
+
+    const summary = `
+      <div class="modal-summary">
+        <span><span class="label">Queue length</span><span class="value">${fmt(backlog)}</span></span>
+        <span><span class="label">Running / limit</span><span class="value">${fmt(runningTotal)} / ${fmt(capacityTotal)}</span></span>
+        <span><span class="label">Replicas</span><span class="value">${fmt(replicaCount)}</span></span>
+      </div>`;
+
+    // Queue length is stream-level (shared by every replica), so it lives in the
+    // summary above; the table below is strictly per-replica.
+    const consumers = (w.consumers || [])
+      .slice()
+      .sort((a, b) => String(a.consumer).localeCompare(String(b.consumer)));
+
+    let table;
+    if (consumers.length === 0) {
+      table = `<div class="modal-empty">No replicas currently reporting heartbeats.</div>`;
+    } else {
+      const rows = consumers
+        .map((c) => {
+          const rowClass = c.stale ? ' class="stale-row"' : "";
+          const running = c.in_flight === null || c.in_flight === undefined ? "-" : fmt(c.in_flight);
+          const limit = fmt(c.task_limit);
+          const mem = fmtBytes(c.rss_bytes);
+          const cpu = c.cpu_pct === null || c.cpu_pct === undefined ? "-" : `${c.cpu_pct.toFixed(1)}%`;
+          const seen = c.last_seen ? fmtTimeAgo(c.last_seen) : "-";
+          const staleTag = c.stale ? ' <span class="state-pill stale">stale</span>' : "";
+          return `<tr${rowClass}>
+            <td>${c.consumer || "-"}${staleTag}</td>
+            <td class="num">${running} / ${limit}</td>
+            <td class="num">${mem}</td>
+            <td class="num">${cpu}</td>
+            <td class="num">${seen}</td>
+          </tr>`;
+        })
+        .join("");
+      table = `<table>
+        <thead>
+          <tr>
+            <th>Replica</th>
+            <th class="num">Running / limit</th>
+            <th class="num">Memory</th>
+            <th class="num">CPU</th>
+            <th class="num">Last seen</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    }
+
+    modalBodyEl.innerHTML = summary + table;
   }
 
   function ingestEvents(events, ts) {
@@ -390,6 +484,15 @@
     };
     ws.onerror = () => { /* onclose will handle reconnect */ };
   }
+
+  // Modal dismissal: close button, click on the backdrop, or Escape.
+  document.getElementById("modal-close").addEventListener("click", closeWorkerModal);
+  modalEl.addEventListener("click", (e) => {
+    if (e.target === modalEl) closeWorkerModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && openModalWorker) closeWorkerModal();
+  });
 
   // Initial fetch so the UI is populated before the socket opens.
   fetch("api/snapshot")
