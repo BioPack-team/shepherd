@@ -15,10 +15,10 @@ import json
 import logging
 import os
 import uuid
-from concurrent.futures import ProcessPoolExecutor
 
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 from ranker import arax_rank
@@ -78,11 +78,14 @@ def rank_message(in_message: dict, logger: logging.Logger) -> dict:
         return in_message
 
 
-async def process_task(task, parent_ctx, logger, limiter, loop, executor):
+async def process_task(task, parent_ctx, logger, limiter, loop, pool):
     """Process a given task and ACK in redis.
 
     Ranking is CPU-bound, so it is dispatched to a process pool while the
     span, wrap-up, and error handling are shared with every worker.
+
+    Dispatch goes through ``pool`` (a ProcessPoolManager) so a child dying on an
+    oversized message replaces the pool instead of poisoning it for good.
     """
 
     async def _run(task, logger):
@@ -90,12 +93,7 @@ async def process_task(task, parent_ctx, logger, limiter, loop, executor):
         message = await get_message(response_id, logger)
         if message is not None:
             # Run ranking in process pool for CPU-intensive operations
-            ranked_message = await loop.run_in_executor(
-                executor,
-                rank_message,
-                message,
-                logger,
-            )
+            ranked_message = await pool.run(loop, rank_message, message, logger)
             if ranked_message is None:
                 logger.error("Ranking returned None. Returning original message.")
                 ranked_message = message
@@ -110,14 +108,14 @@ async def poll_for_tasks() -> None:
     """
     Main loop to poll for and process ranking tasks.
 
-    Creates a single ProcessPoolExecutor that is reused across all tasks
+    Creates a single self-healing process pool that is reused across all tasks
     for better performance.
     """
     loop = asyncio.get_running_loop()
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
-    executor = ProcessPoolExecutor(max_workers=cpu_count)
+    pool = ProcessPoolManager(cpu_count, name="arax.rank process pool")
 
     while True:
         try:
@@ -125,7 +123,7 @@ async def poll_for_tasks() -> None:
                 STREAM, GROUP, CONSUMER, TASK_LIMIT
             ):
                 asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, executor)
+                    process_task(task, parent_ctx, logger, limiter, loop, pool)
                 )
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")

@@ -8,13 +8,13 @@ import math
 import os
 import uuid
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
 from itertools import combinations
 
 import numpy as np
 
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
@@ -1229,23 +1229,21 @@ def aragorn_score(response_id: str, logger: logging.Logger) -> None:
     save_message_sync(response_id, in_message)
 
 
-async def process_task(task, parent_ctx, logger, limiter, loop, executor):
+async def process_task(task, parent_ctx, logger, limiter, loop, pool):
     """Process a given task and ACK in redis.
 
     Scoring is CPU-bound, so it is dispatched to a process pool while the
     span, wrap-up, and error handling are shared with every worker. Only the
     ``response_id`` is handed to the child; the message load/save happen there
     (see ``aragorn_score``) so the payload never crosses the process boundary.
+
+    Dispatch goes through ``pool`` (a ProcessPoolManager) so a child dying on an
+    oversized message replaces the pool instead of poisoning it for good.
     """
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        await loop.run_in_executor(
-            executor,
-            aragorn_score,
-            response_id,
-            logger,
-        )
+        await pool.run(loop, aragorn_score, response_id, logger)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
@@ -1256,14 +1254,14 @@ async def poll_for_tasks():
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
-    executor = ProcessPoolExecutor(max_workers=cpu_count)
+    pool = ProcessPoolManager(cpu_count, name="aragorn.score process pool")
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
                 STREAM, GROUP, CONSUMER, TASK_LIMIT
             ):
                 asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, executor)
+                    process_task(task, parent_ctx, logger, limiter, loop, pool)
                 )
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")

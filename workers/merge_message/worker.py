@@ -27,7 +27,6 @@ from shepherd_utils.db import (
     get_message,
     get_message_sync,
     get_ready_callbacks,
-    is_ready_callback,
     remove_callback_id,
     save_message_sync,
 )
@@ -801,22 +800,19 @@ async def poll_for_tasks():
                 # drains the whole query, so a loser has nothing useful to add.
                 got_lock = await try_lock(response_id, CONSUMER, logger)
                 if not got_lock:
-                    still_pending = await is_ready_callback(
-                        response_id, callback_id, logger
+                    # Someone else holds this query's lock and drains its ready
+                    # set to empty, so our callback (added to the set before this
+                    # wake task was enqueued) will be merged by them. Just ack and
+                    # move on -- no re-enqueue. The holder does one final ready-set
+                    # check after releasing the lock (below) to catch a callback
+                    # that lands in the narrow window past its last drain pass, so
+                    # nothing is stranded. This replaces the old per-loser
+                    # re-enqueue, which spun a wake task per contended callback
+                    # every merge_contention_backoff and flooded the logs with
+                    # near-identical "Doing task" lines during a single merge.
+                    logger.debug(
+                        f"[{callback_id}] Lock busy; holder will drain it. Acking."
                     )
-                    if still_pending:
-                        # The holder may finish just before it would have swept
-                        # us; re-enqueue (after a short backoff) so we're retried.
-                        await asyncio.sleep(settings.merge_contention_backoff)
-                        await _reenqueue_wake_task(task, logger)
-                        logger.debug(
-                            f"[{callback_id}] Lock busy; re-enqueued wake task."
-                        )
-                    else:
-                        # Already merged by the lock holder -- nothing to do.
-                        logger.debug(
-                            f"[{callback_id}] Already merged by holder; acking."
-                        )
                     return
 
                 logger.info(f"[{callback_id}] Obtained lock for {response_id}.")
@@ -884,6 +880,23 @@ async def poll_for_tasks():
                     f"{time.time() - lock_time:.2f}s"
                 )
                 await remove_lock(response_id, CONSUMER, logger)
+                # Close the race where a callback landed in the ready set after
+                # our final drain pass read it empty but before we released the
+                # lock: that callback's own wake task would have found the lock
+                # held and dropped (losers no longer re-enqueue). Now that the
+                # lock is free, re-check and kick exactly one wake if anything
+                # remains so the late arrival still gets merged. One conditional
+                # re-enqueue replaces the old storm of per-loser re-enqueues.
+                try:
+                    leftover = await get_ready_callbacks(response_id, logger)
+                except Exception:
+                    leftover = []
+                if leftover:
+                    logger.debug(
+                        f"[{callback_id}] {len(leftover)} callback(s) arrived "
+                        "post-drain; kicking one wake task."
+                    )
+                    await _reenqueue_wake_task(task, logger)
         except Exception as e:
             logger.error(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True

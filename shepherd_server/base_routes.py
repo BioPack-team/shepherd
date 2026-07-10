@@ -24,6 +24,7 @@ from shepherd_utils.db import (
     get_logs,
     get_message,
     get_query_state,
+    remove_callback_id,
     save_message,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
@@ -247,13 +248,66 @@ async def run_async_query(
     )
 
 
+async def _read_body_within_limit(request: Request, max_bytes: int):
+    """Read the request body, aborting if it exceeds ``max_bytes``.
+
+    Returns the body bytes, or ``None`` if the limit was exceeded. A
+    ``max_bytes`` of 0 disables the limit and reads the whole body.
+
+    The declared ``Content-Length`` is checked first so well-behaved clients are
+    rejected without buffering anything; the stream is then read in chunks and
+    aborted the moment the running total crosses the limit, so a missing or
+    dishonest ``Content-Length`` can't force us to buffer an unbounded body.
+    """
+    if max_bytes <= 0:
+        return await request.body()
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > max_bytes:
+                return None
+        except ValueError:
+            pass
+
+    chunks = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def callback(
     target: ARATargetEnum,
     callback_id: str,
     request: Request,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
-    raw = await request.body()
+    max_bytes = settings.callback_max_request_size_bytes
+    raw = await _read_body_within_limit(request, max_bytes)
+    if raw is None:
+        logger = logging.getLogger(f"shepherd.{callback_id}")
+        logger.warning(
+            f"Rejecting callback {callback_id}: request body exceeds the maximum "
+            f"allowed size of {max_bytes} bytes."
+        )
+        # Drop this callback from the running set so the lookup worker stops
+        # waiting on it. Without this the lookup blocks until its whole-query
+        # timeout, since a callback only leaves the set once merge_message has
+        # processed it -- which never happens for a payload we refused to read.
+        await remove_callback_id(callback_id, logger)
+        return JSONResponse(
+            content={
+                "detail": (
+                    f"Request body exceeds the maximum allowed size of {max_bytes} "
+                    "bytes."
+                )
+            },
+            status_code=413,
+        )
     try:
         if "zstd" in request.headers.get("content-encoding", "").lower():
             raw = decompress_zstd(raw)
