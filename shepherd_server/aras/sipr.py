@@ -48,6 +48,4 @@ async def custom_swagger_ui_html(req: Request) -> HTMLResponse:
     )
 
 
-set_open_api_schema(
-    SIPR, infores="infores:shepherd-sipr", subpath="/sipr"
-)
+set_open_api_schema(SIPR, infores="infores:shepherd-sipr", subpath="/sipr")

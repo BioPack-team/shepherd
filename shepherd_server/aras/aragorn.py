@@ -58,6 +58,4 @@ async def custom_swagger_ui_html(req: Request) -> HTMLResponse:
     )
 
 
-set_open_api_schema(
-    ARAGORN, infores="infores:shepherd-aragorn", subpath="/aragorn"
-)
+set_open_api_schema(ARAGORN, infores="infores:shepherd-aragorn", subpath="/aragorn")

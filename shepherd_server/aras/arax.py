@@ -48,6 +48,4 @@ async def custom_swagger_ui_html(req: Request) -> HTMLResponse:
     )
 
 
-set_open_api_schema(
-    ARAX, infores="infores:shepherd-arax", subpath="/arax"
-)
+set_open_api_schema(ARAX, infores="infores:shepherd-arax", subpath="/arax")
