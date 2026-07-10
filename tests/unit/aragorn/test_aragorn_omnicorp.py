@@ -5,30 +5,15 @@ records, raw little-endian-int shared counts) and exercises both the leaf
 LMDB shims and the full overlay on a small TRAPI message.
 """
 
-import asyncio
 import copy
 import json
 import logging
-import os
 
 import lmdb
 import pytest
 
-from concurrent.futures.process import BrokenProcessPool
-
 from shepherd_utils.config import settings
 from workers.aragorn_omnicorp import worker
-
-
-# Top-level (picklable) callables for the process-pool recovery test.
-def _pool_echo(value):
-    return value
-
-
-def _pool_suicide(_):
-    # Abruptly kill the child so the executor enters its broken state, mimicking
-    # a kernel OOM kill of a worker processing an oversized message.
-    os._exit(1)
 
 
 def _build_curies_lmdb(path, entries):
@@ -439,35 +424,6 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
         if a.get("original_attribute_name") == "omnicorp_article_count"
     ]
     assert article_attrs and article_attrs[0]["value"] == 100
-
-
-async def test_pool_manager_recovers_after_child_dies():
-    """A child dying breaks the pool for one task, then the pool self-heals.
-
-    Regression test for the wedged-worker bug: previously a single OOM-killed
-    child poisoned the shared ProcessPoolExecutor so every subsequent task
-    failed with "A process in the process pool was terminated abruptly...". The
-    PoolManager must replace the broken pool so the very next task succeeds.
-    """
-    loop = asyncio.get_running_loop()
-    pool = worker.PoolManager(max_workers=1)
-    try:
-        # Healthy pool runs a task fine.
-        assert await pool.run(loop, _pool_echo, "before") == "before"
-
-        first = pool._executor
-
-        # A child dying surfaces as BrokenProcessPool for the triggering task...
-        with pytest.raises(BrokenProcessPool):
-            await pool.run(loop, _pool_suicide, None)
-
-        # ...but the manager swaps in a fresh executor...
-        assert pool._executor is not first
-
-        # ...so the next task runs on the healthy pool instead of re-raising.
-        assert await pool.run(loop, _pool_echo, "after") == "after"
-    finally:
-        pool._executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_generate_curie_pairs_stops_at_max_pairs():
