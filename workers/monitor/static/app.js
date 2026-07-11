@@ -13,6 +13,12 @@
   const infraEl = document.getElementById("infra");
   const alertsEl = document.getElementById("alerts");
   const eventsEl = document.getElementById("events");
+  const brokerBannerEl = document.getElementById("broker-banner");
+
+  // Client-side memory of when the broker outage began. The server sends a
+  // fresh broker_up=false snapshot each tick while it's down, so we latch the
+  // first one's timestamp to show "since ..." rather than the latest tick time.
+  let brokerDownSince = null;
 
   // Client-side rolling buffer of scaling events. The server sends fresh deltas
   // on each tick; we accumulate them so the user can see recent history.
@@ -431,8 +437,32 @@
       .join("");
   }
 
+  function showBrokerBanner(downSince) {
+    const when = downSince ? new Date(downSince * 1000).toLocaleTimeString() : "";
+    const ago = downSince ? ` (${fmtTimeAgo(downSince)})` : "";
+    brokerBannerEl.innerHTML = `
+      <span class="banner-icon">&#9888;</span>
+      <span class="banner-msg">Broker unreachable &mdash; workers can't read or write tasks. Worker-down alerts are suppressed and the panels below are frozen until it recovers.</span>
+      <span class="banner-detail">since ${when}${ago}</span>`;
+    brokerBannerEl.classList.remove("hidden");
+  }
+
+  function hideBrokerBanner() {
+    brokerBannerEl.classList.add("hidden");
+  }
+
   function applySnapshot(snap) {
     ensureCharts();
+    // Broker down: the snapshot carries no live data (workers/streams/etc. are
+    // empty). Surface a banner and freeze the last-known panels rather than
+    // wiping every card to zero, which would misread as "everything is gone".
+    if (snap.broker_up === false) {
+      if (brokerDownSince === null) brokerDownSince = snap.ts;
+      showBrokerBanner(brokerDownSince);
+      return;
+    }
+    if (brokerDownSince !== null) brokerDownSince = null;
+    hideBrokerBanner();
     lastUpdateEl.textContent = `updated ${new Date(snap.ts * 1000).toLocaleTimeString()}`;
     updateWorkers(snap.workers || {});
     updateStreams(snap.streams || {}, snap.ts);
