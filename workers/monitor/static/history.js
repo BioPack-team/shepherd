@@ -365,6 +365,41 @@
     renderIncidentsTable((r.events || []).filter(e => e.severity && e.severity !== "info"));
   }
 
+  // Pair broker_down -> broker_recovered alerts (archived as type="alert" with
+  // payload.rule) into outage intervals. Handles the two clipped cases: an
+  // outage that began before the window (a recovered with no in-window down ->
+  // clamp start to the window) and one still open at the window's end (a down
+  // with no recovery -> runs to `until`, flagged ongoing).
+  function computeBrokerOutages(events) {
+    const boundaries = events
+      .filter(e => e.type === "alert" && e.payload &&
+        (e.payload.rule === "broker_down" || e.payload.rule === "broker_recovered"))
+      .map(e => ({ ts: e.ts, rule: e.payload.rule }))
+      .sort((a, b) => a.ts - b.ts);
+    const outages = [];
+    let openStart = null;
+    for (const b of boundaries) {
+      if (b.rule === "broker_down") {
+        // Keep the earliest start if downs repeat before a recovery.
+        if (openStart === null) openStart = b.ts;
+      } else {
+        const start = openStart !== null ? openStart : currentWindow.since;
+        outages.push({ start, end: b.ts, ongoing: false });
+        openStart = null;
+      }
+    }
+    if (openStart !== null) {
+      outages.push({ start: openStart, end: currentWindow.until, ongoing: true });
+    }
+    return outages;
+  }
+
+  function fmtSpan(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`;
+    return `${(seconds / 3600).toFixed(1)}h`;
+  }
+
   function renderTimeline(events) {
     const el = document.getElementById("events-timeline");
     if (!events.length) {
@@ -372,6 +407,20 @@
       return;
     }
     const span = Math.max(60, currentWindow.until - currentWindow.since);
+
+    // Shaded bands for broker outages, drawn behind the event dots.
+    const outages = computeBrokerOutages(events);
+    const gaps = outages.map(o => {
+      const s = Math.max(currentWindow.since, o.start);
+      const e = Math.min(currentWindow.until, o.end);
+      if (e <= s) return "";
+      const left = ((s - currentWindow.since) / span) * 100;
+      const width = ((e - s) / span) * 100;
+      const endStr = o.ongoing ? "ongoing" : new Date(o.end * 1000).toLocaleString();
+      const title = `Broker unreachable · ${new Date(o.start * 1000).toLocaleString()} → ${endStr} · ${fmtSpan(o.end - o.start)}`;
+      return `<div class="gap${o.ongoing ? " ongoing" : ""}" style="left:${left.toFixed(2)}%;width:${Math.max(0.4, width).toFixed(2)}%" title="${escapeHtml(title)}"></div>`;
+    }).join("");
+
     const dots = events.map(ev => {
       const x = ((ev.ts - currentWindow.since) / span) * 100;
       let cls = "info";
@@ -382,7 +431,12 @@
       const title = `${new Date(ev.ts * 1000).toLocaleString()} · ${ev.type}${ev.worker ? " · " + ev.worker : ""}${ev.detail ? " · " + ev.detail : ""}`;
       return `<div class="dot ${cls}" style="left:${x.toFixed(2)}%" title="${escapeHtml(title)}"></div>`;
     }).join("");
-    el.innerHTML = `<div class="timeline-bar">${dots}</div>`;
+
+    // Only surface the legend when there's actually an outage to explain.
+    const legend = outages.length
+      ? '<div class="timeline-legend"><span class="swatch broker-gap"></span> Broker unreachable</div>'
+      : "";
+    el.innerHTML = `<div class="timeline-bar">${gaps}${dots}</div>${legend}`;
   }
 
   function renderIncidentsTable(events) {
