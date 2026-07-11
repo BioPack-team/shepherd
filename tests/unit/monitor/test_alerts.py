@@ -37,6 +37,126 @@ def _engine(rules=None):
     return engine
 
 
+@pytest.fixture
+def clock(mocker):
+    """Deterministic control over the wall clock the engine reads.
+
+    The engine's grace-window checks and the broker state machine call
+    ``time.time()``; the rule-streak logic instead uses ``snapshot["ts"]``.
+    Tests keep the two in sync by setting this clock to the same value as the
+    snapshot ts they pass. Only ``workers.monitor.alerts``'s ``time`` reference
+    is replaced, so nothing else is affected.
+    """
+    m = mocker.patch.object(alerts, "time")
+    m.time.return_value = 10_000.0
+    return m.time
+
+
+def _worker_snapshot(ts, worker="arax", alive=0):
+    return {
+        "ts": ts,
+        "events": [],
+        "workers": {worker: {"alive": alive, "stale": 0}},
+        "streams": {},
+        "postgres": {},
+    }
+
+
+async def test_broker_down_fires_once_after_grace(patched, clock):
+    engine = _engine()
+    # Down edge starts the debounce clock; nothing fires yet.
+    clock.return_value = 10_000.0
+    await engine.handle_broker_health(False)
+    patched["dispatch"].assert_not_called()
+    # Still inside the 15s debounce window: silent.
+    clock.return_value = 10_010.0
+    await engine.handle_broker_health(False)
+    patched["dispatch"].assert_not_called()
+    # Past the debounce window: one broker_down alert.
+    clock.return_value = 10_020.0
+    await engine.handle_broker_health(False)
+    patched["dispatch"].assert_called_once()
+    assert patched["dispatch"].call_args.args[0]["rule"] == "broker_down"
+    assert patched["dispatch"].call_args.args[0]["severity"] == "critical"
+    # Continued outage does not re-fire.
+    clock.return_value = 10_060.0
+    await engine.handle_broker_health(False)
+    patched["dispatch"].assert_called_once()
+
+
+async def test_broker_blip_below_grace_stays_silent(patched, clock):
+    engine = _engine()
+    clock.return_value = 10_000.0
+    await engine.handle_broker_health(False)
+    # Recovers before the debounce window elapses: no down alert, and no
+    # recovery alert either (we never announced an outage).
+    clock.return_value = 10_005.0
+    await engine.handle_broker_health(True)
+    patched["dispatch"].assert_not_called()
+
+
+async def test_broker_recovery_fires_recovered_alert(patched, clock):
+    engine = _engine()
+    clock.return_value = 10_000.0
+    await engine.handle_broker_health(False)
+    clock.return_value = 10_020.0
+    await engine.handle_broker_health(False)  # broker_down
+    clock.return_value = 10_030.0
+    await engine.handle_broker_health(True)  # broker_recovered
+    rules_fired = [c.args[0]["rule"] for c in patched["dispatch"].call_args_list]
+    assert rules_fired == ["broker_down", "broker_recovered"]
+
+
+async def test_scale_down_suppressed_while_broker_down(patched, clock):
+    engine = _engine()
+    engine._broker_up = False  # broker currently unreachable
+    clock.return_value = 5_000.0
+    await engine.evaluate(
+        {"ts": 5_000.0, "events": [_scale_down("arax"), _scale_down("bte")]}
+    )
+    clock.return_value = 5_010.0
+    await engine.evaluate({"ts": 5_010.0, "events": []})  # past flush window
+    # The all-workers-down flood is suppressed entirely while the broker is down.
+    patched["dispatch"].assert_not_called()
+    patched["dispatch_batch"].assert_not_called()
+
+
+async def test_scale_down_suppressed_during_recovery_grace(patched, clock):
+    engine = _engine()
+    engine._broker_recovered_at = 1_000.0  # grace window: 1000..1030
+    clock.return_value = 1_010.0
+    await engine.evaluate(
+        {"ts": 1_010.0, "events": [_scale_down("arax"), _scale_down("bte")]}
+    )
+    clock.return_value = 1_020.0
+    await engine.evaluate({"ts": 1_020.0, "events": []})
+    patched["dispatch"].assert_not_called()
+    patched["dispatch_batch"].assert_not_called()
+
+
+async def test_heartbeat_lost_suppressed_in_grace_then_fires_after(patched, clock):
+    rule = Rule(
+        {"name": "arax_down", "type": "heartbeat_lost", "worker": "arax", "duration": 0}
+    )
+    engine = _engine([rule])
+    engine._broker_recovered_at = 1_000.0  # grace window: 1000..1030
+
+    # Inside the recovery grace: a zero-alive worker is suppressed WITHOUT
+    # arming a cooldown, so it can still fire once the window elapses.
+    clock.return_value = 1_010.0
+    await engine.evaluate(_worker_snapshot(1_010.0))
+    patched["dispatch"].assert_not_called()
+
+    # After the grace window: the still-down worker buffers a down-alert...
+    clock.return_value = 1_040.0
+    await engine.evaluate(_worker_snapshot(1_040.0))
+    # ...which flushes on a later tick past the debounce window.
+    clock.return_value = 1_047.0
+    await engine.evaluate(_worker_snapshot(1_047.0))
+    patched["dispatch"].assert_called_once()
+    assert patched["dispatch"].call_args.args[0]["rule"] == "arax_down"
+
+
 async def test_multiple_downed_workers_coalesce_into_one_batch(patched):
     engine = _engine()
     events = [_scale_down("aragorn.lookup"), _scale_down("arax"), _scale_down("bte")]

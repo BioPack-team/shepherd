@@ -68,6 +68,21 @@ SEED_STREAMS = [
 ARAS = ["aragorn", "arax", "bte", "sipr", "gandalf", "example"]
 
 
+async def probe_broker() -> bool:
+    """Cheap liveness check for the broker.
+
+    Returns ``True`` if the broker answers a PING, ``False`` on any error
+    (connection refused, timeout, auth). The poll loop calls this before
+    attempting a full snapshot so a broker outage is detected as a single
+    ``broker_down`` alert instead of surfacing as a full keyspace scan blowing
+    up (and, on recovery, a flood of bogus worker-down alerts).
+    """
+    try:
+        return bool(await broker_client.ping())
+    except Exception:
+        return False
+
+
 async def _scan_keys(pattern: str) -> List[str]:
     keys: List[str] = []
     async for key in broker_client.scan_iter(match=pattern, count=200):

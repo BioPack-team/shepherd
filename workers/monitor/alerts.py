@@ -181,10 +181,102 @@ class AlertEngine:
         # The buffer flushes on a normal poll tick once the window elapses.
         self._down_buffer: Dict[str, Dict[str, Any]] = {}
         self._down_buffer_started_at: float = 0.0
+        # Broker-availability state machine. Driven once per poll tick by
+        # ``handle_broker_health``. We track it in-process (not via a Redis
+        # cooldown key) precisely because the broker is unreachable when it
+        # matters -- a Redis-backed guard couldn't be written then. ``_broker_up``
+        # is the last-observed state; ``_broker_down_since`` debounces transient
+        # blips before we alert; ``_broker_down_alerted`` makes the down-alert
+        # fire once per outage; ``_broker_recovered_at`` opens the grace window
+        # during which the post-restart worker-down flood is suppressed.
+        self._broker_up: bool = True
+        self._broker_down_since: float = 0.0
+        self._broker_down_alerted: bool = False
+        self._broker_recovered_at: float = 0.0
 
     @property
     def in_startup_grace(self) -> bool:
         return (time.time() - self._boot_time) < settings.monitor_startup_grace_sec
+
+    @property
+    def in_broker_recovery_grace(self) -> bool:
+        """True while we're inside the post-recovery window (or broker is down).
+
+        Worker-down alerts are suppressed in this window because a broker
+        restart transiently zeroes every worker's heartbeats until they
+        re-register -- that's not the workers dying, it's the broker having
+        just come back.
+        """
+        if not self._broker_up:
+            return True
+        if not self._broker_recovered_at:
+            return False
+        return (
+            time.time() - self._broker_recovered_at
+        ) < settings.monitor_broker_recovery_grace_sec
+
+    async def handle_broker_health(self, is_up: bool) -> None:
+        """Drive the broker up/down state machine and emit broker alerts.
+
+        Called every poll tick with the result of ``poller.probe_broker()``.
+        Fires exactly one ``broker_down`` alert per outage (after a debounce
+        window) and one ``broker_recovered`` alert when it returns.
+        """
+        now = time.time()
+        if not is_up:
+            if self._broker_up:
+                # Healthy -> down edge: start the debounce clock.
+                self._broker_up = False
+                self._broker_down_since = now
+            elif (
+                not self._broker_down_alerted
+                and (now - self._broker_down_since)
+                >= settings.monitor_broker_down_grace_sec
+            ):
+                # Sustained outage: fire once. Slack/email dispatch does not go
+                # through the broker, so this gets out even while Redis is down;
+                # the Redis-backed history write inside _record_alert degrades
+                # gracefully and the Postgres archive still lands.
+                self._broker_down_alerted = True
+                event = {
+                    "ts": now,
+                    "rule": "broker_down",
+                    "severity": "critical",
+                    "detail": "broker unreachable (PING failed)",
+                    "message": (
+                        "Broker `redis` is unreachable -- workers cannot read or "
+                        "write tasks. Worker-down alerts are suppressed until it "
+                        "recovers so this outage isn't buried under a flood of "
+                        "derived worker-crash alerts."
+                    ),
+                }
+                await _record_alert(event)
+                await dispatch(event)
+            return
+        # is_up
+        if not self._broker_up:
+            # Down -> up edge: open the recovery grace window and announce it.
+            self._broker_up = True
+            self._broker_recovered_at = now
+            was_alerted = self._broker_down_alerted
+            self._broker_down_since = 0.0
+            self._broker_down_alerted = False
+            # Only announce recovery if we actually announced the outage, so a
+            # sub-debounce blip stays silent on both edges.
+            if was_alerted:
+                event = {
+                    "ts": now,
+                    "rule": "broker_recovered",
+                    "severity": "info",
+                    "detail": "broker answering PING again",
+                    "message": (
+                        "Broker `redis` is reachable again. Worker-down alerts "
+                        f"stay suppressed for {settings.monitor_broker_recovery_grace_sec}s "
+                        "while workers re-register their heartbeats."
+                    ),
+                }
+                await _record_alert(event)
+                await dispatch(event)
 
     async def _in_cooldown(self, rule: Rule) -> bool:
         try:
@@ -233,6 +325,13 @@ class AlertEngine:
         """Return the list of alerts that fired on this snapshot."""
         now = snapshot["ts"]
         fired: List[Dict[str, Any]] = []
+        # Worker-down alerts are suppressed both at boot (startup grace) and
+        # around a broker outage (recovery grace): in either case a worker type
+        # reads as zero-alive not because it died but because heartbeats haven't
+        # (re-)registered yet. A broker restart otherwise turns into ~one
+        # worker-crash alert per worker type -- the flood the broker_down alert
+        # is meant to replace.
+        suppress_worker_down = self.in_startup_grace or self.in_broker_recovery_grace
         for rule in self.rules:
             detail = rule.evaluate(snapshot)
             if detail is None:
@@ -242,6 +341,13 @@ class AlertEngine:
                 rule._first_fired_at = now
             duration_in_breach = now - rule._first_fired_at
             if duration_in_breach < rule.duration:
+                continue
+            if rule.kind == "heartbeat_lost" and rule.worker and suppress_worker_down:
+                # Boot or broker-recovery window: a zero-alive reading here is an
+                # artifact of heartbeats not being (re-)registered, not a real
+                # loss. Skip WITHOUT arming the cooldown or recording an alert,
+                # and leave the breach streak intact -- so a worker that is
+                # genuinely still down once the window elapses fires promptly.
                 continue
             if await self._in_cooldown(rule):
                 continue
@@ -266,18 +372,18 @@ class AlertEngine:
         # because every worker type is supposed to have at least one instance
         # running. The message differentiates a crash from a clean scale-down
         # so the operator sees which one happened, but severity is the same.
-        startup_grace = self.in_startup_grace
         for ev in snapshot.get("events", []):
             if not (ev.get("type") == "scale_down" and ev.get("to") == 0):
                 continue
-            if startup_grace:
-                # The whole stack just came up; persistent worker state from a
-                # previous run looks "alive" but current heartbeats haven't
-                # arrived yet. Stay silent until workers have had a chance to
-                # register.
+            if suppress_worker_down:
+                # Either the whole stack just came up (startup grace) or the
+                # broker just restarted (recovery grace): persistent worker
+                # state looks "alive" but current heartbeats haven't arrived
+                # yet, so every worker type spuriously reads as crashed. Stay
+                # silent until workers have had a chance to (re-)register.
                 logger.debug(
                     f"Suppressing worker-down alert for {ev.get('worker')} "
-                    "during startup grace"
+                    "during startup/broker-recovery grace"
                 )
                 continue
             kind = ev.get("kind", "unknown")

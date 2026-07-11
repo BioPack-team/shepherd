@@ -121,3 +121,12 @@ rules:
     duration: 1m
     severity: critical
     message: "Postgres data volume is over 90% full. Grow the PVC now to avoid a crash."
+
+# Broker (Redis) availability is monitored automatically by the alert engine --
+# there is no rule to configure here. The poller PINGs the broker each tick; a
+# sustained failure fires a single `broker_down` (critical) alert and, on
+# return, a `broker_recovered` (info) alert. Across the outage and a short
+# post-recovery window, worker-down alerts are suppressed, because a broker
+# restart transiently zeroes every worker's heartbeats and would otherwise
+# surface as one spurious worker-crash alert per worker type. Tune via the
+# MONITOR_BROKER_DOWN_GRACE_SEC and MONITOR_BROKER_RECOVERY_GRACE_SEC settings.

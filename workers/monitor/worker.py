@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Set
@@ -89,7 +90,29 @@ async def _poll_loop(engine: alerts.AlertEngine) -> None:
     last_history_write = 0.0
     while True:
         try:
+            # Probe the broker before attempting a full snapshot. A snapshot
+            # scans the keyspace for heartbeats, which throws when the broker is
+            # down -- and worse, on recovery the stale persisted worker state
+            # reads as an all-workers-crashed flood. Detecting the outage here
+            # lets the engine emit a single broker_down alert and suppress the
+            # derived worker-down alerts across the outage + recovery window.
+            broker_up = await poller.probe_broker()
+            await engine.handle_broker_health(broker_up)
+            if not broker_up:
+                _latest_snapshot = {
+                    "ts": time.time(),
+                    "broker_up": False,
+                    "workers": {},
+                    "streams": {},
+                    "postgres": {},
+                    "redis": {"error": "broker unreachable"},
+                    "events": [],
+                }
+                await _broadcast({"type": "snapshot", "data": _latest_snapshot})
+                await asyncio.sleep(interval)
+                continue
             snapshot = await poller.collect_snapshot()
+            snapshot["broker_up"] = True
             _latest_snapshot = snapshot
             # Persist history at a slower cadence than the live UI tick to
             # keep Redis memory bounded.
@@ -174,9 +197,7 @@ async def health():
 
 
 def _default_window() -> tuple[float, float]:
-    import time as _time
-
-    now = _time.time()
+    now = time.time()
     return now - 24 * 3600, now
 
 
