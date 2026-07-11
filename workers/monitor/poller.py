@@ -285,14 +285,38 @@ async def _collect_postgres() -> Dict[str, Any]:
     return snapshot
 
 
+# Previous ``evicted_keys`` counter reading, so we can expose a per-tick delta
+# (the raw field is monotonic). ``None`` until the first sample; reset-safe
+# because a broker restart drops the counter to 0 and we clamp negatives.
+_last_evicted_keys: "int | None" = None
+
+
 async def _collect_redis_info() -> Dict[str, Any]:
+    global _last_evicted_keys
     try:
         info = await broker_client.info()
     except Exception as e:
         return {"error": str(e)}
+    used = int(info.get("used_memory", 0) or 0)
+    maxmem = int(info.get("maxmemory", 0) or 0)
+    evicted = int(info.get("evicted_keys", 0) or 0)
+    # Delta since the previous tick. Clamp to >= 0 so a counter reset (broker
+    # restart) reads as "no evictions this interval" rather than a huge negative.
+    evicted_delta = 0
+    if _last_evicted_keys is not None:
+        evicted_delta = max(0, evicted - _last_evicted_keys)
+    _last_evicted_keys = evicted
     return {
         "used_memory_human": info.get("used_memory_human"),
-        "used_memory_bytes": int(info.get("used_memory", 0) or 0),
+        "used_memory_bytes": used,
+        # ``maxmemory`` is 0 when the broker runs uncapped; downstream treats
+        # that as "no cap" and skips the percentage-based memory alert.
+        "maxmemory_bytes": maxmem,
+        "maxmemory_pct": round(100.0 * used / maxmem, 1) if maxmem else None,
+        "maxmemory_policy": info.get("maxmemory_policy"),
+        "evicted_keys": evicted,
+        "evicted_keys_delta": evicted_delta,
+        "mem_fragmentation_ratio": info.get("mem_fragmentation_ratio"),
         "connected_clients": info.get("connected_clients"),
         "instantaneous_ops_per_sec": info.get("instantaneous_ops_per_sec"),
         "uptime_in_seconds": info.get("uptime_in_seconds"),
@@ -643,6 +667,10 @@ async def write_history(snapshot: Dict[str, Any]) -> None:
     redis_info = snapshot.get("redis", {}) or {}
     if redis_info.get("used_memory_bytes"):
         samples["redis:used_memory_bytes"] = redis_info["used_memory_bytes"]
+    if redis_info.get("maxmemory_bytes"):
+        samples["redis:maxmemory_bytes"] = redis_info["maxmemory_bytes"]
+    if redis_info.get("evicted_keys") is not None:
+        samples["redis:evicted_keys"] = int(redis_info.get("evicted_keys") or 0)
     if redis_info.get("connected_clients") is not None:
         samples["redis:connected_clients"] = int(
             redis_info.get("connected_clients") or 0

@@ -6,10 +6,16 @@
 # Rule schema:
 #   name:       unique identifier (used as cooldown key)
 #   type:       threshold | heartbeat_lost | queue_pending | oldest_callback_age
+#               | db_capacity | redis_memory | redis_eviction | stuck_pending
 #   metric:     for type=threshold: xlen | callbacks_pending | pg_connection_count
-#   stream:     redis stream name (for xlen / queue_pending)
+#   stream:     redis stream name (for xlen / queue_pending / stuck_pending;
+#               stuck_pending scans all streams when omitted)
 #   worker:     worker type name (for heartbeat_lost)
-#   threshold:  number to compare against
+#   threshold:  number to compare against (redis_memory: percent of maxmemory;
+#               redis_eviction: keys-per-interval floor; stuck_pending: min
+#               pending tasks per consumer)
+#   idle_ms:    for stuck_pending: how long a consumer's held tasks must sit
+#               idle before it counts as wedged
 #   duration:   how long the condition must hold before firing (e.g. 60s, 5m)
 #   cooldown:   how long to suppress repeat fires (default 10m)
 #   severity:   info | warning | critical
@@ -94,6 +100,44 @@ rules:
     threshold: 100
     duration: 2m
     severity: warning
+
+  # Redis broker memory: warn before the maxmemory cap starts evicting / risks
+  # an OOM-kill. No-op when the broker runs uncapped (maxmemory 0).
+  - name: redis_memory_high
+    type: redis_memory
+    threshold: 85
+    duration: 2m
+    severity: warning
+    message: "Redis broker is over 85% of its maxmemory cap. Eviction and OOM-kill risk are near -- shed load, raise the cap, or lower redis_ttl."
+  - name: redis_memory_critical
+    type: redis_memory
+    threshold: 95
+    duration: 1m
+    severity: critical
+    message: "Redis broker is over 95% of its maxmemory cap. Eviction of live data is imminent."
+
+  # Redis eviction: with volatile-ttl, any eviction means the cap was reached
+  # and blobs are being shed. threshold 0 => alert on the first eviction.
+  - name: redis_evicting
+    type: redis_eviction
+    threshold: 0
+    duration: 30s
+    severity: warning
+
+  # Wedged workers: tasks delivered to a consumer that then stopped acking. The
+  # consumer may still heartbeat, so heartbeat_lost won't catch it. Fleet-wide
+  # (no stream named). idle_ms comfortably exceeds normal task durations.
+  - name: stuck_pending_tasks
+    type: stuck_pending
+    threshold: 1
+    idle_ms: 120000
+    duration: 60s
+    severity: warning
+
+  # Postgres availability is monitored automatically by the alert engine (like
+  # the broker) -- no rule to configure. A sustained outage fires postgres_down
+  # (critical) and recovery fires postgres_recovered (info). Tune the debounce
+  # via MONITOR_POSTGRES_DOWN_GRACE_SEC.
 
   # Postgres health: connection saturation.
   - name: pg_connection_saturation

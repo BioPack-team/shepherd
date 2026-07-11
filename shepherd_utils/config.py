@@ -185,6 +185,13 @@ class Settings(BaseSettings):
     # flood into just the ``broker_down``/``broker_recovered`` pair; a worker
     # that is *genuinely* still down once the window elapses alerts as normal.
     monitor_broker_recovery_grace_sec: int = 30
+    # Postgres availability alerting. Same debounce idea as the broker: Postgres
+    # must stay unreachable this long before the single ``postgres_down`` alert
+    # fires, so a transient query timeout doesn't trip it. No recovery-grace
+    # counterpart is needed -- a Postgres outage doesn't zero out the worker
+    # heartbeats (those live in Redis), so there's no derived alert flood to
+    # suppress on the way back.
+    monitor_postgres_down_grace_sec: float = 15.0
     # A query that never reaches COMPLETED this long after it started is treated
     # as abandoned (the worker driving it almost certainly crashed). The janitor
     # marks it ABANDONED and clears its pending callbacks. Must comfortably

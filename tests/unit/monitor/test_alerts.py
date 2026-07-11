@@ -134,6 +134,95 @@ async def test_scale_down_suppressed_during_recovery_grace(patched, clock):
     patched["dispatch_batch"].assert_not_called()
 
 
+async def test_postgres_down_fires_once_after_grace_then_recovers(patched, clock):
+    engine = _engine()
+    # Down edge starts the debounce clock; nothing fires yet.
+    clock.return_value = 10_000.0
+    await engine.handle_postgres_health(False)
+    patched["dispatch"].assert_not_called()
+    # Inside the 15s debounce window: still silent.
+    clock.return_value = 10_010.0
+    await engine.handle_postgres_health(False)
+    patched["dispatch"].assert_not_called()
+    # Past it: one postgres_down alert; no re-fire while it stays down.
+    clock.return_value = 10_020.0
+    await engine.handle_postgres_health(False)
+    clock.return_value = 10_050.0
+    await engine.handle_postgres_health(False)
+    patched["dispatch"].assert_called_once()
+    assert patched["dispatch"].call_args.args[0]["rule"] == "postgres_down"
+    # Recovery announces once.
+    clock.return_value = 10_060.0
+    await engine.handle_postgres_health(True)
+    rules = [c.args[0]["rule"] for c in patched["dispatch"].call_args_list]
+    assert rules == ["postgres_down", "postgres_recovered"]
+
+
+async def test_postgres_blip_below_grace_stays_silent(patched, clock):
+    engine = _engine()
+    clock.return_value = 10_000.0
+    await engine.handle_postgres_health(False)
+    clock.return_value = 10_005.0
+    await engine.handle_postgres_health(True)
+    patched["dispatch"].assert_not_called()
+
+
+def _redis_snap(used, maxmem, evicted_delta=0):
+    return {
+        "ts": 1.0,
+        "events": [],
+        "streams": {},
+        "postgres": {},
+        "redis": {
+            "used_memory_bytes": used,
+            "maxmemory_bytes": maxmem,
+            "evicted_keys_delta": evicted_delta,
+        },
+    }
+
+
+def test_redis_memory_rule_fires_over_threshold():
+    rule = Rule({"name": "mem", "type": "redis_memory", "threshold": 85})
+    # 9/10 GB = 90% -> breach.
+    assert rule.evaluate(_redis_snap(9_000_000_000, 10_000_000_000)) is not None
+    # 8/10 GB = 80% -> clear.
+    assert rule.evaluate(_redis_snap(8_000_000_000, 10_000_000_000)) is None
+    # Uncapped broker (maxmemory 0) -> no-op regardless of usage.
+    assert rule.evaluate(_redis_snap(9_000_000_000, 0)) is None
+
+
+def test_redis_eviction_rule_fires_on_any_delta():
+    rule = Rule({"name": "evict", "type": "redis_eviction", "threshold": 0})
+    assert rule.evaluate(_redis_snap(1, 10, evicted_delta=0)) is None
+    assert rule.evaluate(_redis_snap(1, 10, evicted_delta=5)) is not None
+
+
+def _stuck_snap(streams):
+    return {"ts": 1.0, "events": [], "postgres": {}, "streams": streams}
+
+
+def test_stuck_pending_rule_detects_wedged_consumer():
+    rule = Rule(
+        {"name": "stuck", "type": "stuck_pending", "threshold": 1, "idle_ms": 120000}
+    )
+    # A consumer holding a task, idle well past the threshold -> wedged.
+    wedged = _stuck_snap(
+        {"arax": {"consumers": [{"name": "c1", "pending": 2, "idle_ms": 300000}]}}
+    )
+    detail = rule.evaluate(wedged)
+    assert detail is not None and "arax/c1" in detail
+    # Pending but actively working (low idle) -> not wedged.
+    busy = _stuck_snap(
+        {"arax": {"consumers": [{"name": "c1", "pending": 2, "idle_ms": 500}]}}
+    )
+    assert rule.evaluate(busy) is None
+    # Idle but nothing held -> not wedged (just an idle consumer).
+    idle_empty = _stuck_snap(
+        {"arax": {"consumers": [{"name": "c1", "pending": 0, "idle_ms": 300000}]}}
+    )
+    assert rule.evaluate(idle_empty) is None
+
+
 async def test_heartbeat_lost_suppressed_in_grace_then_fires_after(patched, clock):
     rule = Rule(
         {"name": "arax_down", "type": "heartbeat_lost", "worker": "arax", "duration": 0}

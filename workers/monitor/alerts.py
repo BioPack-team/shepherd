@@ -55,6 +55,9 @@ class Rule:
         self.stream = raw.get("stream")
         self.worker = raw.get("worker")
         self.threshold = raw.get("threshold")
+        # stuck_pending only: how long a consumer's held-but-unacked tasks must
+        # sit idle before it counts as wedged. Milliseconds, to match XINFO.
+        self.idle_ms = raw.get("idle_ms")
         self.duration = _parse_duration(raw.get("duration", 0))
         self.cooldown = _parse_duration(raw.get("cooldown", "10m"))
         self.severity = raw.get("severity", "warning")
@@ -89,6 +92,12 @@ class Rule:
             return None
         if self.kind == "db_capacity":
             return self._eval_db_capacity(snapshot)
+        if self.kind == "redis_memory":
+            return self._eval_redis_memory(snapshot)
+        if self.kind == "redis_eviction":
+            return self._eval_redis_eviction(snapshot)
+        if self.kind == "stuck_pending":
+            return self._eval_stuck_pending(snapshot)
         return None
 
     def _eval_threshold(self, snapshot: Dict[str, Any]) -> Optional[str]:
@@ -129,6 +138,77 @@ class Rule:
                 f"Postgres volume {pct:.1f}% full "
                 f"({used_gb:.1f}GB of {cap_gb:.1f}GB) >= {self.threshold}%"
             )
+        return None
+
+    def _eval_redis_memory(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when the broker's used memory crosses ``threshold`` percent of
+        its ``maxmemory`` cap.
+
+        This is the early warning the OOM-kill incident lacked: eviction (and,
+        if the cap sits at the container limit, an OOM-kill) only bites once
+        usage nears the cap, so crossing e.g. 85% is the actionable signal. A
+        no-op when the broker runs uncapped (``maxmemory`` 0) since there's no
+        denominator.
+        """
+        redis = snapshot.get("redis", {})
+        maxmem = redis.get("maxmemory_bytes", 0)
+        used = redis.get("used_memory_bytes", 0)
+        if not maxmem or self.threshold is None:
+            return None
+        pct = 100.0 * used / maxmem
+        if pct >= float(self.threshold):
+            return (
+                f"Redis memory {pct:.1f}% of maxmemory "
+                f"({used / 1e9:.1f}GB of {maxmem / 1e9:.1f}GB) >= {self.threshold}%"
+            )
+        return None
+
+    def _eval_redis_eviction(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when the broker evicted keys in the last interval.
+
+        With the ``volatile-ttl`` policy, eviction only happens once the broker
+        is *at* its maxmemory cap, so a non-zero delta is a definitive "the cap
+        has been reached and blobs are being shed" signal -- distinct from the
+        percentage warning above, which is a lead indicator. ``threshold``
+        defaults to 0 (any eviction); raise it to ignore trivial churn.
+        """
+        redis = snapshot.get("redis", {})
+        delta = redis.get("evicted_keys_delta", 0)
+        floor = float(self.threshold) if self.threshold is not None else 0.0
+        if delta > floor:
+            return (
+                f"Redis evicted {delta} key(s) in the last interval -- broker is "
+                "at its maxmemory cap and shedding data"
+            )
+        return None
+
+    def _eval_stuck_pending(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when a consumer is holding tasks it hasn't acked for too long.
+
+        This catches a *wedged* worker: one whose heartbeat may still be live
+        (so ``heartbeat_lost`` never trips) but which grabbed stream messages
+        and then stopped processing -- they sit in its pending-entries list,
+        idle, until reclaim eventually rescues them. Distinct from a plain
+        backlog (``xlen`` high but actively draining). Scans every stream when
+        no ``stream`` is named, so one rule covers the whole fleet.
+        """
+        streams = snapshot.get("streams", {})
+        targets = [self.stream] if self.stream else list(streams.keys())
+        min_pending = int(self.threshold) if self.threshold is not None else 1
+        idle_ms = float(self.idle_ms) if self.idle_ms is not None else 60000.0
+        stuck: List[str] = []
+        for name in targets:
+            stats = streams.get(name) or {}
+            for c in stats.get("consumers", []):
+                if (c.get("pending", 0) or 0) >= min_pending and (
+                    c.get("idle_ms", 0) or 0
+                ) >= idle_ms:
+                    stuck.append(
+                        f"{name}/{c.get('name')} "
+                        f"({c.get('pending')} pending, idle {c.get('idle_ms', 0) / 1000:.0f}s)"
+                    )
+        if stuck:
+            return "wedged consumers holding unacked tasks: " + ", ".join(stuck)
         return None
 
     def _eval_heartbeat_lost(self, snapshot: Dict[str, Any]) -> Optional[str]:
@@ -193,6 +273,12 @@ class AlertEngine:
         self._broker_down_since: float = 0.0
         self._broker_down_alerted: bool = False
         self._broker_recovered_at: float = 0.0
+        # Postgres-availability state machine. Same debounce/fire-once shape as
+        # the broker's, minus the recovery-grace window (a PG outage doesn't
+        # zero out heartbeats, so there's no worker-down flood to suppress).
+        self._pg_up: bool = True
+        self._pg_down_since: float = 0.0
+        self._pg_down_alerted: bool = False
 
     @property
     def in_startup_grace(self) -> bool:
@@ -274,6 +360,58 @@ class AlertEngine:
                         f"stay suppressed for {settings.monitor_broker_recovery_grace_sec}s "
                         "while workers re-register their heartbeats."
                     ),
+                }
+                await _record_alert(event)
+                await dispatch(event)
+
+    async def handle_postgres_health(self, is_up: bool) -> None:
+        """Drive the Postgres up/down state machine and emit its alerts.
+
+        Called every poll tick with whether the latest snapshot reached
+        Postgres. Fires one ``postgres_down`` alert per outage (after a debounce
+        window) and one ``postgres_recovered`` when it returns. Unlike the
+        broker, the alert path (Redis cooldowns, Slack/email) doesn't depend on
+        Postgres, so ordinary dispatch works throughout the outage.
+        """
+        now = time.time()
+        if not is_up:
+            if self._pg_up:
+                self._pg_up = False
+                self._pg_down_since = now
+            elif (
+                not self._pg_down_alerted
+                and (now - self._pg_down_since)
+                >= settings.monitor_postgres_down_grace_sec
+            ):
+                self._pg_down_alerted = True
+                event = {
+                    "ts": now,
+                    "rule": "postgres_down",
+                    "severity": "critical",
+                    "detail": "postgres unreachable",
+                    "message": (
+                        "Postgres is unreachable -- durable query state can't be "
+                        "read or written, and the janitor can't purge or reap "
+                        "abandoned queries. Redis-backed task flow may still run, "
+                        "so this can be silent without this alert."
+                    ),
+                }
+                await _record_alert(event)
+                await dispatch(event)
+            return
+        # is_up
+        if not self._pg_up:
+            self._pg_up = True
+            was_alerted = self._pg_down_alerted
+            self._pg_down_since = 0.0
+            self._pg_down_alerted = False
+            if was_alerted:
+                event = {
+                    "ts": now,
+                    "rule": "postgres_recovered",
+                    "severity": "info",
+                    "detail": "postgres reachable again",
+                    "message": "Postgres is reachable again.",
                 }
                 await _record_alert(event)
                 await dispatch(event)

@@ -388,10 +388,30 @@
     } else {
       dbDisk = fmtBytes(pg.db_size_bytes);
     }
+    // Redis memory: used / cap when a maxmemory is configured, plus a colorized
+    // % of the cap and eviction activity -- the headroom signals behind the
+    // redis_memory / redis_eviction alerts, visible at a glance.
+    const usedH = redis.used_memory_human
+      || (redis.used_memory_bytes ? fmtBytes(redis.used_memory_bytes) : "-");
+    const maxBytes = redis.maxmemory_bytes || 0;
+    const memValue = maxBytes ? `${usedH} / ${fmtBytes(maxBytes)}` : usedH;
+    let memPct = "-";
+    if (redis.maxmemory_pct != null) {
+      const p = redis.maxmemory_pct;
+      const color = p >= 95 ? "var(--bad)" : p >= 85 ? "var(--warn)" : null;
+      const text = `${p.toFixed(1)}%`;
+      memPct = color ? `<span style="color:${color}">${text}</span>` : text;
+    }
+    let evictValue = redis.evicted_keys == null ? "-" : fmt(redis.evicted_keys);
+    if ((redis.evicted_keys_delta || 0) > 0) {
+      evictValue = `<span style="color:var(--warn)">${fmt(redis.evicted_keys)} (+${fmt(redis.evicted_keys_delta)})</span>`;
+    }
     const rows = [
       { label: "DB disk", value: dbDisk },
       { label: "PG connections", value: pg.connection_count ?? "-" },
-      { label: "Redis memory", value: redis.used_memory_human || "-" },
+      { label: "Redis memory", value: memValue },
+      { label: "Redis mem %", value: memPct },
+      { label: "Redis evicted", value: evictValue },
       { label: "Redis clients", value: redis.connected_clients ?? "-" },
       { label: "Redis ops/s", value: redis.instantaneous_ops_per_sec ?? "-" },
     ];

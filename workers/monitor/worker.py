@@ -113,6 +113,11 @@ async def _poll_loop(engine: alerts.AlertEngine) -> None:
                 continue
             snapshot = await poller.collect_snapshot()
             snapshot["broker_up"] = True
+            # Postgres reachability rides in the snapshot (the collector records
+            # an ``error`` under ``postgres`` when its queries fail). Drive the
+            # PG up/down alert off that, same cadence as the broker check.
+            pg_up = "error" not in (snapshot.get("postgres") or {})
+            await engine.handle_postgres_health(pg_up)
             _latest_snapshot = snapshot
             # Persist history at a slower cadence than the live UI tick to
             # keep Redis memory bounded.

@@ -102,7 +102,7 @@
   }
 
   function seriesToDataset(label, points, color, opts = {}) {
-    return {
+    const ds = {
       label,
       data: points.map(p => ({ x: p[0], y: p[1] })),
       borderColor: color,
@@ -113,6 +113,8 @@
       tension: 0.2,
       stepped: opts.stepped ?? false,
     };
+    if (opts.dash) ds.borderDash = opts.dash;
+    return ds;
   }
 
   // ---- data loaders ---------------------------------------------------
@@ -328,13 +330,16 @@
     const { since, until } = currentWindow;
     const r = await fetchJSON(
       `api/historical/metrics?${qs({
-        metric: "redis:used_memory_bytes,pg:connection_count,pg:db_size_bytes,redis:ops_per_sec,pg:disk_used_pct",
+        metric: "redis:used_memory_bytes,redis:maxmemory_bytes,pg:connection_count,pg:db_size_bytes,redis:ops_per_sec,pg:disk_used_pct",
         since, until,
       })}`
     );
     if (!charts.redisMem) charts.redisMem = mkChart("redis-mem-chart", "line", []);
     replaceDatasets(charts.redisMem, [
       seriesToDataset("Redis memory", r.series["redis:used_memory_bytes"] || [], COLORS[0], { fill: true }),
+      // Dashed reference line for the cap, so headroom (and how close usage ran
+      // to it) reads directly off the chart.
+      seriesToDataset("Redis maxmemory", r.series["redis:maxmemory_bytes"] || [], COLORS[3], { dash: [6, 4] }),
       seriesToDataset("Postgres DB size", r.series["pg:db_size_bytes"] || [], COLORS[4], { fill: false }),
     ]);
     charts.redisMem.options.scales.y.ticks.callback = v => fmtBytes(v);
