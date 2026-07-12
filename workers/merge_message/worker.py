@@ -3,13 +3,11 @@
 import asyncio
 import json
 import logging
-import multiprocessing
 import os
 import time
 import traceback
 import uuid
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
 from typing import Any, Union
@@ -31,6 +29,7 @@ from shepherd_utils.db import (
     save_message_sync,
 )
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
 
 # Queue name
@@ -657,21 +656,6 @@ def merge_messages(
 # ---------------------------------------------------------------------------
 
 
-def _init_worker():
-    """Initializer run once per spawned worker process."""
-    import faulthandler
-
-    # Print C-level tracebacks to stderr on segfault / abort, so we get
-    # something actionable instead of a silent BrokenProcessPool.
-    faulthandler.enable()
-    # Minimal logging config so log calls inside the worker reach stderr,
-    # which the parent's container/log collector will pick up.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [worker %(process)d] %(levelname)s %(name)s: %(message)s",
-    )
-
-
 def merge_messages_by_ids(
     target: str,
     query_id: str,
@@ -735,15 +719,6 @@ def merge_messages_by_id(
     return bool(merged)
 
 
-def _make_executor(max_workers: int) -> ProcessPoolExecutor:
-    """Build a fresh ProcessPoolExecutor using the spawn start method."""
-    return ProcessPoolExecutor(
-        max_workers=max_workers,
-        mp_context=multiprocessing.get_context("spawn"),
-        initializer=_init_worker,
-    )
-
-
 async def _reenqueue_wake_task(task, logger):
     """Put a fresh merge_message wake task back on the stream.
 
@@ -761,17 +736,11 @@ async def poll_for_tasks():
     cpu_count = os.cpu_count()
     cpu_count = cpu_count if cpu_count is not None else 1
     cpu_count = min(cpu_count, TASK_LIMIT)
-    # Single-element holder so concurrent process_query coroutines and the
-    # crash-recovery path share one executor reference even when it is swapped
-    # out after a BrokenProcessPool.
-    executor_holder = {"executor": _make_executor(cpu_count)}
-    executor_lock = asyncio.Lock()
-
-    async def _recreate_executor(broken):
-        async with executor_lock:
-            if executor_holder["executor"] is broken:
-                broken.shutdown(wait=False, cancel_futures=True)
-                executor_holder["executor"] = _make_executor(cpu_count)
+    # Shared self-healing pool: spawn-context executor that replaces itself in
+    # place on a BrokenProcessPool (same implementation the aragorn.omnicorp /
+    # aragorn.score / arax.rank workers use). run() swaps the dead pool before
+    # re-raising, so the except block below just does the merge-specific cleanup.
+    pool = ProcessPoolManager(cpu_count, name="merge_message process pool")
 
     async def _clear_batch(response_id, callback_ids, logger):
         """Drop a processed batch from the ready index and callbacks table.
@@ -842,8 +811,8 @@ async def poll_for_tasks():
                             break
                         if settings.merge_max_fold > 0:
                             ready = ready[: settings.merge_max_fold]
-                        merged = await loop.run_in_executor(
-                            executor_holder["executor"],
+                        merged = await pool.run(
+                            loop,
                             merge_messages_by_ids,
                             target,
                             query_id,
@@ -855,11 +824,11 @@ async def poll_for_tasks():
                         # Keep our lock alive across a long multi-pass drain.
                         await refresh_lock(response_id, CONSUMER, 45000, logger)
                 except BrokenProcessPool:
+                    # pool.run already swapped in a fresh executor; here we just
+                    # release the lock and re-enqueue so the callback is retried.
                     logger.error(
-                        f"[{callback_id}] Process pool broken; recreating and "
-                        "re-enqueuing."
+                        f"[{callback_id}] Process pool broken; re-enqueuing."
                     )
-                    await _recreate_executor(executor_holder["executor"])
                     await remove_lock(response_id, CONSUMER, logger)
                     await _reenqueue_wake_task(task, logger)
                     span.set_attribute("drained_callbacks", drained)
@@ -927,7 +896,7 @@ async def poll_for_tasks():
             logging.info("Poll loop cancelled, shutting down.")
             for t in inflight:
                 t.cancel()
-            executor_holder["executor"].shutdown(wait=False, cancel_futures=True)
+            pool.shutdown()
             return
         except Exception as e:
             logging.error(f"Error in task polling loop: {e}", exc_info=True)
