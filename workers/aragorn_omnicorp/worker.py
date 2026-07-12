@@ -26,6 +26,7 @@ from uuid import uuid4
 import lmdb
 
 from shepherd_utils.config import settings
+from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -558,14 +559,18 @@ async def process_task(
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     loop = asyncio.get_running_loop()
-    # The overlay is CPU-bound, so cap real parallelism at the number of cores
-    # (mirrors aragorn_score). Extra in-flight tasks queue against the pool
-    # without blocking the loop.
-    cpu_count = os.cpu_count()
-    cpu_count = cpu_count if cpu_count is not None else 1
-    cpu_count = min(cpu_count, TASK_LIMIT)
+    # The overlay is CPU-bound, so cap real parallelism at the number of cores.
+    # Each pool child loads a full (potentially large) message into memory, so
+    # this count is also what bounds peak memory -- it MUST reflect the pod's
+    # actual CPU allocation, not os.cpu_count() (which reports the whole node's
+    # cores and would size the pool for a many-core host, running many big
+    # messages at once and OOM-killing the pod). resolve_pool_workers reads the
+    # cgroup CPU limit and honours a POOL_MAX_WORKERS override for memory-tight
+    # deployments. Extra in-flight tasks queue against the pool without blocking.
+    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
+    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     pool = ProcessPoolManager(
-        cpu_count,
+        max_workers,
         max_tasks_per_child=OMNICORP_MAX_TASKS_PER_CHILD,
         name="aragorn.omnicorp process pool",
     )

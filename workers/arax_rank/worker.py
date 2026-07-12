@@ -13,9 +13,9 @@ adapted for Shepherd's dict-based TRAPI message structure.
 import asyncio
 import json
 import logging
-import os
 import uuid
 
+from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -112,10 +112,13 @@ async def poll_for_tasks() -> None:
     for better performance.
     """
     loop = asyncio.get_running_loop()
-    cpu_count = os.cpu_count()
-    cpu_count = cpu_count if cpu_count is not None else 1
-    cpu_count = min(cpu_count, TASK_LIMIT)
-    pool = ProcessPoolManager(cpu_count, name="arax.rank process pool")
+    # Size the pool by the pod's actual CPU allocation (cgroup limit), not
+    # os.cpu_count() -- see aragorn_omnicorp.poll_for_tasks. arax_rank hands the
+    # full message to the child, so this also bounds peak memory. POOL_MAX_WORKERS
+    # overrides.
+    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
+    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    pool = ProcessPoolManager(max_workers, name="arax.rank process pool")
 
     while True:
         try:
