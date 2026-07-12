@@ -30,7 +30,7 @@ from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks, request_shutdown, run_task_lifecycle
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
 STREAM = "aragorn.omnicorp"
@@ -573,7 +573,6 @@ async def poll_for_tasks():
         max_workers,
         max_tasks_per_child=OMNICORP_MAX_TASKS_PER_CHILD,
         name="aragorn.omnicorp process pool",
-        on_broken=request_shutdown,
     )
     while True:
         try:

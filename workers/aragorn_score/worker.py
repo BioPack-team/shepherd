@@ -15,7 +15,7 @@ from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks, request_shutdown, run_task_lifecycle
+from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
 STREAM = "aragorn.score"
@@ -1256,11 +1256,7 @@ async def poll_for_tasks():
     # full message, so this also bounds peak memory. POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
     logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
-    pool = ProcessPoolManager(
-        max_workers,
-        name="aragorn.score process pool",
-        on_broken=request_shutdown,
-    )
+    pool = ProcessPoolManager(max_workers, name="aragorn.score process pool")
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
