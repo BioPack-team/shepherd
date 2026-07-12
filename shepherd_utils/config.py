@@ -153,6 +153,14 @@ class Settings(BaseSettings):
     # POOL_TASK_TIMEOUT_SEC; 0 disables the timeout.
     pool_task_timeout_sec: float = 300.0
 
+    # Recycle each process-pool child after this many tasks. A child that once
+    # processed a very large message keeps that peak RSS for its whole life
+    # (freed memory isn't fully returned to the OS), so long-lived children
+    # ratchet a worker toward its cgroup limit over time. Recycling returns that
+    # memory; the spawn cost is amortized over the interval. Per-Deployment
+    # override via POOL_MAX_TASKS_PER_CHILD; 0 disables recycling.
+    pool_max_tasks_per_child: int = 100
+
     # Event-loop liveness watchdog. A daemon thread force-exits the process if
     # the asyncio loop stops ticking for this long, turning any loop wedge (an
     # unexpected blocking call, a deadlock) into a Kubernetes restart instead of

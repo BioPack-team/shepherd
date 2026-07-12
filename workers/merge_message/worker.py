@@ -747,6 +747,7 @@ async def poll_for_tasks():
     # re-raising, so the except block below just does the merge-specific cleanup.
     pool = ProcessPoolManager(
         max_workers,
+        max_tasks_per_child=settings.pool_max_tasks_per_child,
         name="merge_message process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )

@@ -426,6 +426,98 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
     assert article_attrs and article_attrs[0]["value"] == 100
 
 
+def test_already_overlaid_detects_node_annotation():
+    assert worker._already_overlaid({"nodes": {}}) is False
+    assert worker._already_overlaid({"nodes": {"n": {"attributes": []}}}) is False
+    assert worker._already_overlaid({"nodes": {"n": {"attributes": None}}}) is False
+    assert (
+        worker._already_overlaid(
+            {
+                "nodes": {
+                    "n": {
+                        "attributes": [
+                            {
+                                "original_attribute_name": "omnicorp_article_count",
+                                "value": 5,
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        is True
+    )
+
+
+def test_omnicorp_overlay_is_idempotent_on_rerun(lmdb_envs):
+    """Re-running the overlay on an already-overlaid message is a no-op.
+
+    Guards the reclaim-redelivery case (a prior run saved the overlaid message
+    but died before ACKing): without the guard a second pass would double node
+    counts and append duplicate co-occurrence edges.
+    """
+    in_message = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"set_interpretation": "BATCH"},
+                    "n1": {"set_interpretation": "BATCH"},
+                    "n2": {"set_interpretation": "BATCH"},
+                },
+                "edges": {"e0": {"subject": "n0", "object": "n1"}},
+            },
+            "knowledge_graph": {
+                "nodes": {
+                    "MONDO:0001": {"attributes": []},
+                    "CHEBI:0001": {"attributes": []},
+                    "HP:0001": {"attributes": []},
+                },
+                "edges": {
+                    "kedge_0": {
+                        "subject": "MONDO:0001",
+                        "object": "CHEBI:0001",
+                        "attributes": [],
+                    },
+                },
+            },
+            "results": [
+                {
+                    "node_bindings": {
+                        "n0": [{"id": "MONDO:0001"}],
+                        "n1": [{"id": "CHEBI:0001"}],
+                        "n2": [{"id": "HP:0001"}],
+                    },
+                    "analyses": [{"edge_bindings": {"e0": [{"id": "kedge_0"}]}}],
+                }
+            ],
+        }
+    }
+
+    logger = logging.getLogger(__name__)
+    once = worker.omnicorp_overlay(copy.deepcopy(in_message), logger)
+    # Feed the already-overlaid output back through, as a reclaim would.
+    twice = worker.omnicorp_overlay(copy.deepcopy(once), logger)
+
+    def article_counts(msg, node_id):
+        return [
+            a
+            for a in msg["message"]["knowledge_graph"]["nodes"][node_id]["attributes"]
+            if a.get("original_attribute_name") == "omnicorp_article_count"
+        ]
+
+    def cooccurrence_edges(msg):
+        return [
+            e
+            for e in msg["message"]["knowledge_graph"]["edges"].values()
+            if e.get("predicate") == "biolink:occurs_together_in_literature_with"
+        ]
+
+    # Node counts are not doubled and no duplicate edges were appended.
+    for node_id in ("MONDO:0001", "CHEBI:0001", "HP:0001"):
+        assert len(article_counts(twice, node_id)) == 1
+    assert len(cooccurrence_edges(twice)) == len(cooccurrence_edges(once))
+
+
 def test_generate_curie_pairs_stops_at_max_pairs():
     """``max_pairs`` bounds the mapping instead of materializing every pair."""
     from workers.aragorn_omnicorp.worker import generate_curie_pairs

@@ -72,10 +72,10 @@ class ProcessPoolManager:
 
     Args:
         max_workers: pool size handed to ``ProcessPoolExecutor``.
-        max_tasks_per_child: optional ceiling on tasks a single child runs
-            before it recycles, returning the memory a large message forced it
-            to grow back to the OS. ``None`` (default) leaves children alive for
-            the pool's lifetime.
+        max_tasks_per_child: ceiling on tasks a single child runs before it
+            recycles, returning the memory a large message forced it to grow
+            back to the OS. ``None`` or <= 0 leaves children alive for the
+            pool's lifetime.
         name: label used in the log line emitted when the pool is replaced.
         task_timeout: per-task ceiling in seconds. When a task exceeds it, the
             running child is killed, the pool is rebuilt, and ``run`` raises
@@ -105,7 +105,9 @@ class ProcessPoolManager:
             "mp_context": self._ctx,
             "initializer": _init_pool_worker,
         }
-        if self._max_tasks_per_child is not None:
+        # ProcessPoolExecutor rejects max_tasks_per_child <= 0, so only pass a
+        # positive value; None / 0 / negative means "don't recycle".
+        if self._max_tasks_per_child and self._max_tasks_per_child > 0:
             kwargs["max_tasks_per_child"] = self._max_tasks_per_child
         return ProcessPoolExecutor(**kwargs)
 

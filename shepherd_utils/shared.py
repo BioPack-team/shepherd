@@ -92,6 +92,18 @@ def _request_shutdown() -> None:
     _shutdown.set()
 
 
+def _hard_exit(code: int) -> None:
+    """Terminate the process immediately, bypassing atexit handlers.
+
+    ``os._exit`` skips the interpreter-shutdown atexit join of the process pool,
+    which could otherwise block a self-heal restart if a pool child is wedged
+    mid-task. Used for the involuntary exits (broker wedge, loop watchdog) where
+    getting the pod recycled promptly matters more than clean teardown. Wrapped
+    so tests can substitute it instead of actually killing the test process.
+    """
+    os._exit(code)
+
+
 class LoopWatchdog:
     """Force-exits the process if the asyncio event loop stops ticking.
 
@@ -264,7 +276,9 @@ def _exit_if_broker_wedged(stream: str, logger: logging.Logger) -> None:
             f"exiting so this {stream} worker is rescheduled with a fresh "
             "broker connection."
         )
-        sys.exit(1)
+        # Hard exit: the broker is unreachable, so there's nothing to flush, and
+        # os._exit avoids blocking on the pool's atexit join if a child is busy.
+        _hard_exit(1)
 
 
 def _resolve_task_limit(stream: str, default: int, logger: logging.Logger) -> int:

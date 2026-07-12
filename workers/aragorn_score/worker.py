@@ -1259,6 +1259,7 @@ async def poll_for_tasks():
     logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     pool = ProcessPoolManager(
         max_workers,
+        max_tasks_per_child=settings.pool_max_tasks_per_child,
         name="aragorn.score process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )

@@ -146,13 +146,17 @@ def test_exit_if_broker_wedged_stays_quiet_when_healthy(monkeypatch):
 
 def test_exit_if_broker_wedged_exits_after_threshold(monkeypatch):
     """Once the broker has been unreachable past the window, the worker exits
-    non-zero so Kubernetes reschedules it."""
+    non-zero so Kubernetes reschedules it. Uses a hard exit (os._exit) so a
+    busy pool's atexit join can't stall the restart -- patched here so it
+    doesn't kill the test process."""
     monkeypatch.setattr(settings, "broker_unhealthy_exit_sec", 300.0)
     monkeypatch.setattr(shared.broker_health, "seconds_since_success", lambda: 301.0)
+    exits = []
+    monkeypatch.setattr(shared, "_hard_exit", lambda code: exits.append(code))
 
-    with pytest.raises(SystemExit) as exc:
-        shared._exit_if_broker_wedged("aragorn.score", logger)
-    assert exc.value.code == 1
+    shared._exit_if_broker_wedged("aragorn.score", logger)
+
+    assert exits == [1]
 
 
 def test_exit_if_broker_wedged_disabled_with_zero(monkeypatch):
