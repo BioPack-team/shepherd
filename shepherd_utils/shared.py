@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
@@ -80,6 +81,7 @@ setup_logging()
 _shutdown = asyncio.Event()
 _active_heartbeat: "Heartbeat | None" = None
 _signal_handlers_installed = False
+_loop_watchdog: "LoopWatchdog | None" = None
 
 
 def is_shutting_down() -> bool:
@@ -90,6 +92,71 @@ def _request_shutdown() -> None:
     _shutdown.set()
 
 
+class LoopWatchdog:
+    """Force-exits the process if the asyncio event loop stops ticking.
+
+    An asyncio task bumps ``_last_tick`` every ``tick_interval`` seconds. A
+    separate daemon *thread* -- deliberately off the loop, so it keeps running
+    even when the loop is wedged -- checks how long it's been since the last
+    tick. If the loop has been blocked longer than ``stall_timeout`` the process
+    is hard-exited (``os._exit``, bypassing atexit so a stuck pool can't block
+    the exit) and Kubernetes restarts it. This turns any loop wedge into a
+    restart instead of an indefinite hang whose heartbeat has silently died.
+
+    Skips firing while a shutdown is in progress -- the drain path owns that exit
+    and a slow drain must not be mistaken for a wedge.
+    """
+
+    def __init__(self, stall_timeout_sec: float, tick_interval_sec: float = 1.0, on_stall=None):
+        self._stall_timeout = stall_timeout_sec
+        self._tick_interval = tick_interval_sec
+        self._on_stall = on_stall or self._force_exit
+        self._last_tick = time.monotonic()
+        self._tick_task: "asyncio.Task | None" = None
+        self._thread: "threading.Thread | None" = None
+
+    def _stalled_for(self) -> float:
+        return time.monotonic() - self._last_tick
+
+    def _should_fire(self) -> bool:
+        if is_shutting_down():
+            return False
+        return self._stalled_for() >= self._stall_timeout
+
+    def _force_exit(self, stalled: float) -> None:
+        try:
+            sys.stderr.write(
+                f"[loop-watchdog] event loop stalled {stalled:.0f}s "
+                f">= {self._stall_timeout:.0f}s threshold; force-exiting for a "
+                "clean restart.\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(1)
+
+    async def _tick_loop(self) -> None:
+        while True:
+            self._last_tick = time.monotonic()
+            await asyncio.sleep(self._tick_interval)
+
+    def _watch(self) -> None:
+        while True:
+            time.sleep(self._tick_interval)
+            if self._should_fire():
+                self._on_stall(self._stalled_for())
+                return
+
+    def start(self) -> "LoopWatchdog":
+        self._last_tick = time.monotonic()
+        self._tick_task = asyncio.create_task(self._tick_loop())
+        self._thread = threading.Thread(
+            target=self._watch, name="loop-watchdog", daemon=True
+        )
+        self._thread.start()
+        return self
+
+
 def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
     """Install asyncio-aware SIGTERM/SIGINT handlers (idempotent).
 
@@ -97,7 +164,7 @@ def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
     a running event loop: the callback runs between awaits rather than in the
     interrupt context, so it can flip an ``asyncio.Event`` the drain loop awaits.
     """
-    global _signal_handlers_installed, _active_heartbeat
+    global _signal_handlers_installed, _active_heartbeat, _loop_watchdog
     # Always update the heartbeat reference so the marker is written for the
     # currently-active worker even if get_tasks is re-entered after an error.
     _active_heartbeat = heartbeat
@@ -116,6 +183,13 @@ def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
                 signal.signal(sig, lambda *_: _request_shutdown())
             except (ValueError, OSError):
                 pass
+    # Loop-liveness watchdog: force-exit (for a Kubernetes restart) if the event
+    # loop ever wedges, instead of hanging forever with a silently-dead
+    # heartbeat. Installed alongside the shutdown handlers so it covers every
+    # worker; a stall_limit of 0 disables it.
+    stall_limit = float(settings.worker_loop_stall_exit_sec)
+    if stall_limit > 0 and _loop_watchdog is None:
+        _loop_watchdog = LoopWatchdog(stall_limit).start()
     _signal_handlers_installed = True
 
 

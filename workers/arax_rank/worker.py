@@ -15,6 +15,7 @@ import json
 import logging
 import uuid
 
+from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.otel import setup_tracer
@@ -118,7 +119,11 @@ async def poll_for_tasks() -> None:
     # overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
     logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
-    pool = ProcessPoolManager(max_workers, name="arax.rank process pool")
+    pool = ProcessPoolManager(
+        max_workers,
+        name="arax.rank process pool",
+        task_timeout=settings.pool_task_timeout_sec,
+    )
 
     while True:
         try:

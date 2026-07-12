@@ -36,6 +36,14 @@ def _get_start_method(_):
     return multiprocessing.get_start_method()
 
 
+def _sleep(seconds):
+    # Runs in a child; blocks so we can exercise the task timeout.
+    import time
+
+    time.sleep(seconds)
+    return "done"
+
+
 async def test_pool_uses_spawn_start_method():
     """Children must be spawned, not forked (fork risks a loop-thread deadlock)."""
     loop = asyncio.get_running_loop()
@@ -64,6 +72,41 @@ async def test_manager_recovers_after_child_dies():
 
         # ...so the next task runs on the healthy pool instead of re-raising.
         assert await pool.run(loop, _echo, "after") == "after"
+    finally:
+        pool.shutdown()
+
+
+async def test_run_times_out_kills_child_and_recovers():
+    """A task that overruns task_timeout is killed and the pool rebuilt.
+
+    Without this a hung child would hold its pool slot forever and, with a small
+    pool, silently stall the whole worker. The task must fail (TimeoutError) and
+    the very next task must succeed on a fresh pool.
+    """
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=1.0)
+    try:
+        first = pool._executor
+
+        # Child sleeps well past the 1s limit -> the run must time out.
+        with pytest.raises(asyncio.TimeoutError):
+            await pool.run(loop, _sleep, 30)
+
+        # The stuck child was killed and the pool replaced...
+        assert pool._executor is not first
+
+        # ...so the next task runs on a healthy pool.
+        assert await pool.run(loop, _echo, "after") == "after"
+    finally:
+        pool.shutdown()
+
+
+async def test_no_timeout_when_task_timeout_unset():
+    """With task_timeout None, a fast task still completes normally."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        assert await pool.run(loop, _echo, "ok") == "ok"
     finally:
         pool.shutdown()
 

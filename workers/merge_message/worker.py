@@ -745,7 +745,11 @@ async def poll_for_tasks():
     # place on a BrokenProcessPool (same implementation the aragorn.omnicorp /
     # aragorn.score / arax.rank workers use). run() swaps the dead pool before
     # re-raising, so the except block below just does the merge-specific cleanup.
-    pool = ProcessPoolManager(max_workers, name="merge_message process pool")
+    pool = ProcessPoolManager(
+        max_workers,
+        name="merge_message process pool",
+        task_timeout=settings.pool_task_timeout_sec,
+    )
 
     async def _clear_batch(response_id, callback_ids, logger):
         """Drop a processed batch from the ready index and callbacks table.

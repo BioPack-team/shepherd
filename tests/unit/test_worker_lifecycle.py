@@ -11,6 +11,7 @@ per Deployment.
 
 import asyncio
 import logging
+import time
 
 import pytest
 
@@ -287,3 +288,49 @@ async def test_get_tasks_exits_when_shutdown_already_requested(monkeypatch):
 
 async def _async_noop(*args, **kwargs):
     return None
+
+
+# --- Loop-liveness watchdog -------------------------------------------------
+
+
+def test_watchdog_should_fire_only_when_stalled():
+    wd = shared.LoopWatchdog(stall_timeout_sec=10.0, on_stall=lambda s: None)
+    # A fresh tick is not a stall.
+    wd._last_tick = time.monotonic()
+    assert wd._should_fire() is False
+    # Stale beyond the threshold -> fire.
+    wd._last_tick = time.monotonic() - 11.0
+    assert wd._should_fire() is True
+
+
+def test_watchdog_does_not_fire_during_shutdown():
+    shared._request_shutdown()  # reset by the autouse fixture
+    wd = shared.LoopWatchdog(stall_timeout_sec=0.0, on_stall=lambda s: None)
+    wd._last_tick = time.monotonic() - 100.0  # very stale
+    # Intentional shutdown owns the exit; the watchdog must stand down.
+    assert wd._should_fire() is False
+
+
+def test_watchdog_watch_thread_invokes_on_stall():
+    fired = []
+    wd = shared.LoopWatchdog(
+        stall_timeout_sec=0.0,  # any staleness counts
+        tick_interval_sec=0.01,
+        on_stall=lambda stalled: fired.append(stalled),
+    )
+    wd._last_tick = time.monotonic() - 1.0
+    # _watch sleeps one interval, sees the stall, fires on_stall, and returns.
+    wd._watch()
+    assert len(fired) == 1
+
+
+async def test_watchdog_tick_loop_refreshes_timestamp():
+    wd = shared.LoopWatchdog(stall_timeout_sec=100.0, tick_interval_sec=0.01)
+    wd._last_tick = time.monotonic() - 50.0  # pretend it went stale
+    task = asyncio.create_task(wd._tick_loop())
+    try:
+        await asyncio.sleep(0.05)  # let the loop tick a few times
+        # The tick loop refreshed the timestamp back to ~now.
+        assert wd._stalled_for() < 1.0
+    finally:
+        task.cancel()

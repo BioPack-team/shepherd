@@ -573,6 +573,7 @@ async def poll_for_tasks():
         max_workers,
         max_tasks_per_child=OMNICORP_MAX_TASKS_PER_CHILD,
         name="aragorn.omnicorp process pool",
+        task_timeout=settings.pool_task_timeout_sec,
     )
     while True:
         try:
