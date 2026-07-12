@@ -1,9 +1,9 @@
-"""Tests for the self-healing ProcessPoolManager.
+"""Tests for ProcessPoolManager's broken-pool handling.
 
-Regression coverage for the wedged-worker bug: a single OOM-killed child used
-to poison the shared ProcessPoolExecutor so every subsequent task failed with
-"A process in the process pool was terminated abruptly...". The manager must
-replace the broken pool so the very next task succeeds.
+When a pool child dies (e.g. an OOM kill), the manager must NOT rebuild the pool
+in-process -- doing that on the event loop thread can deadlock the worker. It
+instead fails the task and signals a clean restart exactly once via the
+``on_broken`` callback, which the workers wire to the graceful-drain shutdown.
 """
 
 import asyncio
@@ -27,43 +27,59 @@ def _suicide(_):
     os._exit(1)
 
 
-async def test_manager_recovers_after_child_dies():
+async def test_broken_pool_signals_restart_and_does_not_rebuild():
     loop = asyncio.get_running_loop()
-    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    calls = []
+    pool = ProcessPoolManager(
+        max_workers=1, name="test pool", on_broken=lambda: calls.append(1)
+    )
     try:
         # Healthy pool runs a task fine.
         assert await pool.run(loop, _echo, "before") == "before"
 
-        first = pool._executor
+        executor_before = pool._executor
 
-        # A child dying surfaces as BrokenProcessPool for the triggering task...
+        # A child dying surfaces as BrokenProcessPool for the triggering task.
         with pytest.raises(BrokenProcessPool):
             await pool.run(loop, _suicide, None)
 
-        # ...but the manager swaps in a fresh executor...
-        assert pool._executor is not first
-
-        # ...so the next task runs on the healthy pool instead of re-raising.
-        assert await pool.run(loop, _echo, "after") == "after"
+        # The pool is NOT rebuilt in-process (that risks a loop deadlock)...
+        assert pool._executor is executor_before
+        assert pool.is_broken is True
+        # ...instead a restart is requested exactly once.
+        assert calls == [1]
     finally:
         pool.shutdown()
 
 
-async def test_replace_is_idempotent_for_the_same_broken_pool():
-    """Concurrent tasks that all saw the same dead pool replace it only once."""
+async def test_broken_pool_signals_only_once_under_concurrent_failures():
+    """Every in-flight future on the dead pool raises; on_broken fires once."""
     loop = asyncio.get_running_loop()
-    pool = ProcessPoolManager(max_workers=2, name="test pool")
+    calls = []
+    pool = ProcessPoolManager(
+        max_workers=2, name="test pool", on_broken=lambda: calls.append(1)
+    )
     try:
         await pool.run(loop, _echo, "warmup")
-        broken = pool._executor
 
-        # Two callers both observed `broken`; the first swaps it, the second is
-        # a no-op (identity guard) rather than churning a second fresh pool.
-        await pool._replace(broken)
-        replaced_once = pool._executor
-        await pool._replace(broken)
+        results = await asyncio.gather(
+            pool.run(loop, _suicide, None),
+            pool.run(loop, _suicide, None),
+            return_exceptions=True,
+        )
+        assert all(isinstance(r, BrokenProcessPool) for r in results)
+        assert calls == [1]
+    finally:
+        pool.shutdown()
 
-        assert replaced_once is not broken
-        assert pool._executor is replaced_once
+
+async def test_broken_pool_without_callback_just_marks_broken():
+    """on_broken=None is tolerated (logs only); the flag still flips."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        with pytest.raises(BrokenProcessPool):
+            await pool.run(loop, _suicide, None)
+        assert pool.is_broken is True
     finally:
         pool.shutdown()

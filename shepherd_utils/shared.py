@@ -90,6 +90,18 @@ def _request_shutdown() -> None:
     _shutdown.set()
 
 
+def request_shutdown() -> None:
+    """Public trigger for the graceful-drain shutdown path.
+
+    Lets a worker component ask the poll loop to stop taking new work, drain
+    in-flight tasks, and exit so Kubernetes restarts it with a fresh process.
+    Used when a worker reaches a state it can't safely recover in-process --
+    e.g. a broken ``ProcessPoolExecutor`` that can't be rebuilt on the event
+    loop thread without risking a fork/at-fork deadlock.
+    """
+    _request_shutdown()
+
+
 def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
     """Install asyncio-aware SIGTERM/SIGINT handlers (idempotent).
 
