@@ -20,6 +20,7 @@ from shepherd_utils.broker import (
     try_lock,
 )
 from shepherd_utils.config import settings
+from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import (
     clear_ready_callback,
     get_message,
@@ -733,14 +734,18 @@ async def _reenqueue_wake_task(task, logger):
 
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
-    cpu_count = os.cpu_count()
-    cpu_count = cpu_count if cpu_count is not None else 1
-    cpu_count = min(cpu_count, TASK_LIMIT)
+    # Size by the pod's actual CPU allocation (cgroup limit), not os.cpu_count()
+    # which reports the whole node's cores. This one value drives both the pool
+    # and the in-flight task limit below: each merge runs a child that loads the
+    # growing response blob, so pool size == concurrency bounds peak memory.
+    # POOL_MAX_WORKERS overrides.
+    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
+    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     # Shared self-healing pool: spawn-context executor that replaces itself in
     # place on a BrokenProcessPool (same implementation the aragorn.omnicorp /
     # aragorn.score / arax.rank workers use). run() swaps the dead pool before
     # re-raising, so the except block below just does the merge-specific cleanup.
-    pool = ProcessPoolManager(cpu_count, name="merge_message process pool")
+    pool = ProcessPoolManager(max_workers, name="merge_message process pool")
 
     async def _clear_batch(response_id, callback_ids, logger):
         """Drop a processed batch from the ready index and callbacks table.
@@ -883,9 +888,9 @@ async def poll_for_tasks():
         try:
             # Dispatch each wake task concurrently. Distinct queries never share
             # a lock, so their merges run in parallel on the process pool; the
-            # task_limiter semaphore (sized to cpu_count) bounds concurrency.
+            # task_limiter semaphore (sized to max_workers) bounds concurrency.
             async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, cpu_count
+                STREAM, GROUP, CONSUMER, max_workers
             ):
                 t = asyncio.create_task(
                     process_query(task, parent_ctx, logger, limiter)
