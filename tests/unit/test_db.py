@@ -194,8 +194,16 @@ async def test_get_logs_sorts_by_timestamp(redis_mock):
     # Stored out of order: a merge log flushed before the lookup that preceded it.
     stored = [
         {"message": "merge", "timestamp": "2026-07-13T00:00:02+00:00", "level": "INFO"},
-        {"message": "lookup", "timestamp": "2026-07-13T00:00:01+00:00", "level": "INFO"},
-        {"message": "finish", "timestamp": "2026-07-13T00:00:03+00:00", "level": "INFO"},
+        {
+            "message": "lookup",
+            "timestamp": "2026-07-13T00:00:01+00:00",
+            "level": "INFO",
+        },
+        {
+            "message": "finish",
+            "timestamp": "2026-07-13T00:00:03+00:00",
+            "level": "INFO",
+        },
     ]
     await redis_mock["logs"].set("resp-sort", orjson.dumps(stored))
     out = await get_logs("resp-sort", logger)

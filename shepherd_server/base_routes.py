@@ -363,7 +363,12 @@ async def callback(
             "edges": {},
         }
 
-    logger.info(f"Got back {len(response['message']['results'])} results.")
+    logger.info(
+        f"[{callback_id}] Got back {len(response['message']['results'])} results."
+    )
+    logger.debug(
+        f"[{callback_id}] for query graph: {response['message'].get('query_graph')}"
+    )
     # get associated query id for this callback
     original_query = await get_callback_query_id(callback_id, logger)
     logger.debug(f"Got original query: {original_query}")

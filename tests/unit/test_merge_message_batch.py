@@ -120,9 +120,7 @@ def test_merge_messages_by_ids_returns_child_logs(mocker):
     assert any(
         "Missing callback c2" in entry.get("message", "") for entry in log_entries
     )
-    assert all(
-        "timestamp" in entry and "level" in entry for entry in log_entries
-    )
+    assert all("timestamp" in entry and "level" in entry for entry in log_entries)
 
 
 def test_merge_messages_by_ids_child_handler_not_leaked(mocker):
