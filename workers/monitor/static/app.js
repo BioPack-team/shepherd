@@ -13,6 +13,12 @@
   const infraEl = document.getElementById("infra");
   const alertsEl = document.getElementById("alerts");
   const eventsEl = document.getElementById("events");
+  const brokerBannerEl = document.getElementById("broker-banner");
+
+  // Client-side memory of when the broker outage began. The server sends a
+  // fresh broker_up=false snapshot each tick while it's down, so we latch the
+  // first one's timestamp to show "since ..." rather than the latest tick time.
+  let brokerDownSince = null;
 
   // Client-side rolling buffer of scaling events. The server sends fresh deltas
   // on each tick; we accumulate them so the user can see recent history.
@@ -382,10 +388,30 @@
     } else {
       dbDisk = fmtBytes(pg.db_size_bytes);
     }
+    // Redis memory: used / cap when a maxmemory is configured, plus a colorized
+    // % of the cap and eviction activity -- the headroom signals behind the
+    // redis_memory / redis_eviction alerts, visible at a glance.
+    const usedH = redis.used_memory_human
+      || (redis.used_memory_bytes ? fmtBytes(redis.used_memory_bytes) : "-");
+    const maxBytes = redis.maxmemory_bytes || 0;
+    const memValue = maxBytes ? `${usedH} / ${fmtBytes(maxBytes)}` : usedH;
+    let memPct = "-";
+    if (redis.maxmemory_pct != null) {
+      const p = redis.maxmemory_pct;
+      const color = p >= 95 ? "var(--bad)" : p >= 85 ? "var(--warn)" : null;
+      const text = `${p.toFixed(1)}%`;
+      memPct = color ? `<span style="color:${color}">${text}</span>` : text;
+    }
+    let evictValue = redis.evicted_keys == null ? "-" : fmt(redis.evicted_keys);
+    if ((redis.evicted_keys_delta || 0) > 0) {
+      evictValue = `<span style="color:var(--warn)">${fmt(redis.evicted_keys)} (+${fmt(redis.evicted_keys_delta)})</span>`;
+    }
     const rows = [
       { label: "DB disk", value: dbDisk },
       { label: "PG connections", value: pg.connection_count ?? "-" },
-      { label: "Redis memory", value: redis.used_memory_human || "-" },
+      { label: "Redis memory", value: memValue },
+      { label: "Redis mem %", value: memPct },
+      { label: "Redis evicted", value: evictValue },
       { label: "Redis clients", value: redis.connected_clients ?? "-" },
       { label: "Redis ops/s", value: redis.instantaneous_ops_per_sec ?? "-" },
     ];
@@ -431,8 +457,32 @@
       .join("");
   }
 
+  function showBrokerBanner(downSince) {
+    const when = downSince ? new Date(downSince * 1000).toLocaleTimeString() : "";
+    const ago = downSince ? ` (${fmtTimeAgo(downSince)})` : "";
+    brokerBannerEl.innerHTML = `
+      <span class="banner-icon">&#9888;</span>
+      <span class="banner-msg">Broker unreachable &mdash; workers can't read or write tasks. Worker-down alerts are suppressed and the panels below are frozen until it recovers.</span>
+      <span class="banner-detail">since ${when}${ago}</span>`;
+    brokerBannerEl.classList.remove("hidden");
+  }
+
+  function hideBrokerBanner() {
+    brokerBannerEl.classList.add("hidden");
+  }
+
   function applySnapshot(snap) {
     ensureCharts();
+    // Broker down: the snapshot carries no live data (workers/streams/etc. are
+    // empty). Surface a banner and freeze the last-known panels rather than
+    // wiping every card to zero, which would misread as "everything is gone".
+    if (snap.broker_up === false) {
+      if (brokerDownSince === null) brokerDownSince = snap.ts;
+      showBrokerBanner(brokerDownSince);
+      return;
+    }
+    if (brokerDownSince !== null) brokerDownSince = null;
+    hideBrokerBanner();
     lastUpdateEl.textContent = `updated ${new Date(snap.ts * 1000).toLocaleTimeString()}`;
     updateWorkers(snap.workers || {});
     updateStreams(snap.streams || {}, snap.ts);

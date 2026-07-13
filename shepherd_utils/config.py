@@ -173,6 +173,25 @@ class Settings(BaseSettings):
     # per worker. The poll loop ticks faster than this, so the buffer flushes
     # on a normal tick without a dedicated timer.
     monitor_down_debounce_sec: float = 5.0
+    # Broker (Redis) availability alerting. The poller pings the broker each
+    # tick. The broker must stay unreachable for this long before we fire the
+    # single ``broker_down`` alert, so a one-off slow/blip probe doesn't trip
+    # it. Sized above the broker socket_timeout (7s) for that reason.
+    monitor_broker_down_grace_sec: float = 15.0
+    # After the broker recovers, worker-down alerts are suppressed for this long.
+    # A broker restart wipes/staleness the heartbeat keys, so every worker type
+    # momentarily reads as zero-alive until it re-registers (heartbeat interval
+    # 5s, TTL 15s). Suppressing for this window turns the "all workers down"
+    # flood into just the ``broker_down``/``broker_recovered`` pair; a worker
+    # that is *genuinely* still down once the window elapses alerts as normal.
+    monitor_broker_recovery_grace_sec: int = 30
+    # Postgres availability alerting. Same debounce idea as the broker: Postgres
+    # must stay unreachable this long before the single ``postgres_down`` alert
+    # fires, so a transient query timeout doesn't trip it. No recovery-grace
+    # counterpart is needed -- a Postgres outage doesn't zero out the worker
+    # heartbeats (those live in Redis), so there's no derived alert flood to
+    # suppress on the way back.
+    monitor_postgres_down_grace_sec: float = 15.0
     # A query that never reaches COMPLETED this long after it started is treated
     # as abandoned (the worker driving it almost certainly crashed). The janitor
     # marks it ABANDONED and clears its pending callbacks. Must comfortably

@@ -55,6 +55,9 @@ class Rule:
         self.stream = raw.get("stream")
         self.worker = raw.get("worker")
         self.threshold = raw.get("threshold")
+        # stuck_pending only: how long a consumer's held-but-unacked tasks must
+        # sit idle before it counts as wedged. Milliseconds, to match XINFO.
+        self.idle_ms = raw.get("idle_ms")
         self.duration = _parse_duration(raw.get("duration", 0))
         self.cooldown = _parse_duration(raw.get("cooldown", "10m"))
         self.severity = raw.get("severity", "warning")
@@ -89,6 +92,12 @@ class Rule:
             return None
         if self.kind == "db_capacity":
             return self._eval_db_capacity(snapshot)
+        if self.kind == "redis_memory":
+            return self._eval_redis_memory(snapshot)
+        if self.kind == "redis_eviction":
+            return self._eval_redis_eviction(snapshot)
+        if self.kind == "stuck_pending":
+            return self._eval_stuck_pending(snapshot)
         return None
 
     def _eval_threshold(self, snapshot: Dict[str, Any]) -> Optional[str]:
@@ -129,6 +138,77 @@ class Rule:
                 f"Postgres volume {pct:.1f}% full "
                 f"({used_gb:.1f}GB of {cap_gb:.1f}GB) >= {self.threshold}%"
             )
+        return None
+
+    def _eval_redis_memory(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when the broker's used memory crosses ``threshold`` percent of
+        its ``maxmemory`` cap.
+
+        This is the early warning the OOM-kill incident lacked: eviction (and,
+        if the cap sits at the container limit, an OOM-kill) only bites once
+        usage nears the cap, so crossing e.g. 85% is the actionable signal. A
+        no-op when the broker runs uncapped (``maxmemory`` 0) since there's no
+        denominator.
+        """
+        redis = snapshot.get("redis", {})
+        maxmem = redis.get("maxmemory_bytes", 0)
+        used = redis.get("used_memory_bytes", 0)
+        if not maxmem or self.threshold is None:
+            return None
+        pct = 100.0 * used / maxmem
+        if pct >= float(self.threshold):
+            return (
+                f"Redis memory {pct:.1f}% of maxmemory "
+                f"({used / 1e9:.1f}GB of {maxmem / 1e9:.1f}GB) >= {self.threshold}%"
+            )
+        return None
+
+    def _eval_redis_eviction(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when the broker evicted keys in the last interval.
+
+        With the ``volatile-ttl`` policy, eviction only happens once the broker
+        is *at* its maxmemory cap, so a non-zero delta is a definitive "the cap
+        has been reached and blobs are being shed" signal -- distinct from the
+        percentage warning above, which is a lead indicator. ``threshold``
+        defaults to 0 (any eviction); raise it to ignore trivial churn.
+        """
+        redis = snapshot.get("redis", {})
+        delta = redis.get("evicted_keys_delta", 0)
+        floor = float(self.threshold) if self.threshold is not None else 0.0
+        if delta > floor:
+            return (
+                f"Redis evicted {delta} key(s) in the last interval -- broker is "
+                "at its maxmemory cap and shedding data"
+            )
+        return None
+
+    def _eval_stuck_pending(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when a consumer is holding tasks it hasn't acked for too long.
+
+        This catches a *wedged* worker: one whose heartbeat may still be live
+        (so ``heartbeat_lost`` never trips) but which grabbed stream messages
+        and then stopped processing -- they sit in its pending-entries list,
+        idle, until reclaim eventually rescues them. Distinct from a plain
+        backlog (``xlen`` high but actively draining). Scans every stream when
+        no ``stream`` is named, so one rule covers the whole fleet.
+        """
+        streams = snapshot.get("streams", {})
+        targets = [self.stream] if self.stream else list(streams.keys())
+        min_pending = int(self.threshold) if self.threshold is not None else 1
+        idle_ms = float(self.idle_ms) if self.idle_ms is not None else 60000.0
+        stuck: List[str] = []
+        for name in targets:
+            stats = streams.get(name) or {}
+            for c in stats.get("consumers", []):
+                if (c.get("pending", 0) or 0) >= min_pending and (
+                    c.get("idle_ms", 0) or 0
+                ) >= idle_ms:
+                    stuck.append(
+                        f"{name}/{c.get('name')} "
+                        f"({c.get('pending')} pending, idle {c.get('idle_ms', 0) / 1000:.0f}s)"
+                    )
+        if stuck:
+            return "wedged consumers holding unacked tasks: " + ", ".join(stuck)
         return None
 
     def _eval_heartbeat_lost(self, snapshot: Dict[str, Any]) -> Optional[str]:
@@ -181,10 +261,160 @@ class AlertEngine:
         # The buffer flushes on a normal poll tick once the window elapses.
         self._down_buffer: Dict[str, Dict[str, Any]] = {}
         self._down_buffer_started_at: float = 0.0
+        # Broker-availability state machine. Driven once per poll tick by
+        # ``handle_broker_health``. We track it in-process (not via a Redis
+        # cooldown key) precisely because the broker is unreachable when it
+        # matters -- a Redis-backed guard couldn't be written then. ``_broker_up``
+        # is the last-observed state; ``_broker_down_since`` debounces transient
+        # blips before we alert; ``_broker_down_alerted`` makes the down-alert
+        # fire once per outage; ``_broker_recovered_at`` opens the grace window
+        # during which the post-restart worker-down flood is suppressed.
+        self._broker_up: bool = True
+        self._broker_down_since: float = 0.0
+        self._broker_down_alerted: bool = False
+        self._broker_recovered_at: float = 0.0
+        # Postgres-availability state machine. Same debounce/fire-once shape as
+        # the broker's, minus the recovery-grace window (a PG outage doesn't
+        # zero out heartbeats, so there's no worker-down flood to suppress).
+        self._pg_up: bool = True
+        self._pg_down_since: float = 0.0
+        self._pg_down_alerted: bool = False
 
     @property
     def in_startup_grace(self) -> bool:
         return (time.time() - self._boot_time) < settings.monitor_startup_grace_sec
+
+    @property
+    def in_broker_recovery_grace(self) -> bool:
+        """True while we're inside the post-recovery window (or broker is down).
+
+        Worker-down alerts are suppressed in this window because a broker
+        restart transiently zeroes every worker's heartbeats until they
+        re-register -- that's not the workers dying, it's the broker having
+        just come back.
+        """
+        if not self._broker_up:
+            return True
+        if not self._broker_recovered_at:
+            return False
+        return (
+            time.time() - self._broker_recovered_at
+        ) < settings.monitor_broker_recovery_grace_sec
+
+    async def handle_broker_health(self, is_up: bool) -> None:
+        """Drive the broker up/down state machine and emit broker alerts.
+
+        Called every poll tick with the result of ``poller.probe_broker()``.
+        Fires exactly one ``broker_down`` alert per outage (after a debounce
+        window) and one ``broker_recovered`` alert when it returns.
+        """
+        now = time.time()
+        if not is_up:
+            if self._broker_up:
+                # Healthy -> down edge: start the debounce clock.
+                self._broker_up = False
+                self._broker_down_since = now
+            elif (
+                not self._broker_down_alerted
+                and (now - self._broker_down_since)
+                >= settings.monitor_broker_down_grace_sec
+            ):
+                # Sustained outage: fire once. Slack/email dispatch does not go
+                # through the broker, so this gets out even while Redis is down;
+                # the Redis-backed history write inside _record_alert degrades
+                # gracefully and the Postgres archive still lands.
+                self._broker_down_alerted = True
+                event = {
+                    "ts": now,
+                    "rule": "broker_down",
+                    "severity": "critical",
+                    "detail": "broker unreachable (PING failed)",
+                    "message": (
+                        "Broker `redis` is unreachable -- workers cannot read or "
+                        "write tasks. Worker-down alerts are suppressed until it "
+                        "recovers so this outage isn't buried under a flood of "
+                        "derived worker-crash alerts."
+                    ),
+                }
+                await _record_alert(event)
+                await dispatch(event)
+            return
+        # is_up
+        if not self._broker_up:
+            # Down -> up edge: open the recovery grace window and announce it.
+            self._broker_up = True
+            self._broker_recovered_at = now
+            was_alerted = self._broker_down_alerted
+            self._broker_down_since = 0.0
+            self._broker_down_alerted = False
+            # Only announce recovery if we actually announced the outage, so a
+            # sub-debounce blip stays silent on both edges.
+            if was_alerted:
+                event = {
+                    "ts": now,
+                    "rule": "broker_recovered",
+                    "severity": "info",
+                    "detail": "broker answering PING again",
+                    "message": (
+                        "Broker `redis` is reachable again. Worker-down alerts "
+                        f"stay suppressed for {settings.monitor_broker_recovery_grace_sec}s "
+                        "while workers re-register their heartbeats."
+                    ),
+                }
+                await _record_alert(event)
+                await dispatch(event)
+
+    async def handle_postgres_health(self, is_up: bool) -> None:
+        """Drive the Postgres up/down state machine and emit its alerts.
+
+        Called every poll tick with whether the latest snapshot reached
+        Postgres. Fires one ``postgres_down`` alert per outage (after a debounce
+        window) and one ``postgres_recovered`` when it returns. Unlike the
+        broker, the alert path (Redis cooldowns, Slack/email) doesn't depend on
+        Postgres, so ordinary dispatch works throughout the outage.
+        """
+        now = time.time()
+        if not is_up:
+            if self._pg_up:
+                self._pg_up = False
+                self._pg_down_since = now
+            elif (
+                not self._pg_down_alerted
+                and (now - self._pg_down_since)
+                >= settings.monitor_postgres_down_grace_sec
+            ):
+                self._pg_down_alerted = True
+                event = {
+                    "ts": now,
+                    "rule": "postgres_down",
+                    "severity": "critical",
+                    "detail": "postgres unreachable",
+                    "message": (
+                        "Postgres is unreachable -- durable query state can't be "
+                        "read or written, and the janitor can't purge or reap "
+                        "abandoned queries. Redis-backed task flow may still run, "
+                        "so this can be silent without this alert."
+                    ),
+                }
+                await _record_alert(event)
+                await dispatch(event)
+            return
+        # is_up
+        if not self._pg_up:
+            self._pg_up = True
+            was_alerted = self._pg_down_alerted
+            self._pg_down_since = 0.0
+            self._pg_down_alerted = False
+            if was_alerted:
+                event = {
+                    "ts": now,
+                    "rule": "postgres_recovered",
+                    "severity": "info",
+                    "detail": "postgres reachable again",
+                    "message": "Postgres is reachable again.",
+                }
+                await _record_alert(event)
+                await dispatch(event)
 
     async def _in_cooldown(self, rule: Rule) -> bool:
         try:
@@ -233,6 +463,13 @@ class AlertEngine:
         """Return the list of alerts that fired on this snapshot."""
         now = snapshot["ts"]
         fired: List[Dict[str, Any]] = []
+        # Worker-down alerts are suppressed both at boot (startup grace) and
+        # around a broker outage (recovery grace): in either case a worker type
+        # reads as zero-alive not because it died but because heartbeats haven't
+        # (re-)registered yet. A broker restart otherwise turns into ~one
+        # worker-crash alert per worker type -- the flood the broker_down alert
+        # is meant to replace.
+        suppress_worker_down = self.in_startup_grace or self.in_broker_recovery_grace
         for rule in self.rules:
             detail = rule.evaluate(snapshot)
             if detail is None:
@@ -242,6 +479,13 @@ class AlertEngine:
                 rule._first_fired_at = now
             duration_in_breach = now - rule._first_fired_at
             if duration_in_breach < rule.duration:
+                continue
+            if rule.kind == "heartbeat_lost" and rule.worker and suppress_worker_down:
+                # Boot or broker-recovery window: a zero-alive reading here is an
+                # artifact of heartbeats not being (re-)registered, not a real
+                # loss. Skip WITHOUT arming the cooldown or recording an alert,
+                # and leave the breach streak intact -- so a worker that is
+                # genuinely still down once the window elapses fires promptly.
                 continue
             if await self._in_cooldown(rule):
                 continue
@@ -266,18 +510,18 @@ class AlertEngine:
         # because every worker type is supposed to have at least one instance
         # running. The message differentiates a crash from a clean scale-down
         # so the operator sees which one happened, but severity is the same.
-        startup_grace = self.in_startup_grace
         for ev in snapshot.get("events", []):
             if not (ev.get("type") == "scale_down" and ev.get("to") == 0):
                 continue
-            if startup_grace:
-                # The whole stack just came up; persistent worker state from a
-                # previous run looks "alive" but current heartbeats haven't
-                # arrived yet. Stay silent until workers have had a chance to
-                # register.
+            if suppress_worker_down:
+                # Either the whole stack just came up (startup grace) or the
+                # broker just restarted (recovery grace): persistent worker
+                # state looks "alive" but current heartbeats haven't arrived
+                # yet, so every worker type spuriously reads as crashed. Stay
+                # silent until workers have had a chance to (re-)register.
                 logger.debug(
                     f"Suppressing worker-down alert for {ev.get('worker')} "
-                    "during startup grace"
+                    "during startup/broker-recovery grace"
                 )
                 continue
             kind = ev.get("kind", "unknown")

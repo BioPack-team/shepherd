@@ -162,6 +162,37 @@ header h1 { margin: 0; font-size: 18px; font-weight: 600; flex-shrink: 0; }
   margin-top: -4px;
   border-radius: 50%;
   cursor: pointer;
+  z-index: 1;
+}
+/* Shaded band spanning a broker outage, drawn behind the event dots. */
+.timeline-bar .gap {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(248, 81, 73, 0.15);
+  border-left: 1px solid var(--bad);
+  border-right: 1px solid var(--bad);
+  z-index: 0;
+}
+.timeline-bar .gap.ongoing { border-right: none; }
+
+.timeline-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.timeline-legend .swatch {
+  display: inline-block;
+  width: 18px;
+  height: 10px;
+  border-radius: 2px;
+}
+.timeline-legend .swatch.broker-gap {
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid var(--bad);
 }
 .timeline-bar .dot.info { background: var(--accent); }
 .timeline-bar .dot.warning { background: var(--warn); }
@@ -184,6 +215,27 @@ header h1 { margin: 0; font-size: 18px; font-weight: 600; flex-shrink: 0; }
 .badge.offline { background: rgba(248, 81, 73, 0.15); color: var(--bad); }
 
 main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+/* Full-width status banner (e.g. broker unreachable). Sits above all sections
+   so it's the first thing seen when the dashboard's data source is down. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  margin-bottom: 24px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.banner.hidden { display: none; }
+.banner-critical {
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid var(--bad);
+  color: var(--bad);
+}
+.banner .banner-icon { font-size: 16px; line-height: 1; flex-shrink: 0; }
+.banner .banner-msg { font-weight: 500; }
+.banner .banner-detail { margin-left: auto; color: var(--muted); font-weight: 400; white-space: nowrap; }
 
 section { margin-bottom: 32px; }
 section h2 {
