@@ -119,7 +119,9 @@ class LoopWatchdog:
     and a slow drain must not be mistaken for a wedge.
     """
 
-    def __init__(self, stall_timeout_sec: float, tick_interval_sec: float = 1.0, on_stall=None):
+    def __init__(
+        self, stall_timeout_sec: float, tick_interval_sec: float = 1.0, on_stall=None
+    ):
         self._stall_timeout = stall_timeout_sec
         self._tick_interval = tick_interval_sec
         self._on_stall = on_stall or self._force_exit

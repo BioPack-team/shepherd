@@ -121,9 +121,7 @@ class ProcessPoolManager:
             try:
                 return await loop.run_in_executor(executor, fn, *args)
             except BrokenProcessPool:
-                await self._replace(
-                    executor, reason="a child died or was OOM-killed"
-                )
+                await self._replace(executor, reason="a child died or was OOM-killed")
                 raise
 
         # Timeout path. NOTE: asyncio.wait_for is deliberately NOT used here --
@@ -173,7 +171,9 @@ class ProcessPoolManager:
             except Exception:
                 pass
 
-    async def _replace(self, broken: ProcessPoolExecutor, reason: str = "pool replaced") -> None:
+    async def _replace(
+        self, broken: ProcessPoolExecutor, reason: str = "pool replaced"
+    ) -> None:
         async with self._lock:
             # When a child dies, every future in flight on that pool raises
             # BrokenProcessPool at once, so several tasks may race here. Only the

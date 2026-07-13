@@ -836,9 +836,7 @@ async def poll_for_tasks():
                 except BrokenProcessPool:
                     # pool.run already swapped in a fresh executor; here we just
                     # release the lock and re-enqueue so the callback is retried.
-                    logger.error(
-                        f"[{callback_id}] Process pool broken; re-enqueuing."
-                    )
+                    logger.error(f"[{callback_id}] Process pool broken; re-enqueuing.")
                     await remove_lock(response_id, CONSUMER, logger)
                     await _reenqueue_wake_task(task, logger)
                     span.set_attribute("drained_callbacks", drained)

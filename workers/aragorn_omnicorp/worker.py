@@ -351,7 +351,7 @@ def _already_overlaid(kgraph: dict) -> bool:
     node counts and append duplicate co-occurrence edges with fresh UUIDs.
     """
     for node in kgraph.get("nodes", {}).values():
-        for attr in (node.get("attributes") or []):
+        for attr in node.get("attributes") or []:
             if attr.get("original_attribute_name") == "omnicorp_article_count":
                 return True
     return False
