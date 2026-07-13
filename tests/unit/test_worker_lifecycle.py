@@ -294,6 +294,71 @@ async def _async_noop(*args, **kwargs):
     return None
 
 
+# --- poison-pill discard: unprocessable messages are made terminal ----------
+
+
+@pytest.mark.asyncio
+async def test_discard_unprocessable_task_acks_and_routes_to_finish(monkeypatch):
+    """A message we can't build a context for must not be left in the PEL.
+
+    It should be ack+deleted (mark_task_as_complete) and, when the parent query
+    is identifiable, routed to finish_query with an ERROR status -- otherwise it
+    would sit in the live consumer's PEL forever, invisible to reclaim and the
+    janitor (the "old unacked tasks on a running worker" leak)."""
+    added = []
+    acked = []
+
+    async def _fake_add_task(queue, payload, _logger):
+        added.append((queue, payload))
+
+    async def _fake_mark_complete(stream, group, msg_id, _logger, retries=0):
+        acked.append((stream, group, msg_id))
+
+    monkeypatch.setattr(shared, "add_task", _fake_add_task)
+    monkeypatch.setattr(shared, "mark_task_as_complete", _fake_mark_complete)
+
+    task = ("123-0", {"query_id": "q1", "response_id": "r1", "metadata": "{}"})
+    await shared._discard_unprocessable_task(
+        "aragorn.lookup", "consumer", task, logger, "boom"
+    )
+
+    # Ack+delete happened so it leaves the PEL/stream.
+    assert acked == [("aragorn.lookup", "consumer", "123-0")]
+    # Routed to finish_query with an ERROR status to end the query cleanly.
+    assert len(added) == 1
+    queue, payload = added[0]
+    assert queue == "finish_query"
+    assert payload["status"] == "ERROR"
+    assert payload["query_id"] == "q1"
+    assert payload["response_id"] == "r1"
+
+
+@pytest.mark.asyncio
+async def test_discard_unprocessable_task_drops_when_unidentifiable(monkeypatch):
+    """If the payload is too malformed to identify the query, we still ack+delete
+    it (drop the poison) but skip the finish_query route."""
+    added = []
+    acked = []
+
+    async def _fake_add_task(queue, payload, _logger):
+        added.append((queue, payload))
+
+    async def _fake_mark_complete(stream, group, msg_id, _logger, retries=0):
+        acked.append(msg_id)
+
+    monkeypatch.setattr(shared, "add_task", _fake_add_task)
+    monkeypatch.setattr(shared, "mark_task_as_complete", _fake_mark_complete)
+
+    # No query_id/response_id -> nothing to route.
+    task = ("456-0", {"garbage": "yes"})
+    await shared._discard_unprocessable_task(
+        "aragorn.lookup", "consumer", task, logger, "boom"
+    )
+
+    assert acked == ["456-0"]
+    assert added == []
+
+
 # --- Loop-liveness watchdog -------------------------------------------------
 
 
