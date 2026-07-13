@@ -2,6 +2,7 @@
 
 import logging
 import logging.config
+import multiprocessing
 import os
 from collections import deque
 from datetime import datetime, timezone
@@ -74,6 +75,13 @@ def get_logging_config():
     """
     # Check if running in Kubernetes
     is_kubernetes = bool(os.getenv("KUBERNETES_SERVICE_HOST"))
+    # Only the main process writes the rotating log file. A spawned process-pool
+    # child re-runs this on import; if every child also attached the file
+    # handler, many processes would drive one RotatingFileHandler on the same
+    # (locally bind-mounted) file -- and that handler isn't multiprocess-safe.
+    # Children log to console, which the container/collector already captures.
+    is_main = multiprocessing.current_process().name == "MainProcess"
+    use_file = (not is_kubernetes) and is_main
 
     # Base handlers that are always included
     handlers = {
@@ -84,8 +92,8 @@ def get_logging_config():
         }
     }
 
-    # Add file handler only for local development
-    if not is_kubernetes:
+    # Add file handler only for local development in the main process
+    if use_file:
         # create the logs folder
         os.makedirs("logs", exist_ok=True)
         handlers["file"] = {
@@ -100,7 +108,7 @@ def get_logging_config():
         }
 
     # Determine which handlers to use for the logger
-    logger_handlers = ["console", "file"] if not is_kubernetes else ["console"]
+    logger_handlers = ["console", "file"] if use_file else ["console"]
 
     logging_config = {
         "version": 1,

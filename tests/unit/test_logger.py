@@ -101,3 +101,22 @@ def test_get_logging_config_kubernetes_skips_file_handler(monkeypatch):
     config = get_logging_config()
     assert "file" not in config["handlers"]
     assert config["loggers"]["shepherd"]["handlers"] == ["console"]
+
+
+def test_get_logging_config_pool_child_skips_file_handler(monkeypatch, tmp_path):
+    """A spawned pool child (name != MainProcess) logs to console only, so many
+    children don't drive one non-multiprocess-safe RotatingFileHandler."""
+    import types
+
+    from shepherd_utils import logger as logger_module
+
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        logger_module.multiprocessing,
+        "current_process",
+        lambda: types.SimpleNamespace(name="SpawnProcess-1"),
+    )
+    config = get_logging_config()
+    assert "file" not in config["handlers"]
+    assert config["loggers"]["shepherd"]["handlers"] == ["console"]
