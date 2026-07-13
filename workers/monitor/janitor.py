@@ -82,16 +82,26 @@ async def _trim_stream(stream: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        xpending = await broker_client.execute_command(
-            "XPENDING", stream, CONSUMER_GROUP
-        )
+        # Typed ``xpending`` returns the parsed summary dict
+        # ({"pending", "min", "max", "consumers"}). Calling
+        # ``execute_command("XPENDING", ...)`` returns that same dict via
+        # redis-py's response callback -- but the old code checked for a
+        # list/tuple, so it never saw the pending count, concluded "nothing
+        # pending", and computed MINID from last-delivered-id. That trims away
+        # *unacked* messages (their ids are <= last-delivered-id), which is
+        # exactly the safe-MINID contract this function is meant to uphold.
+        xpending = await broker_client.xpending(stream, CONSUMER_GROUP)
     except Exception:
         # No consumer group yet; nothing to trim safely.
         return None
 
     pending_count = 0
     smallest_pending = None
-    if isinstance(xpending, (list, tuple)) and len(xpending) >= 2:
+    if isinstance(xpending, dict):
+        pending_count = int(xpending.get("pending", 0) or 0)
+        smallest_pending = xpending.get("min")
+    elif isinstance(xpending, (list, tuple)) and len(xpending) >= 2:
+        # RESP-array fallback in case a raw reply is ever returned.
         pending_count = int(xpending[0] or 0)
         smallest_pending = xpending[1]
 
@@ -336,31 +346,30 @@ async def reclaim_dead_consumers(
             if idle < min_idle_ms:
                 continue
 
-            # Enumerate pending message IDs for this consumer.
+            # Enumerate pending message IDs for this consumer. Typed
+            # ``xpending_range`` (not ``execute_command("XPENDING", ...)``,
+            # whose response callback only handles the summary form and raises
+            # on this extended form) returns a list of parsed dicts.
             try:
-                detail = await broker_client.execute_command(
-                    "XPENDING",
+                detail = await broker_client.xpending_range(
                     stream,
                     CONSUMER_GROUP,
-                    "IDLE",
-                    min_idle_ms,
-                    "-",
-                    "+",
-                    pending,
-                    name,
+                    min="-",
+                    max="+",
+                    count=pending,
+                    consumername=name,
+                    idle=min_idle_ms,
                 )
             except Exception as e:
                 logger.debug(f"XPENDING detail failed for {stream}/{name}: {e}")
                 continue
 
             msg_ids: List[str] = []
-            if isinstance(detail, list):
-                for row in detail:
-                    if isinstance(row, list) and row:
-                        raw_id = row[0]
-                        msg_ids.append(
-                            raw_id if isinstance(raw_id, str) else raw_id.decode()
-                        )
+            for entry in detail or []:
+                raw_id = entry.get("message_id")
+                if raw_id is None:
+                    continue
+                msg_ids.append(raw_id if isinstance(raw_id, str) else raw_id.decode())
 
             bucket = summary["by_stream"].setdefault(
                 stream, {"messages": 0, "consumers": 0}

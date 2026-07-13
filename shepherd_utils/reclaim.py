@@ -101,30 +101,32 @@ async def reclaim_orphaned(
         # XPENDING with IDLE filters at the server, but we still cross-check
         # against heartbeats below to avoid yanking work from a slow-but-alive
         # consumer whose idle just crossed the threshold.
-        detail = await broker_client.execute_command(
-            "XPENDING",
-            stream,
-            group,
-            "IDLE",
-            min_idle_ms,
-            "-",
-            "+",
-            max_batch,
+        #
+        # Use the typed ``xpending_range`` rather than
+        # ``execute_command("XPENDING", ...)``: redis-py registers a response
+        # callback on the XPENDING *command name* that only parses the summary
+        # form (``XPENDING key group``). Invoked on this extended form
+        # (IDLE/start/end/count) that callback raises ``IndexError`` -- which the
+        # ``except`` below would swallow at DEBUG level, silently disabling
+        # reclaim entirely. ``xpending_range`` returns a list of parsed dicts.
+        detail = await broker_client.xpending_range(
+            stream, group, min="-", max="+", count=max_batch, idle=min_idle_ms
         )
     except Exception as e:
         logger.debug(f"Reclaim XPENDING failed for {stream}: {e}")
         return []
 
-    if not detail or not isinstance(detail, list):
+    if not detail:
         return []
 
     alive = await _alive_consumers_on_stream(stream)
 
     candidates: List[str] = []
-    for row in detail:
-        if not isinstance(row, list) or len(row) < 2:
+    for entry in detail:
+        raw_id = entry.get("message_id")
+        raw_owner = entry.get("consumer")
+        if raw_id is None or raw_owner is None:
             continue
-        raw_id, raw_owner = row[0], row[1]
         msg_id = raw_id if isinstance(raw_id, str) else raw_id.decode()
         owner = raw_owner if isinstance(raw_owner, str) else raw_owner.decode()
         if owner == consumer:

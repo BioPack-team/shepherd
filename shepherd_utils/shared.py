@@ -343,6 +343,61 @@ def _build_task_context(
     return ctx, task_logger
 
 
+async def _discard_unprocessable_task(
+    stream: str,
+    group: str,
+    ara_task: Tuple[str, dict],
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    """Terminally clear a message we can't even build a task context for.
+
+    Such a message is a poison pill. ``get_task`` reads with the ``>`` cursor,
+    which never re-delivers a PEL entry, and ``reclaim_orphaned`` deliberately
+    skips messages owned by a live/self consumer (``owner == consumer`` and
+    ``owner in alive``). So if we merely dropped it from the poll loop it would
+    sit in *this* (live) consumer's PEL forever -- invisible to reclaim and to
+    the janitor, which only touches dead consumers. That is exactly the
+    "very old unacked tasks on a still-running worker" leak.
+
+    Making it terminal: ack + delete it (``mark_task_as_complete`` does
+    ``XACK`` then ``XDEL``) so it leaves the PEL and the stream, and -- when we
+    can still identify the parent query -- route it to ``finish_query`` with an
+    ERROR status so the query ends cleanly instead of hanging, mirroring
+    ``handle_task_failure``.
+    """
+    msg_id = ara_task[0]
+    fields = ara_task[1] if len(ara_task) > 1 and isinstance(ara_task[1], dict) else {}
+    logger.error(
+        f"Discarding unprocessable task {msg_id} on {stream}: {reason}. "
+        f"Payload fields: {sorted(fields.keys())}"
+    )
+    query_id = fields.get("query_id")
+    response_id = fields.get("response_id")
+    if query_id and response_id:
+        try:
+            await add_task(
+                "finish_query",
+                {
+                    "query_id": query_id,
+                    "response_id": response_id,
+                    "workflow": "[]",
+                    "log_level": fields.get("log_level", 20),
+                    "otel": fields.get("otel", "{}"),
+                    "status": "ERROR",
+                    "metadata": fields.get("metadata", "{}"),
+                },
+                logger,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to route unprocessable task {msg_id} to finish_query: {e}"
+            )
+    # Remove it from the PEL + stream so it stops re-tripping stuck_pending and
+    # can never be re-stranded under a live consumer.
+    await mark_task_as_complete(stream, group, msg_id, logger)
+
+
 async def get_tasks(
     stream: str,
     group: str,
@@ -415,8 +470,16 @@ async def get_tasks(
                         stream, consumer, ara_task, level_number
                     )
                 except Exception as e:
-                    worker_logger.error(
-                        f"Failed to build context for reclaimed task {ara_task}: {e}"
+                    # Poison pill: reclaim_orphaned has already XCLAIM'd this
+                    # message into our (live) consumer's PEL, where nothing
+                    # would ever reclaim it again. Make it terminal instead of
+                    # leaking it back into the PEL.
+                    await _discard_unprocessable_task(
+                        stream,
+                        group,
+                        ara_task,
+                        worker_logger,
+                        f"could not build context for reclaimed task: {e}",
                     )
                     task_limiter.release()
                     continue
@@ -433,9 +496,24 @@ async def get_tasks(
         # get a new task for the given target
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
-            ctx, task_logger = _build_task_context(
-                stream, consumer, ara_task, level_number
-            )
+            try:
+                ctx, task_logger = _build_task_context(
+                    stream, consumer, ara_task, level_number
+                )
+            except Exception as e:
+                # A message we can't build a context for was just delivered into
+                # this consumer's PEL via '>'. It will never be re-read ('>'
+                # only returns new messages) nor reclaimed (owned by us, a live
+                # consumer), so terminate it here instead of leaking it.
+                await _discard_unprocessable_task(
+                    stream,
+                    group,
+                    ara_task,
+                    worker_logger,
+                    f"could not build context for delivered task: {e}",
+                )
+                task_limiter.release()
+                continue
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
             yield ara_task, ctx, task_logger, task_limiter
