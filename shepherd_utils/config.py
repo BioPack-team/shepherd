@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     # workers. Anything larger is rejected with 413 before it is read into
     # memory. Accepts Kubernetes-style sizes ("100MB", "512Mi", ...) or a plain
     # byte count; 0 (or unparseable) disables the limit.
-    callback_max_request_size: str = "100MB"
+    callback_max_request_size: str = "0"
     kg_retrieval_url: str = "http://host.docker.internal:8080/asyncquery"
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
     kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
