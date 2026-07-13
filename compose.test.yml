@@ -49,6 +49,11 @@ services:
       # OMNICORP_MAX_CURIE_PAIRS: "1000000000"
   # The same `cpus` / `mem_limit` + env block applies verbatim to the other
   # CPU-bound workers when you want to stress them too:
-  #   aragorn_score:  { cpus: 2, mem_limit: 6g, environment: {...} }
+  aragorn_score:
+    cpus: 2
+    mem_limit: 5g
   #   arax_rank:      { cpus: 2, mem_limit: 6g, environment: {...} }
   #   merge_message:  { cpus: 2, mem_limit: 6g, environment: {...} }
+  merge_message:
+    cpus: 2
+    mem_limit: 5g

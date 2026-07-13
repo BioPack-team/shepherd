@@ -75,9 +75,7 @@ class Settings(BaseSettings):
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
     kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
     default_data_tier: int = 0
-    omnicorp_url: str = "https://aragorn-ranker.renci.org/omnicorp_overlay"
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
-    node_norm: str = "https://biothings.ci.transltr.io/nodenorm/api/"
 
     pathfinder_redis_host: str = "host.docker.internal"
     pathfinder_redis_port: int = 6383
