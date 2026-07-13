@@ -32,9 +32,15 @@ safe.
 import asyncio
 import logging
 import multiprocessing
+import os
+import signal
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from typing import Optional
+
+# Grace between SIGABRT (which makes the child's faulthandler dump its stack)
+# and the SIGKILL fallback, so the traceback has time to reach stderr.
+_ABORT_GRACE_SEC = 0.5
 
 
 def _init_pool_worker() -> None:
@@ -156,18 +162,40 @@ class ProcessPoolManager:
             await self._replace(executor, reason="a child died or was OOM-killed")
             raise
 
-    def _kill_children(self, executor: ProcessPoolExecutor) -> None:
-        """Force-terminate any live children of ``executor`` (best effort).
+    async def _kill_children(self, executor: ProcessPoolExecutor) -> None:
+        """Force-terminate any live children of ``executor``, capturing stacks.
 
         A ProcessPoolExecutor gives no way to cancel a running child, so on a
-        timeout we SIGKILL the pool's children directly to stop the runaway work
-        and free the slot. Already-dead children (the broken-pool case) are a
-        no-op. ``_processes`` is a CPython internal (pid -> Process); guarded.
+        timeout we terminate the pool's children directly to stop the runaway
+        work and free the slot. We send SIGABRT first, not SIGKILL: the
+        faulthandler installed in ``_init_pool_worker`` catches SIGABRT and dumps
+        the child's C+Python traceback to stderr before it dies -- so a child
+        that hung *before* it ever ran its task (e.g. stuck in cold-start
+        import/setup) leaves an actionable stack instead of a silent kill. After
+        a short grace for that dump, any child still alive (ignored SIGABRT, e.g.
+        stuck in an uninterruptible syscall) is SIGKILLed so the slot is always
+        freed. Already-dead children (the broken-pool case) are a no-op.
+        ``_processes`` is a CPython internal (pid -> Process); guarded.
         """
-        procs = getattr(executor, "_processes", None) or {}
-        for proc in list(procs.values()):
+        procs = list((getattr(executor, "_processes", None) or {}).values())
+        aborted = []
+        for proc in procs:
+            pid = getattr(proc, "pid", None)
+            if pid is None:
+                continue
             try:
-                proc.kill()
+                os.kill(pid, signal.SIGABRT)
+                aborted.append(proc)
+            except (ProcessLookupError, OSError):
+                pass
+        if not aborted:
+            return
+        # Let faulthandler write the traceback(s) and the children abort.
+        await asyncio.sleep(_ABORT_GRACE_SEC)
+        for proc in aborted:
+            try:
+                if proc.is_alive():
+                    proc.kill()
             except Exception:
                 pass
 
@@ -184,7 +212,7 @@ class ProcessPoolManager:
                 f"{self._name}: replacing process pool ({reason}); killing any "
                 "live children and standing up a fresh pool."
             )
-            self._kill_children(broken)
+            await self._kill_children(broken)
             try:
                 broken.shutdown(wait=False, cancel_futures=True)
             except Exception:
