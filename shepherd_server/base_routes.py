@@ -25,6 +25,7 @@ from shepherd_utils.db import (
     get_message,
     get_query_state,
     remove_callback_id,
+    save_logs,
     save_message,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
@@ -381,6 +382,11 @@ async def callback(
             },
             logger,
         )
+    # Persist the logs generated while handling this callback so they land in
+    # the query's log list (keyed by response_id, the same key finish_query
+    # reads). Without this, everything logged above -- the result count, the
+    # callback/query lookups -- is dropped on return.
+    await save_logs(response_id, logger)
     return Response("Callback received.", 200)
 
 

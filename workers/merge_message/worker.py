@@ -27,8 +27,10 @@ from shepherd_utils.db import (
     get_message_sync,
     get_ready_callbacks,
     remove_callback_id,
+    save_logs,
     save_message_sync,
 )
+from shepherd_utils.logger import QueryLogger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
@@ -662,7 +664,8 @@ def merge_messages_by_ids(
     query_id: str,
     response_id: str,
     callback_ids: list[str],
-) -> list[str]:
+    log_level: int = logging.INFO,
+) -> tuple[list[str], list[dict]]:
     """Worker-side batched merge: fetch by id, fold every callback into the
     accumulating response, write back once. No payloads cross IPC.
 
@@ -672,40 +675,61 @@ def merge_messages_by_ids(
     time (which is how they were processed before), but avoids re-loading and
     re-saving the ever-growing response blob per callback.
 
-    Returns the list of callback ids that were actually folded in, so the caller
-    knows which to clear from the ready index and the callbacks table. A single
-    missing callback is skipped rather than aborting the whole batch.
+    Returns a ``(merged, log_entries)`` tuple. ``merged`` is the list of
+    callback ids that were actually folded in, so the caller knows which to
+    clear from the ready index and the callbacks table (a single missing
+    callback is skipped rather than aborting the whole batch). ``log_entries``
+    is the list of formatted log records produced during the merge, oldest
+    first -- this runs in a ProcessPoolExecutor child, so its logger can't be
+    the parent's query logger; instead we attach a fresh ``QueryLogHandler``
+    here and hand its contents back across the process boundary for the parent
+    to fold into the query's log list.
     """
+    # A logger.getLogger call in a child returns the same object for the whole
+    # process life, so attach a call-scoped handler and remove it in finally --
+    # otherwise handlers would accumulate across the child's successive tasks
+    # and leak one query's logs into the next.
+    query_log_handler = QueryLogger().log_handler
     worker_logger = logging.getLogger(f"merge_message.worker.{os.getpid()}")
+    worker_logger.setLevel(log_level)
+    worker_logger.addHandler(query_log_handler)
     try:
-        original_query = get_message_sync(query_id)
-        accumulator = get_message_sync(response_id)
-    except KeyError as e:
-        worker_logger.error(f"Missing message in worker: {e}")
-        raise
-
-    original_query_graph = original_query["message"]["query_graph"]
-    merged: list[str] = []
-    for callback_id in callback_ids:
         try:
-            callback_response = get_message_sync(callback_id)
-        except KeyError:
-            worker_logger.error(
-                f"Missing callback {callback_id} while folding; skipping."
-            )
-            continue
-        accumulator = merge_messages(
-            target,
-            original_query_graph,
-            accumulator,
-            callback_response,
-            worker_logger,
-        )
-        merged.append(callback_id)
+            original_query = get_message_sync(query_id)
+            accumulator = get_message_sync(response_id)
+        except KeyError as e:
+            worker_logger.error(f"Missing message in worker: {e}")
+            raise
 
-    if merged:
-        save_message_sync(response_id, accumulator)
-    return merged
+        original_query_graph = original_query["message"]["query_graph"]
+        merged: list[str] = []
+        for callback_id in callback_ids:
+            try:
+                callback_response = get_message_sync(callback_id)
+            except KeyError:
+                worker_logger.error(
+                    f"Missing callback {callback_id} while folding; skipping."
+                )
+                continue
+            accumulator = merge_messages(
+                target,
+                original_query_graph,
+                accumulator,
+                callback_response,
+                worker_logger,
+            )
+            merged.append(callback_id)
+
+        if merged:
+            save_message_sync(response_id, accumulator)
+        # contents() is newest-first (emit appendlefts); hand back oldest-first
+        # so the parent can appendleft them in order and keep the queue's
+        # newest-first invariant.
+        log_entries = list(query_log_handler.contents())
+        log_entries.reverse()
+        return merged, log_entries
+    finally:
+        worker_logger.removeHandler(query_log_handler)
 
 
 def merge_messages_by_id(
@@ -713,10 +737,13 @@ def merge_messages_by_id(
     query_id: str,
     response_id: str,
     callback_id: str,
+    log_level: int = logging.INFO,
 ) -> bool:
     """Worker-side merge of a single callback (thin delegate to the batched
     path). Retained for callers/tests that merge one callback at a time."""
-    merged = merge_messages_by_ids(target, query_id, response_id, [callback_id])
+    merged, _ = merge_messages_by_ids(
+        target, query_id, response_id, [callback_id], log_level
+    )
     return bool(merged)
 
 
@@ -763,12 +790,33 @@ async def poll_for_tasks():
         )
         await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
 
+    def _ingest_merge_logs(logger, entries):
+        """Fold the merge child's log records into this task's query logger.
+
+        The child formatted them into an isolated handler; drop them into this
+        logger's query handler so the ``save_logs`` in ``finally`` flushes them
+        to the query's log list alongside the parent's own lines.
+        """
+        if not entries:
+            return
+        handler = next(
+            (
+                h
+                for h in logger.handlers
+                if getattr(h, "name", None) == "query_log_handler"
+            ),
+            None,
+        )
+        if handler is not None:
+            handler.ingest(entries)
+
     async def process_query(task, parent_ctx, logger, limiter):
         start = time.time()
         query_id = task[1]["query_id"]
         response_id = task[1]["response_id"]
         callback_id = task[1]["callback_id"]
         target = task[1]["target"]
+        log_level = int(task[1].get("log_level", logging.INFO))
         drained = 0
         try:
             with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
@@ -821,14 +869,16 @@ async def poll_for_tasks():
                             break
                         if settings.merge_max_fold > 0:
                             ready = ready[: settings.merge_max_fold]
-                        merged = await pool.run(
+                        merged, merge_logs = await pool.run(
                             loop,
                             merge_messages_by_ids,
                             target,
                             query_id,
                             response_id,
                             ready,
+                            log_level,
                         )
+                        _ingest_merge_logs(logger, merge_logs)
                         await _clear_batch(response_id, ready, logger)
                         drained += len(merged)
                         # Keep our lock alive across a long multi-pass drain.
@@ -884,6 +934,12 @@ async def poll_for_tasks():
             except Exception as e:
                 logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
             logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+            # Unlike normal workers, this worker hand-rolls its lifecycle and
+            # never calls wrap_up_task, so nothing else persists its logs. Flush
+            # them here (keyed by response_id, the key finish_query reads) so the
+            # parent's own lines *and* the folded-in merge-child logs make it
+            # into the query's log list.
+            await save_logs(response_id, logger)
             limiter.release()
 
     inflight = set()

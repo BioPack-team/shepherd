@@ -51,6 +51,18 @@ class QueryLogHandler(logging.Handler):
         """Get stored logs from handler."""
         return self.log_queue
 
+    def ingest(self, entries):
+        """Merge already-formatted log entries into the queue.
+
+        Used to fold in log records produced somewhere the handler couldn't be
+        attached directly -- e.g. a ProcessPoolExecutor child that formats its
+        own records and hands them back across the process boundary. ``entries``
+        must be oldest-first; each is placed at the front so the queue stays
+        newest-first, matching ``emit``.
+        """
+        for entry in entries:
+            self.log_queue.appendleft(entry)
+
 
 # Create unique logger for each query
 # https://stackoverflow.com/a/37967421
