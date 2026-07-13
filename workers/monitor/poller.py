@@ -129,7 +129,11 @@ async def _collect_streams(stream_names: List[str]) -> Dict[str, Dict[str, Any]]
     pipe = broker_client.pipeline()
     for s in stream_names:
         pipe.xlen(s)
-        pipe.execute_command("XPENDING", s, "consumer")
+        # Typed xpending() returns the parsed summary dict; the previous
+        # execute_command("XPENDING", ...) returned the same dict via redis-py's
+        # response callback, but the parsing below expected a list and so always
+        # read pending as 0.
+        pipe.xpending(s, "consumer")
         pipe.execute_command("XINFO", "CONSUMERS", s, "consumer")
     # ``raise_on_error=False`` returns individual exceptions in-place so one
     # missing stream/group doesn't blow up the whole batch. Streams that don't
@@ -151,7 +155,9 @@ async def _collect_streams(stream_names: List[str]) -> Dict[str, Dict[str, Any]]
         xinfo = _ok(results[base + 2] if base + 2 < len(results) else None)
 
         pending_count = 0
-        if isinstance(xpending, (list, tuple)) and len(xpending) >= 1:
+        if isinstance(xpending, dict):
+            pending_count = int(xpending.get("pending", 0) or 0)
+        elif isinstance(xpending, (list, tuple)) and len(xpending) >= 1:
             pending_count = xpending[0] or 0
 
         consumers = []
