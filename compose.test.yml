@@ -22,7 +22,7 @@ services:
   aragorn_omnicorp:
     cpus: 2 # -> pool sizes to 2; confirm via the "process pool sized to 2 worker(s)" startup log
     mem_limit: 6g # -> a child exceeding this is cgroup-OOM-killed (kernel), parent survives
-    environment:
+    # environment:
       # P0 timeout: set a short limit, then replay a big/slow query. Expect
       # "task exceeded 10s; killing the stuck child", that query -> finish_query
       # ERROR, and the NEXT task succeeding.
