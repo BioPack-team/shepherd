@@ -8,6 +8,9 @@ pathfinder_embeddings/
 
 # Project specific
 scripts/
+# Local docker compose override (auto-merged by `docker compose up`); keep it
+# per-developer. Use the tracked compose.test.yml via `-f` instead, or copy it here.
+compose.override.yml
 pgdata/
 scripts/
 data/

@@ -5,13 +5,14 @@ import copy
 import json
 import logging
 import math
-import os
 import uuid
 from collections import defaultdict
 from itertools import combinations
 
 import numpy as np
 
+from shepherd_utils.config import settings
+from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -1251,10 +1252,17 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     loop = asyncio.get_running_loop()
-    cpu_count = os.cpu_count()
-    cpu_count = cpu_count if cpu_count is not None else 1
-    cpu_count = min(cpu_count, TASK_LIMIT)
-    pool = ProcessPoolManager(cpu_count, name="aragorn.score process pool")
+    # Size the pool by the pod's actual CPU allocation (cgroup limit), not
+    # os.cpu_count() -- see aragorn_omnicorp.poll_for_tasks. Each child loads a
+    # full message, so this also bounds peak memory. POOL_MAX_WORKERS overrides.
+    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
+    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    pool = ProcessPoolManager(
+        max_workers,
+        max_tasks_per_child=settings.pool_max_tasks_per_child,
+        name="aragorn.score process pool",
+        task_timeout=settings.pool_task_timeout_sec,
+    )
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(

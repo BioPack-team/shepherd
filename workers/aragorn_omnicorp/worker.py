@@ -26,6 +26,7 @@ from uuid import uuid4
 import lmdb
 
 from shepherd_utils.config import settings
+from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -51,34 +52,6 @@ LMDB_BATCH_SIZE = 1000
 # seconds to 45 minutes-3 hours. Override via the env var if needed.
 OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 1_000_000))
 
-
-def _parse_max_tasks_per_child():
-    """Optional ceiling on overlays a single pool child runs before it recycles.
-
-    Recycling a child returns the memory a very large message forced it to grow
-    (peak resident size persists for the process's lifetime) back to the OS
-    instead of letting it accumulate across tasks, so the child stays well below
-    the OOM line. Left unset (``None``) by default because enabling it makes the
-    ``ProcessPoolExecutor`` fall back to the ``spawn`` start method -- a Python
-    requirement of ``max_tasks_per_child`` -- which re-imports this worker in
-    each fresh child. Opt in via ``OMNICORP_MAX_TASKS_PER_CHILD`` on a
-    memory-pressured deployment.
-    """
-    raw = os.environ.get("OMNICORP_MAX_TASKS_PER_CHILD")
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        logging.warning(
-            f"Ignoring invalid OMNICORP_MAX_TASKS_PER_CHILD={raw!r}; leaving pool "
-            "children un-recycled."
-        )
-        return None
-    return value if value > 0 else None
-
-
-OMNICORP_MAX_TASKS_PER_CHILD = _parse_max_tasks_per_child()
 
 # Both LMDBs are opened lazily on first use so importing the worker (e.g. in
 # tests) does not require the live data files. Static datasets, so we open
@@ -367,6 +340,23 @@ def generate_curie_pairs(
     return pair_to_answer
 
 
+def _already_overlaid(kgraph: dict) -> bool:
+    """True if this kgraph already carries omnicorp node annotations.
+
+    ``add_node_pmid_counts`` stamps every kgraph node with an
+    ``omnicorp_article_count`` attribute (even when the pair overlay is skipped),
+    so its presence means a previous run already applied the overlay. Used to
+    stay idempotent: a reclaim can redeliver an already-overlaid message (the
+    prior run saved it but died before ACKing), and re-running would double the
+    node counts and append duplicate co-occurrence edges with fresh UUIDs.
+    """
+    for node in kgraph.get("nodes", {}).values():
+        for attr in node.get("attributes") or []:
+            if attr.get("original_attribute_name") == "omnicorp_article_count":
+                return True
+    return False
+
+
 def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     """Add literature co-occurrence support to a TRAPI message in-place.
 
@@ -399,6 +389,14 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     qgraph = message["query_graph"]
     kgraph = message["knowledge_graph"]
     answers = message["results"]
+
+    # Idempotency: if this message already carries the omnicorp overlay (a
+    # reclaim redelivered a message a previous run had already overlaid and
+    # saved), skip -- re-applying would double node counts and stack duplicate
+    # co-occurrence edges.
+    if _already_overlaid(kgraph):
+        logger.info("Omnicorp overlay already applied; skipping to stay idempotent.")
+        return in_message
 
     if "auxiliary_graphs" not in message or message["auxiliary_graphs"] is None:
         message["auxiliary_graphs"] = {}
@@ -558,16 +556,21 @@ async def process_task(
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     loop = asyncio.get_running_loop()
-    # The overlay is CPU-bound, so cap real parallelism at the number of cores
-    # (mirrors aragorn_score). Extra in-flight tasks queue against the pool
-    # without blocking the loop.
-    cpu_count = os.cpu_count()
-    cpu_count = cpu_count if cpu_count is not None else 1
-    cpu_count = min(cpu_count, TASK_LIMIT)
+    # The overlay is CPU-bound, so cap real parallelism at the number of cores.
+    # Each pool child loads a full (potentially large) message into memory, so
+    # this count is also what bounds peak memory -- it MUST reflect the pod's
+    # actual CPU allocation, not os.cpu_count() (which reports the whole node's
+    # cores and would size the pool for a many-core host, running many big
+    # messages at once and OOM-killing the pod). resolve_pool_workers reads the
+    # cgroup CPU limit and honours a POOL_MAX_WORKERS override for memory-tight
+    # deployments. Extra in-flight tasks queue against the pool without blocking.
+    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
+    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     pool = ProcessPoolManager(
-        cpu_count,
-        max_tasks_per_child=OMNICORP_MAX_TASKS_PER_CHILD,
+        max_workers,
+        max_tasks_per_child=settings.pool_max_tasks_per_child,
         name="aragorn.omnicorp process pool",
+        task_timeout=settings.pool_task_timeout_sec,
     )
     while True:
         try:

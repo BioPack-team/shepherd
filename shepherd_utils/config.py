@@ -145,6 +145,31 @@ class Settings(BaseSettings):
     # to 0 to disable the self-exit entirely.
     broker_unhealthy_exit_sec: float = 300.0
 
+    # Per-task ceiling for the CPU-bound workers' process pool. Each overlay /
+    # merge / ranking runs in a pool child; if one exceeds this, the child is
+    # killed and the task fails to finish_query rather than holding a pool slot
+    # (and, with a small pool, stalling the whole worker) indefinitely. Without
+    # a cap a pathological query can run for hours. Per-Deployment override via
+    # POOL_TASK_TIMEOUT_SEC; 0 disables the timeout.
+    pool_task_timeout_sec: float = 300.0
+
+    # Recycle each process-pool child after this many tasks. A child that once
+    # processed a very large message keeps that peak RSS for its whole life
+    # (freed memory isn't fully returned to the OS), so long-lived children
+    # ratchet a worker toward its cgroup limit over time. Recycling returns that
+    # memory; the spawn cost is amortized over the interval. Per-Deployment
+    # override via POOL_MAX_TASKS_PER_CHILD; 0 disables recycling.
+    pool_max_tasks_per_child: int = 100
+
+    # Event-loop liveness watchdog. A daemon thread force-exits the process if
+    # the asyncio loop stops ticking for this long, turning any loop wedge (an
+    # unexpected blocking call, a deadlock) into a Kubernetes restart instead of
+    # an indefinite hang with a silently-dead heartbeat. The heavy work is
+    # offloaded to the process pool, so the loop should never block for more than
+    # a fraction of a second; this window is far above any legitimate pause. Set
+    # to 0 to disable.
+    worker_loop_stall_exit_sec: float = 60.0
+
     # merge_message worker. Callbacks for one query are coalesced into a single
     # locked merge (one load/save of the growing response blob) and different
     # queries merge concurrently. A worker that loses the race for a query's
