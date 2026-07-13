@@ -188,6 +188,36 @@ async def test_get_logs_returns_stored_logs(redis_mock):
 
 
 @pytest.mark.asyncio
+async def test_get_logs_sorts_by_timestamp(redis_mock):
+    """Logs are flushed in worker/callback order, not event order, so get_logs
+    must return them sorted chronologically by their ISO8601 timestamp."""
+    # Stored out of order: a merge log flushed before the lookup that preceded it.
+    stored = [
+        {"message": "merge", "timestamp": "2026-07-13T00:00:02+00:00", "level": "INFO"},
+        {"message": "lookup", "timestamp": "2026-07-13T00:00:01+00:00", "level": "INFO"},
+        {"message": "finish", "timestamp": "2026-07-13T00:00:03+00:00", "level": "INFO"},
+    ]
+    await redis_mock["logs"].set("resp-sort", orjson.dumps(stored))
+    out = await get_logs("resp-sort", logger)
+    assert [entry["message"] for entry in out] == ["lookup", "merge", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_get_logs_sort_is_stable_for_missing_timestamps(redis_mock):
+    """Entries lacking a timestamp must not blow up the sort and should keep
+    their relative order (stable sort with an empty-string key)."""
+    stored = [
+        {"message": "a"},
+        {"message": "b", "timestamp": "2026-07-13T00:00:01+00:00"},
+        {"message": "c"},
+    ]
+    await redis_mock["logs"].set("resp-missing", orjson.dumps(stored))
+    out = await get_logs("resp-missing", logger)
+    # "a" and "c" (empty key) sort before "b" and keep their input order.
+    assert [entry["message"] for entry in out] == ["a", "c", "b"]
+
+
+@pytest.mark.asyncio
 async def test_save_message_retries_on_failure(redis_mock, mocker):
     """The first call to data_db_client.set raises; save_message should sleep
     and retry rather than dropping the message."""

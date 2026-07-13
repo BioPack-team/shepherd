@@ -118,7 +118,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
             except Exception as e:
                 logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
             limiter.release()
-            logger.info(f"Finished task {task[0]} in {time.time() - start}")
+            logger.debug(f"Finished task {task[0]} in {time.time() - start}")
 
 
 async def poll_for_tasks():

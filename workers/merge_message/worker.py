@@ -842,7 +842,7 @@ async def poll_for_tasks():
                     )
                     return
 
-                logger.info(f"[{callback_id}] Obtained lock for {response_id}.")
+                logger.debug(f"[{callback_id}] Obtained lock for {response_id}.")
                 # Sanity check: if the original query is gone, every ready
                 # callback for it is undeliverable -- clean them all up.
                 try:
@@ -902,7 +902,7 @@ async def poll_for_tasks():
                     return
 
                 span.set_attribute("drained_callbacks", drained)
-                logger.info(
+                logger.debug(
                     f"[{callback_id}] Drained {drained} callback(s) in "
                     f"{time.time() - lock_time:.2f}s"
                 )
@@ -933,7 +933,7 @@ async def poll_for_tasks():
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
             except Exception as e:
                 logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-            logger.info(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+            logger.debug(f"Finished task {task[0]} in {time.time() - start:.2f}s")
             # Unlike normal workers, this worker hand-rolls its lifecycle and
             # never calls wrap_up_task, so nothing else persists its logs. Flush
             # them here (keyed by response_id, the key finish_query reads) so the

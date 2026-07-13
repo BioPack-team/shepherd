@@ -332,7 +332,7 @@ def _build_task_context(
     task_log_level = int(ara_task[1].get("log_level", level_number))
     task_logger.setLevel(task_log_level)
     task_logger.addHandler(log_handler)
-    task_logger.info(f"Doing task {ara_task}")
+    task_logger.debug(f"Doing task {ara_task}")
     ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
     # Stamp the task payload with our delivery time so wrap_up_task /
     # handle_task_failure can compute the per-task latency without touching
@@ -539,7 +539,7 @@ async def wrap_up_task(
         next_op = workflow[0]["id"]
     else:
         next_op = "finish_query"
-    logger.info(f"Sending task to {next_op}")
+    logger.debug(f"Sending task to {next_op}")
     await add_task(
         next_op,
         {
@@ -630,7 +630,7 @@ async def run_task_lifecycle(
             await handle_task_failure(stream, group, task, logger)
         finally:
             limiter.release()
-            logger.info(f"Finished task {task[0]} in {time.time() - start}")
+            logger.debug(f"Finished task {task[0]} in {time.time() - start}")
 
 
 def recursive_get_edge_support_graphs(

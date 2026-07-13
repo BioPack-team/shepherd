@@ -281,20 +281,48 @@ async def _read_body_within_limit(request: Request, max_bytes: int):
     return b"".join(chunks)
 
 
+async def _save_callback_error_logs(callback_id: str, logger: logging.Logger) -> None:
+    """Persist a callback handler's logs on an error path.
+
+    The rejection paths (oversized body, unparseable body) bail out before the
+    body's ``response_id`` is known, so resolve it from the callback->query
+    mapping and flush the logger's records under it -- the same key
+    ``finish_query`` reads. If the callback can't be mapped to a live query
+    there's nothing to key the logs on, so they're dropped.
+    """
+    original_query = await get_callback_query_id(callback_id, logger)
+    if original_query is None:
+        return
+    query_state = await get_query_state(original_query[0], logger)
+    if query_state is None:
+        return
+    await save_logs(query_state[7], logger)
+
+
 async def callback(
     target: ARATargetEnum,
     callback_id: str,
     request: Request,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
+    # Set up the query logger up front, keyed only on the callback_id we always
+    # have, so the rejection / parse-error paths below can persist their logs
+    # too. The requested log level lives in the body -- which those paths never
+    # parse -- so leave the logger at its inherited default until we have it.
+    log_handler = QueryLogger().log_handler
+    logger = logging.getLogger(f"shepherd.{callback_id}")
+    logger.addHandler(log_handler)
     max_bytes = settings.callback_max_request_size_bytes
     raw = await _read_body_within_limit(request, max_bytes)
     if raw is None:
-        logger = logging.getLogger(f"shepherd.{callback_id}")
         logger.warning(
             f"Rejecting callback {callback_id}: request body exceeds the maximum "
             f"allowed size of {max_bytes} bytes."
         )
+        # Persist the rejection log BEFORE removing the callback: resolving the
+        # response_id reads the callback->query mapping that remove_callback_id
+        # deletes.
+        await _save_callback_error_logs(callback_id, logger)
         # Drop this callback from the running set so the lookup worker stops
         # waiting on it. Without this the lookup blocks until its whole-query
         # timeout, since a callback only leaves the set once merge_message has
@@ -314,17 +342,16 @@ async def callback(
             raw = decompress_zstd(raw)
         response = orjson.loads(raw)
     except (orjson.JSONDecodeError, zstandard.ZstdError):
+        logger.warning(f"Rejecting callback {callback_id}: invalid request body.")
+        await _save_callback_error_logs(callback_id, logger)
         return JSONResponse(
             content={"detail": "Invalid request body"},
             status_code=422,
         )
-    # Set up logger
+    # Now that the body is parsed, apply the query's requested log level.
     log_level = response.get("log_level") or "INFO"
     level_number = logging._nameToLevel[log_level]
-    log_handler = QueryLogger().log_handler
-    logger = logging.getLogger(f"shepherd.{callback_id}")
     logger.setLevel(level_number)
-    logger.addHandler(log_handler)
     # logger.info(response)
     results = response["message"].get("results")
     if results is None:
@@ -341,6 +368,9 @@ async def callback(
     original_query = await get_callback_query_id(callback_id, logger)
     logger.debug(f"Got original query: {original_query}")
     if original_query is None:
+        # No callback->query mapping, so there's no response_id to persist these
+        # logs under; surface it in the console/collector at least.
+        logger.warning(f"Callback {callback_id}: couldn't find original query.")
         return Response("Couldn't find original query.", 500)
     # if len(response["message"]["results"]) > 0:
     #     with open(
@@ -351,6 +381,10 @@ async def callback(
     #         json.dump(response, f, indent=2)
     query_state = await get_query_state(original_query[0], logger)
     if query_state is None:
+        logger.warning(
+            f"Callback {callback_id}: failed to get query state for "
+            f"{original_query[0]}."
+        )
         return Response("Failed to get query state.", 500)
     response_id = query_state[7]
     # save callback to redis
