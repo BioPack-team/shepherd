@@ -102,3 +102,75 @@ async def test_callback_returns_413_and_drops_callback_for_oversized_payload(
     # The rejected callback must be dropped from the running set so the lookup
     # worker doesn't hang waiting for it until its timeout.
     assert removed == ["cb-1"]
+
+
+async def test_callback_413_persists_logs_before_dropping(monkeypatch):
+    """The oversized-payload rejection must still land in the query's log list.
+
+    The response_id isn't known (we refused to read the body), so it's resolved
+    from the callback->query mapping -- which must happen *before*
+    remove_callback_id deletes that mapping.
+    """
+    monkeypatch.setattr(settings, "callback_max_request_size", "1000")
+    calls = []
+
+    async def _fake_get_callback_query_id(callback_id, logger):
+        calls.append(("resolve_query", callback_id))
+        return ("q-1", "{}")
+
+    async def _fake_get_query_state(query_id, logger):
+        # response_id lives at index 7 of the shepherd_brain row.
+        return [None, None, None, None, None, None, None, "resp-1"]
+
+    async def _fake_save_logs(response_id, logger):
+        calls.append(("save_logs", response_id))
+
+    async def _fake_remove(callback_id, logger):
+        calls.append(("remove", callback_id))
+
+    monkeypatch.setattr(
+        base_routes, "get_callback_query_id", _fake_get_callback_query_id
+    )
+    monkeypatch.setattr(base_routes, "get_query_state", _fake_get_query_state)
+    monkeypatch.setattr(base_routes, "save_logs", _fake_save_logs)
+    monkeypatch.setattr(base_routes, "remove_callback_id", _fake_remove)
+
+    body = b"x" * 5000
+    request = _make_request(body, {"content-length": len(body)})
+
+    response = await callback(ARATargetEnum.ARAGORN, "cb-1", request)
+
+    assert response.status_code == 413
+    # The rejection log was persisted under the resolved response_id...
+    assert ("save_logs", "resp-1") in calls
+    # ...and that happened before the callback->query mapping was deleted.
+    assert calls.index(("save_logs", "resp-1")) < calls.index(("remove", "cb-1"))
+
+
+async def test_callback_422_persists_logs_on_invalid_body(monkeypatch):
+    """An unparseable body is also a callback error whose log must be saved."""
+    monkeypatch.setattr(settings, "callback_max_request_size", "100000")
+    saved = []
+
+    async def _fake_get_callback_query_id(callback_id, logger):
+        return ("q-1", "{}")
+
+    async def _fake_get_query_state(query_id, logger):
+        return [None, None, None, None, None, None, None, "resp-1"]
+
+    async def _fake_save_logs(response_id, logger):
+        saved.append(response_id)
+
+    monkeypatch.setattr(
+        base_routes, "get_callback_query_id", _fake_get_callback_query_id
+    )
+    monkeypatch.setattr(base_routes, "get_query_state", _fake_get_query_state)
+    monkeypatch.setattr(base_routes, "save_logs", _fake_save_logs)
+
+    body = b"this is not json"
+    request = _make_request(body, {"content-length": len(body)})
+
+    response = await callback(ARATargetEnum.ARAGORN, "cb-1", request)
+
+    assert response.status_code == 422
+    assert saved == ["resp-1"]

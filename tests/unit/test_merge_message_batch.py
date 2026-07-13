@@ -65,7 +65,7 @@ def test_merge_messages_by_ids_equivalent_to_sequential(mocker):
     save_message_sync("c1", copy.deepcopy(response_2))
     save_message_sync("c2", copy.deepcopy(response_2))
 
-    merged = merge_messages_by_ids("test_ara", "qid", "rid", ["c1", "c2"])
+    merged, _ = merge_messages_by_ids("test_ara", "qid", "rid", ["c1", "c2"])
     saved = get_message_sync("rid")
 
     # The merge synthesizes creative-mode knowledge edges with random UUIDs, so
@@ -95,8 +95,53 @@ def test_merge_messages_by_ids_skips_missing_callback(mocker):
     save_message_sync("c1", copy.deepcopy(response_2))
     # "c2" intentionally not stored.
 
-    merged = merge_messages_by_ids("test_ara", "qid", "rid", ["c1", "c2"])
+    merged, _ = merge_messages_by_ids("test_ara", "qid", "rid", ["c1", "c2"])
     assert merged == ["c1"]
+
+
+def test_merge_messages_by_ids_returns_child_logs(mocker):
+    """The merge child runs in a subprocess with no access to the parent's
+    query logger, so it hands its own formatted log records back across the
+    process boundary for the parent to fold into the query's log list. A missing
+    callback logs an error there, so it must surface in the returned entries."""
+    query_graph = response_1["message"]["query_graph"]
+    _patch_sync_store(mocker)
+    from shepherd_utils.db import save_message_sync
+
+    save_message_sync("qid", {"message": {"query_graph": copy.deepcopy(query_graph)}})
+    save_message_sync("rid", generate_response())
+    save_message_sync("c1", copy.deepcopy(response_2))
+    # "c2" intentionally not stored so the child logs a "Missing callback" error.
+
+    _, log_entries = merge_messages_by_ids(
+        "test_ara", "qid", "rid", ["c1", "c2"], logging.INFO
+    )
+    # Entries are ReasonerLogEntryFormatter dicts, oldest-first.
+    assert any(
+        "Missing callback c2" in entry.get("message", "") for entry in log_entries
+    )
+    assert all("timestamp" in entry and "level" in entry for entry in log_entries)
+
+
+def test_merge_messages_by_ids_child_handler_not_leaked(mocker):
+    """The child logger is a per-process singleton, so the call-scoped handler
+    must be removed afterward -- otherwise handlers accumulate across the
+    child's successive tasks and bleed one query's logs into the next."""
+    import os
+
+    query_graph = response_1["message"]["query_graph"]
+    _patch_sync_store(mocker)
+    from shepherd_utils.db import save_message_sync
+
+    save_message_sync("qid", {"message": {"query_graph": copy.deepcopy(query_graph)}})
+    save_message_sync("rid", generate_response())
+    save_message_sync("c1", copy.deepcopy(response_2))
+
+    merge_messages_by_ids("test_ara", "qid", "rid", ["c1"], logging.INFO)
+    child_logger = logging.getLogger(f"merge_message.worker.{os.getpid()}")
+    assert not any(
+        getattr(h, "name", None) == "query_log_handler" for h in child_logger.handlers
+    )
 
 
 def test_merge_messages_by_id_delegates(mocker):

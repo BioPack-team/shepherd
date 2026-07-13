@@ -445,6 +445,14 @@ async def get_logs(
         logs = await logs_db_client.get(response_id)
         if logs is not None:
             logs = orjson.loads(logs)
+            # The stored list reflects the order in which workers *flushed*
+            # their logs, not the order events happened: a callback can arrive
+            # and be merged (and flushed) before the lookup that dispatched the
+            # query finishes and flushes its own logs. Every entry carries an
+            # ISO8601 UTC timestamp, so sort by it to present the logs in
+            # chronological order. Stable sort keeps same-timestamp entries in
+            # their original relative order.
+            logs.sort(key=lambda entry: entry.get("timestamp", ""))
             return logs
         else:
             logger.error(f"Failed to get logs for response {response_id}")
