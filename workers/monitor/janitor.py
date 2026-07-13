@@ -369,9 +369,7 @@ async def reclaim_dead_consumers(
                 raw_id = entry.get("message_id")
                 if raw_id is None:
                     continue
-                msg_ids.append(
-                    raw_id if isinstance(raw_id, str) else raw_id.decode()
-                )
+                msg_ids.append(raw_id if isinstance(raw_id, str) else raw_id.decode())
 
             bucket = summary["by_stream"].setdefault(
                 stream, {"messages": 0, "consumers": 0}
