@@ -7,7 +7,7 @@ import os
 import time
 import traceback
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
 from typing import Any, Union
@@ -33,13 +33,7 @@ from shepherd_utils.db import (
 from shepherd_utils.logger import QueryLogger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import (
-    filter_kgraph_orphans,
-    get_tasks,
-    merge_kgraph,
-    recursive_get_auxgraph_edges,
-    recursive_get_edge_support_graphs,
-)
+from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
 
 # Queue name
 STREAM = "merge_message"
@@ -69,57 +63,89 @@ def edge_is_negated(edge):
     return False
 
 
-def edge_has_negated_support(edge_id, message_edges, message_auxgraphs):
-    """Check a bound edge and its recursive support chain for negation."""
-    if edge_id not in message_edges:
-        raise KeyError(f"edge {edge_id} not in knowledge_graph.edges")
+def get_support_graph_ids(edge):
+    """Return auxiliary graph ids referenced by a knowledge edge."""
+    support_graph_ids = []
+    for attribute in edge.get("attributes", []) or []:
+        if attribute.get("attribute_type_id") == "biolink:support_graphs":
+            values = attribute.get("value", []) or []
+            if isinstance(values, str):
+                support_graph_ids.append(values)
+            else:
+                support_graph_ids.extend(values)
+    return support_graph_ids
 
-    edges = set()
-    auxgraphs = set()
-    nodes = set()
-    edges, _, _ = recursive_get_edge_support_graphs(
-        edge_id,
-        edges,
-        auxgraphs,
-        message_edges,
-        message_auxgraphs,
-        nodes,
+
+def _propagate_support_problem(
+    initial_edges,
+    initial_auxgraphs,
+    edge_to_containing_auxgraphs,
+    auxgraph_to_supporting_edges,
+):
+    """Propagate a problem from support edges to every dependent parent edge."""
+    affected_edges = set(initial_edges)
+    affected_auxgraphs = set(initial_auxgraphs)
+    pending = deque(
+        [("edge", edge_id) for edge_id in affected_edges]
+        + [("auxgraph", auxgraph_id) for auxgraph_id in affected_auxgraphs]
     )
-    return any(edge_is_negated(message_edges[support_id]) for support_id in edges)
+
+    while pending:
+        item_type, item_id = pending.popleft()
+        if item_type == "edge":
+            for auxgraph_id in edge_to_containing_auxgraphs.get(item_id, ()):
+                if auxgraph_id in affected_auxgraphs:
+                    continue
+                affected_auxgraphs.add(auxgraph_id)
+                pending.append(("auxgraph", auxgraph_id))
+        else:
+            for edge_id in auxgraph_to_supporting_edges.get(item_id, ()):
+                if edge_id in affected_edges:
+                    continue
+                affected_edges.add(edge_id)
+                pending.append(("edge", edge_id))
+
+    return affected_edges, affected_auxgraphs
 
 
-def analysis_support_has_negated_edge(analysis, message_edges, message_auxgraphs):
-    """Check support graphs that apply to the analysis as a whole."""
-    edges = set()
-    auxgraphs = set()
-    nodes = set()
+def build_support_problem_index(
+    message_edges,
+    message_auxgraphs,
+    directly_negated_edges,
+):
+    """Index all edges and auxiliary graphs affected by bad support evidence."""
+    edge_to_containing_auxgraphs = defaultdict(set)
+    auxgraph_to_supporting_edges = defaultdict(set)
+    invalid_edges = set()
+    invalid_auxgraphs = set()
 
-    for auxgraph_id in analysis.get("support_graphs", []) or []:
-        if auxgraph_id not in message_auxgraphs:
-            raise KeyError(f"auxgraph {auxgraph_id} not in auxiliary_graphs")
-        edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
-            auxgraph_id,
-            edges,
-            auxgraphs,
-            message_edges,
-            message_auxgraphs,
-            nodes,
-        )
+    for auxgraph_id, auxgraph in message_auxgraphs.items():
+        for edge_id in auxgraph.get("edges", []) or []:
+            if edge_id not in message_edges:
+                invalid_auxgraphs.add(auxgraph_id)
+                continue
+            edge_to_containing_auxgraphs[edge_id].add(auxgraph_id)
 
-    return any(edge_is_negated(message_edges[edge_id]) for edge_id in edges)
+    for edge_id, edge in message_edges.items():
+        for auxgraph_id in get_support_graph_ids(edge):
+            if auxgraph_id not in message_auxgraphs:
+                invalid_edges.add(edge_id)
+                continue
+            auxgraph_to_supporting_edges[auxgraph_id].add(edge_id)
 
-
-def analysis_has_negated_edge(analysis, message_edges, message_auxgraphs):
-    """Check every load-bearing edge in an analysis for explicit negation."""
-    for bindings in analysis.get("edge_bindings", {}).values():
-        for binding in bindings:
-            edge_id = binding.get("id")
-            if edge_id is None:
-                raise KeyError("edge binding missing id")
-            if edge_has_negated_support(edge_id, message_edges, message_auxgraphs):
-                return True
-
-    return analysis_support_has_negated_edge(analysis, message_edges, message_auxgraphs)
+    negated_edges, negated_auxgraphs = _propagate_support_problem(
+        directly_negated_edges,
+        set(),
+        edge_to_containing_auxgraphs,
+        auxgraph_to_supporting_edges,
+    )
+    invalid_edges, invalid_auxgraphs = _propagate_support_problem(
+        invalid_edges,
+        invalid_auxgraphs,
+        edge_to_containing_auxgraphs,
+        auxgraph_to_supporting_edges,
+    )
+    return negated_edges, negated_auxgraphs, invalid_edges, invalid_auxgraphs
 
 
 def filter_negated_creative_results(
@@ -130,6 +156,26 @@ def filter_negated_creative_results(
 ):
     """Prune invalid bindings and remove analyses with unsupported query edges."""
     results = response.get("message", {}).get("results", []) or []
+    if not results:
+        return 0
+
+    directly_negated_edges = {
+        edge_id for edge_id, edge in message_edges.items() if edge_is_negated(edge)
+    }
+    if not directly_negated_edges:
+        return 0
+
+    (
+        negated_edges,
+        negated_auxgraphs,
+        invalid_edges,
+        invalid_auxgraphs,
+    ) = build_support_problem_index(
+        message_edges,
+        message_auxgraphs,
+        directly_negated_edges,
+    )
+
     filtered_results = []
     removed_analyses = 0
     negated_bindings = 0
@@ -145,19 +191,22 @@ def filter_negated_creative_results(
 
         valid_analyses = []
         for analysis in analyses:
-            try:
-                has_negated_analysis_support = analysis_support_has_negated_edge(
-                    analysis, message_edges, message_auxgraphs
-                )
-            except KeyError as e:
+            support_graph_ids = analysis.get("support_graphs", []) or []
+            if any(
+                auxgraph_id not in message_auxgraphs or auxgraph_id in invalid_auxgraphs
+                for auxgraph_id in support_graph_ids
+            ):
                 invalid_analysis_supports += 1
                 removed_analyses += 1
                 logger.warning(
-                    f"Filtering creative analysis with an incomplete support chain: {e}"
+                    "Filtering creative analysis with an incomplete "
+                    "analysis-level support chain."
                 )
                 continue
 
-            if has_negated_analysis_support:
+            if any(
+                auxgraph_id in negated_auxgraphs for auxgraph_id in support_graph_ids
+            ):
                 negated_analysis_supports += 1
                 removed_analyses += 1
                 continue
@@ -168,21 +217,19 @@ def filter_negated_creative_results(
                 valid_bindings = []
                 for binding in bindings:
                     edge_id = binding.get("id")
-                    try:
-                        if edge_id is None:
-                            raise KeyError("edge binding missing id")
-                        has_negation = edge_has_negated_support(
-                            edge_id, message_edges, message_auxgraphs
-                        )
-                    except KeyError as e:
+                    if (
+                        edge_id is None
+                        or edge_id not in message_edges
+                        or edge_id in invalid_edges
+                    ):
                         invalid_bindings += 1
                         logger.warning(
                             "Filtering creative edge binding with an "
-                            f"incomplete support chain: {e}"
+                            "incomplete support chain."
                         )
                         continue
 
-                    if has_negation:
+                    if edge_id in negated_edges:
                         negated_bindings += 1
                         continue
                     valid_bindings.append(binding)

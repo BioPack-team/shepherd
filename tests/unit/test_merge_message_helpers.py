@@ -28,7 +28,7 @@ from tests.helpers.generate_messages import (
 )
 from workers.merge_message.worker import (
     add_knowledge_edge,
-    analysis_has_negated_edge,
+    build_support_problem_index,
     create_aux_graph,
     edge_is_negated,
     filter_negated_creative_results,
@@ -82,7 +82,7 @@ def test_edge_is_negated_requires_explicit_true_value():
     )
 
 
-def test_analysis_has_negated_edge_walks_nested_support_graphs():
+def test_build_support_problem_index_propagates_nested_negation():
     message_edges = {
         "rule_edge": {
             "subject": "CHEBI:1",
@@ -116,12 +116,20 @@ def test_analysis_has_negated_edge_walks_nested_support_graphs():
         "aux_1": {"edges": ["inferred_edge"]},
         "aux_2": {"edges": ["negated_edge"]},
     }
-    analysis = {"edge_bindings": {"e0": [{"id": "rule_edge"}]}}
+    (
+        negated_edges,
+        negated_auxgraphs,
+        invalid_edges,
+        invalid_auxgraphs,
+    ) = build_support_problem_index(message_edges, message_auxgraphs, {"negated_edge"})
 
-    assert analysis_has_negated_edge(analysis, message_edges, message_auxgraphs)
+    assert negated_edges == {"rule_edge", "inferred_edge", "negated_edge"}
+    assert negated_auxgraphs == {"aux_1", "aux_2"}
+    assert invalid_edges == set()
+    assert invalid_auxgraphs == set()
 
 
-def test_analysis_has_negated_edge_checks_analysis_support_graphs():
+def test_filter_negated_creative_results_checks_analysis_support_graphs():
     message_edges = {
         "bound_edge": {
             "subject": "CHEBI:1",
@@ -142,7 +150,52 @@ def test_analysis_has_negated_edge_checks_analysis_support_graphs():
         "support_graphs": ["analysis_support"],
     }
 
-    assert analysis_has_negated_edge(analysis, message_edges, message_auxgraphs)
+    response = {
+        "message": {
+            "results": [
+                {
+                    "node_bindings": {"SN": [{"id": "CHEBI:1"}]},
+                    "analyses": [analysis],
+                }
+            ]
+        }
+    }
+
+    removed = filter_negated_creative_results(
+        response, message_edges, message_auxgraphs, logger
+    )
+
+    assert removed == 1
+    assert response["message"]["results"] == []
+
+
+def test_filter_negated_creative_results_fast_path_skips_index(mocker):
+    build_index = mocker.patch(
+        "workers.merge_message.worker.build_support_problem_index"
+    )
+    message_edges = {
+        "valid_edge": {
+            "subject": "CHEBI:1",
+            "object": "MONDO:1",
+            "attributes": [],
+        }
+    }
+    response = {
+        "message": {
+            "results": [
+                {
+                    "node_bindings": {"SN": [{"id": "CHEBI:1"}]},
+                    "analyses": [{"edge_bindings": {"e0": [{"id": "valid_edge"}]}}],
+                }
+            ]
+        }
+    }
+
+    removed = filter_negated_creative_results(response, message_edges, {}, logger)
+
+    assert removed == 0
+    assert len(response["message"]["results"]) == 1
+    build_index.assert_not_called()
 
 
 def test_filter_negated_creative_results_keeps_valid_analysis():
@@ -240,6 +293,15 @@ def test_filter_negated_creative_results_keeps_positive_parallel_binding():
 
 
 def test_filter_negated_creative_results_drops_unresolvable_analysis(caplog):
+    message_edges = {
+        "unrelated_negated_edge": {
+            "subject": "MONDO:1",
+            "object": "HP:1",
+            "attributes": [
+                {"attribute_type_id": "biolink:negated", "value": True},
+            ],
+        }
+    }
     response = {
         "message": {
             "results": [
@@ -254,7 +316,7 @@ def test_filter_negated_creative_results_drops_unresolvable_analysis(caplog):
     }
 
     with caplog.at_level(logging.WARNING):
-        removed = filter_negated_creative_results(response, {}, {}, logger)
+        removed = filter_negated_creative_results(response, message_edges, {}, logger)
 
     assert removed == 1
     assert response["message"]["results"] == []
