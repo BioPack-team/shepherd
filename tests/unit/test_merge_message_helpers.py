@@ -28,7 +28,10 @@ from tests.helpers.generate_messages import (
 )
 from workers.merge_message.worker import (
     add_knowledge_edge,
+    analysis_has_negated_edge,
     create_aux_graph,
+    edge_is_negated,
+    filter_negated_creative_results,
     filter_promiscuous_results,
     filter_repeated_nodes,
     get_answer_node,
@@ -36,6 +39,7 @@ from workers.merge_message.worker import (
     get_promiscuous_qnodes,
     group_results_by_qnode,
     has_unique_nodes,
+    is_creative_query,
     merge_messages,
     queries_equivalent,
     remove_promiscuous_knode_results,
@@ -59,6 +63,217 @@ def test_get_edgeset_collapses_all_edge_bindings():
     }
     out = get_edgeset(result)
     assert out == frozenset({"k1", "k2", "k3", "k4"})
+
+
+def test_edge_is_negated_requires_explicit_true_value():
+    assert edge_is_negated(
+        {
+            "attributes": [
+                {"attribute_type_id": "biolink:negated", "value": True},
+            ]
+        }
+    )
+    assert not edge_is_negated(
+        {
+            "attributes": [
+                {"attribute_type_id": "biolink:negated", "value": False},
+            ]
+        }
+    )
+
+
+def test_analysis_has_negated_edge_walks_nested_support_graphs():
+    message_edges = {
+        "rule_edge": {
+            "subject": "CHEBI:1",
+            "object": "MONDO:1",
+            "attributes": [
+                {
+                    "attribute_type_id": "biolink:support_graphs",
+                    "value": ["aux_1"],
+                }
+            ],
+        },
+        "inferred_edge": {
+            "subject": "MONDO:1",
+            "object": "MONDO:2",
+            "attributes": [
+                {
+                    "attribute_type_id": "biolink:support_graphs",
+                    "value": ["aux_2"],
+                }
+            ],
+        },
+        "negated_edge": {
+            "subject": "MONDO:2",
+            "object": "HP:1",
+            "attributes": [
+                {"attribute_type_id": "biolink:negated", "value": True},
+            ],
+        },
+    }
+    message_auxgraphs = {
+        "aux_1": {"edges": ["inferred_edge"]},
+        "aux_2": {"edges": ["negated_edge"]},
+    }
+    analysis = {"edge_bindings": {"e0": [{"id": "rule_edge"}]}}
+
+    assert analysis_has_negated_edge(analysis, message_edges, message_auxgraphs)
+
+
+def test_analysis_has_negated_edge_checks_analysis_support_graphs():
+    message_edges = {
+        "bound_edge": {
+            "subject": "CHEBI:1",
+            "object": "MONDO:1",
+            "attributes": [],
+        },
+        "negated_edge": {
+            "subject": "MONDO:1",
+            "object": "HP:1",
+            "attributes": [
+                {"attribute_type_id": "biolink:negated", "value": True},
+            ],
+        },
+    }
+    message_auxgraphs = {"analysis_support": {"edges": ["negated_edge"]}}
+    analysis = {
+        "edge_bindings": {"e0": [{"id": "bound_edge"}]},
+        "support_graphs": ["analysis_support"],
+    }
+
+    assert analysis_has_negated_edge(analysis, message_edges, message_auxgraphs)
+
+
+def test_filter_negated_creative_results_keeps_valid_analysis():
+    message_edges = {
+        "valid_edge": {
+            "subject": "CHEBI:1",
+            "object": "MONDO:1",
+            "attributes": [],
+        },
+        "negated_edge": {
+            "subject": "CHEBI:1",
+            "object": "MONDO:1",
+            "attributes": [
+                {"attribute_type_id": "biolink:negated", "value": True},
+            ],
+        },
+    }
+    response = {
+        "message": {
+            "results": [
+                {
+                    "node_bindings": {"SN": [{"id": "CHEBI:1"}]},
+                    "analyses": [
+                        {"edge_bindings": {"e0": [{"id": "negated_edge"}]}},
+                        {"edge_bindings": {"e0": [{"id": "valid_edge"}]}},
+                    ],
+                },
+                {
+                    "node_bindings": {"SN": [{"id": "CHEBI:2"}]},
+                    "analyses": [
+                        {"edge_bindings": {"e0": [{"id": "negated_edge"}]}},
+                    ],
+                },
+            ]
+        }
+    }
+
+    removed = filter_negated_creative_results(response, message_edges, {}, logger)
+
+    assert removed == 2
+    assert len(response["message"]["results"]) == 1
+    assert response["message"]["results"][0]["node_bindings"]["SN"][0]["id"] == (
+        "CHEBI:1"
+    )
+    assert response["message"]["results"][0]["analyses"] == [
+        {"edge_bindings": {"e0": [{"id": "valid_edge"}]}}
+    ]
+
+
+def test_filter_negated_creative_results_keeps_positive_parallel_binding():
+    message_edges = {
+        "valid_edge": {
+            "subject": "CHEBI:1",
+            "object": "MONDO:1",
+            "attributes": [],
+        },
+        "negated_edge": {
+            "subject": "CHEBI:1",
+            "object": "MONDO:1",
+            "attributes": [
+                {"attribute_type_id": "biolink:negated", "value": True},
+            ],
+        },
+    }
+    response = {
+        "message": {
+            "results": [
+                {
+                    "node_bindings": {
+                        "SN": [{"id": "CHEBI:1"}],
+                        "ON": [{"id": "MONDO:1"}],
+                    },
+                    "analyses": [
+                        {
+                            "edge_bindings": {
+                                "e0": [
+                                    {"id": "negated_edge"},
+                                    {"id": "valid_edge"},
+                                ]
+                            }
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+    removed = filter_negated_creative_results(response, message_edges, {}, logger)
+
+    assert removed == 0
+    assert len(response["message"]["results"]) == 1
+    assert response["message"]["results"][0]["analyses"][0]["edge_bindings"] == {
+        "e0": [{"id": "valid_edge"}]
+    }
+
+
+def test_filter_negated_creative_results_drops_unresolvable_analysis(caplog):
+    response = {
+        "message": {
+            "results": [
+                {
+                    "node_bindings": {"SN": [{"id": "CHEBI:1"}]},
+                    "analyses": [
+                        {"edge_bindings": {"e0": [{"id": "missing_edge"}]}},
+                    ],
+                }
+            ]
+        }
+    }
+
+    with caplog.at_level(logging.WARNING):
+        removed = filter_negated_creative_results(response, {}, {}, logger)
+
+    assert removed == 1
+    assert response["message"]["results"] == []
+    assert "incomplete support chain" in caplog.text
+
+
+def test_is_creative_query_requires_exactly_one_inferred_edge():
+    assert is_creative_query(creative_query["message"]["query_graph"])
+    assert not is_creative_query(
+        {
+            "edges": {
+                "e0": {
+                    "subject": "a",
+                    "object": "b",
+                    "knowledge_type": "lookup",
+                }
+            }
+        }
+    )
 
 
 def test_create_aux_graph_returns_uuid_and_edge_list():
@@ -558,3 +773,134 @@ def test_merge_messages_creative_query_creates_knowledge_edges():
         )
     ]
     assert shepherd_edges
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_result_count"),
+    [("aragorn", 0), ("another_ara", 1)],
+)
+def test_merge_messages_filters_negation_only_for_aragorn(
+    target, expected_result_count
+):
+    original_qg = copy.deepcopy(creative_query["message"]["query_graph"])
+    response = {
+        "message": {
+            "query_graph": original_qg,
+            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "results": [],
+            "auxiliary_graphs": {},
+        }
+    }
+    new_response = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "SN": {"categories": ["biolink:ChemicalEntity"]},
+                    "ON": {
+                        "ids": ["MONDO:0001"],
+                        "categories": ["biolink:Disease"],
+                    },
+                    "phenotype": {
+                        "categories": ["biolink:PhenotypicFeature"],
+                    },
+                },
+                "edges": {
+                    "rule_treats": {
+                        "subject": "SN",
+                        "object": "phenotype",
+                        "predicates": ["biolink:treats"],
+                    },
+                    "rule_phenotype": {
+                        "subject": "ON",
+                        "object": "phenotype",
+                        "predicates": ["biolink:has_phenotype"],
+                    },
+                },
+            },
+            "knowledge_graph": {
+                "nodes": {
+                    "CHEBI:BAD": {"categories": ["biolink:ChemicalEntity"]},
+                    "MONDO:0001": {"categories": ["biolink:Disease"]},
+                    "HP:1": {"categories": ["biolink:PhenotypicFeature"]},
+                    "HP:2": {"categories": ["biolink:PhenotypicFeature"]},
+                },
+                "edges": {
+                    "treats_edge": {
+                        "subject": "CHEBI:BAD",
+                        "object": "HP:1",
+                        "predicate": "biolink:treats",
+                        "attributes": [],
+                        "sources": [],
+                    },
+                    "inferred_phenotype_edge": {
+                        "subject": "MONDO:0001",
+                        "object": "HP:1",
+                        "predicate": "biolink:has_phenotype",
+                        "attributes": [
+                            {
+                                "attribute_type_id": "biolink:support_graphs",
+                                "value": ["phenotype_support_1"],
+                            }
+                        ],
+                        "sources": [],
+                    },
+                    "subclass_edge": {
+                        "subject": "HP:2",
+                        "object": "HP:1",
+                        "predicate": "biolink:subclass_of",
+                        "attributes": [
+                            {
+                                "attribute_type_id": "biolink:support_graphs",
+                                "value": ["phenotype_support_2"],
+                            }
+                        ],
+                        "sources": [],
+                    },
+                    "negated_phenotype_edge": {
+                        "subject": "MONDO:0001",
+                        "object": "HP:2",
+                        "predicate": "biolink:has_phenotype",
+                        "attributes": [
+                            {
+                                "attribute_type_id": "biolink:negated",
+                                "value": True,
+                                "original_attribute_name": "negated",
+                            }
+                        ],
+                        "sources": [],
+                    },
+                },
+            },
+            "auxiliary_graphs": {
+                "phenotype_support_1": {"edges": ["subclass_edge"]},
+                "phenotype_support_2": {"edges": ["negated_phenotype_edge"]},
+            },
+            "results": [
+                {
+                    "node_bindings": {
+                        "SN": [{"id": "CHEBI:BAD"}],
+                        "ON": [{"id": "MONDO:0001"}],
+                        "phenotype": [{"id": "HP:1"}],
+                    },
+                    "analyses": [
+                        {
+                            "edge_bindings": {
+                                "rule_treats": [{"id": "treats_edge"}],
+                                "rule_phenotype": [{"id": "inferred_phenotype_edge"}],
+                            }
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    out = merge_messages(
+        target=target,
+        original_query_graph=original_qg,
+        response=response,
+        new_response=new_response,
+        logger=logger,
+    )
+
+    assert len(out["message"]["results"]) == expected_result_count

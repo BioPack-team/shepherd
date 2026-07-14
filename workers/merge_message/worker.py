@@ -33,7 +33,13 @@ from shepherd_utils.db import (
 from shepherd_utils.logger import QueryLogger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
+from shepherd_utils.shared import (
+    filter_kgraph_orphans,
+    get_tasks,
+    merge_kgraph,
+    recursive_get_auxgraph_edges,
+    recursive_get_edge_support_graphs,
+)
 
 # Queue name
 STREAM = "merge_message"
@@ -50,6 +56,185 @@ def get_edgeset(result):
         for edge_id, edgelist in analysis["edge_bindings"].items():
             edgeset.update([e["id"] for e in edgelist])
     return frozenset(edgeset)
+
+
+def edge_is_negated(edge):
+    """Return whether a knowledge edge is explicitly negated."""
+    for attribute in edge.get("attributes", []) or []:
+        if (
+            attribute.get("attribute_type_id") == "biolink:negated"
+            and attribute.get("value") is True
+        ):
+            return True
+    return False
+
+
+def edge_has_negated_support(edge_id, message_edges, message_auxgraphs):
+    """Check a bound edge and its recursive support chain for negation."""
+    if edge_id not in message_edges:
+        raise KeyError(f"edge {edge_id} not in knowledge_graph.edges")
+
+    edges = set()
+    auxgraphs = set()
+    nodes = set()
+    edges, _, _ = recursive_get_edge_support_graphs(
+        edge_id,
+        edges,
+        auxgraphs,
+        message_edges,
+        message_auxgraphs,
+        nodes,
+    )
+    return any(edge_is_negated(message_edges[support_id]) for support_id in edges)
+
+
+def analysis_support_has_negated_edge(analysis, message_edges, message_auxgraphs):
+    """Check support graphs that apply to the analysis as a whole."""
+    edges = set()
+    auxgraphs = set()
+    nodes = set()
+
+    for auxgraph_id in analysis.get("support_graphs", []) or []:
+        if auxgraph_id not in message_auxgraphs:
+            raise KeyError(f"auxgraph {auxgraph_id} not in auxiliary_graphs")
+        edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
+            auxgraph_id,
+            edges,
+            auxgraphs,
+            message_edges,
+            message_auxgraphs,
+            nodes,
+        )
+
+    return any(edge_is_negated(message_edges[edge_id]) for edge_id in edges)
+
+
+def analysis_has_negated_edge(analysis, message_edges, message_auxgraphs):
+    """Check every load-bearing edge in an analysis for explicit negation."""
+    for bindings in analysis.get("edge_bindings", {}).values():
+        for binding in bindings:
+            edge_id = binding.get("id")
+            if edge_id is None:
+                raise KeyError("edge binding missing id")
+            if edge_has_negated_support(edge_id, message_edges, message_auxgraphs):
+                return True
+
+    return analysis_support_has_negated_edge(analysis, message_edges, message_auxgraphs)
+
+
+def filter_negated_creative_results(
+    response,
+    message_edges,
+    message_auxgraphs,
+    logger: logging.Logger,
+):
+    """Prune invalid bindings and remove analyses with unsupported query edges."""
+    results = response.get("message", {}).get("results", []) or []
+    filtered_results = []
+    removed_analyses = 0
+    negated_bindings = 0
+    invalid_bindings = 0
+    negated_analysis_supports = 0
+    invalid_analysis_supports = 0
+
+    for result in results:
+        analyses = result.get("analyses")
+        if not analyses:
+            filtered_results.append(result)
+            continue
+
+        valid_analyses = []
+        for analysis in analyses:
+            try:
+                has_negated_analysis_support = analysis_support_has_negated_edge(
+                    analysis, message_edges, message_auxgraphs
+                )
+            except KeyError as e:
+                invalid_analysis_supports += 1
+                removed_analyses += 1
+                logger.warning(
+                    f"Filtering creative analysis with an incomplete support chain: {e}"
+                )
+                continue
+
+            if has_negated_analysis_support:
+                negated_analysis_supports += 1
+                removed_analyses += 1
+                continue
+
+            filtered_edge_bindings = {}
+            has_empty_qedge = False
+            for qedge_id, bindings in analysis.get("edge_bindings", {}).items():
+                valid_bindings = []
+                for binding in bindings:
+                    edge_id = binding.get("id")
+                    try:
+                        if edge_id is None:
+                            raise KeyError("edge binding missing id")
+                        has_negation = edge_has_negated_support(
+                            edge_id, message_edges, message_auxgraphs
+                        )
+                    except KeyError as e:
+                        invalid_bindings += 1
+                        logger.warning(
+                            "Filtering creative edge binding with an "
+                            f"incomplete support chain: {e}"
+                        )
+                        continue
+
+                    if has_negation:
+                        negated_bindings += 1
+                        continue
+                    valid_bindings.append(binding)
+
+                filtered_edge_bindings[qedge_id] = valid_bindings
+                if not valid_bindings:
+                    has_empty_qedge = True
+
+            if has_empty_qedge:
+                removed_analyses += 1
+                continue
+
+            analysis["edge_bindings"] = filtered_edge_bindings
+            valid_analyses.append(analysis)
+
+        if valid_analyses:
+            result["analyses"] = valid_analyses
+            filtered_results.append(result)
+
+    response["message"]["results"] = filtered_results
+    if negated_bindings:
+        logger.info(
+            f"Filtered {negated_bindings} creative edge bindings because their "
+            "load-bearing edge chains had biolink:negated=true."
+        )
+    if invalid_bindings:
+        logger.warning(
+            f"Filtered {invalid_bindings} creative edge bindings because their "
+            "load-bearing edge chains could not be fully resolved."
+        )
+    if negated_analysis_supports:
+        logger.info(
+            f"Filtered {negated_analysis_supports} creative analyses because "
+            "an analysis-level support graph had biolink:negated=true."
+        )
+    if invalid_analysis_supports:
+        logger.warning(
+            f"Filtered {invalid_analysis_supports} creative analyses because "
+            "their analysis-level support graphs could not be fully resolved."
+        )
+    return removed_analyses
+
+
+def is_creative_query(query_graph):
+    """Return whether this is Aragorn's supported single-edge inferred query."""
+    return (
+        sum(
+            edge.get("knowledge_type", "lookup") == "inferred"
+            for edge in query_graph.get("edges", {}).values()
+        )
+        == 1
+    )
 
 
 def create_aux_graph(analysis):
@@ -507,6 +692,14 @@ def merge_messages(
                         )
                 else:
                     existing[key] = val
+
+    if target == "aragorn" and is_creative_query(original_query_graph):
+        filter_negated_creative_results(
+            new_response,
+            result["message"]["knowledge_graph"]["edges"],
+            merged_aux,
+            logger,
+        )
 
     # Determine type of message
     if "edges" in original_query_graph:
