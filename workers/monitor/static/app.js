@@ -250,7 +250,12 @@
           const running = c.in_flight === null || c.in_flight === undefined ? "-" : fmt(c.in_flight);
           const limit = fmt(c.task_limit);
           const mem = fmtBytes(c.rss_bytes);
-          const cpu = c.cpu_pct === null || c.cpu_pct === undefined ? "-" : `${c.cpu_pct.toFixed(1)}%`;
+          // CPU is a top-style "% of a single core" (can exceed 100 on
+          // multi-core work), so show the core allocation alongside it to keep
+          // the number interpretable.
+          const cpu = c.cpu_pct === null || c.cpu_pct === undefined
+            ? "-"
+            : (c.cpu_count ? `${c.cpu_pct.toFixed(1)}% / ${c.cpu_count} cores` : `${c.cpu_pct.toFixed(1)}%`);
           const seen = c.last_seen ? fmtTimeAgo(c.last_seen) : "-";
           const staleTag = c.stale ? ' <span class="state-pill stale">stale</span>' : "";
           return `<tr${rowClass}>

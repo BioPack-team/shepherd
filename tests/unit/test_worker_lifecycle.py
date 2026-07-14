@@ -191,11 +191,69 @@ def test_heartbeat_manage_signals_flag_defaults_true():
     assert Heartbeat("s", "c", 1, manage_signals=False).manage_signals is False
 
 
+# --- TaskSlots: reservation vs. dispatch ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_task_slots_reserved_slot_not_counted_as_running():
+    """Reserving a slot for the poll must NOT count as a running task -- this is
+    the "shows one running while just checking for a task" bug."""
+    slots = shared.TaskSlots(10)
+    await slots.acquire()  # what get_tasks does before the blocking poll
+    assert slots.in_flight == 0
+    # Idle poll returned nothing: the slot is freed with no work counted.
+    slots.release_slot()
+    assert slots.in_flight == 0
+
+
+@pytest.mark.asyncio
+async def test_task_slots_dispatch_then_release_tracks_running():
+    """A dispatched task counts as in-flight until the worker releases it."""
+    slots = shared.TaskSlots(10)
+    await slots.acquire()
+    slots.dispatch()  # get_tasks marks it just before yielding to the worker
+    assert slots.in_flight == 1
+    slots.release()  # worker's finally
+    assert slots.in_flight == 0
+
+
+@pytest.mark.asyncio
+async def test_task_slots_counts_multiple_concurrent_dispatches():
+    slots = shared.TaskSlots(10)
+    for _ in range(3):
+        await slots.acquire()
+        slots.dispatch()
+    assert slots.in_flight == 3
+    slots.release()
+    assert slots.in_flight == 2
+
+
+def test_task_slots_release_never_goes_negative():
+    """A stray release must not drive the count below zero."""
+    slots = shared.TaskSlots(10)
+    slots.release()
+    assert slots.in_flight == 0
+
+
 # --- resource / in-flight reporting -----------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_heartbeat_in_flight_reports_dispatched_not_reserved():
+    """Through the heartbeat: a slot merely reserved for polling reads as 0
+    running; only once a task is dispatched does it read as 1."""
+    slots = shared.TaskSlots(10)
+    hb = Heartbeat("merge_message", "c1", 10, manage_signals=False, limiter=slots)
+    await slots.acquire()
+    assert hb._in_flight() == 0
+    slots.dispatch()
+    assert hb._in_flight() == 1
+    slots.release()
+    assert hb._in_flight() == 0
+
+
 def test_heartbeat_in_flight_from_semaphore():
-    """``_in_flight`` = task_limit minus the semaphore's free permits."""
+    """Fallback path: a bare semaphore -> task_limit minus its free permits."""
     limiter = asyncio.Semaphore(10)
     hb = Heartbeat("merge_message", "c1", 10, manage_signals=False, limiter=limiter)
     assert hb._in_flight() == 0
@@ -232,6 +290,7 @@ async def test_heartbeat_ping_payload_includes_resources(redis_mock, monkeypatch
 
     raw = await redis_mock["broker"].get(heartbeat_key("merge_message", "abc"))
     payload = json.loads(raw)
+    # A bare semaphore with one acquired permit -> fallback in-flight of 1.
     assert payload["in_flight"] == 1
     assert payload["task_limit"] == 8
     # Keys are always present; values are best-effort (None off Linux / no /proc).
@@ -239,6 +298,68 @@ async def test_heartbeat_ping_payload_includes_resources(redis_mock, monkeypatch
     assert "cpu_pct" in payload
     # The very first ping has no prior CPU sample to diff against.
     assert payload["cpu_pct"] is None
+    # CPU core allocation accompanies the percentage so it's interpretable.
+    assert payload["cpu_count"] >= 1
+
+
+# --- CPU accounting: cgroup-wide vs. this process ---------------------------
+
+
+def test_read_cpu_seconds_prefers_cgroup_when_containerized(monkeypatch):
+    """In a container we read the cgroup total so ProcessPoolExecutor children
+    (where CPU-bound workers do their heavy lifting) are included."""
+    monkeypatch.setattr(heartbeat_module, "_in_container", lambda: True)
+    monkeypatch.setattr(heartbeat_module, "_read_cgroup_cpu_seconds", lambda: 123.0)
+    monkeypatch.setattr(
+        heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 1.0
+    )
+    assert heartbeat_module._read_cpu_seconds() == 123.0
+
+
+def test_read_cpu_seconds_uses_proc_self_outside_container(monkeypatch):
+    """On a bare host /sys/fs/cgroup is the whole machine, so we must NOT read
+    it -- fall back to this process's own CPU time."""
+    monkeypatch.setattr(heartbeat_module, "_in_container", lambda: False)
+    monkeypatch.setattr(
+        heartbeat_module,
+        "_read_cgroup_cpu_seconds",
+        lambda: (_ for _ in ()).throw(AssertionError("must not read cgroup")),
+    )
+    monkeypatch.setattr(
+        heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 7.0
+    )
+    assert heartbeat_module._read_cpu_seconds() == 7.0
+
+
+def test_read_cpu_seconds_falls_back_when_cgroup_unreadable(monkeypatch):
+    """Containerized but cgroup CPU accounting unavailable -> process self."""
+    monkeypatch.setattr(heartbeat_module, "_in_container", lambda: True)
+    monkeypatch.setattr(heartbeat_module, "_read_cgroup_cpu_seconds", lambda: None)
+    monkeypatch.setattr(
+        heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 3.5
+    )
+    assert heartbeat_module._read_cpu_seconds() == 3.5
+
+
+def test_read_cgroup_cpu_seconds_parses_v2_usage_usec(monkeypatch, tmp_path):
+    """cgroup v2 cpu.stat: usage_usec is microseconds -> seconds."""
+    stat = tmp_path / "cpu.stat"
+    stat.write_text("usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n")
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/sys/fs/cgroup/cpu.stat":
+            return real_open(stat, *args, **kwargs)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert heartbeat_module._read_cgroup_cpu_seconds() == 2.5
+
+
+def test_in_container_detects_kubernetes(monkeypatch):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    assert heartbeat_module._in_container() is True
 
 
 def test_heartbeat_cpu_pct_computes_after_two_samples(monkeypatch):

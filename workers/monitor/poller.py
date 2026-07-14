@@ -391,6 +391,7 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "in_flight": hb.get("in_flight"),
                 "rss_bytes": hb.get("rss_bytes"),
                 "cpu_pct": hb.get("cpu_pct"),
+                "cpu_count": hb.get("cpu_count"),
                 "stale": hb.get("stale", False),
             }
         )
