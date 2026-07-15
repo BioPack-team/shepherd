@@ -134,18 +134,21 @@ class Settings(BaseSettings):
     max_task_deliveries: int = 5
 
     # Pre-flight response-size guard for the message-processing workers. Loading a
-    # stored TRAPI response decompresses and JSON-parses it into Python objects,
-    # which balloons memory to many times the payload's on-the-wire size; a large
-    # enough response peaks past the container's memory limit for a fraction of a
-    # second and is OOM-killed (invisible to a coarse memory dashboard). A worker
-    # can cheaply check the *stored/compressed* blob size (Redis STRLEN, no load)
-    # before fetching it and fail the task gracefully instead of OOMing. This is
-    # the compressed size, so set it well below the memory limit to leave room for
-    # the decode/expand multiplier (a good starting point is ~10-15% of the pod's
-    # memory limit; tune from the STRLEN of a known-bad response). Accepts
-    # Kubernetes-style sizes ("300MB", "256Mi", ...) or a plain byte count; 0 (or
-    # unparseable) disables the guard -- the delivery-count breaker above is the
-    # always-on backstop.
+    # stored TRAPI response decompresses it and JSON-parses it into a Python
+    # object tree that is ~5-6x the uncompressed JSON for TRAPI-shaped data; that
+    # tree also briefly coexists with the decompressed bytes, so peak memory while
+    # decoding is roughly (uncompressed size) x 6-7 plus the process baseline. A
+    # large enough response blows past the container memory limit for a fraction
+    # of a second and is OOM-killed (invisible to a coarse memory dashboard). A
+    # worker can cheaply read the response's *uncompressed* size from the zstd
+    # frame header (GETRANGE of a few bytes, no load, no decompress) before
+    # fetching it and fail the task gracefully instead of OOMing. This is the
+    # uncompressed size (what you'd see from the /response endpoint), so size it
+    # off the memory limit and the ~6-7x peak multiplier: for a 2Gi pod, keeping
+    # the decode peak under ~1.8Gi means capping uncompressed size around 200-250M
+    # (tune from the size of a known-bad response). Accepts Kubernetes-style sizes
+    # ("250MB", "256Mi", ...) or a plain byte count; 0 (or unparseable) disables
+    # the guard -- the delivery-count breaker above is the always-on backstop.
     max_response_size: str = "0"
 
     # Graceful shutdown. On SIGTERM/SIGINT (Kubernetes sends SIGTERM on every
@@ -272,7 +275,7 @@ class Settings(BaseSettings):
 
     @property
     def max_response_size_bytes(self) -> int:
-        """Max stored (compressed) response blob in bytes (0 disables the guard)."""
+        """Max uncompressed response size in bytes (0 disables the guard)."""
         return parse_size_to_bytes(self.max_response_size)
 
     class Config:

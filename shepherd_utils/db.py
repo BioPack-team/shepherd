@@ -269,10 +269,42 @@ class ResponseTooLargeError(Exception):
 async def get_blob_size(message_id: str) -> int:
     """Return the stored (compressed) size of a data-db blob in bytes.
 
-    ``STRLEN`` is an O(1) server-side read that never transfers the payload, so
-    a worker can gate on size before paying the memory cost of fetching,
-    decompressing and parsing it. Returns 0 when the key is missing.
+    ``STRLEN`` is an O(1) server-side read that never transfers the payload.
+    Returns 0 when the key is missing.
     """
+    return int(await data_db_client.strlen(message_id))
+
+
+# The zstd frame header (magic + descriptors + content size) is at most 18
+# bytes; a small prefix is enough to read the embedded uncompressed size.
+_ZSTD_HEADER_PROBE_BYTES = 64
+
+
+async def get_response_size(message_id: str) -> int:
+    """Best-effort *uncompressed* size of a stored response, read cheaply.
+
+    Every blob we store is a one-shot zstd frame (``encode_message``), which
+    embeds the original uncompressed content size in its header. We fetch just
+    the first few header bytes with ``GETRANGE`` and decode that size -- no full
+    fetch, no decompress. Uncompressed size is what actually drives a worker's
+    peak memory: decoding parses the JSON into a Python object tree several times
+    larger again (~5-6x for TRAPI-shaped data), and that tree briefly coexists
+    with the decompressed bytes. Falls back to the compressed ``STRLEN`` if the
+    header carries no content size (e.g. a streaming frame); returns 0 when the
+    key is missing.
+    """
+    header = await data_db_client.getrange(message_id, 0, _ZSTD_HEADER_PROBE_BYTES - 1)
+    if not header:
+        return 0
+    if isinstance(header, str):
+        header = header.encode("latin-1")
+    try:
+        size = zstandard.frame_content_size(header)
+    except zstandard.ZstdError:
+        size = -1
+    if size and size > 0:
+        return int(size)
+    # Unknown content size -> fall back to the compressed length as a proxy.
     return int(await data_db_client.strlen(message_id))
 
 
@@ -282,21 +314,24 @@ async def enforce_response_size_limit(
 ) -> None:
     """Raise ``ResponseTooLargeError`` if a response exceeds the configured cap.
 
-    The cap (``settings.max_response_size``) is compared against the *stored,
-    compressed* blob size -- decoding expands it several-fold in memory, so the
-    limit is deliberately set well below the pod's memory limit. A cap of 0
-    disables the guard, leaving the delivery-count circuit breaker as the
-    backstop. Called at the top of a worker, before ``get_message``.
+    The cap (``settings.max_response_size``) is compared against the response's
+    *uncompressed* size -- the number you'd see fetching it from ``/response`` --
+    read cheaply from the zstd frame header without loading the blob. Decoding
+    expands that several-fold in memory, so set the limit well below the pod's
+    memory limit (see the config comment for sizing). A cap of 0 disables the
+    guard, leaving the delivery-count circuit breaker as the backstop. Called at
+    the top of a worker, before ``get_message``.
     """
     max_bytes = settings.max_response_size_bytes
     if max_bytes <= 0:
         return
-    size = await get_blob_size(response_id)
+    size = await get_response_size(response_id)
     if size > max_bytes:
         raise ResponseTooLargeError(
-            f"Response {response_id} is {size} compressed bytes, over the "
+            f"Response {response_id} is {size} uncompressed bytes, over the "
             f"{max_bytes}-byte limit (max_response_size={settings.max_response_size}); "
-            "refusing to load it to avoid an out-of-memory kill."
+            "refusing to load it: parsing it into memory would risk an "
+            "out-of-memory kill."
         )
 
 

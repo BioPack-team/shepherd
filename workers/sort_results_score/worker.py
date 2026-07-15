@@ -35,24 +35,31 @@ async def sort_results_score(task, logger: logging.Logger):
     current_op = workflow[0]
     aord = current_op.get("ascending_or_descending", "descending")
     reverse = aord == "descending"
-    for ind, result in enumerate(results):
-        message["message"]["results"][ind]["analyses"] = sorted(
-            result["analyses"],
+    # Sort in place (list.sort, not sorted()) throughout. The decoded response is
+    # already by far the largest object in memory, so allocating a second copy of
+    # the results list -- and of every result's analyses list -- is wasted peak
+    # memory on exactly the payloads big enough to be a problem. ``results`` is
+    # the same list object as message["message"]["results"], so sorting it in
+    # place reorders the message too.
+    for result in results:
+        result["analyses"].sort(
             key=lambda x: x.get("score", 0),
             reverse=reverse,
         )
     if reverse:
-        message["message"]["results"] = sorted(
-            results,
+        results.sort(
             key=lambda x: x["analyses"][0].get("score", 0) if x["analyses"] else 0,
             reverse=reverse,
         )
     else:
-        message["message"]["results"] = sorted(
-            results,
+        results.sort(
             key=lambda x: x["analyses"][-1].get("score", 0) if x["analyses"] else 0,
             reverse=reverse,
         )
+    # Reattach so the key exists even when the response arrived without a
+    # ``results`` field (get returned the default []); this is a rebind of the
+    # same list object, not a copy.
+    message["message"]["results"] = results
     logger.info("Returning sorted results.")
 
     # save merged message back to db

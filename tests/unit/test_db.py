@@ -24,6 +24,7 @@ from shepherd_utils.db import (
     get_logs,
     get_message,
     get_message_sync,
+    get_response_size,
     save_logs,
     save_message,
     save_message_sync,
@@ -44,6 +45,22 @@ async def test_get_blob_size_reports_stored_bytes(redis_mock):
     assert size == await redis_mock["data"].strlen("sizekey")
     # Missing key reads as 0, not an error.
     assert await get_blob_size("nope") == 0
+
+
+@pytest.mark.asyncio
+async def test_get_response_size_reports_uncompressed_bytes(redis_mock):
+    """get_response_size returns the UNCOMPRESSED size (from the zstd frame
+    header), which equals the JSON length -- read without loading the blob."""
+    payload = {
+        "message": {"results": [{"analyses": [{"score": i}]} for i in range(50)]}
+    }
+    await save_message("ukey", payload, logger)
+    uncompressed = len(orjson.dumps(payload))
+    assert await get_response_size("ukey") == uncompressed
+    # The uncompressed size exceeds the compressed one for a real payload.
+    assert await get_response_size("ukey") > await get_blob_size("ukey")
+    # Missing key reads as 0.
+    assert await get_response_size("nope") == 0
 
 
 @pytest.mark.asyncio

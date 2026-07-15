@@ -159,6 +159,31 @@ async def test_invalid_json(redis_mock, mocker):
 
 
 @pytest.mark.asyncio
+async def test_missing_results_key_yields_empty_results(redis_mock, mocker):
+    """A response with no ``results`` field is handled without error and comes
+    out with an (empty) results list attached."""
+    mock_get = mocker.patch("workers.sort_results_score.worker.get_message")
+    mock_get.return_value = {"message": {"knowledge_graph": {"nodes": {}, "edges": {}}}}
+
+    await sort_results_score(
+        [
+            "test",
+            {
+                "query_id": "test",
+                "response_id": "test_response",
+                "workflow": json.dumps([{"id": "sort_results_score"}]),
+                "log_level": "20",
+                "otel": json.dumps({}),
+            },
+        ],
+        logger,
+    )
+
+    message = await get_message("test_response", logger)
+    assert message["message"]["results"] == []
+
+
+@pytest.mark.asyncio
 async def test_oversized_response_raises_before_load(redis_mock, mocker, monkeypatch):
     """An over-limit response must raise ResponseTooLargeError *before* the
     memory-expanding get_message load, so run_task_lifecycle can fail it cleanly
