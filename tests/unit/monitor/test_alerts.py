@@ -246,6 +246,69 @@ async def test_heartbeat_lost_suppressed_in_grace_then_fires_after(patched, cloc
     assert patched["dispatch"].call_args.args[0]["rule"] == "arax_down"
 
 
+def _worker_snapshot_with_eviction(ts, evicted_delta, worker="arax", alive=0):
+    snap = _worker_snapshot(ts, worker=worker, alive=alive)
+    snap["redis"] = {"evicted_keys_delta": evicted_delta}
+    return snap
+
+
+async def test_heartbeat_lost_suppressed_while_redis_evicting(patched, clock, mocker):
+    """A Redis eviction spell shouldn't surface as a worker-crash flood.
+
+    Eviction can shed a live worker's short-TTL heartbeat key, making it read as
+    zero-alive though it never disconnected. The engine should suppress the
+    worker-down alert while eviction is active and for the grace window after.
+    """
+    mocker.patch.object(
+        alerts.settings, "monitor_redis_eviction_grace_sec", 30, create=True
+    )
+    rule = Rule(
+        {"name": "arax_down", "type": "heartbeat_lost", "worker": "arax", "duration": 0}
+    )
+    engine = _engine([rule])
+
+    # Tick observes an eviction AND a zero-alive worker: suppressed, and no
+    # cooldown armed, so it can still fire later if genuinely down.
+    clock.return_value = 2_000.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_000.0, evicted_delta=7))
+    patched["dispatch"].assert_not_called()
+
+    # Still inside the 30s grace after the last eviction (no new evictions):
+    # remains suppressed.
+    clock.return_value = 2_020.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_020.0, evicted_delta=0))
+    patched["dispatch"].assert_not_called()
+
+    # Past the grace window with the worker still down: it now buffers a
+    # down-alert that flushes past the debounce window.
+    clock.return_value = 2_040.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_040.0, evicted_delta=0))
+    clock.return_value = 2_047.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_047.0, evicted_delta=0))
+    patched["dispatch"].assert_called_once()
+    assert patched["dispatch"].call_args.args[0]["rule"] == "arax_down"
+
+
+async def test_scale_down_suppressed_while_redis_evicting(patched, clock, mocker):
+    mocker.patch.object(
+        alerts.settings, "monitor_redis_eviction_grace_sec", 30, create=True
+    )
+    engine = _engine()
+    clock.return_value = 3_000.0
+    snap = {
+        "ts": 3_000.0,
+        "events": [_scale_down("arax"), _scale_down("bte")],
+        "redis": {"evicted_keys_delta": 3},
+    }
+    await engine.evaluate(snap)
+    clock.return_value = 3_010.0
+    await engine.evaluate(
+        {"ts": 3_010.0, "events": [], "redis": {"evicted_keys_delta": 0}}
+    )
+    patched["dispatch"].assert_not_called()
+    patched["dispatch_batch"].assert_not_called()
+
+
 async def test_multiple_downed_workers_coalesce_into_one_batch(patched):
     engine = _engine()
     events = [_scale_down("aragorn.lookup"), _scale_down("arax"), _scale_down("bte")]

@@ -249,7 +249,16 @@
           const rowClass = c.stale ? ' class="stale-row"' : "";
           const running = c.in_flight === null || c.in_flight === undefined ? "-" : fmt(c.in_flight);
           const limit = fmt(c.task_limit);
-          const mem = fmtBytes(c.rss_bytes);
+          // RSS, plus a colorized % of the container's memory cap when one is
+          // reported (cgroup limit). Uncapped workers just show the raw RSS,
+          // mirroring how the Redis panel omits the % when maxmemory is 0.
+          let mem = fmtBytes(c.rss_bytes);
+          if (c.rss_bytes != null && c.mem_limit_bytes) {
+            const memPct = 100 * c.rss_bytes / c.mem_limit_bytes;
+            const memColor = memPct >= 90 ? "var(--bad)" : memPct >= 80 ? "var(--warn)" : null;
+            const memText = `${mem} (${memPct.toFixed(0)}%)`;
+            mem = memColor ? `<span style="color:${memColor}">${memText}</span>` : memText;
+          }
           // CPU is a top-style "% of a single core" (can exceed 100 on
           // multi-core work), so show the core allocation alongside it to keep
           // the number interpretable.
@@ -399,7 +408,12 @@
     const usedH = redis.used_memory_human
       || (redis.used_memory_bytes ? fmtBytes(redis.used_memory_bytes) : "-");
     const maxBytes = redis.maxmemory_bytes || 0;
-    const memValue = maxBytes ? `${usedH} / ${fmtBytes(maxBytes)}` : usedH;
+    // Inline the % of the cap alongside used/cap so the headroom reads at a
+    // glance without cross-referencing the separate "Redis mem %" row below.
+    let memValue = maxBytes ? `${usedH} / ${fmtBytes(maxBytes)}` : usedH;
+    if (maxBytes && redis.maxmemory_pct != null) {
+      memValue += ` (${redis.maxmemory_pct.toFixed(1)}%)`;
+    }
     let memPct = "-";
     if (redis.maxmemory_pct != null) {
       const p = redis.maxmemory_pct;

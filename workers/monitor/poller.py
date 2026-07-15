@@ -390,6 +390,7 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "task_limit": hb.get("task_limit"),
                 "in_flight": hb.get("in_flight"),
                 "rss_bytes": hb.get("rss_bytes"),
+                "mem_limit_bytes": hb.get("mem_limit_bytes"),
                 "cpu_pct": hb.get("cpu_pct"),
                 "cpu_count": hb.get("cpu_count"),
                 "stale": hb.get("stale", False),

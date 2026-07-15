@@ -240,6 +240,17 @@ class Settings(BaseSettings):
     # flood into just the ``broker_down``/``broker_recovered`` pair; a worker
     # that is *genuinely* still down once the window elapses alerts as normal.
     monitor_broker_recovery_grace_sec: int = 30
+    # When the Redis broker hits its maxmemory cap and starts evicting keys, the
+    # short-TTL worker heartbeat keys are prime eviction targets (the deployment
+    # uses volatile-ttl, which sheds nearest-expiry keys first). Evicting a live
+    # worker's heartbeat makes it momentarily read as zero-alive even though it
+    # never disconnected -- key eviction doesn't close client connections. To
+    # stop that from firing a flood of bogus worker-down/crash alerts, worker-down
+    # alerts are suppressed while eviction is active and for this long after the
+    # last observed eviction, giving heartbeats (interval 5s, TTL 15s) time to be
+    # re-registered. A worker that is genuinely still down once the window
+    # elapses alerts as normal.
+    monitor_redis_eviction_grace_sec: int = 30
     # Postgres availability alerting. Same debounce idea as the broker: Postgres
     # must stay unreachable this long before the single ``postgres_down`` alert
     # fires, so a transient query timeout doesn't trip it. No recovery-grace

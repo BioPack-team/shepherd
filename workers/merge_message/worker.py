@@ -42,6 +42,18 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
+# Console logger for this worker's operational/plumbing lines (obtained lock,
+# drained N callbacks, finished task, pool sizing, poll-loop lifecycle). It sits
+# under the ``shepherd`` hierarchy so it propagates to that logger's console
+# handler and shows up in `docker compose` / terminal output, but -- unlike the
+# per-task query logger get_tasks hands us -- it carries NO query_log_handler,
+# so these lines are NOT captured into the query's response log list. That
+# separation is deliberate: these lines were demoted from INFO to DEBUG on the
+# per-task logger to stop them flooding the stored query logs, which also
+# silenced them in the terminal. Routing them here restores terminal visibility
+# without reintroducing the response-log noise.
+console_logger = logging.getLogger(f"shepherd.{STREAM}")
+
 
 def get_edgeset(result):
     """Given a result, return a frozenset of any knowledge edges in it"""
@@ -767,7 +779,7 @@ async def poll_for_tasks():
     # growing response blob, so pool size == concurrency bounds peak memory.
     # POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
-    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    console_logger.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     # Shared self-healing pool: spawn-context executor that replaces itself in
     # place on a BrokenProcessPool (same implementation the aragorn.omnicorp /
     # aragorn.score / arax.rank workers use). run() swaps the dead pool before
@@ -842,7 +854,7 @@ async def poll_for_tasks():
                     )
                     return
 
-                logger.debug(f"[{callback_id}] Obtained lock for {response_id}.")
+                console_logger.info(f"[{callback_id}] Obtained lock for {response_id}.")
                 # Sanity check: if the original query is gone, every ready
                 # callback for it is undeliverable -- clean them all up. Use a
                 # cheap EXISTS rather than loading the whole query blob just to
@@ -902,7 +914,7 @@ async def poll_for_tasks():
                     return
 
                 span.set_attribute("drained_callbacks", drained)
-                logger.debug(
+                console_logger.info(
                     f"[{callback_id}] Drained {drained} callback(s) in "
                     f"{time.time() - lock_time:.2f}s"
                 )
@@ -933,7 +945,9 @@ async def poll_for_tasks():
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
             except Exception as e:
                 logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
-            logger.debug(f"Finished task {task[0]} in {time.time() - start:.2f}s")
+            console_logger.info(
+                f"Finished task {task[0]} in {time.time() - start:.2f}s"
+            )
             # Unlike normal workers, this worker hand-rolls its lifecycle and
             # never calls wrap_up_task, so nothing else persists its logs. Flush
             # them here (keyed by response_id, the key finish_query reads) so the
@@ -957,13 +971,13 @@ async def poll_for_tasks():
                 inflight.add(t)
                 t.add_done_callback(inflight.discard)
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            console_logger.info("Poll loop cancelled, shutting down.")
             for t in inflight:
                 t.cancel()
             pool.shutdown()
             return
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            console_logger.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
 
 

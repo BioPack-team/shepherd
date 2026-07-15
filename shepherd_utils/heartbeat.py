@@ -66,6 +66,42 @@ def _read_rss_bytes() -> "int | None":
         return None
 
 
+def _read_cgroup_memory_limit() -> "int | None":
+    """The container's memory limit in bytes, or ``None`` if uncapped/unknown.
+
+    Read from the same ``/sys/fs/cgroup`` tree the CPU accounting uses, handling
+    both cgroup v2 (``memory.max``) and v1 (``memory/memory.limit_in_bytes``).
+    Both use a sentinel for "no limit": v2 writes the literal ``"max"``, v1 an
+    enormous page-counter maximum. We return ``None`` for either so the monitor
+    treats the worker as uncapped (and shows raw RSS without a percentage),
+    exactly like the Redis panel does when ``maxmemory`` is 0. Only meaningful
+    inside a container -- on a bare host the cgroup is the whole machine's.
+    """
+    if not _in_container():
+        return None
+    # cgroup v2: a single value or the literal "max".
+    try:
+        with open("/sys/fs/cgroup/memory.max", encoding="ascii") as f:
+            raw = f.read().strip()
+        if raw and raw != "max":
+            limit = int(raw)
+            # Guard against a v2 kernel also exposing a giant sentinel.
+            if 0 < limit < (1 << 62):
+                return limit
+        return None
+    except (OSError, ValueError):
+        pass
+    # cgroup v1: a byte count; "unlimited" is a near-INT64_MAX page-counter max.
+    try:
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", encoding="ascii") as f:
+            limit = int(f.read().strip())
+        if 0 < limit < (1 << 62):
+            return limit
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def _read_proc_self_cpu_seconds() -> "float | None":
     """Cumulative CPU time (user + system) of *this process* in seconds.
 
@@ -175,6 +211,10 @@ class Heartbeat:
         # top-style "% of one core" reading is interpretable against the pod's
         # allocation.
         self._cpu_count = available_cpu_count()
+        # Container memory limit (cgroup cap), sampled once since it's static for
+        # the process's lifetime. Reported alongside rss_bytes so the monitor can
+        # show RSS as a percentage of the cap; None when uncapped.
+        self._mem_limit_bytes = _read_cgroup_memory_limit()
         # Previous CPU sample, so each ping can report utilization over the
         # interval since the last one rather than since process start.
         self._last_cpu_sec: float | None = None
@@ -237,6 +277,7 @@ class Heartbeat:
                 "task_limit": self.task_limit,
                 "in_flight": self._in_flight(),
                 "rss_bytes": _read_rss_bytes(),
+                "mem_limit_bytes": self._mem_limit_bytes,
                 "cpu_pct": self._cpu_pct(),
                 "cpu_count": self._cpu_count,
             }

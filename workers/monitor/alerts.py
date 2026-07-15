@@ -273,6 +273,13 @@ class AlertEngine:
         self._broker_down_since: float = 0.0
         self._broker_down_alerted: bool = False
         self._broker_recovered_at: float = 0.0
+        # Redis-eviction grace window. When the broker evicts keys under memory
+        # pressure it can shed live workers' short-TTL heartbeat keys, making
+        # them read as zero-alive though they never disconnected. This holds the
+        # wall-clock time until which worker-down alerts stay suppressed; it's
+        # pushed forward on every tick that observes an eviction, then lets the
+        # window elapse so heartbeats can re-register before we trust "down".
+        self._redis_eviction_grace_until: float = 0.0
         # Postgres-availability state machine. Same debounce/fire-once shape as
         # the broker's, minus the recovery-grace window (a PG outage doesn't
         # zero out heartbeats, so there's no worker-down flood to suppress).
@@ -300,6 +307,31 @@ class AlertEngine:
         return (
             time.time() - self._broker_recovered_at
         ) < settings.monitor_broker_recovery_grace_sec
+
+    @property
+    def in_redis_eviction_grace(self) -> bool:
+        """True while (or shortly after) the broker is evicting keys.
+
+        Redis key eviction removes keys to free memory; it does *not* close
+        client connections, so the workers themselves are fine. But the monitor
+        infers worker liveness from short-TTL heartbeat keys, which eviction can
+        shed -- so during and just after an eviction spell a live worker can read
+        as zero-alive. Suppressing worker-down alerts across this window keeps a
+        Redis memory spike from spamming bogus worker-crash notifications.
+        """
+        return time.time() < self._redis_eviction_grace_until
+
+    def _note_redis_eviction(self, snapshot: Dict[str, Any]) -> None:
+        """Open/extend the eviction grace window when this tick saw evictions."""
+        redis = snapshot.get("redis", {}) or {}
+        try:
+            delta = int(redis.get("evicted_keys_delta", 0) or 0)
+        except (TypeError, ValueError):
+            delta = 0
+        if delta > 0:
+            self._redis_eviction_grace_until = (
+                time.time() + settings.monitor_redis_eviction_grace_sec
+            )
 
     async def handle_broker_health(self, is_up: bool) -> None:
         """Drive the broker up/down state machine and emit broker alerts.
@@ -463,13 +495,22 @@ class AlertEngine:
         """Return the list of alerts that fired on this snapshot."""
         now = snapshot["ts"]
         fired: List[Dict[str, Any]] = []
-        # Worker-down alerts are suppressed both at boot (startup grace) and
-        # around a broker outage (recovery grace): in either case a worker type
-        # reads as zero-alive not because it died but because heartbeats haven't
-        # (re-)registered yet. A broker restart otherwise turns into ~one
-        # worker-crash alert per worker type -- the flood the broker_down alert
-        # is meant to replace.
-        suppress_worker_down = self.in_startup_grace or self.in_broker_recovery_grace
+        # Refresh the Redis-eviction grace window from this snapshot before we
+        # decide whether to trust "worker down" readings below.
+        self._note_redis_eviction(snapshot)
+        # Worker-down alerts are suppressed at boot (startup grace), around a
+        # broker outage (recovery grace), and while Redis is evicting keys
+        # (eviction grace): in every case a worker type reads as zero-alive not
+        # because it died but because its heartbeat key is missing or hasn't
+        # (re-)registered yet. A broker restart or a memory-pressure eviction
+        # spell would otherwise turn into ~one worker-crash alert per worker
+        # type -- exactly the inaccurate flood these grace windows exist to
+        # replace with a single, accurate signal.
+        suppress_worker_down = (
+            self.in_startup_grace
+            or self.in_broker_recovery_grace
+            or self.in_redis_eviction_grace
+        )
         for rule in self.rules:
             detail = rule.evaluate(snapshot)
             if detail is None:
@@ -481,8 +522,9 @@ class AlertEngine:
             if duration_in_breach < rule.duration:
                 continue
             if rule.kind == "heartbeat_lost" and rule.worker and suppress_worker_down:
-                # Boot or broker-recovery window: a zero-alive reading here is an
-                # artifact of heartbeats not being (re-)registered, not a real
+                # Boot, broker-recovery, or Redis-eviction window: a zero-alive
+                # reading here is an artifact of heartbeats not being
+                # (re-)registered or their keys having been evicted, not a real
                 # loss. Skip WITHOUT arming the cooldown or recording an alert,
                 # and leave the breach streak intact -- so a worker that is
                 # genuinely still down once the window elapses fires promptly.
@@ -514,14 +556,15 @@ class AlertEngine:
             if not (ev.get("type") == "scale_down" and ev.get("to") == 0):
                 continue
             if suppress_worker_down:
-                # Either the whole stack just came up (startup grace) or the
-                # broker just restarted (recovery grace): persistent worker
-                # state looks "alive" but current heartbeats haven't arrived
-                # yet, so every worker type spuriously reads as crashed. Stay
-                # silent until workers have had a chance to (re-)register.
+                # The whole stack just came up (startup grace), the broker just
+                # restarted (recovery grace), or Redis is evicting heartbeat keys
+                # under memory pressure (eviction grace): persistent worker state
+                # looks "alive" but current heartbeats are missing or haven't
+                # arrived yet, so every worker type spuriously reads as crashed.
+                # Stay silent until workers have had a chance to (re-)register.
                 logger.debug(
                     f"Suppressing worker-down alert for {ev.get('worker')} "
-                    "during startup/broker-recovery grace"
+                    "during startup/broker-recovery/redis-eviction grace"
                 )
                 continue
             kind = ev.get("kind", "unknown")
