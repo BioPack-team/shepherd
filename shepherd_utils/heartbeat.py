@@ -7,9 +7,23 @@ Workers self-report so the monitor doesn't have to introspect Docker or
 Kubernetes -- this works identically under either, and handles autoscaling.
 
 Key format: ``worker:heartbeat:{stream}:{consumer}``
-TTL: refreshed every ``HEARTBEAT_INTERVAL_SEC``, expires after
-``HEARTBEAT_TTL_SEC``. If a worker crashes or is killed, the key disappears
-within the TTL window and the monitor will surface it as a worker-loss event.
+
+The key is written *without* a Redis TTL, deliberately. The broker runs a
+``volatile-ttl`` maxmemory policy (see ``shepherd_broker/redis.conf``), which
+evicts the keys nearest to expiry first when memory is tight. A short-TTL
+heartbeat would be the very first thing shed under pressure, so a live worker
+would vanish from the keyspace and the monitor would misread it as crashed --
+even though key eviction never actually disconnects the worker. Making the key
+persistent exempts it from eviction entirely (the policy only touches keys that
+carry a TTL, which is also why the no-TTL task streams are safe).
+
+Liveness is therefore judged from the payload's ``last_seen`` timestamp, not
+from the key's existence: a heartbeat is "fresh" (the worker is alive) if it was
+refreshed within ``HEARTBEAT_TTL_SEC``. Every reader agrees on this via
+``is_heartbeat_fresh``. Because a persistent key can't expire itself away when a
+worker crashes, the monitor reaps heartbeats left unrefreshed for longer than
+``HEARTBEAT_REAP_SEC`` so dead consumers don't accumulate. A worker deletes its
+own key on clean shutdown (see ``stop``/``_mark_shutdown_sync``).
 
 On SIGTERM/SIGINT we additionally write a *shutdown marker*
 ``worker:shutdown:{stream}:{consumer}`` synchronously before exiting. The
@@ -34,7 +48,16 @@ from .cpu import available_cpu_count
 HEARTBEAT_PREFIX = "worker:heartbeat"
 HEARTBEAT_SCAN_PATTERN = f"{HEARTBEAT_PREFIX}:*"
 HEARTBEAT_INTERVAL_SEC = 5
+# A worker whose heartbeat hasn't been refreshed within this window is considered
+# not-alive (``is_heartbeat_fresh`` returns False). Sized comfortably above the
+# ping interval so a single missed tick doesn't flap liveness.
 HEARTBEAT_TTL_SEC = 15
+# Heartbeat keys are persistent (see the module docstring), so a crashed worker's
+# key can't expire on its own. The monitor deletes any heartbeat left unrefreshed
+# for longer than this so dead consumers don't pile up in the keyspace. Well above
+# HEARTBEAT_TTL_SEC so a briefly-paused worker (or a broker blip) isn't reaped and
+# then forced to re-register; a genuinely dead worker is cleaned within ~2 min.
+HEARTBEAT_REAP_SEC = 120
 
 SHUTDOWN_PREFIX = "worker:shutdown"
 SHUTDOWN_SCAN_PATTERN = f"{SHUTDOWN_PREFIX}:*"
@@ -49,6 +72,29 @@ def heartbeat_key(stream: str, consumer: str) -> str:
 
 def shutdown_key(stream: str, consumer: str) -> str:
     return f"{SHUTDOWN_PREFIX}:{stream}:{consumer}"
+
+
+def is_heartbeat_fresh(raw: "str | bytes | None", now: "float | None" = None) -> bool:
+    """Whether a heartbeat payload was refreshed within ``HEARTBEAT_TTL_SEC``.
+
+    Heartbeat keys are persistent (no Redis TTL) so they survive maxmemory
+    eviction; liveness is therefore decided from the payload's ``last_seen``
+    age rather than from the key merely existing. This is the single definition
+    every "is this worker alive?" reader shares -- the monitor poller, the task
+    reclaimer, and the janitor -- so they can't drift apart. A missing/malformed
+    payload or absent ``last_seen`` reads as not-fresh (fail safe toward "dead").
+    """
+    if not raw:
+        return False
+    try:
+        last_seen = float(json.loads(raw).get("last_seen", 0) or 0)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if last_seen <= 0:
+        return False
+    if now is None:
+        now = time.time()
+    return (now - last_seen) <= HEARTBEAT_TTL_SEC
 
 
 def _read_rss_bytes() -> "int | None":
@@ -283,10 +329,13 @@ class Heartbeat:
             }
         )
         try:
+            # No TTL: a persistent key is exempt from the broker's volatile-ttl
+            # eviction, so memory pressure can't shed a live worker's heartbeat.
+            # Liveness rides on the payload's last_seen instead; the monitor
+            # reaps keys left unrefreshed past HEARTBEAT_REAP_SEC.
             await broker_client.set(
                 heartbeat_key(self.stream, self.consumer),
                 payload,
-                ex=HEARTBEAT_TTL_SEC,
             )
         except Exception as e:
             self._logger.debug(f"Heartbeat ping failed: {e}")

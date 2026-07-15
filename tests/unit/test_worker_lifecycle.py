@@ -302,6 +302,38 @@ async def test_heartbeat_ping_payload_includes_resources(redis_mock, monkeypatch
     assert payload["cpu_count"] >= 1
 
 
+async def test_heartbeat_key_is_persistent_no_ttl(redis_mock, monkeypatch):
+    """The heartbeat key carries no TTL so volatile-ttl eviction can't shed it."""
+    from shepherd_utils.heartbeat import heartbeat_key
+
+    monkeypatch.setattr(heartbeat_module, "broker_client", redis_mock["broker"])
+    hb = Heartbeat("merge_message", "abc", 8, manage_signals=False)
+    await hb._ping()
+    # -1 == key exists with no expiry set (persistent).
+    ttl = await redis_mock["broker"].ttl(heartbeat_key("merge_message", "abc"))
+    assert ttl == -1
+
+
+def test_is_heartbeat_fresh_by_last_seen():
+    """Freshness rides on last_seen age, not on the key existing."""
+    import json
+
+    from shepherd_utils.heartbeat import HEARTBEAT_TTL_SEC, is_heartbeat_fresh
+
+    now = 10_000.0
+    assert is_heartbeat_fresh(json.dumps({"last_seen": now - 1}), now=now) is True
+    assert (
+        is_heartbeat_fresh(
+            json.dumps({"last_seen": now - HEARTBEAT_TTL_SEC - 1}), now=now
+        )
+        is False
+    )
+    # Missing/blank/malformed payloads fail safe toward "not alive".
+    assert is_heartbeat_fresh(None, now=now) is False
+    assert is_heartbeat_fresh("{}", now=now) is False
+    assert is_heartbeat_fresh("not json", now=now) is False
+
+
 # --- CPU accounting: cgroup-wide vs. this process ---------------------------
 
 
