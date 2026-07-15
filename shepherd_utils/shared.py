@@ -454,9 +454,7 @@ async def get_tasks(
     consumer: str,
     task_limit: int,
     reclaim_min_idle_sec: int = None,
-) -> AsyncGenerator[
-    Tuple[Tuple[str, str], Context, logging.Logger, "TaskSlots"], None
-]:
+) -> AsyncGenerator[Tuple[Tuple[str, str], Context, logging.Logger, "TaskSlots"], None]:
     """Continually monitor the ara queue for tasks.
 
     ``reclaim_min_idle_sec`` overrides the per-stream default for how long a

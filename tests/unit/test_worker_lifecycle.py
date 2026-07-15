@@ -310,9 +310,7 @@ def test_read_cpu_seconds_prefers_cgroup_when_containerized(monkeypatch):
     (where CPU-bound workers do their heavy lifting) are included."""
     monkeypatch.setattr(heartbeat_module, "_in_container", lambda: True)
     monkeypatch.setattr(heartbeat_module, "_read_cgroup_cpu_seconds", lambda: 123.0)
-    monkeypatch.setattr(
-        heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 1.0
-    )
+    monkeypatch.setattr(heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 1.0)
     assert heartbeat_module._read_cpu_seconds() == 123.0
 
 
@@ -325,9 +323,7 @@ def test_read_cpu_seconds_uses_proc_self_outside_container(monkeypatch):
         "_read_cgroup_cpu_seconds",
         lambda: (_ for _ in ()).throw(AssertionError("must not read cgroup")),
     )
-    monkeypatch.setattr(
-        heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 7.0
-    )
+    monkeypatch.setattr(heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 7.0)
     assert heartbeat_module._read_cpu_seconds() == 7.0
 
 
@@ -335,9 +331,7 @@ def test_read_cpu_seconds_falls_back_when_cgroup_unreadable(monkeypatch):
     """Containerized but cgroup CPU accounting unavailable -> process self."""
     monkeypatch.setattr(heartbeat_module, "_in_container", lambda: True)
     monkeypatch.setattr(heartbeat_module, "_read_cgroup_cpu_seconds", lambda: None)
-    monkeypatch.setattr(
-        heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 3.5
-    )
+    monkeypatch.setattr(heartbeat_module, "_read_proc_self_cpu_seconds", lambda: 3.5)
     assert heartbeat_module._read_cpu_seconds() == 3.5
 
 
