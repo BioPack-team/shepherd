@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     # queue for hours. Kept above 1 so a genuine transient (a one-off broker blip
     # or a rollout that interrupts a task mid-flight) still gets retried. 0
     # disables the breaker (unbounded retries -- the old behavior).
-    max_task_deliveries: int = 5
+    max_task_deliveries: int = 3
 
     # Pre-flight response-size guard for the message-processing workers. Loading a
     # stored TRAPI response decompresses it and JSON-parses it into a Python

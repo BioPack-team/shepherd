@@ -19,6 +19,12 @@
 # service and overrides the shared .env.
 
 services:
+  aragorn:
+    cpus: 1
+    mem_limit: 1g
+  aragorn_lookup:
+    cpus: 1
+    mem_limit: 1g
   aragorn_omnicorp:
     cpus: 2 # -> pool sizes to 2; confirm via the "process pool sized to 2 worker(s)" startup log
     mem_limit: 6g # -> a child exceeding this is cgroup-OOM-killed (kernel), parent survives
@@ -49,11 +55,45 @@ services:
       # OMNICORP_MAX_CURIE_PAIRS: "1000000000"
   # The same `cpus` / `mem_limit` + env block applies verbatim to the other
   # CPU-bound workers when you want to stress them too:
-  aragorn_score:
-    cpus: 2
+  aragorn_pathfinder:
+    cpus: 1
     mem_limit: 5g
-  #   arax_rank:      { cpus: 2, mem_limit: 6g, environment: {...} }
-  #   merge_message:  { cpus: 2, mem_limit: 6g, environment: {...} }
+  aragorn_score:
+    cpus: 4
+    mem_limit: 10g
+  arax:
+    cpus: 1
+    mem_limit: 3g
+  arax_rank:
+    cpus: 4
+    mem_limit: 10g
+  bte:
+    cpus: 1
+    mem_limit: 1g
+  bte_lookup:
+    cpus: 1
+    mem_limit: 1g
+  filter_analyses_top_n:
+    cpus: 1
+    mem_limit: 5g
+  filter_kgraph_orphans:
+    cpus: 1
+    mem_limit: 5g
+  filter_results_top_n:
+    cpus: 1
+    mem_limit: 5g
+  finish_query:
+    cpus: 1
+    mem_limit: 5g
   merge_message:
     cpus: 2
+    mem_limit: 5g
+  score_paths:
+    cpus: 6
+    mem_limit: 22g
+  sipr:
+    cpus: 1
+    mem_limit: 2g
+  sort_results_score:
+    cpus: 1
     mem_limit: 5g
