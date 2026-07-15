@@ -415,15 +415,63 @@ async def _discard_unprocessable_task(
     )
 
 
+class TaskSlots:
+    """Concurrency limiter that also tracks how many tasks are *actively running*.
+
+    ``get_tasks`` reserves a slot *before* it polls the broker for the next task
+    -- the poll is a blocking read (a 5s ``XREADGROUP``). If the monitor counted
+    every reserved slot as a running task, an idle worker that is only *waiting*
+    for work would report a task in flight (the "shows one running even when it's
+    just checking for a task" bug). So slot reservation (backpressure) is kept
+    separate from dispatch (a task actually handed to a worker):
+
+    * ``acquire`` / ``release_slot`` -- reserve/free a concurrency slot; used by
+      ``get_tasks`` around the poll. These do **not** change the in-flight count.
+    * ``dispatch`` -- called immediately before a task is yielded to a worker;
+      marks one task as actively running.
+    * ``release`` -- called by the worker's ``finally`` when the task finishes;
+      frees the slot *and* clears the in-flight mark. Every worker already calls
+      ``limiter.release()`` exactly once per task, so this is covered uniformly
+      without touching each worker.
+
+    ``in_flight`` is what the heartbeat surfaces as "Running". A plain
+    :class:`asyncio.Semaphore` interface (``acquire``/``release``) is preserved
+    so the drain path and workers keep working unchanged.
+    """
+
+    def __init__(self, task_limit: int):
+        self._sem = asyncio.Semaphore(task_limit)
+        self._in_flight = 0
+
+    async def acquire(self) -> None:
+        await self._sem.acquire()
+
+    def release_slot(self) -> None:
+        """Free a slot reserved for polling but never dispatched to a worker."""
+        self._sem.release()
+
+    def dispatch(self) -> None:
+        """Mark a reserved slot as an actively-running task (about to be yielded)."""
+        self._in_flight += 1
+
+    def release(self) -> None:
+        """A dispatched task finished: clear its in-flight mark and free its slot."""
+        if self._in_flight > 0:
+            self._in_flight -= 1
+        self._sem.release()
+
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
+
+
 async def get_tasks(
     stream: str,
     group: str,
     consumer: str,
     task_limit: int,
     reclaim_min_idle_sec: int = None,
-) -> AsyncGenerator[
-    Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None
-]:
+) -> AsyncGenerator[Tuple[Tuple[str, str], Context, logging.Logger, "TaskSlots"], None]:
     """Continually monitor the ara queue for tasks.
 
     ``reclaim_min_idle_sec`` overrides the per-stream default for how long a
@@ -441,7 +489,10 @@ async def get_tasks(
     task_limit = _resolve_task_limit(stream, task_limit, worker_logger)
     # initialize opens the db connection
     await initialize_db()
-    task_limiter = asyncio.Semaphore(task_limit)
+    # TaskSlots bounds concurrency like a Semaphore but distinguishes a slot
+    # reserved for the blocking poll from a task actually dispatched to a worker,
+    # so the heartbeat's "Running" count reflects real work, not idle polling.
+    task_limiter = TaskSlots(task_limit)
     # register this worker with the monitor via a Redis heartbeat key. The
     # heartbeat does not install its own (immediate-exit) signal handlers --
     # install_shutdown_handlers below installs asyncio-aware ones that drain.
@@ -521,8 +572,11 @@ async def get_tasks(
                         worker_logger,
                         f"could not build context for reclaimed task: {e}",
                     )
-                    task_limiter.release()
+                    task_limiter.release_slot()
                     continue
+                # Dispatching real work: count it as in-flight until the worker
+                # releases the slot in its finally.
+                task_limiter.dispatch()
                 yield ara_task, ctx, task_logger, task_limiter
 
         # check if we can take another task
@@ -530,7 +584,7 @@ async def get_tasks(
         # A shutdown may have arrived while we waited for a free slot; don't
         # fetch new work in that case -- release and drain.
         if is_shutting_down():
-            task_limiter.release()
+            task_limiter.release_slot()
             await _drain_and_exit(task_limiter, task_limit, worker_logger)
             return
         # get a new task for the given target
@@ -552,13 +606,16 @@ async def get_tasks(
                     worker_logger,
                     f"could not build context for delivered task: {e}",
                 )
-                task_limiter.release()
+                task_limiter.release_slot()
                 continue
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
+            task_limiter.dispatch()
             yield ara_task, ctx, task_logger, task_limiter
         else:
-            task_limiter.release()
+            # Poll returned nothing (idle): free the reserved slot. Nothing was
+            # dispatched, so the in-flight count is untouched.
+            task_limiter.release_slot()
 
 
 async def wrap_up_task(
