@@ -29,6 +29,7 @@ import time
 
 from .broker import broker_client
 from .config import settings
+from .cpu import available_cpu_count
 
 HEARTBEAT_PREFIX = "worker:heartbeat"
 HEARTBEAT_SCAN_PATTERN = f"{HEARTBEAT_PREFIX}:*"
@@ -65,11 +66,14 @@ def _read_rss_bytes() -> "int | None":
         return None
 
 
-def _read_cpu_seconds() -> "float | None":
-    """Cumulative CPU time (user + system) of this process in seconds.
+def _read_proc_self_cpu_seconds() -> "float | None":
+    """Cumulative CPU time (user + system) of *this process* in seconds.
 
     Parsed from ``/proc/self/stat``. The ``comm`` field can contain spaces and
     parentheses, so we split after the final ``)`` to keep field offsets stable.
+
+    Note this covers only the current process, not any ``ProcessPoolExecutor``
+    children it offloads CPU-bound work to -- see ``_read_cpu_seconds``.
     """
     try:
         with open("/proc/self/stat", encoding="ascii") as f:
@@ -81,6 +85,70 @@ def _read_cpu_seconds() -> "float | None":
         return ticks / os.sysconf("SC_CLK_TCK")
     except (OSError, ValueError, IndexError, ZeroDivisionError):
         return None
+
+
+def _read_cgroup_cpu_seconds() -> "float | None":
+    """Cumulative CPU seconds for the whole cgroup, or None if unavailable.
+
+    A container's cgroup CPU accounting sums *every* process in the container,
+    so unlike ``/proc/self`` it includes the ``ProcessPoolExecutor`` children the
+    CPU-bound workers do their heavy lifting in. Reads the same
+    ``/sys/fs/cgroup`` tree the pool-sizing code (``shepherd_utils.cpu``) already
+    relies on, handling both cgroup v2 and v1 layouts.
+    """
+    # cgroup v2: "/sys/fs/cgroup/cpu.stat" has a "usage_usec <n>" line (micros).
+    try:
+        with open("/sys/fs/cgroup/cpu.stat", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("usage_usec"):
+                    return int(line.split()[1]) / 1_000_000
+    except (OSError, ValueError, IndexError):
+        pass
+    # cgroup v1: "cpuacct.usage" is the cumulative total in nanoseconds.
+    for path in (
+        "/sys/fs/cgroup/cpuacct/cpuacct.usage",
+        "/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage",
+    ):
+        try:
+            with open(path, encoding="ascii") as f:
+                return int(f.read().strip()) / 1_000_000_000
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _in_container() -> bool:
+    """Best-effort check for whether we're running inside a container.
+
+    Only when containerized is ``/sys/fs/cgroup`` the process's *own* cgroup
+    (Docker and Kubernetes mount it that way); on a bare host it would be the
+    whole machine's cgroup, so reading cgroup-wide CPU there would wrongly
+    attribute all host CPU to this worker. Covers both deployment targets:
+    Kubernetes injects ``KUBERNETES_SERVICE_HOST`` into every pod, and Docker
+    (including Compose, used for local runs) drops a ``/.dockerenv`` marker.
+    """
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return True
+    try:
+        return os.path.exists("/.dockerenv")
+    except OSError:
+        return False
+
+
+def _read_cpu_seconds() -> "float | None":
+    """Cumulative CPU seconds attributable to this worker.
+
+    Inside a container (Kubernetes pod / Docker, including local Compose) we read
+    the cgroup's CPU accounting so pool children -- where the CPU-bound workers
+    burn most of their cycles -- are included; measuring only ``/proc/self``
+    there reports those workers as nearly idle. Outside a container we fall back
+    to this process's own CPU time.
+    """
+    if _in_container():
+        cgroup = _read_cgroup_cpu_seconds()
+        if cgroup is not None:
+            return cgroup
+    return _read_proc_self_cpu_seconds()
 
 
 class Heartbeat:
@@ -98,10 +166,15 @@ class Heartbeat:
         self.consumer = consumer
         self.task_limit = task_limit
         self.started_at = time.time()
-        # The concurrency semaphore ``get_tasks`` owns. We read its available
-        # permits to report how many tasks are currently in flight; left None
-        # (e.g. in tests) the in-flight count is simply omitted.
+        # The ``TaskSlots`` limiter ``get_tasks`` owns. We read its in-flight
+        # count to report how many tasks are actively running; left None (e.g. in
+        # tests) the in-flight count is simply omitted.
         self._limiter = limiter
+        # CPUs available to this worker (cgroup-limit aware). Static for the
+        # process's lifetime, so sample it once. Reported alongside cpu_pct so a
+        # top-style "% of one core" reading is interpretable against the pod's
+        # allocation.
+        self._cpu_count = available_cpu_count()
         # Previous CPU sample, so each ping can report utilization over the
         # interval since the last one rather than since process start.
         self._last_cpu_sec: float | None = None
@@ -116,9 +189,19 @@ class Heartbeat:
         self._prev_handlers: dict = {}
 
     def _in_flight(self) -> "int | None":
-        """Tasks currently running = task_limit minus the semaphore's free permits."""
+        """Tasks whose worker function is currently executing.
+
+        Reads ``TaskSlots.in_flight`` -- the count of tasks actually dispatched
+        to a worker -- rather than the raw slot reservation. The limiter reserves
+        a slot while merely polling for the next task, so counting reservations
+        would report an idle worker as running one task. Falls back to the
+        free-permit calculation if a bare semaphore is passed (older callers/tests).
+        """
         if self._limiter is None:
             return None
+        in_flight = getattr(self._limiter, "in_flight", None)
+        if in_flight is not None:
+            return max(0, int(in_flight))
         available = getattr(self._limiter, "_value", None)
         if available is None:
             return None
@@ -155,6 +238,7 @@ class Heartbeat:
                 "in_flight": self._in_flight(),
                 "rss_bytes": _read_rss_bytes(),
                 "cpu_pct": self._cpu_pct(),
+                "cpu_count": self._cpu_count,
             }
         )
         try:
