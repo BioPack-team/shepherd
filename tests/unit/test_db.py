@@ -13,10 +13,14 @@ import orjson
 import pytest
 import zstandard
 
+from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    ResponseTooLargeError,
     decode_message,
     decompress_zstd,
     encode_message,
+    enforce_response_size_limit,
+    get_blob_size,
     get_logs,
     get_message,
     get_message_sync,
@@ -27,6 +31,45 @@ from shepherd_utils.db import (
 from shepherd_utils.logger import QueryLogger
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.mark.asyncio
+async def test_get_blob_size_reports_stored_bytes(redis_mock):
+    """get_blob_size returns the STRLEN of the stored (compressed) blob, and 0
+    for a missing key -- without transferring the payload."""
+    await save_message("sizekey", {"message": {"results": [{"score": 1}]}}, logger)
+    size = await get_blob_size("sizekey")
+    assert size > 0
+    # Matches the raw stored length exactly.
+    assert size == await redis_mock["data"].strlen("sizekey")
+    # Missing key reads as 0, not an error.
+    assert await get_blob_size("nope") == 0
+
+
+@pytest.mark.asyncio
+async def test_enforce_response_size_limit_disabled_by_default(redis_mock, monkeypatch):
+    """With the guard off (0), even a present blob passes without a size read."""
+    monkeypatch.setattr(settings, "max_response_size", "0")
+    await save_message("k", {"message": {"results": []}}, logger)
+    # Should simply return, never raise.
+    await enforce_response_size_limit("k", logger)
+
+
+@pytest.mark.asyncio
+async def test_enforce_response_size_limit_raises_when_over(redis_mock, monkeypatch):
+    """A blob larger than the configured cap raises before it is ever loaded."""
+    monkeypatch.setattr(settings, "max_response_size", "1")  # 1 byte cap
+    await save_message("big", {"message": {"results": [{"score": 1}]}}, logger)
+    with pytest.raises(ResponseTooLargeError):
+        await enforce_response_size_limit("big", logger)
+
+
+@pytest.mark.asyncio
+async def test_enforce_response_size_limit_allows_under(redis_mock, monkeypatch):
+    """A blob under the cap passes."""
+    monkeypatch.setattr(settings, "max_response_size", "100Mi")
+    await save_message("small", {"message": {"results": [{"score": 1}]}}, logger)
+    await enforce_response_size_limit("small", logger)
 
 
 def test_encode_decode_roundtrip_preserves_payload():

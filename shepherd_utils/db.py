@@ -255,6 +255,51 @@ async def save_message(
             pass
 
 
+class ResponseTooLargeError(Exception):
+    """Raised when a stored response is too large to safely load into memory.
+
+    A plain ``Exception`` on purpose: the shared task lifecycle
+    (``run_task_lifecycle``) already catches any ``Exception`` from a worker and
+    routes the task to ``finish_query`` with an ERROR status, so raising this
+    *before* the memory-expanding load converts what would otherwise be an
+    uncatchable OOM SIGKILL into a clean, accounted-for task failure.
+    """
+
+
+async def get_blob_size(message_id: str) -> int:
+    """Return the stored (compressed) size of a data-db blob in bytes.
+
+    ``STRLEN`` is an O(1) server-side read that never transfers the payload, so
+    a worker can gate on size before paying the memory cost of fetching,
+    decompressing and parsing it. Returns 0 when the key is missing.
+    """
+    return int(await data_db_client.strlen(message_id))
+
+
+async def enforce_response_size_limit(
+    response_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Raise ``ResponseTooLargeError`` if a response exceeds the configured cap.
+
+    The cap (``settings.max_response_size``) is compared against the *stored,
+    compressed* blob size -- decoding expands it several-fold in memory, so the
+    limit is deliberately set well below the pod's memory limit. A cap of 0
+    disables the guard, leaving the delivery-count circuit breaker as the
+    backstop. Called at the top of a worker, before ``get_message``.
+    """
+    max_bytes = settings.max_response_size_bytes
+    if max_bytes <= 0:
+        return
+    size = await get_blob_size(response_id)
+    if size > max_bytes:
+        raise ResponseTooLargeError(
+            f"Response {response_id} is {size} compressed bytes, over the "
+            f"{max_bytes}-byte limit (max_response_size={settings.max_response_size}); "
+            "refusing to load it to avoid an out-of-memory kill."
+        )
+
+
 async def get_message(
     message_id: str,
     logger: logging.Logger,

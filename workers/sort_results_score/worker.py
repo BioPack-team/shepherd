@@ -4,7 +4,12 @@ import asyncio
 import json
 import logging
 import uuid
-from shepherd_utils.db import get_message, save_message, get_query_state
+from shepherd_utils.db import (
+    enforce_response_size_limit,
+    get_message,
+    save_message,
+    get_query_state,
+)
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 from shepherd_utils.otel import setup_tracer
 
@@ -20,6 +25,11 @@ async def sort_results_score(task, logger: logging.Logger):
     # given a task, get the message from the db
     response_id = task[1]["response_id"]
     workflow = json.loads(task[1]["workflow"])
+    # Refuse to load a response so large that decoding + sorting it would OOM
+    # the worker. Raising here (before get_message) lets run_task_lifecycle fail
+    # the task cleanly to finish_query instead of the process being SIGKILL'd
+    # mid-load and the message crash-looping on every reclaim.
+    await enforce_response_size_limit(response_id, logger)
     message = await get_message(response_id, logger)
     results = message["message"].get("results", [])
     current_op = workflow[0]

@@ -2,8 +2,11 @@ import json
 import logging
 import pytest
 
-from shepherd_utils.db import get_message
+from shepherd_utils.config import settings
+from shepherd_utils.db import ResponseTooLargeError, get_message, save_message
 from workers.sort_results_score.worker import sort_results_score
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.mark.asyncio
@@ -153,3 +156,33 @@ async def test_invalid_json(redis_mock, mocker):
         )
 
     assert "analyses" in str(e.value)
+
+
+@pytest.mark.asyncio
+async def test_oversized_response_raises_before_load(redis_mock, mocker, monkeypatch):
+    """An over-limit response must raise ResponseTooLargeError *before* the
+    memory-expanding get_message load, so run_task_lifecycle can fail it cleanly
+    instead of the process being OOM-killed and the task crash-looping.
+    """
+    monkeypatch.setattr(settings, "max_response_size", "1")  # 1-byte cap
+    await save_message("big_resp", {"message": {"results": [{"score": 1}]}}, logger)
+
+    # If the guard works, get_message is never reached.
+    load = mocker.patch("workers.sort_results_score.worker.get_message")
+
+    with pytest.raises(ResponseTooLargeError):
+        await sort_results_score(
+            [
+                "test",
+                {
+                    "query_id": "test",
+                    "response_id": "big_resp",
+                    "workflow": json.dumps([{"id": "sort_results_score"}]),
+                    "log_level": "20",
+                    "otel": json.dumps({}),
+                },
+            ],
+            logger,
+        )
+
+    load.assert_not_called()

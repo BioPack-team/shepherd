@@ -343,35 +343,25 @@ def _build_task_context(
     return ctx, task_logger
 
 
-async def _discard_unprocessable_task(
+async def _terminate_task(
     stream: str,
     group: str,
     ara_task: Tuple[str, dict],
     logger: logging.Logger,
     reason: str,
 ) -> None:
-    """Terminally clear a message we can't even build a task context for.
+    """Terminally clear a message: ack+delete it and end its query with ERROR.
 
-    Such a message is a poison pill. ``get_task`` reads with the ``>`` cursor,
-    which never re-delivers a PEL entry, and ``reclaim_orphaned`` deliberately
-    skips messages owned by a live/self consumer (``owner == consumer`` and
-    ``owner in alive``). So if we merely dropped it from the poll loop it would
-    sit in *this* (live) consumer's PEL forever -- invisible to reclaim and to
-    the janitor, which only touches dead consumers. That is exactly the
-    "very old unacked tasks on a still-running worker" leak.
-
-    Making it terminal: ack + delete it (``mark_task_as_complete`` does
+    Making a message terminal: ack + delete it (``mark_task_as_complete`` does
     ``XACK`` then ``XDEL``) so it leaves the PEL and the stream, and -- when we
     can still identify the parent query -- route it to ``finish_query`` with an
     ERROR status so the query ends cleanly instead of hanging, mirroring
-    ``handle_task_failure``.
+    ``handle_task_failure``. Shared by the "unprocessable message" and
+    "poison-pill / over-delivered" paths.
     """
     msg_id = ara_task[0]
     fields = ara_task[1] if len(ara_task) > 1 and isinstance(ara_task[1], dict) else {}
-    logger.error(
-        f"Discarding unprocessable task {msg_id} on {stream}: {reason}. "
-        f"Payload fields: {sorted(fields.keys())}"
-    )
+    logger.error(f"Terminating task {msg_id} on {stream}: {reason}")
     query_id = fields.get("query_id")
     response_id = fields.get("response_id")
     if query_id and response_id:
@@ -391,11 +381,38 @@ async def _discard_unprocessable_task(
             )
         except Exception as e:
             logger.error(
-                f"Failed to route unprocessable task {msg_id} to finish_query: {e}"
+                f"Failed to route terminated task {msg_id} to finish_query: {e}"
             )
     # Remove it from the PEL + stream so it stops re-tripping stuck_pending and
     # can never be re-stranded under a live consumer.
     await mark_task_as_complete(stream, group, msg_id, logger)
+
+
+async def _discard_unprocessable_task(
+    stream: str,
+    group: str,
+    ara_task: Tuple[str, dict],
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    """Terminally clear a message we can't even build a task context for.
+
+    Such a message is a poison pill. ``get_task`` reads with the ``>`` cursor,
+    which never re-delivers a PEL entry, and ``reclaim_orphaned`` deliberately
+    skips messages owned by a live/self consumer (``owner == consumer`` and
+    ``owner in alive``). So if we merely dropped it from the poll loop it would
+    sit in *this* (live) consumer's PEL forever -- invisible to reclaim and to
+    the janitor, which only touches dead consumers. That is exactly the
+    "very old unacked tasks on a still-running worker" leak.
+    """
+    fields = ara_task[1] if len(ara_task) > 1 and isinstance(ara_task[1], dict) else {}
+    await _terminate_task(
+        stream,
+        group,
+        ara_task,
+        logger,
+        f"unprocessable: {reason}. Payload fields: {sorted(fields.keys())}",
+    )
 
 
 async def get_tasks(
@@ -435,6 +452,9 @@ async def get_tasks(
     # periodic orphan-task reclaim so a worker crash doesn't strand its PEL
     reclaim_interval = max(5.0, float(settings.reclaim_interval_sec))
     last_reclaim = 0.0
+    # after this many un-acked (re)deliveries a reclaimed message is treated as a
+    # poison pill and dead-lettered rather than retried; 0 disables the breaker.
+    max_task_deliveries = int(settings.max_task_deliveries)
     # continuously poll the broker for new tasks
     while True:
         # On shutdown, stop taking new work and drain anything in flight.
@@ -452,6 +472,7 @@ async def get_tasks(
         now = time.time()
         if now - last_reclaim >= reclaim_interval:
             last_reclaim = now
+            delivery_counts: Dict[str, int] = {}
             try:
                 reclaimed = await reclaim_orphaned(
                     stream,
@@ -459,11 +480,30 @@ async def get_tasks(
                     consumer,
                     worker_logger,
                     min_idle_sec=reclaim_min_idle_sec,
+                    delivery_counts=delivery_counts,
                 )
             except Exception as e:
                 worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
                 reclaimed = []
             for ara_task in reclaimed:
+                # Poison-pill circuit breaker: a message that has been reclaimed
+                # this many times without ever completing is almost certainly
+                # crashing whatever worker takes it (e.g. an OOM SIGKILL no
+                # in-process handler can catch). Dead-letter it instead of
+                # spending another slot -- and another crash -- on it. Checked
+                # before acquiring a permit so the terminal path needs no release.
+                delivered = delivery_counts.get(ara_task[0], 0)
+                if 0 < max_task_deliveries <= delivered:
+                    await _terminate_task(
+                        stream,
+                        group,
+                        ara_task,
+                        worker_logger,
+                        f"reclaimed {delivered} times without completing "
+                        f"(>= max_task_deliveries={max_task_deliveries}); "
+                        "treating as a poison pill",
+                    )
+                    continue
                 await task_limiter.acquire()
                 try:
                     ctx, task_logger = _build_task_context(
