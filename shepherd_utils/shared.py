@@ -944,28 +944,33 @@ def filter_kgraph_orphans(message, logger: logging.Logger):
             "nodes": {},
             "edges": {},
         }
-        # now remove all knowledge_graph nodes and edges that are
-        # not in our nodes and edges sets.
+        # Now remove all knowledge_graph nodes/edges (and auxiliary graphs) that
+        # aren't in our keep-sets. Delete in place rather than rebuilding each
+        # dict with a comprehension: the knowledge graph is usually the largest
+        # part of the response, and a comprehension would hold the full original
+        # dict and the filtered copy at the same time -- doubling the dict
+        # overhead for the biggest structure right before we re-encode it.
+        # Deleting the orphans drops them (and everything they reference) now.
         kg_nodes = (
             message.get("message", {}).get("knowledge_graph", {}).get("nodes", {})
         )
-        message["message"]["knowledge_graph"]["nodes"] = {
-            nid: ndata for nid, ndata in kg_nodes.items() if nid in nodes
-        }
+        for nid in [nid for nid in kg_nodes if nid not in nodes]:
+            del kg_nodes[nid]
         kg_edges = (
             message.get("message", {}).get("knowledge_graph", {}).get("edges", {})
         )
-        message["message"]["knowledge_graph"]["edges"] = {
-            eid: edata for eid, edata in kg_edges.items() if eid in edges
-        }
+        for eid in [eid for eid in kg_edges if eid not in edges]:
+            del kg_edges[eid]
         # validate_message(message)
-        message["message"]["auxiliary_graphs"] = {
-            auxgraph: adata
-            for auxgraph, adata in message["message"]
-            .get("auxiliary_graphs", {})
-            .items()
-            if auxgraph in auxgraphs
-        }
+        kg_auxgraphs = message["message"].get("auxiliary_graphs")
+        if kg_auxgraphs:
+            for auxgraph in [a for a in kg_auxgraphs if a not in auxgraphs]:
+                del kg_auxgraphs[auxgraph]
+        elif "auxiliary_graphs" not in message["message"]:
+            # Preserve the prior behavior that this key is always present after
+            # filtering (the old comprehension created an empty dict when the
+            # response carried no auxiliary graphs).
+            message["message"]["auxiliary_graphs"] = {}
         # is_invalid = validate_message(message)
         # if is_invalid:
         #     before_is_invalid = validate_message(initial_message)

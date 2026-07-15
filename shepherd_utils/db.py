@@ -275,6 +275,17 @@ async def get_blob_size(message_id: str) -> int:
     return int(await data_db_client.strlen(message_id))
 
 
+async def message_exists(message_id: str) -> bool:
+    """True if a data-db blob exists, via a cheap ``EXISTS``.
+
+    Use this for a presence check instead of ``get_message`` when the payload
+    itself isn't needed: ``EXISTS`` never transfers, decompresses or parses the
+    blob, so it avoids materializing a potentially large message just to learn
+    whether it is there.
+    """
+    return bool(await data_db_client.exists(message_id))
+
+
 # The zstd frame header (magic + descriptors + content size) is at most 18
 # bytes; a small prefix is enough to read the embedded uncompressed size.
 _ZSTD_HEADER_PROBE_BYTES = 64

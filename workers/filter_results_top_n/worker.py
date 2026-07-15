@@ -28,7 +28,15 @@ async def filter_results_top_n(task, logger: logging.Logger):
         raise Exception(f"Operation {STREAM} is not in workflow")
     n = current_op.get("max_results", 500)
 
-    message["message"]["results"] = results[:n]
+    # Truncate in place (del results[n:]) rather than binding a results[:n]
+    # slice: the slice would allocate a second list and, worse, ``results`` would
+    # keep the dropped results (and everything they reference) alive until the
+    # function returns -- i.e. through the save. Deleting the tail drops those
+    # references now so they can be freed before we re-encode the message.
+    del results[n:]
+    # Rebind so the key exists even if the response arrived without a results
+    # field (get returned the default []); this is a rebind, not a copy.
+    message["message"]["results"] = results
     logger.info("Returning filtered results.")
 
     # save merged message back to db

@@ -25,6 +25,7 @@ from shepherd_utils.db import (
     get_message,
     get_message_sync,
     get_response_size,
+    message_exists,
     save_logs,
     save_message,
     save_message_sync,
@@ -61,6 +62,14 @@ async def test_get_response_size_reports_uncompressed_bytes(redis_mock):
     assert await get_response_size("ukey") > await get_blob_size("ukey")
     # Missing key reads as 0.
     assert await get_response_size("nope") == 0
+
+
+@pytest.mark.asyncio
+async def test_message_exists_checks_presence_without_loading(redis_mock):
+    """message_exists is a cheap presence check: true when stored, false when not."""
+    await save_message("present", {"message": {"results": []}}, logger)
+    assert await message_exists("present") is True
+    assert await message_exists("absent") is False
 
 
 @pytest.mark.asyncio

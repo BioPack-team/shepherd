@@ -54,3 +54,32 @@ async def test_filter_results_top_n(redis_mock, mocker):
     message = await get_message("test_response", logger)
 
     assert len(message["message"]["results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_filter_results_missing_key_yields_empty(redis_mock, mocker):
+    """A response with no results field is handled and comes out with an empty
+    results list (the in-place truncation rebinds the key)."""
+    mocker.patch(
+        "workers.filter_results_top_n.worker.get_message",
+        new_callable=mocker.AsyncMock,
+        return_value={"message": {"knowledge_graph": {"nodes": {}, "edges": {}}}},
+    )
+    logger = logging.getLogger(__name__)
+
+    await filter_results_top_n(
+        [
+            "test",
+            {
+                "query_id": "test",
+                "response_id": "test_response",
+                "workflow": json.dumps([{"id": "filter_results_top_n"}]),
+                "log_level": "20",
+                "otel": json.dumps({}),
+            },
+        ],
+        logger,
+    )
+
+    message = await get_message("test_response", logger)
+    assert message["message"]["results"] == []
