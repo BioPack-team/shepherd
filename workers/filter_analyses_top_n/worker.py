@@ -29,8 +29,11 @@ async def filter_analyses_top_n(task, logger: logging.Logger):
         raise Exception(f"Operation {STREAM} is not in workflow")
     n = current_op.get("max_analyses", 500)
     logger.info(f"Filtering top {n} analyses.")
-    for ind, result in enumerate(results):
-        message["message"]["results"][ind]["analyses"] = result["analyses"][:n]
+    # Truncate each analyses list in place (del ...[n:]) instead of binding an
+    # ``analyses[:n]`` slice, so the dropped analyses are freed now rather than
+    # allocating a parallel list and holding the originals until save.
+    for result in results:
+        del result["analyses"][n:]
     logger.info("Returning filtered analyses.")
 
     # save merged message back to db

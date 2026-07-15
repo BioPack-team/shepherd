@@ -119,6 +119,38 @@ class Settings(BaseSettings):
     reclaim_interval_sec: int = 10
     reclaim_max_batch: int = 50
 
+    # Poison-pill circuit breaker. A task that keeps killing its worker before it
+    # can ack (e.g. a payload so large that decoding/sorting it trips the cgroup
+    # OOM killer -- an uncatchable SIGKILL that no in-process try/except can turn
+    # into a clean finish_query) is re-delivered forever: the worker dies, the
+    # message stays pending, reclaim hands it to the next worker, which also dies.
+    # Redis Streams increments a per-message delivery counter on every (re)claim;
+    # once a reclaimed message has been delivered at least this many times without
+    # completing, we stop retrying and dead-letter it (ack + route to finish_query
+    # with an ERROR status) so one bad task can no longer crash-loop the whole
+    # queue for hours. Kept above 1 so a genuine transient (a one-off broker blip
+    # or a rollout that interrupts a task mid-flight) still gets retried. 0
+    # disables the breaker (unbounded retries -- the old behavior).
+    max_task_deliveries: int = 3
+
+    # Pre-flight response-size guard for the message-processing workers. Loading a
+    # stored TRAPI response decompresses it and JSON-parses it into a Python
+    # object tree that is ~5-6x the uncompressed JSON for TRAPI-shaped data; that
+    # tree also briefly coexists with the decompressed bytes, so peak memory while
+    # decoding is roughly (uncompressed size) x 6-7 plus the process baseline. A
+    # large enough response blows past the container memory limit for a fraction
+    # of a second and is OOM-killed (invisible to a coarse memory dashboard). A
+    # worker can cheaply read the response's *uncompressed* size from the zstd
+    # frame header (GETRANGE of a few bytes, no load, no decompress) before
+    # fetching it and fail the task gracefully instead of OOMing. This is the
+    # uncompressed size (what you'd see from the /response endpoint), so size it
+    # off the memory limit and the ~6-7x peak multiplier: for a 2Gi pod, keeping
+    # the decode peak under ~1.8Gi means capping uncompressed size around 200-250M
+    # (tune from the size of a known-bad response). Accepts Kubernetes-style sizes
+    # ("250MB", "256Mi", ...) or a plain byte count; 0 (or unparseable) disables
+    # the guard -- the delivery-count breaker above is the always-on backstop.
+    max_response_size: str = "0"
+
     # Graceful shutdown. On SIGTERM/SIGINT (Kubernetes sends SIGTERM on every
     # rollout, scale-down and node drain) a worker stops pulling new tasks and
     # waits up to this long for in-flight tasks to finish before exiting, so the
@@ -240,6 +272,11 @@ class Settings(BaseSettings):
     def callback_max_request_size_bytes(self) -> int:
         """Max accepted ``/callback`` body in bytes (0 disables the limit)."""
         return parse_size_to_bytes(self.callback_max_request_size)
+
+    @property
+    def max_response_size_bytes(self) -> int:
+        """Max uncompressed response size in bytes (0 disables the guard)."""
+        return parse_size_to_bytes(self.max_response_size)
 
     class Config:
         env_file = ".env"

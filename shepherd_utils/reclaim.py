@@ -86,12 +86,19 @@ async def reclaim_orphaned(
     consumer: str,
     logger: logging.Logger,
     min_idle_sec: Optional[int] = None,
+    delivery_counts: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[str, Any]]:
     """Claim any pending messages whose owner is no longer alive.
 
     Returns the reclaimed messages in the same ``(id, fields_dict)`` shape as
     ``broker.get_task`` so the caller can feed them through its normal task
     pipeline.
+
+    When ``delivery_counts`` is provided it is populated ``{msg_id:
+    times_delivered}`` from the XPENDING scan for every candidate, so the caller
+    can spot a message that keeps being re-delivered without completing (a poison
+    pill) and dead-letter it instead of retrying forever. ``times_delivered`` is
+    the count as of this scan, i.e. before the XCLAIM below bumps it.
     """
     effective_min_idle = min_idle_sec_for(stream, min_idle_sec)
     min_idle_ms = max(0, int(effective_min_idle * 1000))
@@ -134,6 +141,11 @@ async def reclaim_orphaned(
         if owner in alive:
             continue  # owner is alive -- the dual safety check
         candidates.append(msg_id)
+        if delivery_counts is not None:
+            # ``times_delivered`` is how many times this message has been
+            # delivered/claimed without an ack -- the signal a caller uses to
+            # break a poison-pill retry loop.
+            delivery_counts[msg_id] = int(entry.get("times_delivered", 0) or 0)
 
     if not candidates:
         return []

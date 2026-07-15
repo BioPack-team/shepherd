@@ -474,6 +474,105 @@ async def test_discard_unprocessable_task_drops_when_unidentifiable(monkeypatch)
     assert added == []
 
 
+# --- poison-pill circuit breaker: over-delivered messages are dead-lettered --
+
+
+@pytest.mark.asyncio
+async def test_terminate_task_acks_and_routes_to_finish(monkeypatch):
+    """The shared terminal-clear helper acks+deletes and ends the query ERROR."""
+    added = []
+    acked = []
+
+    async def _fake_add_task(queue, payload, _logger):
+        added.append((queue, payload))
+
+    async def _fake_mark_complete(stream, group, msg_id, _logger, retries=0):
+        acked.append((stream, group, msg_id))
+
+    monkeypatch.setattr(shared, "add_task", _fake_add_task)
+    monkeypatch.setattr(shared, "mark_task_as_complete", _fake_mark_complete)
+
+    task = ("789-0", {"query_id": "q9", "response_id": "r9", "metadata": "{}"})
+    await shared._terminate_task(
+        "sort_results_score", "consumer", task, logger, "poison pill"
+    )
+
+    assert acked == [("sort_results_score", "consumer", "789-0")]
+    assert len(added) == 1
+    queue, payload = added[0]
+    assert queue == "finish_query"
+    assert payload["status"] == "ERROR"
+    assert payload["query_id"] == "q9"
+    assert payload["response_id"] == "r9"
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_dead_letters_over_delivered_reclaim(monkeypatch):
+    """A reclaimed message whose delivery count is at/over the cap is
+    dead-lettered instead of being yielded for (another crashing) attempt."""
+    monkeypatch.setattr(shared, "initialize_db", _async_noop)
+    monkeypatch.setattr(settings, "max_task_deliveries", 5)
+    # Keep the unrelated self-heal guards quiet during the single loop turn.
+    monkeypatch.setattr(settings, "broker_unhealthy_exit_sec", 0.0)
+
+    fake_hb = _FakeHeartbeat()
+
+    class _HBFactory:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return fake_hb
+
+    monkeypatch.setattr(shared, "Heartbeat", _HBFactory)
+    monkeypatch.setattr(shared, "install_shutdown_handlers", lambda hb=None: None)
+
+    poison = ("999-0", {"query_id": "qp", "response_id": "rp", "metadata": "{}"})
+
+    async def _fake_reclaim(stream, group, consumer, _logger, **kwargs):
+        # Report the message as delivered past the cap, then ask the loop to
+        # stop so it drains+exits after handling the reclaim batch.
+        counts = kwargs.get("delivery_counts")
+        if counts is not None:
+            counts[poison[0]] = 5
+        shared._request_shutdown()
+        return [poison]
+
+    async def _fake_get_task(*args, **kwargs):
+        return None
+
+    added = []
+    acked = []
+
+    async def _fake_add_task(queue, payload, _logger):
+        added.append((queue, payload))
+
+    async def _fake_mark_complete(stream, group, msg_id, _logger, retries=0):
+        acked.append(msg_id)
+
+    monkeypatch.setattr(shared, "reclaim_orphaned", _fake_reclaim)
+    monkeypatch.setattr(shared, "get_task", _fake_get_task)
+    monkeypatch.setattr(shared, "add_task", _fake_add_task)
+    monkeypatch.setattr(shared, "mark_task_as_complete", _fake_mark_complete)
+    shared._active_heartbeat = fake_hb
+
+    yielded = []
+    with pytest.raises(SystemExit) as exc:
+        async for task in shared.get_tasks("sort_results_score", "consumer", "cid", 8):
+            yielded.append(task)
+
+    assert exc.value.code == 0
+    # The poison message was never handed to the worker...
+    assert yielded == []
+    # ...it was acked+deleted and its query ended with an ERROR status.
+    assert acked == ["999-0"]
+    assert len(added) == 1
+    queue, payload = added[0]
+    assert queue == "finish_query"
+    assert payload["status"] == "ERROR"
+    assert payload["response_id"] == "rp"
+
+
 # --- Loop-liveness watchdog -------------------------------------------------
 
 

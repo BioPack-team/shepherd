@@ -23,9 +23,9 @@ from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import (
     clear_ready_callback,
-    get_message,
     get_message_sync,
     get_ready_callbacks,
+    message_exists,
     remove_callback_id,
     save_logs,
     save_message_sync,
@@ -844,10 +844,10 @@ async def poll_for_tasks():
 
                 logger.debug(f"[{callback_id}] Obtained lock for {response_id}.")
                 # Sanity check: if the original query is gone, every ready
-                # callback for it is undeliverable -- clean them all up.
-                try:
-                    await get_message(query_id, logger)
-                except KeyError:
+                # callback for it is undeliverable -- clean them all up. Use a
+                # cheap EXISTS rather than loading the whole query blob just to
+                # learn whether it's present.
+                if not await message_exists(query_id):
                     logger.error(
                         f"Failed to get original query for {query_id}. "
                         "Discarding ready callbacks."

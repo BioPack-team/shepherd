@@ -94,3 +94,28 @@ async def test_reclaim_orphaned_skips_own_pending(
     reclaimed = await reclaim.reclaim_orphaned(stream, group, "liveworker", logger)
 
     assert reclaimed == []
+
+
+@pytest.mark.asyncio
+async def test_reclaim_orphaned_populates_delivery_counts(
+    redis_mock, tiny_idle_floor, monkeypatch
+):
+    """The optional out-param is filled with each candidate's delivery count.
+
+    This is the signal the worker loop uses to break a poison-pill retry loop.
+    A message that has only been delivered once reads back as 1.
+    """
+    broker = redis_mock["broker"]
+    monkeypatch.setattr(reclaim, "broker_client", broker)
+
+    stream, group = "aragorn.score", "consumer"
+    msg_id = await _seed_pending(broker, stream, group, "deadworker")
+
+    delivery_counts: dict = {}
+    reclaimed = await reclaim.reclaim_orphaned(
+        stream, group, "liveworker", logger, delivery_counts=delivery_counts
+    )
+
+    assert [m[0] for m in reclaimed] == [msg_id]
+    # Delivered exactly once so far (the initial XREADGROUP), before this claim.
+    assert delivery_counts == {msg_id: 1}
