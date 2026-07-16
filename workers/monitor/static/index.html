@@ -25,6 +25,8 @@
     </header>
 
     <main>
+      <div id="broker-banner" class="banner banner-critical hidden" role="alert"></div>
+
       <section>
         <h2>Workers</h2>
         <div id="workers" class="grid"></div>
@@ -72,6 +74,16 @@
         <ul id="alerts"></ul>
       </section>
     </main>
+
+    <div id="worker-modal" class="modal-overlay hidden">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-header">
+          <h3 id="modal-title"></h3>
+          <button id="modal-close" class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div id="modal-body"></div>
+      </div>
+    </div>
 
     <script src="static/app.js"></script>
   </body>

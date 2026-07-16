@@ -21,7 +21,7 @@ from shepherd_server.aras.arax import ARAX
 from shepherd_server.aras.bte import BTE
 from shepherd_server.aras.sipr import SIPR
 from shepherd_server.base_routes import base_router
-from shepherd_server.openapi import construct_open_api_schema
+from shepherd_server.openapi import set_open_api_schema
 from shepherd_utils.broker import add_task
 from shepherd_utils.db import (
     initialize_db,
@@ -81,7 +81,7 @@ async def custom_swagger_ui_html(req: Request) -> HTMLResponse:
     )
 
 
-APP.openapi_schema = construct_open_api_schema(
+set_open_api_schema(
     APP,
     infores="infores:shepherd",
 )

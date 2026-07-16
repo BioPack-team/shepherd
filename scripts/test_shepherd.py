@@ -7,17 +7,21 @@ from pathlib import Path
 import httpx
 
 target_urls = {
-    "aragorn-prod": "https://aragorn.transltr.io/aragorn",
-    "aragorn-test": "https://aragorn.test.transltr.io/aragorn",
-    "aragorn-ci": "https://shepherd.ci.transltr.io/aragorn",
-    "arax-ci": "https://shepherd.ci.transltr.io/arax",
-    "bte-ci": "https://shepherd.ci.transltr.io/bte",
-    "aragorn-dev": "https://shepherd.renci.org/aragorn",
-    "arax-dev": "https://shepherd.renci.org/arax",
-    "bte-dev": "https://shepherd.renci.org/bte",
-    "aragorn-local": "http://localhost:5439/aragorn",
-    "arax-local": "http://localhost:5439/arax",
-    "bte-local": "http://localhost:5439/bte",
+    "aragorn-prod": "https://aragorn.transltr.io/aragorn/query",
+    "aragorn-test": "https://aragorn.test.transltr.io/aragorn/query",
+    "ars-test": "https://ars.test.transltr.io/ars/api/submit",
+    "aragorn-ci": "https://shepherd.ci.transltr.io/aragorn/query",
+    "arax-ci": "https://shepherd.ci.transltr.io/arax/query",
+    "bte-ci": "https://shepherd.ci.transltr.io/bte/query",
+    "ars-ci": "https://ars.ci.transltr.io/ars/api/submit",
+    "aragorn-dev": "https://shepherd.renci.org/aragorn/query",
+    "arax-dev": "https://shepherd.renci.org/arax/query",
+    "bte-dev": "https://shepherd.renci.org/bte/query",
+    "ars-dev": "https://ars-dev.transltr.io/ars/api/submit",
+    "aragorn-local": "http://localhost:5439/aragorn/query",
+    "arax-local": "http://localhost:5439/arax/query",
+    "bte-local": "http://localhost:5439/bte/query",
+    "ars-local": "http://localhost:5439/ars/query",
 }
 
 METRICS_FILE = "benchmark_metrics.json"
@@ -101,7 +105,7 @@ async def single_lookup(curie: str, target: str) -> dict:
       - total_time_seconds: full round trip.
     """
     query = generate_query(curie)
-    url = f"{target_urls[target]}/query"
+    url = target_urls[target]
     started_at = datetime.now(timezone.utc)
     print(f"Running {curie} against {target}")
 
@@ -127,7 +131,9 @@ async def single_lookup(curie: str, target: str) -> dict:
     request_start = time.perf_counter()
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS)
+        ) as client:
             async with client.stream("POST", url, json=query) as response:
                 # Headers are received here -- the server has started sending. Treat as TTFB.
                 ttfb = time.perf_counter()
@@ -148,7 +154,9 @@ async def single_lookup(curie: str, target: str) -> dict:
                 metrics["response_size_bytes"] = size_bytes
                 metrics["response_size_mb"] = round(size_mb, 4)
                 if transfer_time > 0:
-                    metrics["transfer_rate_mb_per_second"] = round(size_mb / transfer_time, 4)
+                    metrics["transfer_rate_mb_per_second"] = round(
+                        size_mb / transfer_time, 4
+                    )
 
                 response.raise_for_status()
 
@@ -166,7 +174,9 @@ async def single_lookup(curie: str, target: str) -> dict:
             }
     except Exception as e:
         if metrics["total_time_seconds"] is None:
-            metrics["total_time_seconds"] = round(time.perf_counter() - request_start, 4)
+            metrics["total_time_seconds"] = round(
+                time.perf_counter() - request_start, 4
+            )
         metrics["error"] = f"{type(e).__name__}: {e}"
         response_json = {"error": metrics["error"]}
 
@@ -204,25 +214,30 @@ curie_list = [
     "MONDO:0011705",  # lymphangioleiomyomatosis
     "MONDO:0004979",  # Asthma
     "MONDO:0001106",  # Kidney Failure
-    "MONDO:0015564",
+    "MONDO:0015564",  # Castleman Disease
     "MONDO:0100345",  # Lactose Intolerance
     "MONDO:0005799",  # Hookworm infectious disease
-    "MONDO:0009265",
-    "MONDO:0018982",
-    "MONDO:0018328",
-    "MONDO:0001119",
+    "MONDO:0009265",  # Gaucher disease type I
+    "MONDO:0018982",  # Niemann-Pick disease type C
+    "MONDO:0018328",  # homozygous familial hypercholesterolemia
+    "MONDO:0001119",  # premature menopause
     "MONDO:0016098",  # Immune-mediated Necrotizing Myopathy
     "MONDO:0005267",  # Heart Disorder
-    "MONDO:0009831",
+    "MONDO:0009831",  # malignant pancreatic neoplasm
     "MONDO:0001982",  # Niemann-Pick disease
     "MONDO:0850283",  # Acute Asthma
+    "MONDO:0004975",  # Alzheimers
+    "MONDO:0005100",  # systemic sclerosis
+    "MONDO:0019293",  # skin vascular disease
+    "MONDO:0005015",  # Diabetes Mellitus
+    "CHEBI:85078",  # MVP2
 ]
 
 
 async def main():
     """Run the configured benchmark sweep and time it overall."""
     # Add more keys from target_urls here to compare endpoints in one run.
-    targets = ["aragorn-dev"]
+    targets = ["aragorn-local"]
     runs_per_target = 1
 
     start = time.time()

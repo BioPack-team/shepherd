@@ -13,6 +13,12 @@
   const infraEl = document.getElementById("infra");
   const alertsEl = document.getElementById("alerts");
   const eventsEl = document.getElementById("events");
+  const brokerBannerEl = document.getElementById("broker-banner");
+
+  // Client-side memory of when the broker outage began. The server sends a
+  // fresh broker_up=false snapshot each tick while it's down, so we latch the
+  // first one's timestamp to show "since ..." rather than the latest tick time.
+  let brokerDownSince = null;
 
   // Client-side rolling buffer of scaling events. The server sends fresh deltas
   // on each tick; we accumulate them so the user can see recent history.
@@ -26,6 +32,15 @@
   // on every snapshot tick, which wipes Chart.js's internal visibility state,
   // so we mirror it here (keyed by series label) and re-apply on each rebuild.
   const xlenHiddenSeries = new Set();
+
+  // Most recent workers rollup, kept so the open modal can live-refresh on each
+  // snapshot. ``openModalWorker`` is the worker name whose modal is showing (or
+  // null when closed).
+  let latestWorkers = {};
+  let openModalWorker = null;
+  const modalEl = document.getElementById("worker-modal");
+  const modalTitleEl = document.getElementById("modal-title");
+  const modalBodyEl = document.getElementById("modal-body");
 
   function fmt(n) {
     if (n === null || n === undefined) return "-";
@@ -130,6 +145,7 @@
   }
 
   function updateWorkers(workers) {
+    latestWorkers = workers;
     const names = Object.keys(workers).sort();
     workersEl.innerHTML = "";
     if (names.length === 0) {
@@ -140,12 +156,13 @@
       const w = workers[name];
       const state = w.state || (w.alive > 0 ? "alive" : "unknown");
       const card = document.createElement("div");
-      card.className = `card state-${state}`;
+      card.className = `card state-${state} clickable`;
 
       // For non-alive workers, fall back to the previously recorded alive count
       // so the user can see how many were running before things went bad.
       const aliveDisplay = w.alive > 0 ? w.alive : 0;
       const capacityDisplay = w.alive > 0 ? w.task_limit_total : (w.last_alive_count || 0);
+      const runningDisplay = w.alive > 0 ? (w.in_flight_total || 0) : 0;
       const backlog = w.backlog || 0;
       const utilization = w.utilization || 0;
       const utilWidth = Math.min(100, Math.round(utilization * 100));
@@ -169,14 +186,102 @@
         </div>
         <div class="counts">
           <span><span class="label">Alive</span><span class="value alive">${aliveDisplay}</span></span>
+          <span><span class="label">Running</span><span class="value">${fmt(runningDisplay)}</span></span>
           <span><span class="label">Backlog</span><span class="value">${fmt(backlog)}</span></span>
           <span><span class="label">Capacity</span><span class="value">${fmt(capacityDisplay)}</span></span>
         </div>
         <div class="util-bar"><div class="fill ${utilClass}" style="width: ${utilWidth}%"></div></div>
         <div class="meta">${metaText}</div>
       `;
+      card.addEventListener("click", () => openWorkerModal(name));
       workersEl.appendChild(card);
     }
+    // Keep an open modal in sync with the freshest snapshot.
+    if (openModalWorker) renderModal(openModalWorker);
+  }
+
+  // ---- worker detail modal ------------------------------------------------
+
+  function openWorkerModal(name) {
+    openModalWorker = name;
+    renderModal(name);
+    modalEl.classList.remove("hidden");
+  }
+
+  function closeWorkerModal() {
+    openModalWorker = null;
+    modalEl.classList.add("hidden");
+  }
+
+  function renderModal(name) {
+    const w = latestWorkers[name];
+    if (!w) {
+      // Worker vanished from the snapshot (e.g. forgotten); close politely.
+      closeWorkerModal();
+      return;
+    }
+    modalTitleEl.textContent = name;
+
+    const backlog = w.backlog || 0;
+    const runningTotal = w.alive > 0 ? (w.in_flight_total || 0) : 0;
+    const capacityTotal = w.alive > 0 ? (w.task_limit_total || 0) : 0;
+    const replicaCount = (w.consumers || []).length;
+
+    const summary = `
+      <div class="modal-summary">
+        <span><span class="label">Queue length</span><span class="value">${fmt(backlog)}</span></span>
+        <span><span class="label">Running / limit</span><span class="value">${fmt(runningTotal)} / ${fmt(capacityTotal)}</span></span>
+        <span><span class="label">Replicas</span><span class="value">${fmt(replicaCount)}</span></span>
+      </div>`;
+
+    // Queue length is stream-level (shared by every replica), so it lives in the
+    // summary above; the table below is strictly per-replica.
+    const consumers = (w.consumers || [])
+      .slice()
+      .sort((a, b) => String(a.consumer).localeCompare(String(b.consumer)));
+
+    let table;
+    if (consumers.length === 0) {
+      table = `<div class="modal-empty">No replicas currently reporting heartbeats.</div>`;
+    } else {
+      const rows = consumers
+        .map((c) => {
+          const rowClass = c.stale ? ' class="stale-row"' : "";
+          const running = c.in_flight === null || c.in_flight === undefined ? "-" : fmt(c.in_flight);
+          const limit = fmt(c.task_limit);
+          const mem = fmtBytes(c.rss_bytes);
+          // CPU is a top-style "% of a single core" (can exceed 100 on
+          // multi-core work), so show the core allocation alongside it to keep
+          // the number interpretable.
+          const cpu = c.cpu_pct === null || c.cpu_pct === undefined
+            ? "-"
+            : (c.cpu_count ? `${c.cpu_pct.toFixed(1)}% / ${c.cpu_count} cores` : `${c.cpu_pct.toFixed(1)}%`);
+          const seen = c.last_seen ? fmtTimeAgo(c.last_seen) : "-";
+          const staleTag = c.stale ? ' <span class="state-pill stale">stale</span>' : "";
+          return `<tr${rowClass}>
+            <td>${c.consumer || "-"}${staleTag}</td>
+            <td class="num">${running} / ${limit}</td>
+            <td class="num">${mem}</td>
+            <td class="num">${cpu}</td>
+            <td class="num">${seen}</td>
+          </tr>`;
+        })
+        .join("");
+      table = `<table>
+        <thead>
+          <tr>
+            <th>Replica</th>
+            <th class="num">Running / limit</th>
+            <th class="num">Memory</th>
+            <th class="num">CPU</th>
+            <th class="num">Last seen</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    }
+
+    modalBodyEl.innerHTML = summary + table;
   }
 
   function ingestEvents(events, ts) {
@@ -288,10 +393,30 @@
     } else {
       dbDisk = fmtBytes(pg.db_size_bytes);
     }
+    // Redis memory: used / cap when a maxmemory is configured, plus a colorized
+    // % of the cap and eviction activity -- the headroom signals behind the
+    // redis_memory / redis_eviction alerts, visible at a glance.
+    const usedH = redis.used_memory_human
+      || (redis.used_memory_bytes ? fmtBytes(redis.used_memory_bytes) : "-");
+    const maxBytes = redis.maxmemory_bytes || 0;
+    const memValue = maxBytes ? `${usedH} / ${fmtBytes(maxBytes)}` : usedH;
+    let memPct = "-";
+    if (redis.maxmemory_pct != null) {
+      const p = redis.maxmemory_pct;
+      const color = p >= 95 ? "var(--bad)" : p >= 85 ? "var(--warn)" : null;
+      const text = `${p.toFixed(1)}%`;
+      memPct = color ? `<span style="color:${color}">${text}</span>` : text;
+    }
+    let evictValue = redis.evicted_keys == null ? "-" : fmt(redis.evicted_keys);
+    if ((redis.evicted_keys_delta || 0) > 0) {
+      evictValue = `<span style="color:var(--warn)">${fmt(redis.evicted_keys)} (+${fmt(redis.evicted_keys_delta)})</span>`;
+    }
     const rows = [
       { label: "DB disk", value: dbDisk },
       { label: "PG connections", value: pg.connection_count ?? "-" },
-      { label: "Redis memory", value: redis.used_memory_human || "-" },
+      { label: "Redis memory", value: memValue },
+      { label: "Redis mem %", value: memPct },
+      { label: "Redis evicted", value: evictValue },
       { label: "Redis clients", value: redis.connected_clients ?? "-" },
       { label: "Redis ops/s", value: redis.instantaneous_ops_per_sec ?? "-" },
     ];
@@ -337,8 +462,32 @@
       .join("");
   }
 
+  function showBrokerBanner(downSince) {
+    const when = downSince ? new Date(downSince * 1000).toLocaleTimeString() : "";
+    const ago = downSince ? ` (${fmtTimeAgo(downSince)})` : "";
+    brokerBannerEl.innerHTML = `
+      <span class="banner-icon">&#9888;</span>
+      <span class="banner-msg">Broker unreachable &mdash; workers can't read or write tasks. Worker-down alerts are suppressed and the panels below are frozen until it recovers.</span>
+      <span class="banner-detail">since ${when}${ago}</span>`;
+    brokerBannerEl.classList.remove("hidden");
+  }
+
+  function hideBrokerBanner() {
+    brokerBannerEl.classList.add("hidden");
+  }
+
   function applySnapshot(snap) {
     ensureCharts();
+    // Broker down: the snapshot carries no live data (workers/streams/etc. are
+    // empty). Surface a banner and freeze the last-known panels rather than
+    // wiping every card to zero, which would misread as "everything is gone".
+    if (snap.broker_up === false) {
+      if (brokerDownSince === null) brokerDownSince = snap.ts;
+      showBrokerBanner(brokerDownSince);
+      return;
+    }
+    if (brokerDownSince !== null) brokerDownSince = null;
+    hideBrokerBanner();
     lastUpdateEl.textContent = `updated ${new Date(snap.ts * 1000).toLocaleTimeString()}`;
     updateWorkers(snap.workers || {});
     updateStreams(snap.streams || {}, snap.ts);
@@ -390,6 +539,15 @@
     };
     ws.onerror = () => { /* onclose will handle reconnect */ };
   }
+
+  // Modal dismissal: close button, click on the backdrop, or Escape.
+  document.getElementById("modal-close").addEventListener("click", closeWorkerModal);
+  modalEl.addEventListener("click", (e) => {
+    if (e.target === modalEl) closeWorkerModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && openModalWorker) closeWorkerModal();
+  });
 
   // Initial fetch so the UI is populated before the socket opens.
   fetch("api/snapshot")

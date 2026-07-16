@@ -13,12 +13,13 @@ adapted for Shepherd's dict-based TRAPI message structure.
 import asyncio
 import json
 import logging
-import os
 import uuid
-from concurrent.futures import ProcessPoolExecutor
 
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.config import settings
+from shepherd_utils.cpu import resolve_pool_workers
+from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 from ranker import arax_rank
@@ -78,30 +79,36 @@ def rank_message(in_message: dict, logger: logging.Logger) -> dict:
         return in_message
 
 
-async def process_task(task, parent_ctx, logger, limiter, loop, executor):
+def arax_rank_task(response_id: str, logger: logging.Logger) -> None:
+    """Process-pool entrypoint: load, rank, and save entirely in the child.
+
+    Only the small ``response_id`` crosses the process-pool boundary; the
+    (potentially very large) message is read from Redis, ranked, and written
+    back inside the child. Previously the parent loaded the whole message on the
+    event loop and pickled it across to the child and back -- so a big message
+    sat on the parent's heap and was resident several times over, and the
+    decode blocked the loop. Reading and writing here keeps the payload off the
+    parent entirely (matching aragorn_omnicorp / aragorn_score).
+    """
+    message = get_message_sync(response_id)
+    ranked_message = rank_message(message, logger)
+    if ranked_message is None:
+        ranked_message = message
+    save_message_sync(response_id, ranked_message)
+
+
+async def process_task(task, parent_ctx, logger, limiter, loop, pool):
     """Process a given task and ACK in redis.
 
     Ranking is CPU-bound, so it is dispatched to a process pool while the
-    span, wrap-up, and error handling are shared with every worker.
+    span, wrap-up, and error handling are shared with every worker. Only the
+    ``response_id`` is handed to the child; the message load/save happen there
+    (see ``arax_rank_task``) so the payload never crosses the process boundary.
     """
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        message = await get_message(response_id, logger)
-        if message is not None:
-            # Run ranking in process pool for CPU-intensive operations
-            ranked_message = await loop.run_in_executor(
-                executor,
-                rank_message,
-                message,
-                logger,
-            )
-            if ranked_message is None:
-                logger.error("Ranking returned None. Returning original message.")
-                ranked_message = message
-            await save_message(response_id, ranked_message, logger)
-        else:
-            logger.error(f"Failed to get {response_id} for ranking.")
+        await pool.run(loop, arax_rank_task, response_id, logger)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
@@ -110,21 +117,30 @@ async def poll_for_tasks() -> None:
     """
     Main loop to poll for and process ranking tasks.
 
-    Creates a single ProcessPoolExecutor that is reused across all tasks
+    Creates a single self-healing process pool that is reused across all tasks
     for better performance.
     """
     loop = asyncio.get_running_loop()
-    cpu_count = os.cpu_count()
-    cpu_count = cpu_count if cpu_count is not None else 1
-    cpu_count = min(cpu_count, TASK_LIMIT)
-    executor = ProcessPoolExecutor(max_workers=cpu_count)
+    # Size the pool by the pod's actual CPU allocation (cgroup limit), not
+    # os.cpu_count() -- see aragorn_omnicorp.poll_for_tasks. Each child loads a
+    # full message, so this also bounds peak memory. POOL_MAX_WORKERS overrides.
+    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
+    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    pool = ProcessPoolManager(
+        max_workers,
+        max_tasks_per_child=settings.pool_max_tasks_per_child,
+        name="arax.rank process pool",
+        task_timeout=settings.pool_task_timeout_sec,
+    )
 
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
                 STREAM, GROUP, CONSUMER, TASK_LIMIT
             ):
-                await process_task(task, parent_ctx, logger, limiter, loop, executor)
+                asyncio.create_task(
+                    process_task(task, parent_ctx, logger, limiter, loop, pool)
+                )
         except asyncio.CancelledError:
             logging.info("Poll loop cancelled, shutting down.")
         except Exception as e:

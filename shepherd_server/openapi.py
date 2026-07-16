@@ -77,3 +77,24 @@ def construct_open_api_schema(app, description=None, infores=None, subpath=""):
         open_api_schema["servers"] = servers_conf
 
     return open_api_schema
+
+
+def set_open_api_schema(app, description=None, infores=None, subpath=""):
+    """Pin a custom OpenAPI schema on ``app``.
+
+    Assigning ``app.openapi_schema`` directly is not enough on modern FastAPI:
+    ``app.openapi()`` (which the served ``/openapi.json`` calls) regenerates the
+    schema whenever its cached routes-version marker doesn't match, throwing away
+    our customizations and reverting ``info.version`` to FastAPI's ``0.1.0``
+    default. Overriding the ``openapi`` method is the supported way to keep a
+    fixed schema. See https://fastapi.tiangolo.com/how-to/extending-openapi/.
+    """
+    schema = construct_open_api_schema(
+        app, description=description, infores=infores, subpath=subpath
+    )
+
+    def openapi():
+        return schema
+
+    app.openapi = openapi
+    return schema

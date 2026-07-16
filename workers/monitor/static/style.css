@@ -162,6 +162,37 @@ header h1 { margin: 0; font-size: 18px; font-weight: 600; flex-shrink: 0; }
   margin-top: -4px;
   border-radius: 50%;
   cursor: pointer;
+  z-index: 1;
+}
+/* Shaded band spanning a broker outage, drawn behind the event dots. */
+.timeline-bar .gap {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(248, 81, 73, 0.15);
+  border-left: 1px solid var(--bad);
+  border-right: 1px solid var(--bad);
+  z-index: 0;
+}
+.timeline-bar .gap.ongoing { border-right: none; }
+
+.timeline-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.timeline-legend .swatch {
+  display: inline-block;
+  width: 18px;
+  height: 10px;
+  border-radius: 2px;
+}
+.timeline-legend .swatch.broker-gap {
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid var(--bad);
 }
 .timeline-bar .dot.info { background: var(--accent); }
 .timeline-bar .dot.warning { background: var(--warn); }
@@ -184,6 +215,27 @@ header h1 { margin: 0; font-size: 18px; font-weight: 600; flex-shrink: 0; }
 .badge.offline { background: rgba(248, 81, 73, 0.15); color: var(--bad); }
 
 main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+/* Full-width status banner (e.g. broker unreachable). Sits above all sections
+   so it's the first thing seen when the dashboard's data source is down. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  margin-bottom: 24px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.banner.hidden { display: none; }
+.banner-critical {
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid var(--bad);
+  color: var(--bad);
+}
+.banner .banner-icon { font-size: 16px; line-height: 1; flex-shrink: 0; }
+.banner .banner-msg { font-weight: 500; }
+.banner .banner-detail { margin-left: auto; color: var(--muted); font-weight: 400; white-space: nowrap; }
 
 section { margin-bottom: 32px; }
 section h2 {
@@ -230,6 +282,7 @@ section h3 { font-size: 12px; color: var(--muted); margin: 20px 0 8px; text-tran
 .state-pill.scaled_down { background: rgba(139, 148, 158, 0.18); color: var(--muted); }
 .state-pill.crashed { background: rgba(248, 81, 73, 0.18); color: var(--bad); }
 .state-pill.unknown { background: rgba(139, 148, 158, 0.12); color: var(--muted); }
+.state-pill.stale { background: rgba(210, 153, 34, 0.18); color: var(--warn); }
 
 .card .counts { display: flex; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
 .card .counts span { display: flex; flex-direction: column; }
@@ -259,6 +312,75 @@ section h3 { font-size: 12px; color: var(--muted); margin: 20px 0 8px; text-tran
   font-size: 11px;
   color: var(--muted);
 }
+
+.card.clickable { cursor: pointer; }
+.card.clickable:hover { border-color: var(--accent); }
+
+/* Per-replica detail modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+.modal-overlay.hidden { display: none; }
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  max-width: 720px;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+.modal-header h3 { margin: 0; font-size: 15px; word-break: break-all; }
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.modal-close:hover { color: var(--text); }
+#modal-body { padding: 16px 18px; }
+.modal-summary {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.modal-summary .label {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.modal-summary .value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+#modal-body table { font-size: 13px; }
+#modal-body td.stale-row { color: var(--muted); }
+.modal-empty { color: var(--muted); font-size: 13px; }
 
 #events {
   list-style: none;

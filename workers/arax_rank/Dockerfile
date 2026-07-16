@@ -5,6 +5,11 @@ FROM ghcr.io/translatorsri/renci-python-image:3.12.13
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
+# Enable faulthandler from interpreter startup so a SIGABRT dumps every thread's
+# traceback -- including during a spawned pool child's import phase, before the
+# pool initializer's faulthandler.enable() would run. Lets ProcessPoolManager's
+# SIGABRT-on-timeout capture a stuck child's stack even if it hangs in startup.
+ENV PYTHONFAULTHANDLER=1
 
 # set up requirements
 WORKDIR /app

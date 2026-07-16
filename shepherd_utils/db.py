@@ -255,6 +255,97 @@ async def save_message(
             pass
 
 
+class ResponseTooLargeError(Exception):
+    """Raised when a stored response is too large to safely load into memory.
+
+    A plain ``Exception`` on purpose: the shared task lifecycle
+    (``run_task_lifecycle``) already catches any ``Exception`` from a worker and
+    routes the task to ``finish_query`` with an ERROR status, so raising this
+    *before* the memory-expanding load converts what would otherwise be an
+    uncatchable OOM SIGKILL into a clean, accounted-for task failure.
+    """
+
+
+async def get_blob_size(message_id: str) -> int:
+    """Return the stored (compressed) size of a data-db blob in bytes.
+
+    ``STRLEN`` is an O(1) server-side read that never transfers the payload.
+    Returns 0 when the key is missing.
+    """
+    return int(await data_db_client.strlen(message_id))
+
+
+async def message_exists(message_id: str) -> bool:
+    """True if a data-db blob exists, via a cheap ``EXISTS``.
+
+    Use this for a presence check instead of ``get_message`` when the payload
+    itself isn't needed: ``EXISTS`` never transfers, decompresses or parses the
+    blob, so it avoids materializing a potentially large message just to learn
+    whether it is there.
+    """
+    return bool(await data_db_client.exists(message_id))
+
+
+# The zstd frame header (magic + descriptors + content size) is at most 18
+# bytes; a small prefix is enough to read the embedded uncompressed size.
+_ZSTD_HEADER_PROBE_BYTES = 64
+
+
+async def get_response_size(message_id: str) -> int:
+    """Best-effort *uncompressed* size of a stored response, read cheaply.
+
+    Every blob we store is a one-shot zstd frame (``encode_message``), which
+    embeds the original uncompressed content size in its header. We fetch just
+    the first few header bytes with ``GETRANGE`` and decode that size -- no full
+    fetch, no decompress. Uncompressed size is what actually drives a worker's
+    peak memory: decoding parses the JSON into a Python object tree several times
+    larger again (~5-6x for TRAPI-shaped data), and that tree briefly coexists
+    with the decompressed bytes. Falls back to the compressed ``STRLEN`` if the
+    header carries no content size (e.g. a streaming frame); returns 0 when the
+    key is missing.
+    """
+    header = await data_db_client.getrange(message_id, 0, _ZSTD_HEADER_PROBE_BYTES - 1)
+    if not header:
+        return 0
+    if isinstance(header, str):
+        header = header.encode("latin-1")
+    try:
+        size = zstandard.frame_content_size(header)
+    except zstandard.ZstdError:
+        size = -1
+    if size and size > 0:
+        return int(size)
+    # Unknown content size -> fall back to the compressed length as a proxy.
+    return int(await data_db_client.strlen(message_id))
+
+
+async def enforce_response_size_limit(
+    response_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Raise ``ResponseTooLargeError`` if a response exceeds the configured cap.
+
+    The cap (``settings.max_response_size``) is compared against the response's
+    *uncompressed* size -- the number you'd see fetching it from ``/response`` --
+    read cheaply from the zstd frame header without loading the blob. Decoding
+    expands that several-fold in memory, so set the limit well below the pod's
+    memory limit (see the config comment for sizing). A cap of 0 disables the
+    guard, leaving the delivery-count circuit breaker as the backstop. Called at
+    the top of a worker, before ``get_message``.
+    """
+    max_bytes = settings.max_response_size_bytes
+    if max_bytes <= 0:
+        return
+    size = await get_response_size(response_id)
+    if size > max_bytes:
+        raise ResponseTooLargeError(
+            f"Response {response_id} is {size} uncompressed bytes, over the "
+            f"{max_bytes}-byte limit (max_response_size={settings.max_response_size}); "
+            "refusing to load it: parsing it into memory would risk an "
+            "out-of-memory kill."
+        )
+
+
 async def get_message(
     message_id: str,
     logger: logging.Logger,
@@ -281,6 +372,91 @@ async def get_message(
     logger.debug(f"Decompression took {time.time() - start_decomp}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
+
+
+# ---------------------------------------------------------------------------
+# Per-query "ready callback" index
+#
+# The merge_message worker coalesces all of a query's arrived-but-unmerged
+# callbacks into a single locked merge. So that one worker can find every ready
+# callback for a query without draining (and thus hoarding) the shared merge
+# stream, each arriving callback is recorded in a Redis set keyed by the query's
+# response_id. The merge worker drains this set under the response_id lock; the
+# per-callback stream message is only a wake signal. Set membership implies the
+# callback payload is already saved (add_ready_callback is called after
+# save_message), and a callback leaves the set only after it has been merged.
+# ---------------------------------------------------------------------------
+
+READY_CALLBACKS_PREFIX = "merge_ready:"
+
+
+def _ready_callbacks_key(response_id: str) -> str:
+    return f"{READY_CALLBACKS_PREFIX}{response_id}"
+
+
+async def add_ready_callback(
+    response_id: str,
+    callback_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Record an arrived callback as ready to merge into ``response_id``."""
+    key = _ready_callbacks_key(response_id)
+    try:
+        async with data_db_client.pipeline(transaction=True) as pipe:
+            pipe.sadd(key, callback_id)
+            pipe.expire(key, settings.redis_ttl)
+            await pipe.execute()
+    except Exception as e:
+        logger.error(f"Failed to record ready callback {callback_id}: {e}")
+
+
+async def get_ready_callbacks(
+    response_id: str,
+    logger: logging.Logger,
+) -> List[str]:
+    """Return the callback ids currently ready to merge for ``response_id``."""
+    key = _ready_callbacks_key(response_id)
+    try:
+        members = await data_db_client.smembers(key)
+    except Exception as e:
+        logger.error(f"Failed to get ready callbacks for {response_id}: {e}")
+        return []
+    return [m.decode() if isinstance(m, bytes) else m for m in members]
+
+
+async def is_ready_callback(
+    response_id: str,
+    callback_id: str,
+    logger: logging.Logger,
+) -> bool:
+    """True if ``callback_id`` is still an unmerged ready callback.
+
+    On error we assume it is still pending so the caller re-enqueues the wake
+    task rather than silently dropping a callback.
+    """
+    key = _ready_callbacks_key(response_id)
+    try:
+        return bool(await data_db_client.sismember(key, callback_id))
+    except Exception as e:
+        logger.error(f"Failed to check ready callback {callback_id}: {e}")
+        return True
+
+
+async def clear_ready_callback(
+    response_id: str,
+    callback_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Remove a merged callback from the ready index.
+
+    Redis deletes the set automatically once its last member is removed, so no
+    explicit key cleanup is needed; the TTL covers abandoned queries.
+    """
+    key = _ready_callbacks_key(response_id)
+    try:
+        await data_db_client.srem(key, callback_id)
+    except Exception as e:
+        logger.error(f"Failed to clear ready callback {callback_id}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +536,14 @@ async def get_logs(
         logs = await logs_db_client.get(response_id)
         if logs is not None:
             logs = orjson.loads(logs)
+            # The stored list reflects the order in which workers *flushed*
+            # their logs, not the order events happened: a callback can arrive
+            # and be merged (and flushed) before the lookup that dispatched the
+            # query finishes and flushes its own logs. Every entry carries an
+            # ISO8601 UTC timestamp, so sort by it to present the logs in
+            # chronological order. Stable sort keeps same-timestamp entries in
+            # their original relative order.
+            logs.sort(key=lambda entry: entry.get("timestamp", ""))
             return logs
         else:
             logger.error(f"Failed to get logs for response {response_id}")

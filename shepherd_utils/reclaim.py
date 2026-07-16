@@ -86,12 +86,19 @@ async def reclaim_orphaned(
     consumer: str,
     logger: logging.Logger,
     min_idle_sec: Optional[int] = None,
+    delivery_counts: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[str, Any]]:
     """Claim any pending messages whose owner is no longer alive.
 
     Returns the reclaimed messages in the same ``(id, fields_dict)`` shape as
     ``broker.get_task`` so the caller can feed them through its normal task
     pipeline.
+
+    When ``delivery_counts`` is provided it is populated ``{msg_id:
+    times_delivered}`` from the XPENDING scan for every candidate, so the caller
+    can spot a message that keeps being re-delivered without completing (a poison
+    pill) and dead-letter it instead of retrying forever. ``times_delivered`` is
+    the count as of this scan, i.e. before the XCLAIM below bumps it.
     """
     effective_min_idle = min_idle_sec_for(stream, min_idle_sec)
     min_idle_ms = max(0, int(effective_min_idle * 1000))
@@ -101,30 +108,32 @@ async def reclaim_orphaned(
         # XPENDING with IDLE filters at the server, but we still cross-check
         # against heartbeats below to avoid yanking work from a slow-but-alive
         # consumer whose idle just crossed the threshold.
-        detail = await broker_client.execute_command(
-            "XPENDING",
-            stream,
-            group,
-            "IDLE",
-            min_idle_ms,
-            "-",
-            "+",
-            max_batch,
+        #
+        # Use the typed ``xpending_range`` rather than
+        # ``execute_command("XPENDING", ...)``: redis-py registers a response
+        # callback on the XPENDING *command name* that only parses the summary
+        # form (``XPENDING key group``). Invoked on this extended form
+        # (IDLE/start/end/count) that callback raises ``IndexError`` -- which the
+        # ``except`` below would swallow at DEBUG level, silently disabling
+        # reclaim entirely. ``xpending_range`` returns a list of parsed dicts.
+        detail = await broker_client.xpending_range(
+            stream, group, min="-", max="+", count=max_batch, idle=min_idle_ms
         )
     except Exception as e:
         logger.debug(f"Reclaim XPENDING failed for {stream}: {e}")
         return []
 
-    if not detail or not isinstance(detail, list):
+    if not detail:
         return []
 
     alive = await _alive_consumers_on_stream(stream)
 
     candidates: List[str] = []
-    for row in detail:
-        if not isinstance(row, list) or len(row) < 2:
+    for entry in detail:
+        raw_id = entry.get("message_id")
+        raw_owner = entry.get("consumer")
+        if raw_id is None or raw_owner is None:
             continue
-        raw_id, raw_owner = row[0], row[1]
         msg_id = raw_id if isinstance(raw_id, str) else raw_id.decode()
         owner = raw_owner if isinstance(raw_owner, str) else raw_owner.decode()
         if owner == consumer:
@@ -132,6 +141,11 @@ async def reclaim_orphaned(
         if owner in alive:
             continue  # owner is alive -- the dual safety check
         candidates.append(msg_id)
+        if delivery_counts is not None:
+            # ``times_delivered`` is how many times this message has been
+            # delivered/claimed without an ack -- the signal a caller uses to
+            # break a poison-pill retry loop.
+            delivery_counts[msg_id] = int(entry.get("times_delivered", 0) or 0)
 
     if not candidates:
         return []

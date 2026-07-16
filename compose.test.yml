@@ -1,0 +1,99 @@
+# Local test overlay for exercising the CPU-worker robustness paths.
+#
+# Explicit opt-in (does NOT auto-merge, so a normal `docker compose up` is
+# unaffected):
+#
+#   docker compose -f compose.yml -f compose.test.yml up --build
+#
+# Prefer the auto-merge convenience locally? Copy it to compose.override.yml
+# (gitignored, so it stays on your machine):  cp compose.test.yml compose.override.yml
+#
+# Why the resource limits matter: they make local behavior match prod. Docker
+# writes a cgroup CPU quota (which resolve_pool_workers reads to size the pool)
+# and a memory limit (so a child that balloons is actually OOM-killed). Without
+# them a compose container sees the whole host, the pool sizes huge, and none of
+# the sizing / OOM / recovery behavior reproduces.
+#
+# Uncomment the environment knobs per test (see scripts/seed_omnicorp.py and the
+# per-property table in the testing notes). Env set here is scoped to the one
+# service and overrides the shared .env.
+
+services:
+  aragorn:
+    cpus: 1
+    mem_limit: 1g
+  aragorn_lookup:
+    cpus: 1
+    mem_limit: 1g
+  aragorn_omnicorp:
+    cpus: 2 # -> pool sizes to 2; confirm via the "process pool sized to 2 worker(s)" startup log
+    mem_limit: 6g # -> a child exceeding this is cgroup-OOM-killed (kernel), parent survives
+    # environment:
+      # P0 timeout: set a short limit, then replay a big/slow query. Expect
+      # "task exceeded 10s; killing the stuck child", that query -> finish_query
+      # ERROR, and the NEXT task succeeding.
+      # POOL_TASK_TIMEOUT_SEC: "10"
+
+      # Pin pool concurrency (e.g. to 1) instead of trusting cgroup detection.
+      # Also the reliable way to serialize tasks for the idempotency demo.
+      # POOL_MAX_WORKERS: "1"
+
+      # Child recycling cadence (default 100). Lower it to watch RSS sawtooth
+      # sooner under a --repeat run in `docker stats` / the monitor.
+      # POOL_MAX_TASKS_PER_CHILD: "20"
+
+      # Loop watchdog threshold (default 60s). Only fires on a genuinely wedged
+      # loop -- to see it, temporarily inject a blocking sleep in poll_for_tasks.
+      # WORKER_LOOP_STALL_EXIT_SEC: "60"
+
+      # Broker-wedge self-heal window (default 300s). Lower it, then
+      # `docker compose stop shepherd_broker`, to see the worker exit + restart.
+      # BROKER_UNHEALTHY_EXIT_SEC: "30"
+
+      # Force the pair overlay to run even on huge queries (default 1_000_000),
+      # so a big message does the full memory-heavy work instead of being skipped.
+      # OMNICORP_MAX_CURIE_PAIRS: "1000000000"
+  # The same `cpus` / `mem_limit` + env block applies verbatim to the other
+  # CPU-bound workers when you want to stress them too:
+  aragorn_pathfinder:
+    cpus: 1
+    mem_limit: 5g
+  aragorn_score:
+    cpus: 4
+    mem_limit: 10g
+  arax:
+    cpus: 1
+    mem_limit: 3g
+  arax_rank:
+    cpus: 4
+    mem_limit: 10g
+  bte:
+    cpus: 1
+    mem_limit: 1g
+  bte_lookup:
+    cpus: 1
+    mem_limit: 1g
+  filter_analyses_top_n:
+    cpus: 1
+    mem_limit: 5g
+  filter_kgraph_orphans:
+    cpus: 1
+    mem_limit: 5g
+  filter_results_top_n:
+    cpus: 1
+    mem_limit: 5g
+  finish_query:
+    cpus: 1
+    mem_limit: 5g
+  merge_message:
+    cpus: 2
+    mem_limit: 5g
+  score_paths:
+    cpus: 6
+    mem_limit: 22g
+  sipr:
+    cpus: 1
+    mem_limit: 2g
+  sort_results_score:
+    cpus: 1
+    mem_limit: 5g

@@ -18,11 +18,14 @@ from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     add_query,
+    add_ready_callback,
     decompress_zstd,
     get_callback_query_id,
     get_logs,
     get_message,
     get_query_state,
+    remove_callback_id,
+    save_logs,
     save_message,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
@@ -246,29 +249,109 @@ async def run_async_query(
     )
 
 
+async def _read_body_within_limit(request: Request, max_bytes: int):
+    """Read the request body, aborting if it exceeds ``max_bytes``.
+
+    Returns the body bytes, or ``None`` if the limit was exceeded. A
+    ``max_bytes`` of 0 disables the limit and reads the whole body.
+
+    The declared ``Content-Length`` is checked first so well-behaved clients are
+    rejected without buffering anything; the stream is then read in chunks and
+    aborted the moment the running total crosses the limit, so a missing or
+    dishonest ``Content-Length`` can't force us to buffer an unbounded body.
+    """
+    if max_bytes <= 0:
+        return await request.body()
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > max_bytes:
+                return None
+        except ValueError:
+            pass
+
+    chunks = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _save_callback_error_logs(callback_id: str, logger: logging.Logger) -> None:
+    """Persist a callback handler's logs on an error path.
+
+    The rejection paths (oversized body, unparseable body) bail out before the
+    body's ``response_id`` is known, so resolve it from the callback->query
+    mapping and flush the logger's records under it -- the same key
+    ``finish_query`` reads. If the callback can't be mapped to a live query
+    there's nothing to key the logs on, so they're dropped.
+    """
+    original_query = await get_callback_query_id(callback_id, logger)
+    if original_query is None:
+        return
+    query_state = await get_query_state(original_query[0], logger)
+    if query_state is None:
+        return
+    await save_logs(query_state[7], logger)
+
+
 async def callback(
     target: ARATargetEnum,
     callback_id: str,
     request: Request,
 ) -> Response:
     """Handle asynchronous callback queries from subservices."""
-    raw = await request.body()
+    # Set up the query logger up front, keyed only on the callback_id we always
+    # have, so the rejection / parse-error paths below can persist their logs
+    # too. The requested log level lives in the body -- which those paths never
+    # parse -- so leave the logger at its inherited default until we have it.
+    log_handler = QueryLogger().log_handler
+    logger = logging.getLogger(f"shepherd.{callback_id}")
+    logger.addHandler(log_handler)
+    max_bytes = settings.callback_max_request_size_bytes
+    raw = await _read_body_within_limit(request, max_bytes)
+    if raw is None:
+        logger.warning(
+            f"Rejecting callback {callback_id}: request body exceeds the maximum "
+            f"allowed size of {max_bytes} bytes."
+        )
+        # Persist the rejection log BEFORE removing the callback: resolving the
+        # response_id reads the callback->query mapping that remove_callback_id
+        # deletes.
+        await _save_callback_error_logs(callback_id, logger)
+        # Drop this callback from the running set so the lookup worker stops
+        # waiting on it. Without this the lookup blocks until its whole-query
+        # timeout, since a callback only leaves the set once merge_message has
+        # processed it -- which never happens for a payload we refused to read.
+        await remove_callback_id(callback_id, logger)
+        return JSONResponse(
+            content={
+                "detail": (
+                    f"Request body exceeds the maximum allowed size of {max_bytes} "
+                    "bytes."
+                )
+            },
+            status_code=413,
+        )
     try:
         if "zstd" in request.headers.get("content-encoding", "").lower():
             raw = decompress_zstd(raw)
         response = orjson.loads(raw)
     except (orjson.JSONDecodeError, zstandard.ZstdError):
+        logger.warning(f"Rejecting callback {callback_id}: invalid request body.")
+        await _save_callback_error_logs(callback_id, logger)
         return JSONResponse(
             content={"detail": "Invalid request body"},
             status_code=422,
         )
-    # Set up logger
+    # Now that the body is parsed, apply the query's requested log level.
     log_level = response.get("log_level") or "INFO"
     level_number = logging._nameToLevel[log_level]
-    log_handler = QueryLogger().log_handler
-    logger = logging.getLogger(f"shepherd.{callback_id}")
     logger.setLevel(level_number)
-    logger.addHandler(log_handler)
     # logger.info(response)
     results = response["message"].get("results")
     if results is None:
@@ -280,11 +363,19 @@ async def callback(
             "edges": {},
         }
 
-    logger.info(f"Got back {len(response['message']['results'])} results.")
+    logger.info(
+        f"[{callback_id}] Got back {len(response['message']['results'])} results."
+    )
+    logger.debug(
+        f"[{callback_id}] for query graph: {response['message'].get('query_graph')}"
+    )
     # get associated query id for this callback
     original_query = await get_callback_query_id(callback_id, logger)
     logger.debug(f"Got original query: {original_query}")
     if original_query is None:
+        # No callback->query mapping, so there's no response_id to persist these
+        # logs under; surface it in the console/collector at least.
+        logger.warning(f"Callback {callback_id}: couldn't find original query.")
         return Response("Couldn't find original query.", 500)
     # if len(response["message"]["results"]) > 0:
     #     with open(
@@ -295,12 +386,21 @@ async def callback(
     #         json.dump(response, f, indent=2)
     query_state = await get_query_state(original_query[0], logger)
     if query_state is None:
+        logger.warning(
+            f"Callback {callback_id}: failed to get query state for "
+            f"{original_query[0]}."
+        )
         return Response("Failed to get query state.", 500)
     response_id = query_state[7]
     # save callback to redis
     logger.debug(f"Saving callback {callback_id} to redis")
     await save_message(callback_id, response, logger)
     logger.debug(f"Saved callback {callback_id} to redis")
+    # Record this callback in the per-query ready index *before* enqueuing the
+    # wake task, so that whichever merge_message worker picks up the wake signal
+    # can drain every arrived callback for this query under one lock. Set
+    # membership implies the payload above is already saved.
+    await add_ready_callback(response_id, callback_id, logger)
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
     with tracer.start_as_current_span("callback", context=parent_ctx) as span:
@@ -321,6 +421,11 @@ async def callback(
             },
             logger,
         )
+    # Persist the logs generated while handling this callback so they land in
+    # the query's log list (keyed by response_id, the same key finish_query
+    # reads). Without this, everything logged above -- the result count, the
+    # callback/query lookups -- is dropped on return.
+    await save_logs(response_id, logger)
     return Response("Callback received.", 200)
 
 

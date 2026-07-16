@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
@@ -14,7 +15,13 @@ from opentelemetry.context.context import Context
 from opentelemetry.propagate import extract
 from opentelemetry.trace import Status, StatusCode
 
-from .broker import add_task, broker_client, get_task, mark_task_as_complete
+from .broker import (
+    add_task,
+    broker_client,
+    broker_health,
+    get_task,
+    mark_task_as_complete,
+)
 from .config import settings
 from .db import initialize_db, save_logs
 from .heartbeat import Heartbeat
@@ -74,6 +81,7 @@ setup_logging()
 _shutdown = asyncio.Event()
 _active_heartbeat: "Heartbeat | None" = None
 _signal_handlers_installed = False
+_loop_watchdog: "LoopWatchdog | None" = None
 
 
 def is_shutting_down() -> bool:
@@ -84,6 +92,85 @@ def _request_shutdown() -> None:
     _shutdown.set()
 
 
+def _hard_exit(code: int) -> None:
+    """Terminate the process immediately, bypassing atexit handlers.
+
+    ``os._exit`` skips the interpreter-shutdown atexit join of the process pool,
+    which could otherwise block a self-heal restart if a pool child is wedged
+    mid-task. Used for the involuntary exits (broker wedge, loop watchdog) where
+    getting the pod recycled promptly matters more than clean teardown. Wrapped
+    so tests can substitute it instead of actually killing the test process.
+    """
+    os._exit(code)
+
+
+class LoopWatchdog:
+    """Force-exits the process if the asyncio event loop stops ticking.
+
+    An asyncio task bumps ``_last_tick`` every ``tick_interval`` seconds. A
+    separate daemon *thread* -- deliberately off the loop, so it keeps running
+    even when the loop is wedged -- checks how long it's been since the last
+    tick. If the loop has been blocked longer than ``stall_timeout`` the process
+    is hard-exited (``os._exit``, bypassing atexit so a stuck pool can't block
+    the exit) and Kubernetes restarts it. This turns any loop wedge into a
+    restart instead of an indefinite hang whose heartbeat has silently died.
+
+    Skips firing while a shutdown is in progress -- the drain path owns that exit
+    and a slow drain must not be mistaken for a wedge.
+    """
+
+    def __init__(
+        self, stall_timeout_sec: float, tick_interval_sec: float = 1.0, on_stall=None
+    ):
+        self._stall_timeout = stall_timeout_sec
+        self._tick_interval = tick_interval_sec
+        self._on_stall = on_stall or self._force_exit
+        self._last_tick = time.monotonic()
+        self._tick_task: "asyncio.Task | None" = None
+        self._thread: "threading.Thread | None" = None
+
+    def _stalled_for(self) -> float:
+        return time.monotonic() - self._last_tick
+
+    def _should_fire(self) -> bool:
+        if is_shutting_down():
+            return False
+        return self._stalled_for() >= self._stall_timeout
+
+    def _force_exit(self, stalled: float) -> None:
+        try:
+            sys.stderr.write(
+                f"[loop-watchdog] event loop stalled {stalled:.0f}s "
+                f">= {self._stall_timeout:.0f}s threshold; force-exiting for a "
+                "clean restart.\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(1)
+
+    async def _tick_loop(self) -> None:
+        while True:
+            self._last_tick = time.monotonic()
+            await asyncio.sleep(self._tick_interval)
+
+    def _watch(self) -> None:
+        while True:
+            time.sleep(self._tick_interval)
+            if self._should_fire():
+                self._on_stall(self._stalled_for())
+                return
+
+    def start(self) -> "LoopWatchdog":
+        self._last_tick = time.monotonic()
+        self._tick_task = asyncio.create_task(self._tick_loop())
+        self._thread = threading.Thread(
+            target=self._watch, name="loop-watchdog", daemon=True
+        )
+        self._thread.start()
+        return self
+
+
 def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
     """Install asyncio-aware SIGTERM/SIGINT handlers (idempotent).
 
@@ -91,7 +178,7 @@ def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
     a running event loop: the callback runs between awaits rather than in the
     interrupt context, so it can flip an ``asyncio.Event`` the drain loop awaits.
     """
-    global _signal_handlers_installed, _active_heartbeat
+    global _signal_handlers_installed, _active_heartbeat, _loop_watchdog
     # Always update the heartbeat reference so the marker is written for the
     # currently-active worker even if get_tasks is re-entered after an error.
     _active_heartbeat = heartbeat
@@ -110,6 +197,13 @@ def install_shutdown_handlers(heartbeat: "Heartbeat | None" = None) -> None:
                 signal.signal(sig, lambda *_: _request_shutdown())
             except (ValueError, OSError):
                 pass
+    # Loop-liveness watchdog: force-exit (for a Kubernetes restart) if the event
+    # loop ever wedges, instead of hanging forever with a silently-dead
+    # heartbeat. Installed alongside the shutdown handlers so it covers every
+    # worker; a stall_limit of 0 disables it.
+    stall_limit = float(settings.worker_loop_stall_exit_sec)
+    if stall_limit > 0 and _loop_watchdog is None:
+        _loop_watchdog = LoopWatchdog(stall_limit).start()
     _signal_handlers_installed = True
 
 
@@ -156,6 +250,37 @@ async def _drain_and_exit(
             pass
     logger.info("Exiting after graceful drain.")
     sys.exit(0)
+
+
+def _exit_if_broker_wedged(stream: str, logger: logging.Logger) -> None:
+    """Self-heal: exit so Kubernetes replaces a worker wedged off the broker.
+
+    A single worker can lose its broker connection (half-open socket, stale
+    conntrack entry, a broker endpoint that moved) while every peer stays
+    healthy. Its own retry loop can't recover because each reconnect traverses
+    the same broken path -- but a rescheduled pod gets a fresh network setup.
+    ``get_task`` keeps ``broker_health`` current; once we've gone longer than the
+    configured window without a single successful read we exit non-zero.
+
+    The window (``broker_unhealthy_exit_sec``) is generous on purpose so a real
+    broker outage recycles the fleet slowly instead of crash-looping: every pod
+    runs the full window before exiting, and the health clock starts fresh on
+    boot. 0 disables the self-exit.
+    """
+    limit = float(settings.broker_unhealthy_exit_sec)
+    if limit <= 0:
+        return
+    stale = broker_health.seconds_since_success()
+    if stale >= limit:
+        logger.error(
+            f"Broker unreachable for {stale:.0f}s (>= {limit:.0f}s threshold) "
+            f"after {broker_health.consecutive_failures} consecutive failures; "
+            f"exiting so this {stream} worker is rescheduled with a fresh "
+            "broker connection."
+        )
+        # Hard exit: the broker is unreachable, so there's nothing to flush, and
+        # os._exit avoids blocking on the pool's atexit join if a child is busy.
+        _hard_exit(1)
 
 
 def _resolve_task_limit(stream: str, default: int, logger: logging.Logger) -> int:
@@ -207,7 +332,7 @@ def _build_task_context(
     task_log_level = int(ara_task[1].get("log_level", level_number))
     task_logger.setLevel(task_log_level)
     task_logger.addHandler(log_handler)
-    task_logger.info(f"Doing task {ara_task}")
+    task_logger.debug(f"Doing task {ara_task}")
     ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
     # Stamp the task payload with our delivery time so wrap_up_task /
     # handle_task_failure can compute the per-task latency without touching
@@ -218,15 +343,135 @@ def _build_task_context(
     return ctx, task_logger
 
 
+async def _terminate_task(
+    stream: str,
+    group: str,
+    ara_task: Tuple[str, dict],
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    """Terminally clear a message: ack+delete it and end its query with ERROR.
+
+    Making a message terminal: ack + delete it (``mark_task_as_complete`` does
+    ``XACK`` then ``XDEL``) so it leaves the PEL and the stream, and -- when we
+    can still identify the parent query -- route it to ``finish_query`` with an
+    ERROR status so the query ends cleanly instead of hanging, mirroring
+    ``handle_task_failure``. Shared by the "unprocessable message" and
+    "poison-pill / over-delivered" paths.
+    """
+    msg_id = ara_task[0]
+    fields = ara_task[1] if len(ara_task) > 1 and isinstance(ara_task[1], dict) else {}
+    logger.error(f"Terminating task {msg_id} on {stream}: {reason}")
+    query_id = fields.get("query_id")
+    response_id = fields.get("response_id")
+    if query_id and response_id:
+        try:
+            await add_task(
+                "finish_query",
+                {
+                    "query_id": query_id,
+                    "response_id": response_id,
+                    "workflow": "[]",
+                    "log_level": fields.get("log_level", 20),
+                    "otel": fields.get("otel", "{}"),
+                    "status": "ERROR",
+                    "metadata": fields.get("metadata", "{}"),
+                },
+                logger,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to route terminated task {msg_id} to finish_query: {e}"
+            )
+    # Remove it from the PEL + stream so it stops re-tripping stuck_pending and
+    # can never be re-stranded under a live consumer.
+    await mark_task_as_complete(stream, group, msg_id, logger)
+
+
+async def _discard_unprocessable_task(
+    stream: str,
+    group: str,
+    ara_task: Tuple[str, dict],
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    """Terminally clear a message we can't even build a task context for.
+
+    Such a message is a poison pill. ``get_task`` reads with the ``>`` cursor,
+    which never re-delivers a PEL entry, and ``reclaim_orphaned`` deliberately
+    skips messages owned by a live/self consumer (``owner == consumer`` and
+    ``owner in alive``). So if we merely dropped it from the poll loop it would
+    sit in *this* (live) consumer's PEL forever -- invisible to reclaim and to
+    the janitor, which only touches dead consumers. That is exactly the
+    "very old unacked tasks on a still-running worker" leak.
+    """
+    fields = ara_task[1] if len(ara_task) > 1 and isinstance(ara_task[1], dict) else {}
+    await _terminate_task(
+        stream,
+        group,
+        ara_task,
+        logger,
+        f"unprocessable: {reason}. Payload fields: {sorted(fields.keys())}",
+    )
+
+
+class TaskSlots:
+    """Concurrency limiter that also tracks how many tasks are *actively running*.
+
+    ``get_tasks`` reserves a slot *before* it polls the broker for the next task
+    -- the poll is a blocking read (a 5s ``XREADGROUP``). If the monitor counted
+    every reserved slot as a running task, an idle worker that is only *waiting*
+    for work would report a task in flight (the "shows one running even when it's
+    just checking for a task" bug). So slot reservation (backpressure) is kept
+    separate from dispatch (a task actually handed to a worker):
+
+    * ``acquire`` / ``release_slot`` -- reserve/free a concurrency slot; used by
+      ``get_tasks`` around the poll. These do **not** change the in-flight count.
+    * ``dispatch`` -- called immediately before a task is yielded to a worker;
+      marks one task as actively running.
+    * ``release`` -- called by the worker's ``finally`` when the task finishes;
+      frees the slot *and* clears the in-flight mark. Every worker already calls
+      ``limiter.release()`` exactly once per task, so this is covered uniformly
+      without touching each worker.
+
+    ``in_flight`` is what the heartbeat surfaces as "Running". A plain
+    :class:`asyncio.Semaphore` interface (``acquire``/``release``) is preserved
+    so the drain path and workers keep working unchanged.
+    """
+
+    def __init__(self, task_limit: int):
+        self._sem = asyncio.Semaphore(task_limit)
+        self._in_flight = 0
+
+    async def acquire(self) -> None:
+        await self._sem.acquire()
+
+    def release_slot(self) -> None:
+        """Free a slot reserved for polling but never dispatched to a worker."""
+        self._sem.release()
+
+    def dispatch(self) -> None:
+        """Mark a reserved slot as an actively-running task (about to be yielded)."""
+        self._in_flight += 1
+
+    def release(self) -> None:
+        """A dispatched task finished: clear its in-flight mark and free its slot."""
+        if self._in_flight > 0:
+            self._in_flight -= 1
+        self._sem.release()
+
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
+
+
 async def get_tasks(
     stream: str,
     group: str,
     consumer: str,
     task_limit: int,
     reclaim_min_idle_sec: int = None,
-) -> AsyncGenerator[
-    Tuple[Tuple[str, str], Context, logging.Logger, asyncio.Semaphore], None
-]:
+) -> AsyncGenerator[Tuple[Tuple[str, str], Context, logging.Logger, "TaskSlots"], None]:
     """Continually monitor the ara queue for tasks.
 
     ``reclaim_min_idle_sec`` overrides the per-stream default for how long a
@@ -244,27 +489,41 @@ async def get_tasks(
     task_limit = _resolve_task_limit(stream, task_limit, worker_logger)
     # initialize opens the db connection
     await initialize_db()
-    task_limiter = asyncio.Semaphore(task_limit)
+    # TaskSlots bounds concurrency like a Semaphore but distinguishes a slot
+    # reserved for the blocking poll from a task actually dispatched to a worker,
+    # so the heartbeat's "Running" count reflects real work, not idle polling.
+    task_limiter = TaskSlots(task_limit)
     # register this worker with the monitor via a Redis heartbeat key. The
     # heartbeat does not install its own (immediate-exit) signal handlers --
     # install_shutdown_handlers below installs asyncio-aware ones that drain.
-    heartbeat = Heartbeat(stream, consumer, task_limit, manage_signals=False).start()
+    heartbeat = Heartbeat(
+        stream, consumer, task_limit, manage_signals=False, limiter=task_limiter
+    ).start()
     install_shutdown_handlers(heartbeat)
     # periodic orphan-task reclaim so a worker crash doesn't strand its PEL
     reclaim_interval = max(5.0, float(settings.reclaim_interval_sec))
     last_reclaim = 0.0
+    # after this many un-acked (re)deliveries a reclaimed message is treated as a
+    # poison pill and dead-lettered rather than retried; 0 disables the breaker.
+    max_task_deliveries = int(settings.max_task_deliveries)
     # continuously poll the broker for new tasks
     while True:
         # On shutdown, stop taking new work and drain anything in flight.
         if is_shutting_down():
             await _drain_and_exit(task_limiter, task_limit, worker_logger)
             return
+        # Self-heal: if this worker has been unable to reach the broker for the
+        # whole configured window, exit so Kubernetes reschedules it with a
+        # fresh connection (its peers stay up; a wedged connection won't recover
+        # on its own).
+        _exit_if_broker_wedged(stream, worker_logger)
         # Before fetching new work, check whether any pending messages on this
         # stream belong to a dead consumer and claim them. Heartbeat + idle
         # filtering inside ``reclaim_orphaned`` keep live consumers safe.
         now = time.time()
         if now - last_reclaim >= reclaim_interval:
             last_reclaim = now
+            delivery_counts: Dict[str, int] = {}
             try:
                 reclaimed = await reclaim_orphaned(
                     stream,
@@ -272,22 +531,52 @@ async def get_tasks(
                     consumer,
                     worker_logger,
                     min_idle_sec=reclaim_min_idle_sec,
+                    delivery_counts=delivery_counts,
                 )
             except Exception as e:
                 worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
                 reclaimed = []
             for ara_task in reclaimed:
+                # Poison-pill circuit breaker: a message that has been reclaimed
+                # this many times without ever completing is almost certainly
+                # crashing whatever worker takes it (e.g. an OOM SIGKILL no
+                # in-process handler can catch). Dead-letter it instead of
+                # spending another slot -- and another crash -- on it. Checked
+                # before acquiring a permit so the terminal path needs no release.
+                delivered = delivery_counts.get(ara_task[0], 0)
+                if 0 < max_task_deliveries <= delivered:
+                    await _terminate_task(
+                        stream,
+                        group,
+                        ara_task,
+                        worker_logger,
+                        f"reclaimed {delivered} times without completing "
+                        f"(>= max_task_deliveries={max_task_deliveries}); "
+                        "treating as a poison pill",
+                    )
+                    continue
                 await task_limiter.acquire()
                 try:
                     ctx, task_logger = _build_task_context(
                         stream, consumer, ara_task, level_number
                     )
                 except Exception as e:
-                    worker_logger.error(
-                        f"Failed to build context for reclaimed task {ara_task}: {e}"
+                    # Poison pill: reclaim_orphaned has already XCLAIM'd this
+                    # message into our (live) consumer's PEL, where nothing
+                    # would ever reclaim it again. Make it terminal instead of
+                    # leaking it back into the PEL.
+                    await _discard_unprocessable_task(
+                        stream,
+                        group,
+                        ara_task,
+                        worker_logger,
+                        f"could not build context for reclaimed task: {e}",
                     )
-                    task_limiter.release()
+                    task_limiter.release_slot()
                     continue
+                # Dispatching real work: count it as in-flight until the worker
+                # releases the slot in its finally.
+                task_limiter.dispatch()
                 yield ara_task, ctx, task_logger, task_limiter
 
         # check if we can take another task
@@ -295,20 +584,38 @@ async def get_tasks(
         # A shutdown may have arrived while we waited for a free slot; don't
         # fetch new work in that case -- release and drain.
         if is_shutting_down():
-            task_limiter.release()
+            task_limiter.release_slot()
             await _drain_and_exit(task_limiter, task_limit, worker_logger)
             return
         # get a new task for the given target
         ara_task = await get_task(stream, group, consumer, worker_logger)
         if ara_task is not None:
-            ctx, task_logger = _build_task_context(
-                stream, consumer, ara_task, level_number
-            )
+            try:
+                ctx, task_logger = _build_task_context(
+                    stream, consumer, ara_task, level_number
+                )
+            except Exception as e:
+                # A message we can't build a context for was just delivered into
+                # this consumer's PEL via '>'. It will never be re-read ('>'
+                # only returns new messages) nor reclaimed (owned by us, a live
+                # consumer), so terminate it here instead of leaking it.
+                await _discard_unprocessable_task(
+                    stream,
+                    group,
+                    ara_task,
+                    worker_logger,
+                    f"could not build context for delivered task: {e}",
+                )
+                task_limiter.release_slot()
+                continue
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
+            task_limiter.dispatch()
             yield ara_task, ctx, task_logger, task_limiter
         else:
-            task_limiter.release()
+            # Poll returned nothing (idle): free the reserved slot. Nothing was
+            # dispatched, so the in-flight count is untouched.
+            task_limiter.release_slot()
 
 
 async def wrap_up_task(
@@ -329,7 +636,7 @@ async def wrap_up_task(
         next_op = workflow[0]["id"]
     else:
         next_op = "finish_query"
-    logger.info(f"Sending task to {next_op}")
+    logger.debug(f"Sending task to {next_op}")
     await add_task(
         next_op,
         {
@@ -420,7 +727,7 @@ async def run_task_lifecycle(
             await handle_task_failure(stream, group, task, logger)
         finally:
             limiter.release()
-            logger.info(f"Finished task {task[0]} in {time.time() - start}")
+            logger.debug(f"Finished task {task[0]} in {time.time() - start}")
 
 
 def recursive_get_edge_support_graphs(
@@ -694,28 +1001,33 @@ def filter_kgraph_orphans(message, logger: logging.Logger):
             "nodes": {},
             "edges": {},
         }
-        # now remove all knowledge_graph nodes and edges that are
-        # not in our nodes and edges sets.
+        # Now remove all knowledge_graph nodes/edges (and auxiliary graphs) that
+        # aren't in our keep-sets. Delete in place rather than rebuilding each
+        # dict with a comprehension: the knowledge graph is usually the largest
+        # part of the response, and a comprehension would hold the full original
+        # dict and the filtered copy at the same time -- doubling the dict
+        # overhead for the biggest structure right before we re-encode it.
+        # Deleting the orphans drops them (and everything they reference) now.
         kg_nodes = (
             message.get("message", {}).get("knowledge_graph", {}).get("nodes", {})
         )
-        message["message"]["knowledge_graph"]["nodes"] = {
-            nid: ndata for nid, ndata in kg_nodes.items() if nid in nodes
-        }
+        for nid in [nid for nid in kg_nodes if nid not in nodes]:
+            del kg_nodes[nid]
         kg_edges = (
             message.get("message", {}).get("knowledge_graph", {}).get("edges", {})
         )
-        message["message"]["knowledge_graph"]["edges"] = {
-            eid: edata for eid, edata in kg_edges.items() if eid in edges
-        }
+        for eid in [eid for eid in kg_edges if eid not in edges]:
+            del kg_edges[eid]
         # validate_message(message)
-        message["message"]["auxiliary_graphs"] = {
-            auxgraph: adata
-            for auxgraph, adata in message["message"]
-            .get("auxiliary_graphs", {})
-            .items()
-            if auxgraph in auxgraphs
-        }
+        kg_auxgraphs = message["message"].get("auxiliary_graphs")
+        if kg_auxgraphs:
+            for auxgraph in [a for a in kg_auxgraphs if a not in auxgraphs]:
+                del kg_auxgraphs[auxgraph]
+        elif "auxiliary_graphs" not in message["message"]:
+            # Preserve the prior behavior that this key is always present after
+            # filtering (the old comprehension created an empty dict when the
+            # response carried no auxiliary graphs).
+            message["message"]["auxiliary_graphs"] = {}
         # is_invalid = validate_message(message)
         # if is_invalid:
         #     before_is_invalid = validate_message(initial_message)

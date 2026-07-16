@@ -13,13 +13,19 @@ import orjson
 import pytest
 import zstandard
 
+from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    ResponseTooLargeError,
     decode_message,
     decompress_zstd,
     encode_message,
+    enforce_response_size_limit,
+    get_blob_size,
     get_logs,
     get_message,
     get_message_sync,
+    get_response_size,
+    message_exists,
     save_logs,
     save_message,
     save_message_sync,
@@ -27,6 +33,69 @@ from shepherd_utils.db import (
 from shepherd_utils.logger import QueryLogger
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.mark.asyncio
+async def test_get_blob_size_reports_stored_bytes(redis_mock):
+    """get_blob_size returns the STRLEN of the stored (compressed) blob, and 0
+    for a missing key -- without transferring the payload."""
+    await save_message("sizekey", {"message": {"results": [{"score": 1}]}}, logger)
+    size = await get_blob_size("sizekey")
+    assert size > 0
+    # Matches the raw stored length exactly.
+    assert size == await redis_mock["data"].strlen("sizekey")
+    # Missing key reads as 0, not an error.
+    assert await get_blob_size("nope") == 0
+
+
+@pytest.mark.asyncio
+async def test_get_response_size_reports_uncompressed_bytes(redis_mock):
+    """get_response_size returns the UNCOMPRESSED size (from the zstd frame
+    header), which equals the JSON length -- read without loading the blob."""
+    payload = {
+        "message": {"results": [{"analyses": [{"score": i}]} for i in range(50)]}
+    }
+    await save_message("ukey", payload, logger)
+    uncompressed = len(orjson.dumps(payload))
+    assert await get_response_size("ukey") == uncompressed
+    # The uncompressed size exceeds the compressed one for a real payload.
+    assert await get_response_size("ukey") > await get_blob_size("ukey")
+    # Missing key reads as 0.
+    assert await get_response_size("nope") == 0
+
+
+@pytest.mark.asyncio
+async def test_message_exists_checks_presence_without_loading(redis_mock):
+    """message_exists is a cheap presence check: true when stored, false when not."""
+    await save_message("present", {"message": {"results": []}}, logger)
+    assert await message_exists("present") is True
+    assert await message_exists("absent") is False
+
+
+@pytest.mark.asyncio
+async def test_enforce_response_size_limit_disabled_by_default(redis_mock, monkeypatch):
+    """With the guard off (0), even a present blob passes without a size read."""
+    monkeypatch.setattr(settings, "max_response_size", "0")
+    await save_message("k", {"message": {"results": []}}, logger)
+    # Should simply return, never raise.
+    await enforce_response_size_limit("k", logger)
+
+
+@pytest.mark.asyncio
+async def test_enforce_response_size_limit_raises_when_over(redis_mock, monkeypatch):
+    """A blob larger than the configured cap raises before it is ever loaded."""
+    monkeypatch.setattr(settings, "max_response_size", "1")  # 1 byte cap
+    await save_message("big", {"message": {"results": [{"score": 1}]}}, logger)
+    with pytest.raises(ResponseTooLargeError):
+        await enforce_response_size_limit("big", logger)
+
+
+@pytest.mark.asyncio
+async def test_enforce_response_size_limit_allows_under(redis_mock, monkeypatch):
+    """A blob under the cap passes."""
+    monkeypatch.setattr(settings, "max_response_size", "100Mi")
+    await save_message("small", {"message": {"results": [{"score": 1}]}}, logger)
+    await enforce_response_size_limit("small", logger)
 
 
 def test_encode_decode_roundtrip_preserves_payload():
@@ -185,6 +254,44 @@ async def test_get_logs_returns_stored_logs(redis_mock):
     await redis_mock["logs"].set("resp-3", orjson.dumps(stored))
     out = await get_logs("resp-3", logger)
     assert out == stored
+
+
+@pytest.mark.asyncio
+async def test_get_logs_sorts_by_timestamp(redis_mock):
+    """Logs are flushed in worker/callback order, not event order, so get_logs
+    must return them sorted chronologically by their ISO8601 timestamp."""
+    # Stored out of order: a merge log flushed before the lookup that preceded it.
+    stored = [
+        {"message": "merge", "timestamp": "2026-07-13T00:00:02+00:00", "level": "INFO"},
+        {
+            "message": "lookup",
+            "timestamp": "2026-07-13T00:00:01+00:00",
+            "level": "INFO",
+        },
+        {
+            "message": "finish",
+            "timestamp": "2026-07-13T00:00:03+00:00",
+            "level": "INFO",
+        },
+    ]
+    await redis_mock["logs"].set("resp-sort", orjson.dumps(stored))
+    out = await get_logs("resp-sort", logger)
+    assert [entry["message"] for entry in out] == ["lookup", "merge", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_get_logs_sort_is_stable_for_missing_timestamps(redis_mock):
+    """Entries lacking a timestamp must not blow up the sort and should keep
+    their relative order (stable sort with an empty-string key)."""
+    stored = [
+        {"message": "a"},
+        {"message": "b", "timestamp": "2026-07-13T00:00:01+00:00"},
+        {"message": "c"},
+    ]
+    await redis_mock["logs"].set("resp-missing", orjson.dumps(stored))
+    out = await get_logs("resp-missing", logger)
+    # "a" and "c" (empty key) sort before "b" and keep their input order.
+    assert [entry["message"] for entry in out] == ["a", "c", "b"]
 
 
 @pytest.mark.asyncio

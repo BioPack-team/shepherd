@@ -68,6 +68,21 @@ SEED_STREAMS = [
 ARAS = ["aragorn", "arax", "bte", "sipr", "gandalf", "example"]
 
 
+async def probe_broker() -> bool:
+    """Cheap liveness check for the broker.
+
+    Returns ``True`` if the broker answers a PING, ``False`` on any error
+    (connection refused, timeout, auth). The poll loop calls this before
+    attempting a full snapshot so a broker outage is detected as a single
+    ``broker_down`` alert instead of surfacing as a full keyspace scan blowing
+    up (and, on recovery, a flood of bogus worker-down alerts).
+    """
+    try:
+        return bool(await broker_client.ping())
+    except Exception:
+        return False
+
+
 async def _scan_keys(pattern: str) -> List[str]:
     keys: List[str] = []
     async for key in broker_client.scan_iter(match=pattern, count=200):
@@ -114,7 +129,11 @@ async def _collect_streams(stream_names: List[str]) -> Dict[str, Dict[str, Any]]
     pipe = broker_client.pipeline()
     for s in stream_names:
         pipe.xlen(s)
-        pipe.execute_command("XPENDING", s, "consumer")
+        # Typed xpending() returns the parsed summary dict; the previous
+        # execute_command("XPENDING", ...) returned the same dict via redis-py's
+        # response callback, but the parsing below expected a list and so always
+        # read pending as 0.
+        pipe.xpending(s, "consumer")
         pipe.execute_command("XINFO", "CONSUMERS", s, "consumer")
     # ``raise_on_error=False`` returns individual exceptions in-place so one
     # missing stream/group doesn't blow up the whole batch. Streams that don't
@@ -136,7 +155,9 @@ async def _collect_streams(stream_names: List[str]) -> Dict[str, Dict[str, Any]]
         xinfo = _ok(results[base + 2] if base + 2 < len(results) else None)
 
         pending_count = 0
-        if isinstance(xpending, (list, tuple)) and len(xpending) >= 1:
+        if isinstance(xpending, dict):
+            pending_count = int(xpending.get("pending", 0) or 0)
+        elif isinstance(xpending, (list, tuple)) and len(xpending) >= 1:
             pending_count = xpending[0] or 0
 
         consumers = []
@@ -270,14 +291,38 @@ async def _collect_postgres() -> Dict[str, Any]:
     return snapshot
 
 
+# Previous ``evicted_keys`` counter reading, so we can expose a per-tick delta
+# (the raw field is monotonic). ``None`` until the first sample; reset-safe
+# because a broker restart drops the counter to 0 and we clamp negatives.
+_last_evicted_keys: "int | None" = None
+
+
 async def _collect_redis_info() -> Dict[str, Any]:
+    global _last_evicted_keys
     try:
         info = await broker_client.info()
     except Exception as e:
         return {"error": str(e)}
+    used = int(info.get("used_memory", 0) or 0)
+    maxmem = int(info.get("maxmemory", 0) or 0)
+    evicted = int(info.get("evicted_keys", 0) or 0)
+    # Delta since the previous tick. Clamp to >= 0 so a counter reset (broker
+    # restart) reads as "no evictions this interval" rather than a huge negative.
+    evicted_delta = 0
+    if _last_evicted_keys is not None:
+        evicted_delta = max(0, evicted - _last_evicted_keys)
+    _last_evicted_keys = evicted
     return {
         "used_memory_human": info.get("used_memory_human"),
-        "used_memory_bytes": int(info.get("used_memory", 0) or 0),
+        "used_memory_bytes": used,
+        # ``maxmemory`` is 0 when the broker runs uncapped; downstream treats
+        # that as "no cap" and skips the percentage-based memory alert.
+        "maxmemory_bytes": maxmem,
+        "maxmemory_pct": round(100.0 * used / maxmem, 1) if maxmem else None,
+        "maxmemory_policy": info.get("maxmemory_policy"),
+        "evicted_keys": evicted,
+        "evicted_keys_delta": evicted_delta,
+        "mem_fragmentation_ratio": info.get("mem_fragmentation_ratio"),
         "connected_clients": info.get("connected_clients"),
         "instantaneous_ops_per_sec": info.get("instantaneous_ops_per_sec"),
         "uptime_in_seconds": info.get("uptime_in_seconds"),
@@ -322,7 +367,13 @@ def _worker_type_from_stream(stream: str) -> str:
 def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Group heartbeats by worker type (stream)."""
     grouped: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"alive": 0, "stale": 0, "consumers": [], "task_limit_total": 0}
+        lambda: {
+            "alive": 0,
+            "stale": 0,
+            "consumers": [],
+            "task_limit_total": 0,
+            "in_flight_total": 0,
+        }
     )
     for hb in workers:
         wtype = _worker_type_from_stream(hb.get("stream", "unknown"))
@@ -337,10 +388,15 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "started_at": hb.get("started_at"),
                 "last_seen": hb.get("last_seen"),
                 "task_limit": hb.get("task_limit"),
+                "in_flight": hb.get("in_flight"),
+                "rss_bytes": hb.get("rss_bytes"),
+                "cpu_pct": hb.get("cpu_pct"),
+                "cpu_count": hb.get("cpu_count"),
                 "stale": hb.get("stale", False),
             }
         )
         bucket["task_limit_total"] += int(hb.get("task_limit", 0) or 0)
+        bucket["in_flight_total"] += int(hb.get("in_flight") or 0)
     return dict(grouped)
 
 
@@ -406,7 +462,13 @@ async def _resolve_worker_states(
     for stream in sorted(all_streams):
         info = workers_rollup.get(
             stream,
-            {"alive": 0, "stale": 0, "consumers": [], "task_limit_total": 0},
+            {
+                "alive": 0,
+                "stale": 0,
+                "consumers": [],
+                "task_limit_total": 0,
+                "in_flight_total": 0,
+            },
         )
         prev = await _load_worker_state(stream)
         prev_state = prev.get("state", "unknown")
@@ -612,6 +674,10 @@ async def write_history(snapshot: Dict[str, Any]) -> None:
     redis_info = snapshot.get("redis", {}) or {}
     if redis_info.get("used_memory_bytes"):
         samples["redis:used_memory_bytes"] = redis_info["used_memory_bytes"]
+    if redis_info.get("maxmemory_bytes"):
+        samples["redis:maxmemory_bytes"] = redis_info["maxmemory_bytes"]
+    if redis_info.get("evicted_keys") is not None:
+        samples["redis:evicted_keys"] = int(redis_info.get("evicted_keys") or 0)
     if redis_info.get("connected_clients") is not None:
         samples["redis:connected_clients"] = int(
             redis_info.get("connected_clients") or 0
