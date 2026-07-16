@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import uuid
-
 import httpx
 from inject_shepherd_arax_provenance import add_shepherd_arax_to_edge_sources
 
@@ -42,7 +41,6 @@ def is_pathfinder_query(message):
 
 
 async def arax(task, logger: logging.Logger):
-    start = time.time()
     query_id = task[1]["query_id"]
     logger.info(f"Getting message from db for query id {query_id}")
     message = await get_message(query_id, logger)
@@ -53,8 +51,10 @@ async def arax(task, logger: logging.Logger):
             message["submitter"] = "Shepherd"
             logger.info(f"Get the message from db {message}")
             headers = {"Content-Type": "application/json"}
-            with httpx.Client(timeout=270) as client:
-                response = client.post(settings.arax_url, json=message, headers=headers)
+            async with httpx.AsyncClient(timeout=270) as client:
+                response = await client.post(
+                    settings.arax_url, json=message, headers=headers
+                )
             logger.info(f"Status Code from ARAX response: {response.status_code}")
             result = response.json()
             result = add_shepherd_arax_to_edge_sources(result)
