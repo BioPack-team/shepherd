@@ -27,6 +27,7 @@ import lmdb
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
+from shepherd_utils.data_download import ensure_omnicorp_lmdb
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -555,6 +556,12 @@ async def process_task(
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
+    # Ensure the curies / shared-counts LMDBs exist before any pool child tries
+    # to open them lazily (a first-run local `docker compose up` starts with the
+    # volume-mounted directory empty). No-op once present or when no download URL
+    # is configured (e.g. production, where the data is mounted out of band).
+    ensure_omnicorp_lmdb(logging.getLogger(STREAM))
+
     loop = asyncio.get_running_loop()
     # The overlay is CPU-bound, so cap real parallelism at the number of cores.
     # Each pool child loads a full (potentially large) message into memory, so
