@@ -88,6 +88,15 @@ class Settings(BaseSettings):
 
     pathfinder_embeddings_dir: str = "pathfinder_embeddings"
 
+    # First-run data downloads for local docker compose development. When set,
+    # the worker fetches a ``.tar.gz`` from this URL on startup (if the LMDB
+    # files aren't already present) and extracts it into the volume-mounted data
+    # directory, so a new developer doesn't have to source the large datasets by
+    # hand. Empty by default: production mounts the data out of band, so the
+    # download is skipped there. See shepherd_utils/data_download.py.
+    omnicorp_lmdb_url: str = ""
+    pathfinder_embeddings_url: str = ""
+
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317

@@ -14,6 +14,34 @@ The main entrypoint is `./compose.yml` and will spin everything up.
 
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`.
 
+### Worker data (LMDB) downloads
+
+A couple of workers read from large, read-only LMDB datasets that are too big to
+commit to git (they're gitignored and volume-mounted from the host):
+
+- **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
+- **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
+
+So a new developer doesn't have to source these by hand, each worker can fetch
+its dataset on first startup. Point it at a `.tar.gz` on an external server by
+adding the matching variable to your root `.env` file:
+
+```dotenv
+OMNICORP_LMDB_URL=https://example.org/path/omnicorp_lmdb.tar.gz
+PATHFINDER_EMBEDDINGS_URL=https://example.org/path/pathfinder_embeddings.tar.gz
+```
+
+On startup the worker checks whether its LMDB files already exist in the
+volume-mounted directory. If they're missing and a URL is set, it downloads the
+archive and extracts it into that directory — which lives on the host, so the
+data persists across restarts and is only downloaded once. If the files are
+already present, or no URL is configured, the download is skipped (production
+mounts this data out of band, so it's unaffected).
+
+The archive for each dataset should contain the expected files at its top level:
+`curies.lmdb` and `shared_counts.lmdb` for omnicorp, `data.mdb` (and
+`lock.mdb`) for the embeddings.
+
 ### Worker
 
 Each worker is it's own separate docker container. It spins up and begins to watch a central message broker for tasks to work on. Once it gets a task, it
