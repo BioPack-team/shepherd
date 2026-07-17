@@ -92,8 +92,6 @@ class Rule:
             return None
         if self.kind == "db_capacity":
             return self._eval_db_capacity(snapshot)
-        if self.kind == "redis_memory":
-            return self._eval_redis_memory(snapshot)
         if self.kind == "redis_eviction":
             return self._eval_redis_eviction(snapshot)
         if self.kind == "stuck_pending":
@@ -137,29 +135,6 @@ class Rule:
             return (
                 f"Postgres volume {pct:.1f}% full "
                 f"({used_gb:.1f}GB of {cap_gb:.1f}GB) >= {self.threshold}%"
-            )
-        return None
-
-    def _eval_redis_memory(self, snapshot: Dict[str, Any]) -> Optional[str]:
-        """Fire when the broker's used memory crosses ``threshold`` percent of
-        its ``maxmemory`` cap.
-
-        This is the early warning the OOM-kill incident lacked: eviction (and,
-        if the cap sits at the container limit, an OOM-kill) only bites once
-        usage nears the cap, so crossing e.g. 85% is the actionable signal. A
-        no-op when the broker runs uncapped (``maxmemory`` 0) since there's no
-        denominator.
-        """
-        redis = snapshot.get("redis", {})
-        maxmem = redis.get("maxmemory_bytes", 0)
-        used = redis.get("used_memory_bytes", 0)
-        if not maxmem or self.threshold is None:
-            return None
-        pct = 100.0 * used / maxmem
-        if pct >= float(self.threshold):
-            return (
-                f"Redis memory {pct:.1f}% of maxmemory "
-                f"({used / 1e9:.1f}GB of {maxmem / 1e9:.1f}GB) >= {self.threshold}%"
             )
         return None
 
@@ -273,12 +248,31 @@ class AlertEngine:
         self._broker_down_since: float = 0.0
         self._broker_down_alerted: bool = False
         self._broker_recovered_at: float = 0.0
+        # Redis-eviction grace window. When the broker evicts keys under memory
+        # pressure it can shed live workers' short-TTL heartbeat keys, making
+        # them read as zero-alive though they never disconnected. This holds the
+        # wall-clock time until which worker-down alerts stay suppressed; it's
+        # pushed forward on every tick that observes an eviction, then lets the
+        # window elapse so heartbeats can re-register before we trust "down".
+        self._redis_eviction_grace_until: float = 0.0
         # Postgres-availability state machine. Same debounce/fire-once shape as
         # the broker's, minus the recovery-grace window (a PG outage doesn't
         # zero out heartbeats, so there's no worker-down flood to suppress).
         self._pg_up: bool = True
         self._pg_down_since: float = 0.0
         self._pg_down_alerted: bool = False
+        # Redis memory-pressure state machine (see handle_redis_memory). Like the
+        # broker/postgres machines it's driven once per poll tick and tracked
+        # in-process. It tiers usage into ok/warning/critical so only the current
+        # level alerts (crossing the critical line doesn't also fire the warning),
+        # re-notifies at most once per cooldown while elevated, and emits a
+        # recovery alert when usage returns below the warning threshold.
+        # ``_candidate``/``_since`` debounce a level change so a single-tick spike
+        # (or dip) doesn't trip it.
+        self._redis_mem_level: str = "ok"
+        self._redis_mem_candidate: str = "ok"
+        self._redis_mem_candidate_since: float = 0.0
+        self._redis_mem_last_alerted_at: float = 0.0
 
     @property
     def in_startup_grace(self) -> bool:
@@ -300,6 +294,31 @@ class AlertEngine:
         return (
             time.time() - self._broker_recovered_at
         ) < settings.monitor_broker_recovery_grace_sec
+
+    @property
+    def in_redis_eviction_grace(self) -> bool:
+        """True while (or shortly after) the broker is evicting keys.
+
+        Redis key eviction removes keys to free memory; it does *not* close
+        client connections, so the workers themselves are fine. But the monitor
+        infers worker liveness from short-TTL heartbeat keys, which eviction can
+        shed -- so during and just after an eviction spell a live worker can read
+        as zero-alive. Suppressing worker-down alerts across this window keeps a
+        Redis memory spike from spamming bogus worker-crash notifications.
+        """
+        return time.time() < self._redis_eviction_grace_until
+
+    def _note_redis_eviction(self, snapshot: Dict[str, Any]) -> None:
+        """Open/extend the eviction grace window when this tick saw evictions."""
+        redis = snapshot.get("redis", {}) or {}
+        try:
+            delta = int(redis.get("evicted_keys_delta", 0) or 0)
+        except (TypeError, ValueError):
+            delta = 0
+        if delta > 0:
+            self._redis_eviction_grace_until = (
+                time.time() + settings.monitor_redis_eviction_grace_sec
+            )
 
     async def handle_broker_health(self, is_up: bool) -> None:
         """Drive the broker up/down state machine and emit broker alerts.
@@ -416,6 +435,119 @@ class AlertEngine:
                 await _record_alert(event)
                 await dispatch(event)
 
+    async def handle_redis_memory(self, snapshot: Dict[str, Any]) -> None:
+        """Drive the Redis memory-pressure state machine and emit its alerts.
+
+        Modeled on the broker/postgres health machines rather than run as two
+        independent threshold rules, so three behaviors compose cleanly:
+
+        * **Tiering without duplicates**: usage is classified into a single
+          level -- ok (< warning%), warning (>= warning%), or critical
+          (>= critical%). Only the current level ever alerts, so crossing the
+          critical line does NOT also send the warning alert.
+        * **Day-long backoff**: while usage stays elevated we re-notify at most
+          once per ``monitor_redis_memory_cooldown_sec`` (a full day by default)
+          instead of every few minutes.
+        * **Recovery**: when usage falls back below the warning threshold we send
+          a one-off "recovered" alert, just like the broker/postgres machines.
+
+        A no-op when the broker runs uncapped (``maxmemory`` 0) -- without a
+        denominator there's nothing to measure.
+        """
+        now = time.time()
+        redis = snapshot.get("redis", {}) or {}
+        maxmem = int(redis.get("maxmemory_bytes", 0) or 0)
+        used = int(redis.get("used_memory_bytes", 0) or 0)
+        if maxmem <= 0:
+            # Uncapped: reset to ok silently. Losing the denominator isn't a real
+            # recovery, so don't announce one.
+            self._redis_mem_level = "ok"
+            self._redis_mem_candidate = "ok"
+            return
+        pct = 100.0 * used / maxmem
+        if pct >= settings.monitor_redis_memory_critical_pct:
+            target = "critical"
+        elif pct >= settings.monitor_redis_memory_warning_pct:
+            target = "warning"
+        else:
+            target = "ok"
+
+        # Debounce: an observed level must hold for the grace window before we
+        # act on it, so a single-tick spike (or dip) doesn't alert or clear.
+        if target != self._redis_mem_candidate:
+            self._redis_mem_candidate = target
+            self._redis_mem_candidate_since = now
+            return
+        if target == self._redis_mem_level:
+            # Sustained at the committed level. Re-notify an elevated level at
+            # most once per cooldown; ``ok`` needs nothing.
+            if (
+                target != "ok"
+                and (now - self._redis_mem_last_alerted_at)
+                >= settings.monitor_redis_memory_cooldown_sec
+            ):
+                await self._fire_redis_memory(target, pct, now)
+            return
+        # A different level has held steady long enough: commit the transition.
+        if (
+            now - self._redis_mem_candidate_since
+        ) < settings.monitor_redis_memory_grace_sec:
+            return
+        prev = self._redis_mem_level
+        self._redis_mem_level = target
+        if target == "ok":
+            # Recovery: an elevated committed level is only ever reached by
+            # alerting, so a return to ok is always worth an "it's better" note.
+            await self._fire_redis_memory_recovery(pct, now)
+        elif target == "critical" or prev == "ok":
+            # Fire when entering an elevated level from ok, or escalating to
+            # critical. A critical->warning de-escalation stays quiet (still
+            # elevated and already alerted) until it either clears or re-escalates.
+            await self._fire_redis_memory(target, pct, now)
+
+    async def _fire_redis_memory(self, level: str, pct: float, now: float) -> None:
+        """Dispatch (and record) a Redis memory warning/critical alert."""
+        self._redis_mem_last_alerted_at = now
+        if level == "critical":
+            rule = "redis_memory_critical"
+            severity = "critical"
+            threshold = settings.monitor_redis_memory_critical_pct
+            tail = "Eviction of live data is imminent"
+        else:
+            rule = "redis_memory_high"
+            severity = "warning"
+            threshold = settings.monitor_redis_memory_warning_pct
+            tail = "Eviction and OOM-kill risk are near"
+        event = {
+            "ts": now,
+            "rule": rule,
+            "severity": severity,
+            "detail": f"Redis memory {pct:.1f}% of maxmemory (>= {threshold:.0f}%)",
+            "message": (
+                f"Redis broker memory is at {pct:.1f}% of its maxmemory cap "
+                f"(>= {threshold:.0f}%). {tail} -- shed load, raise the cap, or "
+                "lower redis_ttl."
+            ),
+        }
+        await _record_alert(event)
+        await dispatch(event)
+
+    async def _fire_redis_memory_recovery(self, pct: float, now: float) -> None:
+        """Dispatch (and record) the Redis memory 'recovered' alert."""
+        warn = settings.monitor_redis_memory_warning_pct
+        event = {
+            "ts": now,
+            "rule": "redis_memory_recovered",
+            "severity": "info",
+            "detail": f"Redis memory back to {pct:.1f}% of maxmemory",
+            "message": (
+                f"Redis broker memory has fallen back below {warn:.0f}% of its "
+                f"maxmemory cap (now {pct:.1f}%). Memory pressure has cleared."
+            ),
+        }
+        await _record_alert(event)
+        await dispatch(event)
+
     async def _in_cooldown(self, rule: Rule) -> bool:
         try:
             return bool(await broker_client.exists(f"alert:cooldown:{rule.name}"))
@@ -463,13 +595,22 @@ class AlertEngine:
         """Return the list of alerts that fired on this snapshot."""
         now = snapshot["ts"]
         fired: List[Dict[str, Any]] = []
-        # Worker-down alerts are suppressed both at boot (startup grace) and
-        # around a broker outage (recovery grace): in either case a worker type
-        # reads as zero-alive not because it died but because heartbeats haven't
-        # (re-)registered yet. A broker restart otherwise turns into ~one
-        # worker-crash alert per worker type -- the flood the broker_down alert
-        # is meant to replace.
-        suppress_worker_down = self.in_startup_grace or self.in_broker_recovery_grace
+        # Refresh the Redis-eviction grace window from this snapshot before we
+        # decide whether to trust "worker down" readings below.
+        self._note_redis_eviction(snapshot)
+        # Worker-down alerts are suppressed at boot (startup grace), around a
+        # broker outage (recovery grace), and while Redis is evicting keys
+        # (eviction grace): in every case a worker type reads as zero-alive not
+        # because it died but because its heartbeat key is missing or hasn't
+        # (re-)registered yet. A broker restart or a memory-pressure eviction
+        # spell would otherwise turn into ~one worker-crash alert per worker
+        # type -- exactly the inaccurate flood these grace windows exist to
+        # replace with a single, accurate signal.
+        suppress_worker_down = (
+            self.in_startup_grace
+            or self.in_broker_recovery_grace
+            or self.in_redis_eviction_grace
+        )
         for rule in self.rules:
             detail = rule.evaluate(snapshot)
             if detail is None:
@@ -481,8 +622,9 @@ class AlertEngine:
             if duration_in_breach < rule.duration:
                 continue
             if rule.kind == "heartbeat_lost" and rule.worker and suppress_worker_down:
-                # Boot or broker-recovery window: a zero-alive reading here is an
-                # artifact of heartbeats not being (re-)registered, not a real
+                # Boot, broker-recovery, or Redis-eviction window: a zero-alive
+                # reading here is an artifact of heartbeats not being
+                # (re-)registered or their keys having been evicted, not a real
                 # loss. Skip WITHOUT arming the cooldown or recording an alert,
                 # and leave the breach streak intact -- so a worker that is
                 # genuinely still down once the window elapses fires promptly.
@@ -514,14 +656,15 @@ class AlertEngine:
             if not (ev.get("type") == "scale_down" and ev.get("to") == 0):
                 continue
             if suppress_worker_down:
-                # Either the whole stack just came up (startup grace) or the
-                # broker just restarted (recovery grace): persistent worker
-                # state looks "alive" but current heartbeats haven't arrived
-                # yet, so every worker type spuriously reads as crashed. Stay
-                # silent until workers have had a chance to (re-)register.
+                # The whole stack just came up (startup grace), the broker just
+                # restarted (recovery grace), or Redis is evicting heartbeat keys
+                # under memory pressure (eviction grace): persistent worker state
+                # looks "alive" but current heartbeats are missing or haven't
+                # arrived yet, so every worker type spuriously reads as crashed.
+                # Stay silent until workers have had a chance to (re-)register.
                 logger.debug(
                     f"Suppressing worker-down alert for {ev.get('worker')} "
-                    "during startup/broker-recovery grace"
+                    "during startup/broker-recovery/redis-eviction grace"
                 )
                 continue
             kind = ev.get("kind", "unknown")

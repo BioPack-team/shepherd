@@ -17,6 +17,7 @@ from shepherd_utils.broker import broker_client
 from shepherd_utils.config import settings
 from shepherd_utils.db import pool as pg_pool
 from shepherd_utils.heartbeat import (
+    HEARTBEAT_REAP_SEC,
     HEARTBEAT_SCAN_PATTERN,
     HEARTBEAT_TTL_SEC,
     SHUTDOWN_SCAN_PATTERN,
@@ -97,16 +98,31 @@ async def _collect_heartbeats() -> List[Dict[str, Any]]:
     raw_values = await broker_client.mget(keys)
     now = time.time()
     workers: List[Dict[str, Any]] = []
-    for raw in raw_values:
+    # Heartbeat keys are persistent (exempt from broker eviction), so a crashed
+    # worker's key never expires on its own. Delete any left unrefreshed past the
+    # reap window here -- the poller already has every payload in hand, so this
+    # is the cheapest place to keep dead consumers from piling up in the keyspace
+    # and lingering as phantom "stale" rows on the dashboard.
+    dead_keys: List[str] = []
+    for key, raw in zip(keys, raw_values):
         if not raw:
             continue
         try:
             hb = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        hb["age_sec"] = max(0.0, now - hb.get("last_seen", now))
-        hb["stale"] = hb["age_sec"] > HEARTBEAT_TTL_SEC
+        age = max(0.0, now - hb.get("last_seen", now))
+        if age > HEARTBEAT_REAP_SEC:
+            dead_keys.append(key)
+            continue
+        hb["age_sec"] = age
+        hb["stale"] = age > HEARTBEAT_TTL_SEC
         workers.append(hb)
+    if dead_keys:
+        try:
+            await broker_client.delete(*dead_keys)
+        except Exception as e:
+            logger.debug(f"Failed to reap {len(dead_keys)} dead heartbeat(s): {e}")
     return workers
 
 
@@ -390,6 +406,7 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "task_limit": hb.get("task_limit"),
                 "in_flight": hb.get("in_flight"),
                 "rss_bytes": hb.get("rss_bytes"),
+                "mem_limit_bytes": hb.get("mem_limit_bytes"),
                 "cpu_pct": hb.get("cpu_pct"),
                 "cpu_count": hb.get("cpu_count"),
                 "stale": hb.get("stale", False),

@@ -249,6 +249,32 @@ class Settings(BaseSettings):
     # flood into just the ``broker_down``/``broker_recovered`` pair; a worker
     # that is *genuinely* still down once the window elapses alerts as normal.
     monitor_broker_recovery_grace_sec: int = 30
+    # When the Redis broker hits its maxmemory cap and starts evicting keys, the
+    # short-TTL worker heartbeat keys are prime eviction targets (the deployment
+    # uses volatile-ttl, which sheds nearest-expiry keys first). Evicting a live
+    # worker's heartbeat makes it momentarily read as zero-alive even though it
+    # never disconnected -- key eviction doesn't close client connections. To
+    # stop that from firing a flood of bogus worker-down/crash alerts, worker-down
+    # alerts are suppressed while eviction is active and for this long after the
+    # last observed eviction, giving heartbeats (interval 5s, TTL 15s) time to be
+    # re-registered. A worker that is genuinely still down once the window
+    # elapses alerts as normal.
+    monitor_redis_eviction_grace_sec: int = 30
+    # Redis broker memory-pressure alerting. Modeled on the broker/postgres
+    # health alerts (an automatic engine state machine, not a YAML rule): a
+    # single alert when usage crosses a threshold, at most one re-notify per
+    # cooldown while it stays elevated, and a recovery alert when it falls back
+    # below the warning threshold. The critical alert supersedes the warning
+    # one, so crossing the critical line never also sends the warning alert.
+    # All no-ops when the broker runs uncapped (maxmemory 0).
+    monitor_redis_memory_warning_pct: float = 85.0
+    monitor_redis_memory_critical_pct: float = 95.0
+    # An elevated level must hold this long before it alerts (and a drop must
+    # hold this long before it clears), so a brief spike/dip doesn't trip it.
+    monitor_redis_memory_grace_sec: float = 120.0
+    # Re-notify backoff while memory stays elevated -- a full day by default, so
+    # a sustained condition reminds once a day rather than every few minutes.
+    monitor_redis_memory_cooldown_sec: float = 86400.0
     # Postgres availability alerting. Same debounce idea as the broker: Postgres
     # must stay unreachable this long before the single ``postgres_down`` alert
     # fires, so a transient query timeout doesn't trip it. No recovery-grace

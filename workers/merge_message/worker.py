@@ -902,8 +902,8 @@ async def poll_for_tasks():
                     return
 
                 span.set_attribute("drained_callbacks", drained)
-                logger.debug(
-                    f"[{callback_id}] Drained {drained} callback(s) in "
+                logger.info(
+                    f"[{callback_id}] Merged {drained} callback(s) in "
                     f"{time.time() - lock_time:.2f}s"
                 )
                 await remove_lock(response_id, CONSUMER, logger)

@@ -26,7 +26,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.db import purge_old_queries
 from shepherd_utils.db import reap_abandoned_queries as reap_abandoned_queries_db
 from shepherd_utils.db import reap_completed_callbacks
-from shepherd_utils.heartbeat import HEARTBEAT_SCAN_PATTERN
+from shepherd_utils.heartbeat import HEARTBEAT_SCAN_PATTERN, is_heartbeat_fresh
 
 from . import alerts, storage
 from .poller import SEED_STREAMS
@@ -225,12 +225,24 @@ async def _alert_abandoned(abandoned: List[Dict[str, Any]]) -> None:
 
 
 async def _list_alive_consumers() -> set:
-    """Return ``{(stream, consumer)}`` for every worker with a live heartbeat."""
-    alive = set()
+    """Return ``{(stream, consumer)}`` for every worker with a *fresh* heartbeat.
+
+    Heartbeat keys are persistent now, so a key existing no longer proves the
+    worker is alive -- only a recently refreshed ``last_seen`` does. Filter on
+    freshness so a crashed consumer's lingering key doesn't keep it in the
+    "alive" set and block its stale consumer-group entry from being cleaned up.
+    """
+    keys = []
     async for key in broker_client.scan_iter(match=HEARTBEAT_SCAN_PATTERN, count=200):
+        keys.append(key)
+    if not keys:
+        return set()
+    values = await broker_client.mget(keys)
+    alive = set()
+    for key, raw in zip(keys, values):
         # worker:heartbeat:{stream}:{consumer}
         parts = key.split(":", 3)
-        if len(parts) == 4:
+        if len(parts) == 4 and is_heartbeat_fresh(raw):
             alive.add((parts[2], parts[3]))
     return alive
 

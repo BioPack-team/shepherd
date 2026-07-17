@@ -181,14 +181,83 @@ def _redis_snap(used, maxmem, evicted_delta=0):
     }
 
 
-def test_redis_memory_rule_fires_over_threshold():
-    rule = Rule({"name": "mem", "type": "redis_memory", "threshold": 85})
-    # 9/10 GB = 90% -> breach.
-    assert rule.evaluate(_redis_snap(9_000_000_000, 10_000_000_000)) is not None
-    # 8/10 GB = 80% -> clear.
-    assert rule.evaluate(_redis_snap(8_000_000_000, 10_000_000_000)) is None
-    # Uncapped broker (maxmemory 0) -> no-op regardless of usage.
-    assert rule.evaluate(_redis_snap(9_000_000_000, 0)) is None
+async def _settle(engine, snap, clock, start, *, grace=130):
+    """Drive handle_redis_memory across the debounce grace so a level commits.
+
+    First tick arms the debounce; a second tick past the grace window commits
+    it (and fires any transition alert). Returns the post-grace timestamp.
+    """
+    clock.return_value = start
+    await engine.handle_redis_memory(snap)
+    clock.return_value = start + grace
+    await engine.handle_redis_memory(snap)
+    return start + grace
+
+
+async def test_redis_memory_warning_fires_after_grace(patched, clock):
+    engine = _engine()
+    warn = _redis_snap(88, 100)  # 88% -> warning
+    # First observation only arms the debounce -- no alert yet.
+    clock.return_value = 1_000.0
+    await engine.handle_redis_memory(warn)
+    patched["dispatch"].assert_not_called()
+    # Still inside the grace window: silent.
+    clock.return_value = 1_060.0
+    await engine.handle_redis_memory(warn)
+    patched["dispatch"].assert_not_called()
+    # Past the grace window: the warning fires once.
+    clock.return_value = 1_130.0
+    await engine.handle_redis_memory(warn)
+    patched["dispatch"].assert_called_once()
+    ev = patched["dispatch"].call_args.args[0]
+    assert ev["rule"] == "redis_memory_high" and ev["severity"] == "warning"
+
+
+async def test_redis_memory_critical_does_not_also_send_warning(patched, clock):
+    engine = _engine()
+    # Straight to 97% -> critical only; the warning alert must not fire too.
+    await _settle(engine, _redis_snap(97, 100), clock, 2_000.0)
+    assert patched["dispatch"].call_count == 1
+    ev = patched["dispatch"].call_args.args[0]
+    assert ev["rule"] == "redis_memory_critical" and ev["severity"] == "critical"
+
+
+async def test_redis_memory_escalates_warning_to_critical(patched, clock):
+    engine = _engine()
+    await _settle(engine, _redis_snap(88, 100), clock, 3_000.0)  # warning
+    assert patched["dispatch"].call_args.args[0]["rule"] == "redis_memory_high"
+    await _settle(engine, _redis_snap(97, 100), clock, 3_300.0)  # escalate
+    assert patched["dispatch"].call_count == 2
+    assert patched["dispatch"].call_args.args[0]["rule"] == "redis_memory_critical"
+
+
+async def test_redis_memory_recovery_fires_when_back_below_warning(patched, clock):
+    engine = _engine()
+    await _settle(engine, _redis_snap(88, 100), clock, 4_000.0)  # warning
+    await _settle(engine, _redis_snap(70, 100), clock, 4_300.0)  # back to ok
+    assert patched["dispatch"].call_count == 2
+    ev = patched["dispatch"].call_args.args[0]
+    assert ev["rule"] == "redis_memory_recovered" and ev["severity"] == "info"
+
+
+async def test_redis_memory_renotifies_once_per_cooldown(patched, clock):
+    engine = _engine()
+    fired_at = await _settle(engine, _redis_snap(88, 100), clock, 5_000.0)
+    assert patched["dispatch"].call_count == 1
+    # Sustained, but only an hour later: no re-notify (cooldown is a full day).
+    clock.return_value = fired_at + 3_600
+    await engine.handle_redis_memory(_redis_snap(88, 100))
+    assert patched["dispatch"].call_count == 1
+    # A day later, still elevated: one re-notify.
+    clock.return_value = fired_at + 86_400 + 1
+    await engine.handle_redis_memory(_redis_snap(88, 100))
+    assert patched["dispatch"].call_count == 2
+
+
+async def test_redis_memory_uncapped_is_noop(patched, clock):
+    engine = _engine()
+    await _settle(engine, _redis_snap(999, 0), clock, 6_000.0)  # maxmemory 0
+    patched["dispatch"].assert_not_called()
 
 
 def test_redis_eviction_rule_fires_on_any_delta():
@@ -244,6 +313,69 @@ async def test_heartbeat_lost_suppressed_in_grace_then_fires_after(patched, cloc
     await engine.evaluate(_worker_snapshot(1_047.0))
     patched["dispatch"].assert_called_once()
     assert patched["dispatch"].call_args.args[0]["rule"] == "arax_down"
+
+
+def _worker_snapshot_with_eviction(ts, evicted_delta, worker="arax", alive=0):
+    snap = _worker_snapshot(ts, worker=worker, alive=alive)
+    snap["redis"] = {"evicted_keys_delta": evicted_delta}
+    return snap
+
+
+async def test_heartbeat_lost_suppressed_while_redis_evicting(patched, clock, mocker):
+    """A Redis eviction spell shouldn't surface as a worker-crash flood.
+
+    Eviction can shed a live worker's short-TTL heartbeat key, making it read as
+    zero-alive though it never disconnected. The engine should suppress the
+    worker-down alert while eviction is active and for the grace window after.
+    """
+    mocker.patch.object(
+        alerts.settings, "monitor_redis_eviction_grace_sec", 30, create=True
+    )
+    rule = Rule(
+        {"name": "arax_down", "type": "heartbeat_lost", "worker": "arax", "duration": 0}
+    )
+    engine = _engine([rule])
+
+    # Tick observes an eviction AND a zero-alive worker: suppressed, and no
+    # cooldown armed, so it can still fire later if genuinely down.
+    clock.return_value = 2_000.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_000.0, evicted_delta=7))
+    patched["dispatch"].assert_not_called()
+
+    # Still inside the 30s grace after the last eviction (no new evictions):
+    # remains suppressed.
+    clock.return_value = 2_020.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_020.0, evicted_delta=0))
+    patched["dispatch"].assert_not_called()
+
+    # Past the grace window with the worker still down: it now buffers a
+    # down-alert that flushes past the debounce window.
+    clock.return_value = 2_040.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_040.0, evicted_delta=0))
+    clock.return_value = 2_047.0
+    await engine.evaluate(_worker_snapshot_with_eviction(2_047.0, evicted_delta=0))
+    patched["dispatch"].assert_called_once()
+    assert patched["dispatch"].call_args.args[0]["rule"] == "arax_down"
+
+
+async def test_scale_down_suppressed_while_redis_evicting(patched, clock, mocker):
+    mocker.patch.object(
+        alerts.settings, "monitor_redis_eviction_grace_sec", 30, create=True
+    )
+    engine = _engine()
+    clock.return_value = 3_000.0
+    snap = {
+        "ts": 3_000.0,
+        "events": [_scale_down("arax"), _scale_down("bte")],
+        "redis": {"evicted_keys_delta": 3},
+    }
+    await engine.evaluate(snap)
+    clock.return_value = 3_010.0
+    await engine.evaluate(
+        {"ts": 3_010.0, "events": [], "redis": {"evicted_keys_delta": 0}}
+    )
+    patched["dispatch"].assert_not_called()
+    patched["dispatch_batch"].assert_not_called()
 
 
 async def test_multiple_downed_workers_coalesce_into_one_batch(patched):

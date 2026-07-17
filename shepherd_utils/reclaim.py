@@ -5,7 +5,10 @@ messages stay assigned to it forever. Every worker periodically scans its
 stream's PEL and uses ``XCLAIM`` to take over messages whose owner is no
 longer alive so the work gets retried instead of dropped.
 
-Aliveness is determined by the heartbeat keys (TTL ~15s presence pings).
+Aliveness is determined by the heartbeat keys, which are persistent (no Redis
+TTL, so eviction can't shed them) and carry a ``last_seen`` timestamp refreshed
+every ~5s; a consumer counts as alive only while that timestamp is fresh (see
+``is_heartbeat_fresh``), so a stale leftover key doesn't shield a dead consumer.
 Two independent gates protect a busy-but-alive consumer from being robbed:
 
 1. **Heartbeat filter**: a message owned by a consumer with a live heartbeat
@@ -27,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .broker import broker_client
 from .config import settings
-from .heartbeat import HEARTBEAT_PREFIX
+from .heartbeat import HEARTBEAT_PREFIX, is_heartbeat_fresh
 
 # Per-stream idle floor in seconds. A reclaim only triggers once a pending
 # message has been idle longer than this, which gates against yanking work
@@ -69,13 +72,27 @@ def min_idle_sec_for(stream: str, override: Optional[int] = None) -> int:
 
 
 async def _alive_consumers_on_stream(stream: str) -> set:
-    """Return the set of consumer names with a live heartbeat for ``stream``."""
+    """Return the set of consumer names with a *fresh* heartbeat for ``stream``.
+
+    Heartbeat keys are persistent, so key existence alone no longer proves
+    liveness -- a crashed consumer's key lingers until the monitor reaps it.
+    We read each payload and keep only consumers whose ``last_seen`` is fresh,
+    so a dead consumer's stale key can't wrongly shield its orphaned messages
+    from reclaim. This freshness check is intrinsic here (it reads last_seen
+    directly), so reclaim never depends on the monitor being up to reap.
+    """
     pattern = f"{HEARTBEAT_PREFIX}:{stream}:*"
-    alive: set = set()
+    keys: List[str] = []
     async for key in broker_client.scan_iter(match=pattern, count=200):
+        keys.append(key)
+    if not keys:
+        return set()
+    values = await broker_client.mget(keys)
+    alive: set = set()
+    for key, raw in zip(keys, values):
         # key format: worker:heartbeat:{stream}:{consumer}
         parts = key.split(":", 3)
-        if len(parts) == 4:
+        if len(parts) == 4 and is_heartbeat_fresh(raw):
             alive.add(parts[3])
     return alive
 

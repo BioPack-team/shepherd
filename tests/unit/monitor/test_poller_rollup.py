@@ -3,6 +3,10 @@ resource fields (in-flight, RSS, CPU) reported in each heartbeat are carried
 through into the snapshot the dashboard's per-replica modal renders from.
 """
 
+import json
+import time
+
+from shepherd_utils.heartbeat import HEARTBEAT_REAP_SEC
 from workers.monitor import poller
 
 
@@ -70,3 +74,36 @@ def test_rollup_stale_heartbeats_counted_separately():
     assert bucket["stale"] == 1
     # Both replicas remain visible in the table so the modal can flag the stale one.
     assert len(bucket["consumers"]) == 2
+
+
+async def test_collect_heartbeats_reaps_dead_persistent_keys(redis_mock, monkeypatch):
+    """Persistent heartbeat keys left unrefreshed past the reap window are deleted.
+
+    A fresh worker survives and is returned; a long-dead one (last_seen far
+    older than HEARTBEAT_REAP_SEC) is both excluded from the result and removed
+    from Redis, so crashed consumers don't accumulate as phantom stale rows.
+    """
+    broker = redis_mock["broker"]
+    monkeypatch.setattr(poller, "broker_client", broker)
+    now = time.time()
+    await broker.set(
+        "worker:heartbeat:merge_message:live",
+        json.dumps({"stream": "merge_message", "consumer": "live", "last_seen": now}),
+    )
+    dead_key = "worker:heartbeat:merge_message:dead"
+    await broker.set(
+        dead_key,
+        json.dumps(
+            {
+                "stream": "merge_message",
+                "consumer": "dead",
+                "last_seen": now - HEARTBEAT_REAP_SEC - 10,
+            }
+        ),
+    )
+
+    workers = await poller._collect_heartbeats()
+
+    assert [w["consumer"] for w in workers] == ["live"]
+    # The dead worker's key was reaped from the keyspace.
+    assert await broker.get(dead_key) is None
