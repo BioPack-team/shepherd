@@ -1,4 +1,4 @@
-"""Example ARA module."""
+"""Filter KGraph Orphans Worker."""
 
 import asyncio
 import json
@@ -17,7 +17,7 @@ from shepherd_utils.shared import (
 STREAM = "filter_kgraph_orphans"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
 

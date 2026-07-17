@@ -1,4 +1,4 @@
-"""Example ARA module."""
+"""Example ARA score module."""
 
 import asyncio
 import json
@@ -13,7 +13,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "example.score"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 3
 tracer = setup_tracer(STREAM)
 
 

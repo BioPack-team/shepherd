@@ -1,4 +1,4 @@
-"""Example ARA module."""
+"""Sort results based on score worker."""
 
 import asyncio
 import json
@@ -17,7 +17,7 @@ from shepherd_utils.otel import setup_tracer
 STREAM = "sort_results_score"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 3
 tracer = setup_tracer(STREAM)
 
 

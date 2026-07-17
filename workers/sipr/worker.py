@@ -21,7 +21,7 @@ from shepherd_utils.shared import get_tasks, run_task_lifecycle
 STREAM = "sipr"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 MAX_QUERY_TIME = 2400
 tracer = setup_tracer(STREAM)
 
