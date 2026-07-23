@@ -21,6 +21,16 @@ CREATE TABLE IF NOT EXISTS callbacks (
   otel_trace varchar(255)
 );
 
+-- Every /callback request looks a row up by callback_id (and deletes it once
+-- processed), and the lookup workers poll by query_id to decide when a query's
+-- fan-out is done. Without these indexes both are sequential scans whose cost
+-- grows with concurrent load, so each one holds a pool connection longer and
+-- starves the small per-process connection pools. These are also applied
+-- idempotently at startup (shepherd_utils.db.initialize_db) for deployments
+-- whose data volume predates this file change.
+CREATE INDEX IF NOT EXISTS idx_callbacks_callback_id ON callbacks (callback_id);
+CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id);
+
 -- Historical metrics archive, written by the monitor every 30s. Used by the
 -- History tab to show trends over days/weeks. Live dashboard reads from Redis
 -- (recent, fast); this is the durable 30-day record.
