@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+import httpx
 import requests
 from biolink_helper_pkg import BiolinkHelper
 from pathfinder.Pathfinder import Pathfinder
@@ -37,8 +38,8 @@ tracer = setup_tracer(STREAM)
 NUM_TOTAL_HOPS = 4
 MAX_HOPS_TO_EXPLORE = 4
 MAX_PATHFINDER_PATHS = 500
-PRUNE_TOP_K = 100
-NODE_DEGREE_THRESHOLD = 1000000
+PRUNE_TOP_K = 75
+NODE_DEGREE_THRESHOLD = 10000
 
 OUT_PATH = Path("general_concepts.json")
 
@@ -66,6 +67,47 @@ def get_blocked_list():
     synonyms = set(s.lower() for s in json_block_list["synonyms"])
     return set(json_block_list["curies"]), synonyms
 
+async def rehydrate(kg, retriever_url, logger):
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    payload = {
+        "message": {
+            "knowledge_graph": kg
+        },
+        "parameters": {
+            "rehydrate": True,
+            "tier": 0
+        }
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(
+                retriever_url.replace("query", "rehydrate"), headers=headers, json=payload
+            )
+        res.raise_for_status()
+        return res.json()["message"]["knowledge_graph"]
+
+    except httpx.HTTPStatusError as http_err:
+        logger.error(f"HTTP error occurred: {http_err}")
+        if res.text:
+            logger.error(f"Error details: {res.text}")
+        raise http_err
+    except httpx.ConnectError as conn_err:
+        logger.error(f"Connection error occurred: {conn_err}")
+        raise conn_err
+    except httpx.TimeoutException as timeout_err:
+        logger.error(f"Timeout error occurred: {timeout_err}")
+        raise timeout_err
+    except httpx.RequestError as req_err:
+        logger.error(f"An unexpected error occurred: {req_err}")
+        raise req_err
+    except json.JSONDecodeError:
+        logger.error("Failed to parse the response as JSON.")
+        logger.error(f"Raw response: {res.text}")
+        raise
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        raise e
 
 def execute_pathfinding_sync(
     pinned_node_ids, pinned_node_keys, intermediate_categories, logger
@@ -74,8 +116,7 @@ def execute_pathfinding_sync(
     blocked_curies, blocked_synonyms = get_blocked_list()
 
     pathfinder_instance = Pathfinder(
-        "MLRepo",
-        settings.plover_url,
+        f"retriever:{settings.sync_kg_retrieval_url}",
         settings.curie_ngd_addr,
         settings.node_degree_addr,
         blocked_curies,
@@ -162,6 +203,8 @@ async def pathfinder(task, logger: logging.Logger):
             intermediate_categories,
             logger,
         )
+        logger.info(f"Rehydrating knowledge graph with retriever")
+        knowledge_graph = await rehydrate(knowledge_graph, settings.kg_rehydrate_url, logger)
 
         res = []
         if result is not None:

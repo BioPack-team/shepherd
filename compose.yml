@@ -352,6 +352,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      - ./arax_pathfinder_dbs:/app/arax_pathfinder_dbs
 
   arax_rank:
     container_name: arax_rank

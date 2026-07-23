@@ -5,7 +5,9 @@ import json
 import logging
 import uuid
 import httpx
-from inject_shepherd_arax_provenance import add_shepherd_arax_to_edge_sources
+from shepherd_utils.inject_shepherd_arax_provenance import (
+    add_shepherd_arax_to_edge_sources,
+)
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import get_message, save_message

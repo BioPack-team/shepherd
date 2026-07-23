@@ -1,2 +1,3 @@
-catrax-pathfinder==1.2.2
+catrax-pathfinder==2.4.3
 biolink-helper-pkg==1.0.0
+httpx==0.28.1

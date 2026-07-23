@@ -80,12 +80,8 @@ class Settings(BaseSettings):
     # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
     plover_url: str = "https://kg2cploverdb.ci.transltr.io"
-    curie_ngd_addr: str = (
-        "mysql:arax-databases-mysql.rtx.ai:public_ro:curie_ngd_v1_0_kg2_10_2"
-    )
-    node_degree_addr: str = (
-        "mysql:arax-databases-mysql.rtx.ai:public_ro:kg2c_v1_0_kg2_10_2"
-    )
+    curie_ngd_addr: str = "sqlite:/app/arax_pathfinder_dbs/curie_ngd_v1.0_tier0-20260621.sqlite"
+    node_degree_addr: str = "sqlite:/app/arax_pathfinder_dbs/tier0-info-for-overlay_v1.0_tier0-20260621.sqlite"
     arax_biolink_version: str = "4.2.5"
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
