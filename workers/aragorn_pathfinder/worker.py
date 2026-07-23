@@ -27,7 +27,7 @@ STREAM = "aragorn.pathfinder"
 # Consumer group, most likely you don't need to change this.
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
 

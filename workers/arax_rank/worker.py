@@ -136,7 +136,7 @@ async def poll_for_tasks() -> None:
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
+                STREAM, GROUP, CONSUMER, max_workers
             ):
                 asyncio.create_task(
                     process_task(task, parent_ctx, logger, limiter, loop, pool)

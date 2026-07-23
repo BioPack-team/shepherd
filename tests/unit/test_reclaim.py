@@ -15,13 +15,22 @@ treats the idle filter.
 """
 
 import asyncio
+import json
 import logging
+import time
 
 import pytest
 
 from shepherd_utils import reclaim
 
 logger = logging.getLogger(__name__)
+
+
+def _fresh_heartbeat(last_seen: "float | None" = None) -> str:
+    """A heartbeat payload that reads as alive (recent ``last_seen``)."""
+    return json.dumps(
+        {"last_seen": last_seen if last_seen is not None else time.time()}
+    )
 
 
 @pytest.fixture()
@@ -70,14 +79,39 @@ async def test_reclaim_orphaned_skips_live_owner(
 
     stream, group = "aragorn.score", "consumer"
     await _seed_pending(broker, stream, group, "busyworker")
-    # busyworker has a live heartbeat -> protected from reclaim.
-    await broker.set(f"worker:heartbeat:{stream}:busyworker", "{}")
+    # busyworker has a fresh heartbeat -> protected from reclaim.
+    await broker.set(f"worker:heartbeat:{stream}:busyworker", _fresh_heartbeat())
 
     reclaimed = await reclaim.reclaim_orphaned(stream, group, "liveworker", logger)
 
     assert reclaimed == []
     summary = await broker.xpending(stream, group)
     assert [c["name"] for c in summary["consumers"]] == ["busyworker"]
+
+
+@pytest.mark.asyncio
+async def test_reclaim_orphaned_claims_from_stale_heartbeat_owner(
+    redis_mock, tiny_idle_floor, monkeypatch
+):
+    """A lingering-but-stale heartbeat key does NOT shield a dead consumer.
+
+    Heartbeat keys are persistent, so a crashed consumer's key can outlive it.
+    Reclaim must judge liveness by last_seen freshness, not key existence, or
+    orphaned work would never be recovered while the stale key sits there.
+    """
+    broker = redis_mock["broker"]
+    monkeypatch.setattr(reclaim, "broker_client", broker)
+
+    stream, group = "aragorn.score", "consumer"
+    msg_id = await _seed_pending(broker, stream, group, "deadworker")
+    # Key still present, but last_seen is far older than HEARTBEAT_TTL_SEC.
+    await broker.set(
+        f"worker:heartbeat:{stream}:deadworker", _fresh_heartbeat(time.time() - 3600)
+    )
+
+    reclaimed = await reclaim.reclaim_orphaned(stream, group, "liveworker", logger)
+
+    assert [m[0] for m in reclaimed] == [msg_id]
 
 
 @pytest.mark.asyncio

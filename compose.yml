@@ -196,6 +196,9 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      # First run? Set PATHFINDER_EMBEDDINGS_URL in your .env to a .tar.gz and
+      # the worker downloads + extracts the embeddings LMDB into this mount on
+      # startup (see README "Worker data (LMDB) downloads").
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
 
   ######### Example ARA
@@ -300,6 +303,9 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      # First run? Set OMNICORP_LMDB_URL in your .env to a .tar.gz and the worker
+      # downloads + extracts curies.lmdb / shared_counts.lmdb into this mount on
+      # startup (see README "Worker data (LMDB) downloads").
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score

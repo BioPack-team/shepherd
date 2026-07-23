@@ -118,6 +118,9 @@ async def _poll_loop(engine: alerts.AlertEngine) -> None:
             # PG up/down alert off that, same cadence as the broker check.
             pg_up = "error" not in (snapshot.get("postgres") or {})
             await engine.handle_postgres_health(pg_up)
+            # Redis memory pressure is an automatic engine state machine (like
+            # broker/postgres health), not a YAML rule -- drive it each tick.
+            await engine.handle_redis_memory(snapshot)
             _latest_snapshot = snapshot
             # Persist history at a slower cadence than the live UI tick to
             # keep Redis memory bounded.

@@ -15,6 +15,7 @@ from torch import nn
 from xgboost import XGBClassifier
 
 from shepherd_utils.config import settings
+from shepherd_utils.data_download import ensure_pathfinder_embeddings
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
@@ -270,6 +271,11 @@ async def process_task(task, parent_ctx, logger, limiter):
 
 async def poll_for_tasks():
     global clf, bmt, mlp, embedding_env, executor
+    # Ensure the embeddings LMDB exists before we open it below (a first-run
+    # local `docker compose up` starts with the volume-mounted directory empty).
+    # No-op once present or when no download URL is configured (e.g. production,
+    # where the data is mounted out of band).
+    ensure_pathfinder_embeddings(logging.getLogger(STREAM))
     clf = XGBClassifier()
     clf.load_model("model_weights/squashbert_classifier_weights.json")
     bmt = Toolkit()

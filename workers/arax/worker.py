@@ -16,7 +16,7 @@ from shepherd_utils.shared import get_tasks, run_task_lifecycle
 STREAM = "arax"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 100
+TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 
 
