@@ -59,8 +59,8 @@ async def check_connection(conn):
 pool = AsyncConnectionPool(
     conninfo=CONNINFO,
     timeout=settings.postgres_pool_timeout,
-    min_size=5,
-    max_size=10,
+    min_size=settings.postgres_pool_min_size,
+    max_size=settings.postgres_pool_max_size,
     max_idle=300,
     max_lifetime=3600,
     check=check_connection,
@@ -158,9 +158,44 @@ def decompress_zstd(blob: bytes) -> bytes:
     return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)).read()
 
 
+# Idempotent DDL applied on every startup. The image's init_db.sql only runs
+# when the Postgres data volume is brand new, so deployments whose volume
+# predates a schema addition never pick it up from there; re-running these
+# here upgrades them in place. Everything in this list must be safe to re-run
+# and effectively free once already applied.
+_SCHEMA_UPGRADES = (
+    "CREATE INDEX IF NOT EXISTS idx_callbacks_callback_id ON callbacks (callback_id)",
+    "CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id)",
+)
+
+# Arbitrary-but-fixed advisory lock id serializing the upgrades across the
+# whole fleet booting at once: IF NOT EXISTS alone still races when two
+# sessions both pass the existence check and try to create the same index.
+_SCHEMA_UPGRADE_LOCK_ID = 762_297_531
+
+
+async def apply_schema_upgrades() -> None:
+    """Bring an existing database up to date with init_db.sql additions."""
+    async with pool.connection(settings.postgres_pool_timeout) as conn:
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_UPGRADE_LOCK_ID,)
+        )
+        for ddl in _SCHEMA_UPGRADES:
+            await conn.execute(ddl)
+        await conn.commit()
+
+
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
+    try:
+        await apply_schema_upgrades()
+    except Exception:
+        # A failed upgrade must never keep a worker from starting: the schema
+        # additions are performance aids, and the janitor/next boot retries.
+        logging.getLogger(__name__).warning(
+            "Failed to apply startup schema upgrades", exc_info=True
+        )
 
 
 async def shutdown_db() -> None:

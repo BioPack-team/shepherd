@@ -283,6 +283,32 @@ async def test_initialize_and_shutdown_open_and_close_pool(mocker):
     assert mock_pool.close.called
 
 
+@pytest.mark.asyncio
+async def test_initialize_db_applies_callback_indexes(mocker):
+    """Startup runs the idempotent schema upgrades (under an advisory lock) so
+    existing deployments get the callbacks indexes without re-running
+    init_db.sql."""
+    mock_conn, mock_pool = _install_pool_mock(mocker)
+    await db.initialize_db()
+    assert mock_pool.open.called
+    executed = " ".join(str(c.args[0]) for c in mock_conn.execute.call_args_list)
+    assert "pg_advisory_xact_lock" in executed
+    assert "idx_callbacks_callback_id" in executed
+    assert "idx_callbacks_query_id" in executed
+    assert mock_conn.commit.called
+
+
+@pytest.mark.asyncio
+async def test_initialize_db_survives_schema_upgrade_failure(mocker):
+    """A failed upgrade (e.g. transient connection error) is logged, not
+    raised -- workers must still start."""
+    mock_conn, mock_pool = _install_pool_mock(
+        mocker, raise_on_execute=OperationalError("pg not ready")
+    )
+    await db.initialize_db()
+    assert mock_pool.open.called
+
+
 # --- check_connection -----------------------------------------------------
 
 
