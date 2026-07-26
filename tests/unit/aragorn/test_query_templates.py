@@ -22,6 +22,7 @@ from workers.aragorn_lookup.query_templates import (
     census_triples,
     estimate,
     needs_signatures,
+    price,
     select_portfolio,
 )
 
@@ -504,3 +505,16 @@ def test_tiers_and_exclude_leaky_are_both_applied():
     )
 
     assert [template.name for template, _ in selected] == ["two_witness_inhibition"]
+
+
+def test_estimates_declare_where_they_came_from(two_hop, census):
+    """Census and baseline pricing must be distinguishable by the caller.
+
+    The baselines were derived from the census, so for an average disease the
+    two agree and an unmounted census is otherwise silent -- it only diverges
+    in the tail, which is exactly where the budget matters.
+    """
+    assert estimate(two_hop, census)["source"] == "census"
+    assert baseline_estimate(two_hop)["source"] == "baseline"
+    assert price(two_hop, census)["source"] == "census"
+    assert price(two_hop, None)["source"] == "baseline"

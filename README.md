@@ -138,6 +138,38 @@ The census is optional. Without it the worker falls back to the baseline
 estimates compiled into `query_templates.py` — the numbers that census produced
 when the portfolio was built — logs a warning, and keeps serving.
 
+**Confirming it loaded.** The baselines were derived from the census, so for an
+average disease both price the portfolio identically; they only diverge in the
+tail, which is exactly where the budget matters. The numbers alone will
+therefore not tell you whether the mount worked, so two log lines do.
+
+On worker start, with the census mounted:
+
+```
+INFO Loaded census from /app/census: 13 rollup rows, graph <path> (1,670,341 nodes /
+     28,709,074 edges), biolink 4.3.2, query semantics, generated 2026-07-25T02:36:55Z
+```
+
+Check the graph, node/edge counts and Biolink version against the graph Gandalf
+is actually serving — this is the provenance that tells you the census and the
+graph are the same vintage. Without the mount you get a warning instead:
+
+```
+WARNING No census at /app/census (census_rollup.tsv missing); pricing query
+        templates from baked-in baselines instead.
+```
+
+Then every creative query says which one it used, so you can confirm it long
+after startup has scrolled away:
+
+```
+INFO Census portfolio for MONDO:0004979: 11 templates, ~19592 expected paths,
+     priced from census, probed (causal_gene_inhibition:134, ...)
+```
+
+`priced from baselines (no census mounted)` there means the mount is missing or
+unreadable. `probed`/`unprobed` reports whether the per-disease probe answered.
+
 #### The per-disease probe
 
 Census fan-outs are means over a heavy-tailed distribution, and disease degree

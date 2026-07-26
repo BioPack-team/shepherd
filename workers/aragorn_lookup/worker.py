@@ -500,12 +500,23 @@ async def expand_census_query(input_message, logger: logging.Logger):
         messages.append(message)
         labels.append(template.name)
 
+    # Say where the estimates came from on every query, not only in the startup
+    # line. The baselines were derived from the census, so an unmounted census
+    # produces the same numbers for an average disease and is otherwise
+    # invisible -- it only diverges in the tail, which is where it matters.
+    priced_from = (
+        "baselines (no census mounted)"
+        if any(summary.get("source") == "baseline" for _, summary in selected)
+        else "census"
+    )
     logger.info(
-        "Census portfolio for %s: %d templates, ~%d expected paths%s (%s)",
+        "Census portfolio for %s: %d templates, ~%d expected paths, priced from "
+        "%s%s (%s)",
         input_id,
         len(selected),
         sum(summary["expected_paths"] for _, summary in selected),
-        " [probed]" if probe else "",
+        priced_from,
+        ", probed" if probe else ", unprobed",
         ", ".join(
             f"{template.name}:{summary['expected_paths']}"
             for template, summary in selected

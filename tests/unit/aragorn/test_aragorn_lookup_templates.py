@@ -443,3 +443,41 @@ def test_two_witness_mirrored_pairs_collapse_on_the_answer_node():
     grouped = group_results_by_qnode("SN", result_message, [])
 
     assert len(grouped) == 1
+
+
+# ---------------------------------------------------------------------------
+# Observability: is the census actually loaded?
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_portfolio_log_says_when_it_priced_from_baselines(message, caplog):
+    """A missing census mount has to be visible on every query, not only in the
+    one startup line. The baselines agree with the census for an average
+    disease, so the numbers alone will not give it away."""
+    with caplog.at_level(logging.INFO):
+        await lookup_worker.build_lookup_messages(message, logger)
+
+    line = next(
+        m for m in (r.getMessage() for r in caplog.records) if "Census portfolio" in m
+    )
+    assert "priced from baselines (no census mounted)" in line
+
+
+@pytest.mark.asyncio
+async def test_portfolio_log_says_when_it_priced_from_the_census(
+    message, mocker, caplog
+):
+    from workers.aragorn_lookup.query_templates import Census
+
+    mocker.patch(
+        "workers.aragorn_lookup.worker.get_census",
+        return_value=Census(rollup={}, qualifier_values={}, signatures={}),
+    )
+    with caplog.at_level(logging.INFO):
+        await lookup_worker.build_lookup_messages(message, logger)
+
+    line = next(
+        m for m in (r.getMessage() for r in caplog.records) if "Census portfolio" in m
+    )
+    assert "priced from census" in line

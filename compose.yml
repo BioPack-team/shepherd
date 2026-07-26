@@ -285,9 +285,12 @@ services:
       # when the graph is built and versioned with it. Creative-mode query
       # templates are priced against it; without it they fall back to the
       # baseline estimates compiled into query_templates.py (the worker logs a
-      # warning and keeps serving). Uncomment once you have a census directory,
-      # and point CENSUS_DIR at it if you mount it somewhere else.
-      # - ./census:/app/census:ro
+      # warning and keeps serving, so a missing census degrades rather than
+      # breaks). It is ~150MB of TSVs and is gitignored like the other large
+      # read-only datasets -- drop the census directory at ./census, or point
+      # CENSUS_DIR somewhere else. See "Aragorn creative-mode query templates"
+      # in the README for the log lines that confirm it loaded.
+      - ./census:/app/census:ro
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
     build:

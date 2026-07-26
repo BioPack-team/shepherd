@@ -5,6 +5,7 @@ debug/
 gandalf_mmap/
 omnicorp_lmdb/
 pathfinder_embeddings/
+census/
 
 # Project specific
 scripts/

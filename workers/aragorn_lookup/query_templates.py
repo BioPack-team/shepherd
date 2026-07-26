@@ -854,11 +854,16 @@ def load_census(
         logger.warning("Could not load census at %s: %s", path, error)
         return None
     logger.info(
-        "Loaded census from %s (%d rollup triples, graph %s, biolink %s)",
+        "Loaded census from %s: %d rollup rows, graph %s (%s nodes / %s edges), "
+        "biolink %s, %s semantics, generated %s",
         path,
         len(census.rollup),
-        census.manifest.get("graph", "unknown"),
+        census.manifest.get("source", "unknown"),
+        f"{census.manifest['nodes']:,}" if "nodes" in census.manifest else "?",
+        f"{census.manifest['edges']:,}" if "edges" in census.manifest else "?",
         census.manifest.get("biolink_version", "unknown"),
+        census.manifest.get("match_semantics", "unknown"),
+        census.manifest.get("generated_at", "unknown"),
     )
     return census
 
@@ -957,6 +962,7 @@ def estimate(
         "probed": probed,
         "hops": per_hop,
         "missing_triples": missing,
+        "source": "census",
     }
 
 
