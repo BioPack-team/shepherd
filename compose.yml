@@ -281,6 +281,13 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      # The metagraph census, produced by gandalf's scripts/metagraph_census.py
+      # when the graph is built and versioned with it. Creative-mode query
+      # templates are priced against it; without it they fall back to the
+      # baseline estimates compiled into query_templates.py (the worker logs a
+      # warning and keeps serving). Uncomment once you have a census directory,
+      # and point CENSUS_DIR at it if you mount it somewhere else.
+      # - ./census:/app/census:ro
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
     build:

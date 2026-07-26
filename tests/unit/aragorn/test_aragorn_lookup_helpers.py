@@ -224,8 +224,10 @@ def test_expand_aragorn_query_appends_amie_rule_template(mocker):
         }
     }
 
+    # The rules file is parsed once per process and cached, so inject at the
+    # accessor rather than at json.load.
     mocker.patch(
-        "workers.aragorn_lookup.worker.json.load",
+        "workers.aragorn_lookup.worker.get_amie_expansions",
         return_value={
             json.dumps({"predicate": "biolink:treats"}): [{"template": rule_template}],
         },

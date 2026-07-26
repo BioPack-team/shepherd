@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from string import Template
 from typing import Optional
@@ -26,6 +27,9 @@ from shepherd_utils.db import (
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
+from . import query_templates
+from .probe import probe_disease
+
 # Queue name
 STREAM = "aragorn.lookup"
 # Consumer group, most likely you don't need to change this.
@@ -33,6 +37,18 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
+
+# Creative-edge predicates the census template portfolio answers. The portfolio
+# is drug-for-disease, so anything else -- contraindication, the qualified
+# affects rules -- keeps using the AMIE expansions regardless of template_set.
+TREATS_PREDICATES = frozenset(
+    {
+        "biolink:treats",
+        "biolink:treats_or_applied_or_studied_to_treat",
+    }
+)
+
+TEMPLATE_SETS = frozenset({"census", "amie", "both"})
 
 
 def examine_query(message):
@@ -89,11 +105,19 @@ async def run_async_lookup(
     message: dict,
     query_id: str,
     logger: logging.Logger,
+    label: str = "",
 ) -> AsyncResponse:
-    """Return an async lookup response with callback id."""
+    """Return an async lookup response with callback id.
+
+    ``label`` names the expansion that produced this message (a census template
+    name, or ``direct_lookup``). It is recorded on the span and in the log so an
+    A/B run can attribute a callback back to the template that asked for it.
+    """
     callback_id = str(uuid.uuid4())[:8]
     with tracer.start_as_current_span("aragorn.lookup") as span:
         span.set_attribute("callback_id", callback_id)
+        if label:
+            span.set_attribute("template", label)
         lookup_carrier = {}
         inject(lookup_carrier)
         # Put callback UID and query ID in postgres
@@ -102,7 +126,7 @@ async def run_async_lookup(
         message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
 
         logger.debug(
-            f"""Sending lookup query to {settings.kg_retrieval_url} with callback {message['callback']}"""
+            f"""Sending lookup query ({label or "unlabelled"}) to {settings.kg_retrieval_url} with callback {message['callback']}"""
         )
         try:
             response = await client.post(
@@ -167,16 +191,16 @@ async def aragorn_lookup(task, logger: logging.Logger):
                     json=message,
                 )
     else:
-        expanded_messages = expand_aragorn_query(message, logger)
+        expanded_messages, labels = await build_lookup_messages(message, logger)
         # with open("./debug/expanded_messages.json", "w", encoding="utf-8") as f:
         #     json.dump(expanded_messages, f, indent=2)
 
         requests = []
         # send all messages to lookup service
         async with httpx.AsyncClient(timeout=20) as client:
-            for expanded_message in expanded_messages:
+            for expanded_message, label in zip(expanded_messages, labels):
                 requests.append(
-                    run_async_lookup(client, expanded_message, query_id, logger)
+                    run_async_lookup(client, expanded_message, query_id, logger, label)
                 )
                 # Then we can retrieve all callback ids from query id to see which are still
                 # being looked up
@@ -296,6 +320,53 @@ def get_rule_key(
     return json.dumps(keydict, sort_keys=True)
 
 
+@lru_cache(maxsize=1)
+def get_amie_expansions() -> dict:
+    """The mined AMIE rules, parsed once per process.
+
+    This is ~400KB of JSON that used to be re-read and re-parsed on every
+    creative query.
+    """
+    with open(
+        Path(__file__).parent / "rules_with_types_cleaned_finalized.json", "r"
+    ) as file:
+        return json.load(file)
+
+
+@lru_cache(maxsize=1)
+def get_census():
+    """The metagraph census, loaded once per process (None if not mounted)."""
+    return query_templates.load_census(settings.census_dir)
+
+
+def build_direct_message(input_message) -> dict:
+    """The plain (non-inferred) form of the original query.
+
+    Every expansion set is fired alongside this one, and ``merge_message``
+    recognises it by shape (``queries_equivalent``) to treat its results as
+    lookup rather than creative results. It must therefore appear exactly once,
+    which is why it is built here rather than inside either expander.
+    """
+    qg = copy.deepcopy(input_message["message"]["query_graph"])
+    for _, edge in qg["edges"].items():
+        edge.pop("knowledge_type", None)
+    return {
+        "message": {"query_graph": qg},
+        "parameters": copy.deepcopy(input_message.get("parameters") or {}),
+        "submitter": input_message["submitter"],
+    }
+
+
+def census_templates_applicable(predicate, qualifiers, source_input) -> bool:
+    """Whether the census portfolio can answer this creative edge.
+
+    It answers one question -- what chemicals may treat this disease -- so it
+    needs a treats-family predicate, no qualifier constraints, and the disease
+    (the object of ``treats``) to be the pinned node.
+    """
+    return predicate in TREATS_PREDICATES and not qualifiers and not source_input
+
+
 def expand_aragorn_query(input_message, logger: logging.Logger):
     """Given a query, split it into many related similar queries."""
     # Contract:
@@ -307,21 +378,8 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
         get_infer_parameters(input_message)
     )
     key = get_rule_key(predicate, qualifiers, logger)
-    # We want to run the non-inferred version of the query as well
-    qg = copy.deepcopy(input_message["message"]["query_graph"])
-    for eid, edge in qg["edges"].items():
-        del edge["knowledge_type"]
-    with open(
-        Path(__file__).parent / "rules_with_types_cleaned_finalized.json", "r"
-    ) as file:
-        AMIE_EXPANSIONS = json.load(file)
-    messages = [
-        {
-            "message": {"query_graph": qg},
-            "parameters": input_message["parameters"],
-            "submitter": input_message["submitter"],
-        }
-    ]
+    AMIE_EXPANSIONS = get_amie_expansions()
+    messages = [build_direct_message(input_message)]
     # If we don't have any AMIE expansions, this will just generate the direct query
     for rule_def in AMIE_EXPANSIONS.get(key, []):
         query_template = Template(json.dumps(rule_def["template"]))
@@ -341,14 +399,165 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
             del query["query_graph"]["nodes"][source]["ids"]
         message = {
             "message": query,
-            "parameters": input_message.get("parameters") or {},
+            # Copied, not shared: each expansion carries its own parameters so
+            # a per-query edit (the census path sets filter_config per
+            # template) cannot leak across the other expansions.
+            "parameters": copy.deepcopy(input_message.get("parameters") or {}),
+            "submitter": input_message["submitter"],
         }
         if "log_level" in input_message:
             message["log_level"] = input_message["log_level"]
-        message["parameters"] = input_message["parameters"]
-        message["submitter"] = input_message["submitter"]
         messages.append(message)
     return messages
+
+
+async def expand_census_query(input_message, logger: logging.Logger):
+    """Expand a drug-for-disease creative query into the census portfolio.
+
+    Returns ``(messages, labels)``: the TRAPI requests to fire and the template
+    name behind each, in the same order. The labels are logged against the
+    callback ids so an A/B run can attribute results back to a template.
+
+    The direct (non-inferred) lookup query is *not* included -- the caller adds
+    it once, so it is not duplicated when both template sets fire.
+    """
+    input_id, predicate, qualifiers, source, source_input, target, qedge_id = (
+        get_infer_parameters(input_message)
+    )
+    # treats runs chemical -> disease, and applicability has already established
+    # the disease end is the pinned one.
+    question_qnode, answer_qnode = target, source
+    qnodes = input_message["message"]["query_graph"]["nodes"]
+    answer_categories = qnodes.get(answer_qnode, {}).get("categories") or []
+
+    parameters = input_message.get("parameters") or {}
+    requested = parameters.get("templates")
+    candidates = [
+        template
+        for template in query_templates.TEMPLATES
+        if template.answer_compatible(answer_categories)
+        and (requested is None or template.name in requested)
+        and not (parameters.get("exclude_leaky") and template.leaky)
+    ]
+    if not candidates:
+        logger.warning(
+            "No census templates match this query (answer categories %s); "
+            "falling back to the AMIE expansions.",
+            answer_categories,
+        )
+        return [], []
+
+    probe = {}
+    if parameters.get("probe", settings.template_probe_enabled):
+        with tracer.start_as_current_span("aragorn.lookup.probe"):
+            probe = await probe_disease(
+                input_id, query_templates.probe_specs_for(candidates), logger
+            )
+
+    budget = parameters.get("template_path_budget", settings.template_path_budget)
+    selected = query_templates.select_portfolio(
+        candidates,
+        get_census(),
+        probe=probe or None,
+        budget=budget,
+        answer_categories=answer_categories,
+    )
+    if not selected:
+        logger.warning(
+            "Census portfolio selected nothing for %s; "
+            "falling back to the AMIE expansions.",
+            input_id,
+        )
+        return [], []
+
+    messages, labels = [], []
+    for template, summary in selected:
+        query_graph = template.render(
+            input_id,
+            question_qnode,
+            answer_qnode,
+            pinned_node=qnodes.get(question_qnode),
+            answer_node=qnodes.get(answer_qnode),
+        )
+        template_parameters = copy.deepcopy(parameters)
+        # The template's degree caps are defaults; anything the caller set
+        # explicitly wins, so a query can still tighten or loosen them.
+        filter_config = dict(template.filter_config)
+        filter_config.update(template_parameters.get("filter_config") or {})
+        if filter_config:
+            template_parameters["filter_config"] = filter_config
+        message = {
+            "message": {"query_graph": query_graph},
+            "parameters": template_parameters,
+            "submitter": input_message["submitter"],
+        }
+        if "log_level" in input_message:
+            message["log_level"] = input_message["log_level"]
+        messages.append(message)
+        labels.append(template.name)
+
+    logger.info(
+        "Census portfolio for %s: %d templates, ~%d expected paths%s (%s)",
+        input_id,
+        len(selected),
+        sum(summary["expected_paths"] for _, summary in selected),
+        " [probed]" if probe else "",
+        ", ".join(
+            f"{template.name}:{summary['expected_paths']}"
+            for template, summary in selected
+        ),
+    )
+    return messages, labels
+
+
+async def build_lookup_messages(input_message, logger: logging.Logger):
+    """Build every lookup request for a creative query, with a label each.
+
+    ``template_set`` picks the expansion strategy -- ``parameters.template_set``
+    per query, falling back to ``settings.template_set``. Census templates only
+    cover drug-for-disease, so any other creative edge uses AMIE whatever the
+    setting says; that keeps the A/B honest instead of silently answering some
+    queries with nothing.
+    """
+    parameters = input_message.get("parameters") or {}
+    template_set = parameters.get("template_set") or settings.template_set
+    if template_set not in TEMPLATE_SETS:
+        logger.warning(
+            "Unknown template_set %r; using %r.", template_set, settings.template_set
+        )
+        template_set = settings.template_set
+
+    _, predicate, qualifiers, _, source_input, _, _ = get_infer_parameters(
+        input_message
+    )
+    applicable = census_templates_applicable(predicate, qualifiers, source_input)
+    if template_set in ("census", "both") and not applicable:
+        logger.debug(
+            "No census templates for a %s creative edge; using AMIE expansions.",
+            predicate,
+        )
+        template_set = "amie"
+
+    messages = [build_direct_message(input_message)]
+    labels = ["direct_lookup"]
+
+    if template_set in ("census", "both"):
+        census_messages, census_labels = await expand_census_query(
+            input_message, logger
+        )
+        messages.extend(census_messages)
+        labels.extend(census_labels)
+        if not census_messages:
+            # expand_census_query said why; fall back rather than fire nothing.
+            template_set = "amie" if template_set == "census" else template_set
+
+    if template_set in ("amie", "both"):
+        # expand_aragorn_query builds its own direct query; drop that copy so
+        # merge_message sees exactly one.
+        messages.extend(expand_aragorn_query(input_message, logger)[1:])
+        labels.extend(f"amie_{index}" for index in range(len(messages) - len(labels)))
+
+    return messages, labels
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):

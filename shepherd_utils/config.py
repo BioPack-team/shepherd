@@ -86,6 +86,43 @@ class Settings(BaseSettings):
     default_data_tier: int = 0
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
 
+    # --- Aragorn creative-mode query expansion -----------------------------
+    # Which template set expands a creative (inferred-edge) query.
+    #   "census" -- the census-derived portfolio in
+    #               workers/aragorn_lookup/query_templates.py
+    #   "amie"   -- the mined AMIE rules in
+    #               workers/aragorn_lookup/rules_with_types_cleaned_finalized.json
+    #   "both"   -- fire both sets (one direct lookup query, not two)
+    # Overridable per query with ``parameters.template_set``, which is how an
+    # A/B is run without a redeploy. Only drug-for-disease queries have census
+    # templates; anything else falls back to AMIE whatever this says.
+    template_set: str = "census"
+    # Census output directory (from gandalf's scripts/metagraph_census.py),
+    # shipped as a build artifact alongside the mmap graph and versioned with
+    # it. Only the rows the portfolio prices are read, so this costs ~25MB
+    # resident and ~1s at worker start. When the directory is absent the
+    # templates fall back to the baseline estimates compiled into the module.
+    census_dir: str = "/app/census"
+    # Total expected paths a creative query's portfolio may buy. Templates are
+    # taken tier-first (mechanism before broad) and cheapest-first within a
+    # tier, so a tight budget sheds recall templates rather than mechanism
+    # ones. The full portfolio prices at ~27.8k paths against the census means,
+    # so this default fires everything for a typical disease and only trims the
+    # dense tail. 0 disables the budget entirely.
+    template_path_budget: int = 30000
+    # Per-disease probe (see workers/aragorn_lookup/probe.py). Measures the
+    # pinned disease's actual degree on each entry hop the portfolio uses, so
+    # selection prices this disease instead of the average one. Costs one small
+    # sync query per distinct entry hop (four for the full portfolio), run
+    # concurrently and bounded by the timeout below; on timeout the estimates
+    # fall back to census means and the query proceeds.
+    template_probe_enabled: bool = True
+    template_probe_timeout: float = 2.0
+    # Degree cap on the probe queries themselves, so probing a hub disease
+    # cannot return a large payload. This bounds the probe, not the real
+    # lookups -- those use each template's own filter_config.
+    template_probe_max_node_degree: int = 1000
+
     pathfinder_redis_host: str = "host.docker.internal"
     pathfinder_redis_port: int = 6383
     pathfinder_redis_password: str = "supersecretpassword"

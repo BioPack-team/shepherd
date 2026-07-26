@@ -23,12 +23,15 @@ RUN pip install -r requirements.txt
 # switch to the non-root user (nru). defined in the base image
 USER nru
 
-# Copy in files
-COPY ./workers/aragorn_lookup ./
+# Copy in files. The worker is a package (worker.py imports its sibling
+# query_templates/probe modules), so it keeps its path under ./workers and is
+# started with -m rather than being flattened into /app.
+COPY ./workers/__init__.py ./workers/__init__.py
+COPY ./workers/aragorn_lookup ./workers/aragorn_lookup
 
 # Set up base for command and any variables
 # that shouldn't be modified
 # ENTRYPOINT ["uvicorn", "shepherd_server.server:APP"]
 
 # Variables that can be overriden
-CMD ["python", "worker.py"]
+CMD ["python", "-m", "workers.aragorn_lookup.worker"]

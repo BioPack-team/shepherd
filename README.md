@@ -42,6 +42,69 @@ The archive for each dataset should contain the expected files at its top level:
 `curies.lmdb` and `shared_counts.lmdb` for omnicorp, `data.mdb` (and
 `lock.mdb`) for the embeddings.
 
+### Aragorn creative-mode query templates
+
+A creative (inferred-edge) query is answered by fanning out a set of templated
+TRAPI queries to Gandalf in parallel and letting the ranker filter what comes
+back. Two template sets exist, and which one runs is the A/B knob:
+
+- **`census`** (default) — the portfolio in
+  `workers/aragorn_lookup/query_templates.py`, derived from a census of the
+  graph's metagraph rather than from biomedical intuition. Twelve shapes in four
+  tiers: mechanism (qualified), broad (recall), associative, and a quarantined
+  tier that reads `treats`-family edges.
+- **`amie`** — the mined AMIE rules in
+  `rules_with_types_cleaned_finalized.json`, which is how this worked before.
+
+Set the default with `TEMPLATE_SET`, or override per query with
+`parameters.template_set` (`census` | `amie` | `both`). `both` fires both sets
+and emits the direct lookup query once. Only drug-for-disease creative edges
+have census templates; every other creative edge uses the AMIE rules whatever
+this is set to.
+
+Per-query knobs, all under `parameters`, for narrowing an experiment:
+
+| Parameter               | Effect                                              |
+| ----------------------- | --------------------------------------------------- |
+| `template_set`          | which set fires                                      |
+| `templates`             | list of template names to restrict to                |
+| `exclude_leaky`         | drop templates that read `treats`-family edges       |
+| `template_path_budget`  | cap on total expected paths (0 = no cap)             |
+| `probe`                 | enable/disable the per-disease probe                 |
+
+Each template carries its own `filter_config` (degree caps), which is passed
+through to Gandalf per query rather than globally; anything the caller sets
+explicitly wins over the template's default. The template behind each expansion
+is recorded on its OTEL span and in the lookup log line, so an A/B run can
+attribute callbacks back to the template that asked for them.
+
+#### The census
+
+Templates are priced against the metagraph census produced by gandalf's
+`scripts/metagraph_census.py` when the graph is built. Ship it as a build
+artifact alongside the mmap graph, version it with the graph, and point
+`CENSUS_DIR` at it (default `/app/census`; see the commented volume in
+`compose.yml`). Only the rows the portfolio prices are read, so this costs about
+25MB resident and a second at worker start rather than the ~870MB a full load
+would take.
+
+The census is optional. Without it the worker falls back to the baseline
+estimates compiled into `query_templates.py` — the numbers that census produced
+when the portfolio was built — logs a warning, and keeps serving.
+
+#### The per-disease probe
+
+Census fan-outs are means over a heavy-tailed distribution, and disease degree
+varies by orders of magnitude, so a portfolio chosen from means holds the time
+budget on the average disease and blows it in the tail. Before firing the real
+expansions the worker measures the pinned disease's actual degree on each entry
+hop the portfolio uses (one small dehydrated, degree-capped query per distinct
+hop, run concurrently), and prices the templates against that instead.
+
+It is bounded by `TEMPLATE_PROBE_TIMEOUT` (default 2s) and fails soft: a probe
+that times out or errors leaves the estimates on census means and the query
+proceeds. Disable it with `TEMPLATE_PROBE_ENABLED=false`.
+
 ### Worker
 
 Each worker is it's own separate docker container. It spins up and begins to watch a central message broker for tasks to work on. Once it gets a task, it
