@@ -68,6 +68,7 @@ Per-query knobs, all under `parameters`, for narrowing an experiment:
 | ----------------------- | --------------------------------------------------- |
 | `template_set`          | which set fires                                      |
 | `templates`             | list of template names to restrict to                |
+| `template_tiers`        | list of tiers to restrict to (the ablation knob)     |
 | `exclude_leaky`         | drop templates that read `treats`-family edges       |
 | `template_path_budget`  | cap on total expected paths (0 = no cap)             |
 | `probe`                 | enable/disable the per-disease probe                 |
@@ -77,6 +78,51 @@ through to Gandalf per query rather than globally; anything the caller sets
 explicitly wins over the template's default. The template behind each expansion
 is recorded on its OTEL span and in the lookup log line, so an A/B run can
 attribute callbacks back to the template that asked for them.
+
+#### Tiers, and what fires by default
+
+Each template declares a tier, which is its claim about how much mechanism the
+shape asserts. Selection is tier-first, so a path budget sheds recall templates
+before mechanism ones:
+
+| Tier            | Templates | Paths  | Claim                                    |
+| --------------- | --------: | -----: | ---------------------------------------- |
+| `A-mechanism`   |         5 |  1,136 | qualified: the drug moves a disease protein |
+| `B-broad`       |         3 | 15,274 | recall: binding, pathway, PPI neighbourhood |
+| `C-associative` |         2 |    493 | association, no mechanism                |
+| `D-branching`   |         1 |  2,689 | two independent witnesses (precision lever) |
+| `D-leaky`       |         1 |  8,221 | routes through `treats` — **held back**  |
+
+`D-leaky` (`indication_transfer`) does not fire by default. It reads the same
+indication data most ground truth is drawn from, so it scores well against any
+benchmark built from that data for reasons that will not generalize, and the
+census work's evaluation protocol says to score it in its own bucket. Flip it on
+with `TEMPLATE_EXCLUDE_LEAKY=false` or `parameters.exclude_leaky: false` when
+you want to measure what it is actually worth.
+
+#### Running an ablation
+
+Tier is the unit to ablate on, and `parameters.template_tiers` sets it per
+query — no redeploy, so the arms can run against one deployment:
+
+```jsonc
+{"template_set": "amie"}                                    // baseline
+{"template_set": "census", "template_tiers": ["A-mechanism"]}
+{"template_set": "census", "template_tiers": ["A-mechanism", "C-associative"]}
+{"template_set": "census"}                                  // current default
+{"template_set": "census", "exclude_leaky": false}          // + the leaky tier
+```
+
+Read the arms on two axes, because the portfolio moves them in opposite
+directions. **Recall** is `NO_RESULTS` — how often the asserted entity was not
+retrieved at all. **Top-of-ranking precision** is `TopAnswer`/`Acceptable`
+`PASSED`. A broad tier reliably buys the first and can cost the second.
+
+One trap worth naming: on `NeverShow`, `PASSED` and `NO_RESULTS` are both
+successes — the entity was not badly surfaced either way. A portfolio that
+retrieves more will convert `NO_RESULTS` into `PASSED` and look like a large
+`NeverShow` win while nothing actually improved. Compare `PASSED + NO_RESULTS`,
+or just watch `FAILED`.
 
 #### The census
 

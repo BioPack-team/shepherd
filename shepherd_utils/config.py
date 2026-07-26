@@ -110,6 +110,22 @@ class Settings(BaseSettings):
     # so this default fires everything for a typical disease and only trims the
     # dense tail. 0 disables the budget entirely.
     template_path_budget: int = 30000
+    # Hold back the templates that route through treats-family edges
+    # (indication_transfer). They read the same indication data much ground
+    # truth is drawn from, so they flatter themselves on any benchmark built
+    # from it, and they contribute ~30% of the portfolio's paths as mechanism-
+    # free Drug candidates three hops from the disease -- the most direct
+    # competition a true answer has for the top slot. The census work's own
+    # evaluation protocol says to score this tier in its own bucket rather than
+    # alongside the rest. Set false (or pass parameters.exclude_leaky) to fire
+    # them, which is how you measure what they are worth.
+    template_exclude_leaky: bool = True
+    # Restrict the portfolio to whole tiers, comma-separated, e.g.
+    # "A-mechanism,C-associative". Empty fires every tier. This is the ablation
+    # knob: tier is the portfolio's own claim about how much mechanism a shape
+    # asserts, so it is the natural unit for "is the recall worth the
+    # precision?". Overridable per query with parameters.template_tiers.
+    template_tiers: str = ""
     # Per-disease probe (see workers/aragorn_lookup/probe.py). Measures the
     # pinned disease's actual degree on each entry hop the portfolio uses, so
     # selection prices this disease instead of the average one. Costs one small
@@ -343,6 +359,11 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+
+    @property
+    def template_tier_list(self) -> list[str]:
+        """Configured template tiers (empty list means every tier)."""
+        return [tier.strip() for tier in self.template_tiers.split(",") if tier.strip()]
 
     @property
     def pg_volume_capacity_bytes(self) -> int:

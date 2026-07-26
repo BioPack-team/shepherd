@@ -1033,6 +1033,7 @@ def select_portfolio(
     budget: int = 0,
     exclude_leaky: bool = False,
     only: Optional[Sequence[str]] = None,
+    tiers: Optional[Sequence[str]] = None,
     answer_categories: Sequence[str] = (),
 ) -> list[tuple[QueryTemplate, dict]]:
     """Choose which templates to fire, and price each one.
@@ -1041,6 +1042,11 @@ def select_portfolio(
     dropped), then cheapest first within a tier, so a tight budget buys as many
     distinct shapes as it can.  ``budget`` of 0 fires everything that survives
     the other filters.
+
+    ``tiers`` restricts to whole tiers, which is the unit an ablation wants:
+    tier is the portfolio's own statement about how much mechanism a shape
+    claims, so "does Tier B earn its recall?" is one run rather than a
+    hand-listed set of names.
 
     A template whose entry hop the probe measured at zero is dropped outright:
     the disease has no neighbours on that hop, so the query cannot return a
@@ -1051,6 +1057,7 @@ def select_portfolio(
         for template in templates
         if not (exclude_leaky and template.leaky)
         and (only is None or template.name in only)
+        and (not tiers or template.tier in tiers)
         and template.answer_compatible(answer_categories)
     ]
 

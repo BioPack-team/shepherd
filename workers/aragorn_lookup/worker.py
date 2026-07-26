@@ -432,12 +432,15 @@ async def expand_census_query(input_message, logger: logging.Logger):
 
     parameters = input_message.get("parameters") or {}
     requested = parameters.get("templates")
+    exclude_leaky = parameters.get("exclude_leaky", settings.template_exclude_leaky)
+    tiers = parameters.get("template_tiers") or settings.template_tier_list
     candidates = [
         template
         for template in query_templates.TEMPLATES
         if template.answer_compatible(answer_categories)
         and (requested is None or template.name in requested)
-        and not (parameters.get("exclude_leaky") and template.leaky)
+        and (not tiers or template.tier in tiers)
+        and not (exclude_leaky and template.leaky)
     ]
     if not candidates:
         logger.warning(
@@ -460,6 +463,7 @@ async def expand_census_query(input_message, logger: logging.Logger):
         get_census(),
         probe=probe or None,
         budget=budget,
+        tiers=tiers,
         answer_categories=answer_categories,
     )
     if not selected:

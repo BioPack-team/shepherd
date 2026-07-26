@@ -171,11 +171,43 @@ async def test_templates_parameter_restricts_the_portfolio(message):
 
 
 @pytest.mark.asyncio
-async def test_exclude_leaky_parameter_drops_the_treats_reading_template(message):
-    message["parameters"]["exclude_leaky"] = True
+async def test_leaky_templates_are_held_back_by_default(message):
+    """indication_transfer reads treats-family edges, so it flatters itself on
+    ground truth drawn from the same indication data. It stays in the registry
+    but does not fire unless asked for."""
     _, labels = await lookup_worker.build_lookup_messages(message, logger)
 
     assert "indication_transfer" not in labels
+    assert "target_inhibition_sm" in labels
+
+
+@pytest.mark.asyncio
+async def test_exclude_leaky_false_fires_the_leaky_template(message):
+    """Measuring what the leaky tier is worth has to remain one flag away."""
+    message["parameters"]["exclude_leaky"] = False
+    _, labels = await lookup_worker.build_lookup_messages(message, logger)
+
+    assert "indication_transfer" in labels
+
+
+@pytest.mark.asyncio
+async def test_template_tiers_parameter_restricts_to_whole_tiers(message):
+    message["parameters"]["template_tiers"] = ["A-mechanism"]
+    _, labels = await lookup_worker.build_lookup_messages(message, logger)
+
+    assert "target_inhibition_sm" in labels
+    assert "ppi_neighborhood" not in labels
+    assert "direct_association" not in labels
+
+
+@pytest.mark.asyncio
+async def test_template_tiers_and_exclude_leaky_compose(message):
+    """A tier ablation must not silently re-admit the leaky tier."""
+    message["parameters"]["template_tiers"] = ["D-leaky", "D-branching"]
+    _, labels = await lookup_worker.build_lookup_messages(message, logger)
+
+    assert "indication_transfer" not in labels
+    assert "two_witness_inhibition" in labels
 
 
 @pytest.mark.asyncio

@@ -485,3 +485,22 @@ def test_conjunction_matches_signatures_as_a_subset(census):
 
     # The one matching signature: 500 edges / 50 distinct proteins = 10.
     assert summary["hops"][1]["fanout"] == 10.0
+
+
+def test_tiers_restricts_selection_to_whole_tiers():
+    selected = select_portfolio(TEMPLATES, census=None, tiers=["A-mechanism"])
+
+    assert {template.tier for template, _ in selected} == {"A-mechanism"}
+    assert len(selected) == 5
+
+
+def test_tiers_of_none_fires_every_tier():
+    assert len(select_portfolio(TEMPLATES, census=None, tiers=None)) == len(TEMPLATES)
+
+
+def test_tiers_and_exclude_leaky_are_both_applied():
+    selected = select_portfolio(
+        TEMPLATES, census=None, tiers=["D-leaky", "D-branching"], exclude_leaky=True
+    )
+
+    assert [template.name for template, _ in selected] == ["two_witness_inhibition"]
