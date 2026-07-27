@@ -546,7 +546,12 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
                 ((DIRECTION, "decreased"),),
             ),
         ),
-        baseline=Baseline(2689, 8832, 99582 / 8832),
+        # 1,225 not the 2,689 the portfolio was published with: that figure
+        # counted ordered witness pairs including the degenerate ones, which
+        # the template's own notes flagged as an overestimate. estimate() now
+        # models the self-join, and the baseline has to agree with it or the
+        # no-census fallback prices this template differently.
+        baseline=Baseline(1225, 8832, 99582 / 8832),
         filter_config={"max_node_degree": 500},
         notes="Branching, not linear: two independent witnesses for the same "
         "chemical -- the precision lever. TRAPI cannot say n_protein_a != "
@@ -890,6 +895,10 @@ def estimate(
     coverage: Optional[int] = None
     missing = []
     probed = False
+    # How many qnodes have already been expanded out of the same neighbour set
+    # -- same source qnode, same predicates, same qualifiers, same target
+    # category. See the sibling handling below.
+    siblings: dict[tuple, int] = {}
 
     remaining = list(template.hops)
     while remaining:
@@ -929,6 +938,33 @@ def estimate(
 
             if coverage is None:
                 coverage = anchor_count
+
+            # A second qnode drawn from the *same* neighbour set is not an
+            # independent draw. two_witness_inhibition picks two proteins from
+            # the disease's associated proteins, so multiplying the fan-out in
+            # twice counts ordered pairs including the degenerate ones -- and
+            # Shepherd keeps neither: merge_message drops results binding the
+            # same knode twice and collapses (a,b) with (b,a), leaving C(f,k)
+            # unordered distinct combinations. Multiplying by (f-k+1)/k for the
+            # k-th sibling builds exactly that, so the cost stays quadratic (it
+            # genuinely is) without the factor-of-two inflation from ordering.
+            #
+            # This matters because the estimate feeds the budget: with the
+            # probe substituting a real disease degree into *both* witness hops,
+            # the uncorrected f^2 blew past the path budget for any disease with
+            # more than ~35 associated proteins, so the template was silently
+            # never selected.
+            source = hop.subject if forward else hop.object
+            sibling_key = (
+                source,
+                hop.predicates,
+                hop.qualifiers,
+                template.categories[target],
+            )
+            already = siblings.get(sibling_key, 0)
+            if already:
+                fanout = max(fanout - already, 0.0) / (already + 1)
+            siblings[sibling_key] = already + 1
 
             role = "expands"
             if target in known:
@@ -1041,6 +1077,7 @@ def select_portfolio(
     only: Optional[Sequence[str]] = None,
     tiers: Optional[Sequence[str]] = None,
     answer_categories: Sequence[str] = (),
+    skipped: Optional[list] = None,
 ) -> list[tuple[QueryTemplate, dict]]:
     """Choose which templates to fire, and price each one.
 
@@ -1057,7 +1094,14 @@ def select_portfolio(
     A template whose entry hop the probe measured at zero is dropped outright:
     the disease has no neighbours on that hop, so the query cannot return a
     path and firing it only spends a lookup slot.
+
+    ``skipped``, if given, collects the ``(template, summary)`` pairs that were
+    priced but not selected, each carrying a ``skipped`` reason. Without it a
+    template dropped by the budget or the probe looks exactly like one that was
+    never in the tier list.
     """
+    if skipped is None:
+        skipped = []
     candidates = [
         template
         for template in templates
@@ -1075,9 +1119,8 @@ def select_portfolio(
             specs = template.probe_specs()
             measurements = [probe[s.key()] for s in specs if s.key() in probe]
             if measurements and not any(measurements):
-                logger.debug(
-                    "Dropping %s: probe found no entry-hop neighbours.", template.name
-                )
+                summary["skipped"] = "probe found no entry-hop neighbours"
+                skipped.append((template, summary))
                 continue
             kept.append((template, summary))
         priced = kept
@@ -1098,13 +1141,12 @@ def select_portfolio(
     for template, summary in priced:
         cost = summary["expected_paths"]
         if selected and spent + cost > budget:
-            logger.debug(
-                "Skipping %s (%d paths): would exceed the %d-path budget at %d.",
-                template.name,
-                cost,
-                budget,
-                spent,
-            )
+            # Recorded on the summary, not just logged: a template dropped here
+            # is indistinguishable from one that was never configured, and the
+            # caller reports it on the per-query line so a portfolio that is
+            # quietly smaller than the tier list says is visible.
+            summary["skipped"] = f"{cost:,} paths would exceed the {budget:,} budget"
+            skipped.append((template, summary))
             continue
         selected.append((template, summary))
         spent += cost

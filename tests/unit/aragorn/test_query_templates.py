@@ -518,3 +518,109 @@ def test_estimates_declare_where_they_came_from(two_hop, census):
     assert baseline_estimate(two_hop)["source"] == "baseline"
     assert price(two_hop, census)["source"] == "census"
     assert price(two_hop, None)["source"] == "baseline"
+
+
+# ---------------------------------------------------------------------------
+# Sibling witnesses are a self-join, not an independent draw
+# ---------------------------------------------------------------------------
+
+
+def two_witness_template():
+    return make_template(
+        name="two_witness",
+        categories={
+            "n_disease": DISEASE,
+            "n_protein_a": PROTEIN,
+            "n_protein_b": PROTEIN,
+            "n_chem": SMALL_MOLECULE,
+        },
+        hops=(
+            Hop("n_disease", "n_protein_a", ("biolink:associated_with",)),
+            Hop("n_disease", "n_protein_b", ("biolink:associated_with",)),
+            Hop(
+                "n_chem",
+                "n_protein_a",
+                ("biolink:affects",),
+                ((DIRECTION, "decreased"),),
+            ),
+            Hop(
+                "n_chem",
+                "n_protein_b",
+                ("biolink:affects",),
+                ((DIRECTION, "decreased"),),
+            ),
+        ),
+    )
+
+
+def test_two_witnesses_count_combinations_not_ordered_pairs(census):
+    """Both witnesses are drawn from the same neighbour set, so multiplying the
+    fan-out in twice counts ordered pairs including the degenerate ones -- and
+    merge_message keeps neither. The estimate must be C(f,2), not f^2."""
+    summary = estimate(two_witness_template(), census)
+
+    # f=10 proteins per disease, 20 chemicals per protein.
+    # C(10,2) = 45 unordered distinct pairs, not 10*10 = 100.
+    assert summary["expected_paths"] == 45 * 20
+
+
+def test_the_self_join_correction_applies_to_probe_measurements_too(census):
+    """This is the case that matters: the probe substitutes a real disease
+    degree into *both* witness hops, so an uncorrected f^2 grows quadratically
+    and blows the path budget for any well-studied disease."""
+    template = two_witness_template()
+    spec = template.probe_spec(template.hops[0])
+    summary = estimate(template, census, probe={spec.key(): 100})
+
+    assert summary["expected_paths"] == (100 * 99 // 2) * 20
+
+
+def test_a_single_witness_is_unaffected(census, two_hop):
+    """The correction must only fire for a second draw from the same set."""
+    assert estimate(two_hop, census)["expected_paths"] == 200
+
+
+def test_distinct_neighbour_sets_are_independent_draws(census):
+    """Two hops from the pinned node with different predicates are genuinely
+    independent and must still multiply."""
+    template = make_template(
+        categories={
+            "n_disease": DISEASE,
+            "n_protein": PROTEIN,
+            "n_chem": SMALL_MOLECULE,
+        },
+        hops=(
+            Hop("n_disease", "n_protein", ("biolink:associated_with",)),
+            Hop(
+                "n_chem", "n_protein", ("biolink:affects",), ((DIRECTION, "decreased"),)
+            ),
+        ),
+    )
+    assert estimate(template, census)["expected_paths"] == 200
+
+
+# ---------------------------------------------------------------------------
+# A template that is configured but not fired must say so
+# ---------------------------------------------------------------------------
+
+
+def test_budget_skips_are_reported_not_silent():
+    skipped: list = []
+    select_portfolio(TEMPLATES, census=None, budget=1200, skipped=skipped)
+
+    names = {template.name for template, _ in skipped}
+    assert "ppi_neighborhood" in names
+    for _, summary in skipped:
+        assert "budget" in summary["skipped"]
+
+
+def test_probe_zero_skips_are_reported_not_silent():
+    associated = ProbeSpec(("biolink:associated_with",), PROTEIN, True)
+    skipped: list = []
+    select_portfolio(
+        TEMPLATES, census=None, probe={associated.key(): 0}, skipped=skipped
+    )
+
+    names = {template.name for template, _ in skipped}
+    assert "target_inhibition_sm" in names
+    assert any("probe" in summary["skipped"] for _, summary in skipped)

@@ -38,6 +38,12 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
+# Startup logging has to go through a "shepherd.*" logger: shepherd_utils.shared
+# calls setup_logging() on import, which attaches handlers to the "shepherd"
+# logger and leaves the root logger bare. Anything logged on the root is
+# dropped by logging.lastResort below WARNING, which is why a worker appears
+# silent until its first task arrives and get_tasks builds a named logger.
+startup_logger = logging.getLogger(f"shepherd.{STREAM}")
 
 # Creative-edge predicates the census template portfolio answers. The portfolio
 # is drug-for-disease, so anything else -- contraindication, the qualified
@@ -489,6 +495,7 @@ async def expand_census_query(input_message, logger: logging.Logger):
             )
 
     budget = parameters.get("template_path_budget", settings.template_path_budget)
+    skipped: list = []
     selected = query_templates.select_portfolio(
         candidates,
         get_census(),
@@ -496,6 +503,7 @@ async def expand_census_query(input_message, logger: logging.Logger):
         budget=budget,
         tiers=tiers,
         answer_categories=answer_categories,
+        skipped=skipped,
     )
     if not selected:
         logger.warning(
@@ -553,6 +561,12 @@ async def expand_census_query(input_message, logger: logging.Logger):
             for template, summary in selected
         ),
     )
+    for template, summary in skipped:
+        logger.warning(
+            "Template %s configured but NOT fired: %s.",
+            template.name,
+            summary["skipped"],
+        )
     return messages, labels
 
 
@@ -615,7 +629,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
-    logging.info(describe_expansion_config())
+    startup_logger.info(describe_expansion_config())
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
