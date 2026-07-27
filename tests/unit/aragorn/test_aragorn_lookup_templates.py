@@ -19,7 +19,7 @@ from workers.aragorn_lookup.probe import (
     count_neighbours,
     probe_disease,
 )
-from workers.aragorn_lookup.query_templates import ProbeSpec
+from workers.aragorn_lookup.query_templates import TIER_ORDER, ProbeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,7 @@ async def test_unknown_template_set_falls_back_to_the_configured_default(
 
 @pytest.mark.asyncio
 async def test_templates_parameter_restricts_the_portfolio(message):
+    message["parameters"]["template_tiers"] = list(TIER_ORDER)
     message["parameters"]["templates"] = ["direct_association"]
     messages, labels = await lookup_worker.build_lookup_messages(message, logger)
 
@@ -184,6 +185,7 @@ async def test_leaky_templates_are_held_back_by_default(message):
 @pytest.mark.asyncio
 async def test_exclude_leaky_false_fires_the_leaky_template(message):
     """Measuring what the leaky tier is worth has to remain one flag away."""
+    message["parameters"]["template_tiers"] = list(TIER_ORDER)
     message["parameters"]["exclude_leaky"] = False
     _, labels = await lookup_worker.build_lookup_messages(message, logger)
 
@@ -212,6 +214,7 @@ async def test_template_tiers_and_exclude_leaky_compose(message):
 
 @pytest.mark.asyncio
 async def test_budget_parameter_trims_the_portfolio(message):
+    message["parameters"]["template_tiers"] = list(TIER_ORDER)
     message["parameters"]["template_path_budget"] = 1200
     _, labels = await lookup_worker.build_lookup_messages(message, logger)
 
@@ -226,6 +229,7 @@ async def test_budget_parameter_trims_the_portfolio(message):
 
 @pytest.mark.asyncio
 async def test_each_template_carries_its_own_filter_config(message):
+    message["parameters"]["template_tiers"] = list(TIER_ORDER)
     messages, labels = await lookup_worker.build_lookup_messages(message, logger)
     by_label = dict(zip(labels, messages))
 
@@ -241,6 +245,7 @@ async def test_each_template_carries_its_own_filter_config(message):
 
 @pytest.mark.asyncio
 async def test_caller_filter_config_wins_over_the_template_default(message):
+    message["parameters"]["template_tiers"] = list(TIER_ORDER)
     message["parameters"]["filter_config"] = {"max_node_degree": 42}
     messages, labels = await lookup_worker.build_lookup_messages(message, logger)
     by_label = dict(zip(labels, messages))
@@ -329,6 +334,7 @@ async def test_probe_measurements_reach_the_estimates(message, mocker):
     associated proteins. With one measured protein it prices at ~975, which is
     the difference between not firing and firing under a 2,000-path budget.
     """
+    message["parameters"]["template_tiers"] = list(TIER_ORDER)
     message["parameters"]["probe"] = True
     message["parameters"]["template_path_budget"] = 2000
     spec = ProbeSpec(("biolink:associated_with",), PROTEIN, True)
@@ -481,3 +487,22 @@ async def test_portfolio_log_says_when_it_priced_from_the_census(
         m for m in (r.getMessage() for r in caplog.records) if "Census portfolio" in m
     )
     assert "priced from census" in line
+
+
+@pytest.mark.asyncio
+async def test_default_portfolio_is_the_mechanism_tier(message):
+    """The shipped default is Tier A alone, on benchmark evidence: it is the
+    only arm that beat the AMIE incumbent on TopAnswer (65 vs 61) and it cut
+    badly-surfaced NeverShow results from 23 to 5. Changing this changes what
+    every deployment fires, so it is pinned rather than left to the tier list
+    happening to be right."""
+    _, labels = await lookup_worker.build_lookup_messages(message, logger)
+
+    assert set(labels) == {
+        "direct_lookup",
+        "target_inhibition_sm",
+        "target_inhibition_drug",
+        "target_activation_sm",
+        "causal_gene_inhibition",
+        "inhibition_mechanism_sm",
+    }

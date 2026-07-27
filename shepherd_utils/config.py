@@ -120,12 +120,24 @@ class Settings(BaseSettings):
     # alongside the rest. Set false (or pass parameters.exclude_leaky) to fire
     # them, which is how you measure what they are worth.
     template_exclude_leaky: bool = True
-    # Restrict the portfolio to whole tiers, comma-separated, e.g.
-    # "A-mechanism,C-associative". Empty fires every tier. This is the ablation
-    # knob: tier is the portfolio's own claim about how much mechanism a shape
-    # asserts, so it is the natural unit for "is the recall worth the
-    # precision?". Overridable per query with parameters.template_tiers.
-    template_tiers: str = ""
+    # Restrict the portfolio to whole tiers, comma-separated. Empty fires every
+    # tier. Overridable per query with parameters.template_tiers, which is how
+    # the arms below were run without a redeploy.
+    #
+    # Defaults to mechanism templates only, on benchmark evidence. Three arms,
+    # scored as TopAnswer PASSED / Acceptable PASSED / NeverShow FAILED:
+    #
+    #   AMIE rules (incumbent)   61 / 40 / 23
+    #   every census tier        57 / 38 / 21
+    #   A-mechanism only         65 / 34 /  5
+    #
+    # Tier A is the only arm that beats the incumbent on top-answer precision,
+    # and it cuts badly-surfaced never-show results by 78%. It costs six
+    # Acceptable passes: those answers are still retrieved (NO_RESULTS 9, better
+    # than the incumbent's 12) but rank lower without the better-connected paths
+    # the broad tiers gave them. Adding B/C/D back is what takes NeverShow
+    # FAILED from 5 to 21, and Tier B is 15,274 of the 18,456 paths that adds.
+    template_tiers: str = "A-mechanism"
     # Per-disease probe (see workers/aragorn_lookup/probe.py). Measures the
     # pinned disease's actual degree on each entry hop the portfolio uses, so
     # selection prices this disease instead of the average one. Costs one small

@@ -93,12 +93,26 @@ before mechanism ones:
 | `D-branching`   |         1 |  2,689 | two independent witnesses (precision lever) |
 | `D-leaky`       |         1 |  8,221 | routes through `treats` — **held back**  |
 
-`D-leaky` (`indication_transfer`) does not fire by default. It reads the same
-indication data most ground truth is drawn from, so it scores well against any
-benchmark built from that data for reasons that will not generalize, and the
-census work's evaluation protocol says to score it in its own bucket. Flip it on
-with `TEMPLATE_EXCLUDE_LEAKY=false` or `parameters.exclude_leaky: false` when
-you want to measure what it is actually worth.
+**Only `A-mechanism` fires by default** (`TEMPLATE_TIERS`), on benchmark
+evidence. Scored as TopAnswer PASSED / Acceptable PASSED / NeverShow FAILED:
+
+| Arm                    | TopAnswer | Acceptable | NeverShow FAILED |
+| ---------------------- | --------: | ---------: | ---------------: |
+| AMIE rules (incumbent) |        61 |     **40** |               23 |
+| every census tier      |        57 |         38 |               21 |
+| `A-mechanism` only     |    **65** |         34 |            **5** |
+
+Tier A is the only arm that beats the incumbent on top-answer precision, and it
+cuts badly-surfaced never-show results by 78%. It costs six Acceptable passes —
+those answers are still *retrieved* (NO_RESULTS 9, better than the incumbent's
+12) but rank lower without the better-connected paths the broad tiers gave them.
+Adding B/C/D back is what takes NeverShow FAILED from 5 to 21, and Tier B is
+15,274 of the 18,456 paths that adds.
+
+`D-leaky` (`indication_transfer`) is additionally held back by
+`TEMPLATE_EXCLUDE_LEAKY`, so it stays off even if you widen the tier list. It
+reads the same indication data most ground truth is drawn from, so it scores
+well for reasons that will not generalize.
 
 #### Running an ablation
 
@@ -106,11 +120,14 @@ Tier is the unit to ablate on, and `parameters.template_tiers` sets it per
 query — no redeploy, so the arms can run against one deployment:
 
 ```jsonc
-{"template_set": "amie"}                                    // baseline
-{"template_set": "census", "template_tiers": ["A-mechanism"]}
+{"template_set": "amie"}                                          // incumbent
+{"template_set": "census", "template_tiers": ["A-mechanism"]}     // current default
 {"template_set": "census", "template_tiers": ["A-mechanism", "C-associative"]}
-{"template_set": "census"}                                  // current default
-{"template_set": "census", "exclude_leaky": false}          // + the leaky tier
+{"template_set": "census", "template_tiers": ["A-mechanism", "D-branching"]}
+{"template_set": "census", "template_tiers": ["A-mechanism", "B-broad"]}
+{"template_set": "census", "exclude_leaky": false,
+ "template_tiers": ["A-mechanism", "B-broad", "C-associative",
+                    "D-branching", "D-leaky"]}                    // everything
 ```
 
 Read the arms on two axes, because the portfolio moves them in opposite
@@ -118,11 +135,25 @@ directions. **Recall** is `NO_RESULTS` — how often the asserted entity was not
 retrieved at all. **Top-of-ranking precision** is `TopAnswer`/`Acceptable`
 `PASSED`. A broad tier reliably buys the first and can cost the second.
 
-One trap worth naming: on `NeverShow`, `PASSED` and `NO_RESULTS` are both
-successes — the entity was not badly surfaced either way. A portfolio that
-retrieves more will convert `NO_RESULTS` into `PASSED` and look like a large
-`NeverShow` win while nothing actually improved. Compare `PASSED + NO_RESULTS`,
-or just watch `FAILED`.
+Two traps worth naming.
+
+On `NeverShow`, `PASSED` and `NO_RESULTS` are both successes — the entity was
+not badly surfaced either way. A portfolio that retrieves more converts
+`NO_RESULTS` into `PASSED` and looks like a large `NeverShow` win while nothing
+improved. Compare `PASSED + NO_RESULTS`, or just watch `FAILED`.
+
+And adding a template does not corroborate an answer. `aragorn.score` scores
+each *analysis* independently (effective resistance over that analysis's
+subgraph) and ranks an answer by the **maximum** over its analyses — see
+`workers/aragorn_score/worker.py`. So a template lifts an answer only by giving
+it a single better-connected path, never by adding a second mediocre one. The
+practical consequence when choosing what to add to Tier A: a template that
+introduces *new* answers can displace true ones, while a template whose answers
+are a subset of what already fires can only raise scores of answers already
+present. `two_witness_inhibition` is the clean case of the latter — it requires
+a chemical to decrease *two* disease-associated proteins where
+`target_inhibition_sm` requires one, so its answers are a strict subset on any
+graph, and it offers a denser per-analysis subgraph.
 
 #### The census
 
