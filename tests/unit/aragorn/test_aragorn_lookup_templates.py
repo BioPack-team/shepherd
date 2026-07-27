@@ -490,12 +490,17 @@ async def test_portfolio_log_says_when_it_priced_from_the_census(
 
 
 @pytest.mark.asyncio
-async def test_default_portfolio_is_the_mechanism_tier(message):
-    """The shipped default is Tier A alone, on benchmark evidence: it is the
-    only arm that beat the AMIE incumbent on TopAnswer (65 vs 61) and it cut
-    badly-surfaced NeverShow results from 23 to 5. Changing this changes what
-    every deployment fires, so it is pinned rather than left to the tier list
-    happening to be right."""
+async def test_default_portfolio_is_mechanism_plus_two_witness(message):
+    """The shipped default is Tier A plus the branching precision lever.
+
+    Tier A alone was the first arm to beat the AMIE incumbent on TopAnswer
+    (65 vs 61) while cutting badly-surfaced NeverShow results from 23 to 5.
+    D-branching was added on top because two_witness_inhibition's answers are a
+    strict subset of target_inhibition_sm's -- it cannot introduce a new
+    candidate, only a denser path for one already present.
+
+    Pinned rather than left to whatever the tier list happens to say, because
+    this is what every deployment fires."""
     _, labels = await lookup_worker.build_lookup_messages(message, logger)
 
     assert set(labels) == {
@@ -505,4 +510,48 @@ async def test_default_portfolio_is_the_mechanism_tier(message):
         "target_activation_sm",
         "causal_gene_inhibition",
         "inhibition_mechanism_sm",
+        "two_witness_inhibition",
     }
+
+
+# ---------------------------------------------------------------------------
+# Observability: what config is actually in effect?
+# ---------------------------------------------------------------------------
+
+
+def test_config_line_reports_the_effective_values():
+    from workers.aragorn_lookup.worker import describe_expansion_config
+
+    line = describe_expansion_config()
+
+    assert "template_set=" in line
+    assert "template_tiers=" in line
+    assert "census_dir=" in line
+
+
+def test_config_line_flags_a_value_overridden_by_the_environment(monkeypatch):
+    """Settings resolves env and .env ahead of the defaults in config.py, and
+    compose mounts the repo's .env into the worker. Editing a default and
+    deploying it can therefore change nothing at all, so an override has to be
+    stated rather than inferred from which templates show up in the logs."""
+    from shepherd_utils.config import Settings
+    from workers.aragorn_lookup import worker as w
+
+    monkeypatch.setattr(w.settings, "template_tiers", "A-mechanism")
+    monkeypatch.setenv("TEMPLATE_TIERS", "A-mechanism")
+    line = w.describe_expansion_config()
+
+    default = Settings.model_fields["template_tiers"].default
+    assert "[env, overriding" in line
+    assert repr(default) in line
+
+
+def test_config_line_attributes_a_dotenv_override(monkeypatch):
+    """Same override with no environment variable set came from .env."""
+    from workers.aragorn_lookup import worker as w
+
+    monkeypatch.setattr(w.settings, "template_tiers", "B-broad")
+    monkeypatch.delenv("TEMPLATE_TIERS", raising=False)
+    line = w.describe_expansion_config()
+
+    assert "[.env, overriding" in line

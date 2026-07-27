@@ -114,6 +114,26 @@ Adding B/C/D back is what takes NeverShow FAILED from 5 to 21, and Tier B is
 reads the same indication data most ground truth is drawn from, so it scores
 well for reasons that will not generalize.
 
+#### Configuration precedence (read this before editing a default)
+
+`Settings` resolves **environment variables first, then `.env`, then the
+defaults in `shepherd_utils/config.py`** — and `compose.yml` mounts the repo's
+`.env` into the worker at `/app/.env`. So a `TEMPLATE_TIERS` left over from an
+earlier ablation run silently wins over an edited default, and the only visible
+symptom is that the templates you expected never get sent.
+
+Every worker start logs what is actually in effect, and says when something
+overrode the code:
+
+```
+INFO Aragorn creative expansion: template_set='census',
+     template_tiers='A-mechanism' [env, overriding 'A-mechanism,D-branching'],
+     template_exclude_leaky=True, template_path_budget=30000,
+     template_probe_enabled=True, census_dir='/app/census'
+```
+
+Check that line first whenever a config change appears to do nothing.
+
 #### Running an ablation
 
 Tier is the unit to ablate on, and `parameters.template_tiers` sets it per

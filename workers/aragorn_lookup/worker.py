@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from typing import Optional
 import httpx
 from opentelemetry.propagate import inject
 
-from shepherd_utils.config import settings
+from shepherd_utils.config import Settings, settings
 from shepherd_utils.db import (
     add_callback_id,
     cleanup_callbacks,
@@ -320,6 +321,36 @@ def get_rule_key(
     return json.dumps(keydict, sort_keys=True)
 
 
+def describe_expansion_config() -> str:
+    """The effective creative-expansion config, and what set each value.
+
+    ``Settings`` resolves environment variables and ``.env`` ahead of the
+    defaults written in ``shepherd_utils/config.py``, and compose mounts the
+    repo's ``.env`` into the worker. So editing a default and deploying it can
+    silently change nothing, with the only evidence being which templates show
+    up in the lookup logs. This says so directly at startup.
+    """
+    fields = (
+        "template_set",
+        "template_tiers",
+        "template_exclude_leaky",
+        "template_path_budget",
+        "template_probe_enabled",
+        "census_dir",
+    )
+    parts = []
+    for name in fields:
+        value = getattr(settings, name)
+        default = Settings.model_fields[name].default
+        if value == default:
+            parts.append(f"{name}={value!r}")
+        else:
+            # Environment wins over .env, so check it first.
+            source = "env" if name.upper() in os.environ else ".env"
+            parts.append(f"{name}={value!r} [{source}, overriding {default!r}]")
+    return "Aragorn creative expansion: " + ", ".join(parts)
+
+
 @lru_cache(maxsize=1)
 def get_amie_expansions() -> dict:
     """The mined AMIE rules, parsed once per process.
@@ -584,6 +615,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
+    logging.info(describe_expansion_config())
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
