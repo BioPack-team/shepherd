@@ -361,12 +361,32 @@ def filter_repeated_nodes(response, logger: logging.Logger):
         filter_kgraph_orphans(response, logger)
 
 
-def get_promiscuous_qnodes(response):
+def get_promiscuous_qnodes(response, answer_qnode: Union[str, None] = None):
     """We have some rules like A<-treats-B-part_of->C<-part_of-D.  Figure out if this
-    qgraph is like that and return C if it is"""
+    qgraph is like that and return C if it is.
+
+    Only *intermediate* qnodes can be the C in that pattern, so the pinned
+    qnodes and the answer qnode are excluded. Both would otherwise be found by
+    the shape test below whenever a rule branches from them, and filtering on
+    either is destructive rather than useful:
+
+    - a pinned qnode is bound to the same knode in *every* result by
+      definition, so it always looks maximally promiscuous and
+      ``remove_promiscuous_knode_results`` deletes the entire result set;
+    - the answer qnode's most common binding is the best-supported answer, so
+      filtering it removes exactly the results worth keeping.
+
+    Two of the shipped AMIE ``treats`` rule templates branch from a pinned node
+    like this, as does the two_witness_inhibition query template, which is
+    branching by construction.
+    """
     qgraph = response["message"]["query_graph"]
     if len(qgraph["edges"]) < 3:
         return []
+    protected = {answer_qnode} if answer_qnode is not None else set()
+    for qnode_id, qnode in (qgraph.get("nodes") or {}).items():
+        if qnode.get("ids"):
+            protected.add(qnode_id)
     # for this to be a problem, we need 2 edges that share a subject or an object,
     # and have the same predicates and qualifiers.
     subjects = defaultdict(list)
@@ -377,7 +397,7 @@ def get_promiscuous_qnodes(response):
     center_nodes = []
     for nodelist in (subjects, objects):
         for node, edges in nodelist.items():
-            if len(edges) < 2:
+            if len(edges) < 2 or node in protected:
                 continue
             for eid1, eid2 in combinations(edges, 2):
                 e1 = qgraph["edges"][eid1]
@@ -424,7 +444,9 @@ def remove_promiscuous_knode_results(MAX_C, qnode, response):
                 del response["message"]["results"][index]
 
 
-def filter_promiscuous_results(response, logger: logging.Logger):
+def filter_promiscuous_results(
+    response, logger: logging.Logger, answer_qnode: Union[str, None] = None
+):
     """We have some rules like A<-treats-B-part_of->C<-part_of-D.
     This is saying B treats A, and D is like B (because they are both part of C).
     This isn't the worst rule in the world, we find it statistically useful.  But,
@@ -444,7 +466,7 @@ def filter_promiscuous_results(response, logger: logging.Logger):
     MAX_C = 10
     if len(response["message"]["results"]) < MAX_C:
         return
-    prom_qnodes = get_promiscuous_qnodes(response)
+    prom_qnodes = get_promiscuous_qnodes(response, answer_qnode)
     # This is a dictionary from bound knodes to the index of their result
     # There should only be one such node
     for qnode in prom_qnodes:
@@ -464,7 +486,11 @@ def merge_messages(
     pydantic_kgraph = {"nodes": {}, "edges": {}}
     source = f"infores:shepherd-{target}"
     filter_repeated_nodes(new_response, logger)
-    filter_promiscuous_results(new_response, logger)
+    # The answer qnode comes from the *original* query graph: every expansion
+    # binds it under the same key, so it is identifiable in the expanded graph.
+    filter_promiscuous_results(
+        new_response, logger, get_answer_node(original_query_graph)
+    )
     for result_message in [response, new_response]:
         result_kgraph = (
             result_message["message"]["knowledge_graph"]

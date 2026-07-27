@@ -17,6 +17,7 @@ Run it after changing any template's shape.
 """
 
 import json
+import logging
 import os
 import tempfile
 
@@ -36,6 +37,14 @@ DISEASE = "MONDO:0004979"
 OTHER_DISEASE = "MONDO:0009999"
 PROTEIN_A = "UniProtKB:P00001"
 PROTEIN_B = "UniProtKB:P00002"
+PROTEIN_C = "UniProtKB:P00005"
+PROTEIN_D = "UniProtKB:P00006"
+# Every protein the disease is associated with and the small molecule
+# decreases. Four of them make two_witness_inhibition return 4x4=16 results,
+# which is what puts it over the MAX_C=10 threshold in
+# merge_message.filter_promiscuous_results. With only two it returned 4 and
+# never exercised that filter at all.
+WITNESSES = (PROTEIN_A, PROTEIN_B, PROTEIN_C, PROTEIN_D)
 PARTNER = "UniProtKB:P00003"
 CAUSAL = "UniProtKB:P00004"
 SM = "CHEBI:100001"
@@ -48,6 +57,8 @@ NODES = [
     (OTHER_DISEASE, "Other disease", ["biolink:Disease"]),
     (PROTEIN_A, "Protein A", ["biolink:Protein"]),
     (PROTEIN_B, "Protein B", ["biolink:Protein"]),
+    (PROTEIN_C, "Protein C", ["biolink:Protein"]),
+    (PROTEIN_D, "Protein D", ["biolink:Protein"]),
     (PARTNER, "Partner", ["biolink:Protein"]),
     (CAUSAL, "Causal protein", ["biolink:Protein"]),
     (SM, "Small molecule", ["biolink:SmallMolecule"]),
@@ -68,16 +79,14 @@ INHIBITION = [("biolink:causal_mechanism_qualifier", "inhibition")]
 
 EDGES = [
     # disease entry hops
-    (DISEASE, "biolink:associated_with", PROTEIN_A, []),
-    (DISEASE, "biolink:associated_with", PROTEIN_B, []),
+    *[(DISEASE, "biolink:associated_with", p, []) for p in WITNESSES],
     (DISEASE, "biolink:associated_with", DRUG, []),
     (DISEASE, "biolink:has_phenotype", PHENOTYPE, []),
     (OTHER_DISEASE, "biolink:has_phenotype", PHENOTYPE, []),
     (CAUSAL, "biolink:contributes_to", DISEASE, []),
     (CAUSAL, "biolink:causes", DISEASE, []),
     # drug-side hops
-    (SM, "biolink:affects", PROTEIN_A, DECREASED),
-    (SM, "biolink:affects", PROTEIN_B, DECREASED),
+    *[(SM, "biolink:affects", p, DECREASED) for p in WITNESSES],
     (SM, "biolink:affects", CAUSAL, DECREASED),
     (SM, "biolink:affects", PARTNER, DECREASED),
     (SM, "biolink:affects", PROTEIN_A, INCREASED),
@@ -167,19 +176,44 @@ def test_gandalf_accepts_the_rendered_template(template, graph):
 
 def test_two_witness_returns_the_degenerate_pairs_it_documents(graph):
     """The defect in the template's notes, pinned to the behaviour that causes
-    it: two associated proteins yield 2x2 ordered pairs, two of them degenerate.
-    merge_message drops the degenerate ones and collapses the mirrored pair --
+    it: N associated proteins yield NxN ordered pairs, N of them degenerate.
+    merge_message drops the degenerate ones and collapses the mirrored pairs --
     see tests/unit/aragorn/test_aragorn_lookup_templates.py."""
     template = next(t for t in TEMPLATES if t.name == "two_witness_inhibition")
     query_graph = template.render(DISEASE, "ON", "SN", pinned_node=PINNED_NODE)
     response = lookup(graph, {"message": {"query_graph": query_graph}})
 
     results = response["message"]["results"]
-    assert len(results) == 4
+    assert len(results) == len(WITNESSES) ** 2
     degenerate = [
         result
         for result in results
         if result["node_bindings"]["n_protein_a"][0]["id"]
         == result["node_bindings"]["n_protein_b"][0]["id"]
     ]
-    assert len(degenerate) == 2
+    assert len(degenerate) == len(WITNESSES)
+
+
+def test_branching_template_survives_the_merge_filters(graph):
+    """End to end past lookup: a template is only useful if its results also
+    survive merge_message. two_witness_inhibition branches from the pinned node,
+    which made filter_promiscuous_results delete every one of its results once
+    it returned more than MAX_C=10 -- invisible in any test whose fixture
+    returned fewer, which is why this fixture has four witnesses."""
+    from workers.merge_message.worker import (
+        filter_promiscuous_results,
+        filter_repeated_nodes,
+    )
+
+    template = next(t for t in TEMPLATES if t.name == "two_witness_inhibition")
+    query_graph = template.render(DISEASE, "ON", "SN", pinned_node=PINNED_NODE)
+    response = lookup(graph, {"message": {"query_graph": query_graph}})
+    assert len(response["message"]["results"]) > 10
+
+    logger = logging.getLogger(__name__)
+    filter_repeated_nodes(response, logger)
+    # Degenerate pairs (same protein both sides) are dropped here by design.
+    assert len(response["message"]["results"]) == len(WITNESSES) ** 2 - len(WITNESSES)
+
+    filter_promiscuous_results(response, logger, answer_qnode="SN")
+    assert response["message"]["results"], "promiscuous filter ate the whole template"
