@@ -137,7 +137,7 @@ class Settings(BaseSettings):
     # than the incumbent's 12) but rank lower without the better-connected paths
     # the broad tiers gave them. Adding B/C/D back is what takes NeverShow
     # FAILED from 5 to 21, and Tier B is 15,274 of the 18,456 paths that adds.
-    template_tiers: str = "A-mechanism"
+    template_tiers: str = "A-mechanism,D-branching"
     # Per-disease probe (see workers/aragorn_lookup/probe.py). Measures the
     # pinned disease's actual degree on each entry hop the portfolio uses, so
     # selection prices this disease instead of the average one. Costs one small
