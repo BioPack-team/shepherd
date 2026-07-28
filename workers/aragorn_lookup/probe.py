@@ -47,8 +47,8 @@ def build_probe_query(
 ) -> dict:
     """A one-hop TRAPI query measuring one entry hop of the pinned disease."""
     disease_node: dict = {DISEASE_QNODE: {"ids": [disease_curie]}}
-    far_node: dict = {FAR_QNODE: {"categories": [spec.category]}}
-    if spec.disease_is_subject:
+    far_node: dict = {FAR_QNODE: {"categories": list(spec.categories)}}
+    if spec.pinned_is_subject:
         edge = {"subject": DISEASE_QNODE, "object": FAR_QNODE}
     else:
         edge = {"subject": FAR_QNODE, "object": DISEASE_QNODE}

@@ -349,7 +349,7 @@ def test_exclude_leaky_drops_the_treats_reading_template():
 
 def test_probe_of_zero_drops_a_template_that_cannot_answer():
     """No neighbours on the entry hop means no possible path -- do not fire."""
-    associated = ProbeSpec(("biolink:associated_with",), PROTEIN, True)
+    associated = ProbeSpec(("biolink:associated_with",), (PROTEIN,), True)
     selected = select_portfolio(TEMPLATES, census=None, probe={associated.key(): 0})
     names = [template.name for template, _ in selected]
 
@@ -615,7 +615,7 @@ def test_budget_skips_are_reported_not_silent():
 
 
 def test_probe_zero_skips_are_reported_not_silent():
-    associated = ProbeSpec(("biolink:associated_with",), PROTEIN, True)
+    associated = ProbeSpec(("biolink:associated_with",), (PROTEIN,), True)
     skipped: list = []
     select_portfolio(
         TEMPLATES, census=None, probe={associated.key(): 0}, skipped=skipped
@@ -624,3 +624,92 @@ def test_probe_zero_skips_are_reported_not_silent():
     names = {template.name for template, _ in skipped}
     assert "target_inhibition_sm" in names
     assert any("probe" in summary["skipped"] for _, summary in skipped)
+
+
+# ---------------------------------------------------------------------------
+# Multi-category qnodes
+# ---------------------------------------------------------------------------
+
+
+def multi_category_census():
+    """The same hop recorded under two categories, as the census would file it
+    when some nodes are most-specific Gene and others most-specific Protein."""
+    return Census(
+        rollup={
+            (SMALL_MOLECULE, "biolink:affects", PROTEIN): {
+                "edges": 800,
+                "subjects": 40,
+                "objects": 200,
+            },
+            (SMALL_MOLECULE, "biolink:affects", "biolink:Gene"): {
+                "edges": 200,
+                "subjects": 10,
+                "objects": 50,
+            },
+        },
+        qualifier_values={},
+        signatures={},
+    )
+
+
+def one_hop(target_categories):
+    return make_template(
+        categories={"n_gene": target_categories, "n_chem": SMALL_MOLECULE},
+        hops=(Hop("n_chem", "n_gene", ("biolink:affects",)),),
+        pinned="n_gene",
+        answer="n_chem",
+    )
+
+
+def test_a_single_category_is_still_accepted():
+    """Templates written with a plain string keep working."""
+    assert one_hop(PROTEIN).cats("n_gene") == (PROTEIN,)
+
+
+def test_category_sets_sum_across_disjoint_census_buckets():
+    """The census files every node under exactly one most-specific category, so
+    the per-category rows partition the graph and summing them is exact.
+
+    This is what makes a qnode meaning "the gene, however the census filed it"
+    reachable: nearly every node here is multi-category, so pinning one name
+    silently loses whatever landed under the other.
+    """
+    census = multi_category_census()
+
+    protein_only = estimate(one_hop(PROTEIN), census)
+    gene_only = estimate(one_hop("biolink:Gene"), census)
+    both = estimate(one_hop((PROTEIN, "biolink:Gene")), census)
+
+    assert protein_only["disease_coverage"] == 200
+    assert gene_only["disease_coverage"] == 50
+    assert both["disease_coverage"] == 250
+    # 1000 edges over 250 distinct objects, vs 800/200 and 200/50 separately.
+    assert both["hops"][0]["fanout"] == 4.0
+
+
+def test_render_emits_every_category_on_the_qnode():
+    query_graph = one_hop((PROTEIN, "biolink:Gene")).render("NCBIGene:1017", "QN", "AN")
+
+    assert query_graph["nodes"]["QN"]["categories"] == [PROTEIN, "biolink:Gene"]
+    assert query_graph["nodes"]["QN"]["ids"] == ["NCBIGene:1017"]
+
+
+def test_census_triples_covers_every_category_combination():
+    triples = census_triples([one_hop((PROTEIN, "biolink:Gene"))])
+
+    assert (SMALL_MOLECULE, "biolink:affects", PROTEIN) in triples
+    assert (SMALL_MOLECULE, "biolink:affects", "biolink:Gene") in triples
+
+
+def test_answer_compatible_accepts_any_matching_answer_category():
+    template = make_template(
+        categories={
+            "n_disease": DISEASE,
+            "n_protein": PROTEIN,
+            "n_chem": (SMALL_MOLECULE, DRUG),
+        }
+    )
+
+    assert template.answer_compatible([DRUG])
+    assert template.answer_compatible([SMALL_MOLECULE])
+    assert template.answer_compatible([CHEMICAL])

@@ -140,12 +140,12 @@ class ProbeSpec:
     """
 
     predicates: tuple[str, ...]
-    category: str
-    disease_is_subject: bool
+    categories: tuple[str, ...]
+    pinned_is_subject: bool
 
     def key(self) -> str:
-        direction = "out" if self.disease_is_subject else "in"
-        return f"{direction}|{','.join(self.predicates)}|{self.category}"
+        direction = "out" if self.pinned_is_subject else "in"
+        return f"{direction}|{','.join(self.predicates)}|{','.join(sorted(self.categories))}"
 
 
 @dataclass(frozen=True)
@@ -170,7 +170,14 @@ class QueryTemplate:
     name: str
     tier: str
     mechanism: str
-    categories: dict[str, str]
+    # qnode key -> category, or a tuple of categories.  Tuples matter because
+    # essentially every node in this graph is multi-category (the census
+    # manifest counts 1,670,265 of 1,670,341), and the census files each node
+    # under one "most-specific" choice.  A paralog of a pinned gene may be
+    # recorded under Gene or under Protein depending on that choice, so a qnode
+    # that means "the protein product of a gene" has to name both or it silently
+    # loses half its matches.  Read through ``cats()``, never directly.
+    categories: dict[str, "str | tuple[str, ...]"]
     hops: tuple[Hop, ...]
     baseline: Baseline
     pinned: str = "n_disease"
@@ -179,12 +186,17 @@ class QueryTemplate:
     filter_config: dict = field(default_factory=dict)
     notes: str = ""
 
+    def cats(self, key: str) -> tuple[str, ...]:
+        """The categories for a qnode, normalised to a tuple."""
+        value = self.categories[key]
+        return (value,) if isinstance(value, str) else tuple(value)
+
     def probe_spec(self, hop: Hop) -> Optional[ProbeSpec]:
         """The probe that measures ``hop``, or None if it is not an entry hop."""
         if hop.subject == self.pinned:
-            return ProbeSpec(hop.predicates, self.categories[hop.object], True)
+            return ProbeSpec(hop.predicates, self.cats(hop.object), True)
         if hop.object == self.pinned:
-            return ProbeSpec(hop.predicates, self.categories[hop.subject], False)
+            return ProbeSpec(hop.predicates, self.cats(hop.subject), False)
         return None
 
     def probe_specs(self) -> list[ProbeSpec]:
@@ -203,10 +215,15 @@ class QueryTemplate:
         """
         if not requested_categories:
             return True
-        ancestors = _CHEMICAL_ANCESTORS.get(self.categories[self.answer])
-        if ancestors is None:
-            return True
-        return any(category in ancestors for category in requested_categories)
+        compatible = False
+        for answer_category in self.cats(self.answer):
+            ancestors = _CHEMICAL_ANCESTORS.get(answer_category)
+            if ancestors is None:
+                # Unknown to the local hierarchy: allow rather than over-filter.
+                return True
+            if any(category in ancestors for category in requested_categories):
+                compatible = True
+        return compatible
 
     def render(
         self,
@@ -242,8 +259,8 @@ class QueryTemplate:
             taken.add(name)
 
         nodes: dict[str, dict] = {}
-        for key, category in self.categories.items():
-            nodes[rename[key]] = {"categories": [category]}
+        for key in self.categories:
+            nodes[rename[key]] = {"categories": list(self.cats(key))}
 
         pinned = nodes[question_qnode]
         pinned["ids"] = [disease_curie]
@@ -772,11 +789,40 @@ class Census:
         Multiple predicates take the largest matching row, since Gandalf ORs
         them.
         """
-        subject_category = template.categories[hop.subject]
-        object_category = template.categories[hop.object]
-
         best = None
         for predicate in hop.predicates:
+            found = self._for_predicate(template, hop, predicate)
+            if found and (best is None or found["edges"] > best["edges"]):
+                best = found
+        return best
+
+    def _for_predicate(
+        self, template: "QueryTemplate", hop: Hop, predicate: str
+    ) -> Optional[dict]:
+        """Counts for one hop under one predicate, summed over category sets.
+
+        A qnode may name several categories. The census files every node under
+        exactly one most-specific category, so the per-category rows partition
+        the nodes and edges -- summing across them is exact, not double
+        counting.
+        """
+        totals = None
+        for subject_category in template.cats(hop.subject):
+            for object_category in template.cats(hop.object):
+                found = self._one_row(hop, subject_category, predicate, object_category)
+                if found is None:
+                    continue
+                if totals is None:
+                    totals = dict(found)
+                else:
+                    for field_name in ("edges", "subjects", "objects"):
+                        totals[field_name] += found[field_name]
+        return totals
+
+    def _one_row(
+        self, hop: Hop, subject_category: str, predicate: str, object_category: str
+    ) -> Optional[dict]:
+        if True:
             key = (subject_category, predicate, object_category)
             if len(hop.qualifiers) == 1:
                 type_id, value = hop.qualifiers[0]
@@ -796,9 +842,7 @@ class Census:
                     }
             else:
                 found = self.rollup.get(key)
-            if found and (best is None or found["edges"] > best["edges"]):
-                best = found
-        return best
+            return found
 
 
 def census_triples(
@@ -812,10 +856,10 @@ def census_triples(
     triples: set[tuple[str, str, str]] = set()
     for template in templates:
         for hop in template.hops:
-            subject = template.categories[hop.subject]
-            obj = template.categories[hop.object]
-            for predicate in hop.predicates:
-                triples.add((subject, predicate, obj))
+            for subject in template.cats(hop.subject):
+                for obj in template.cats(hop.object):
+                    for predicate in hop.predicates:
+                        triples.add((subject, predicate, obj))
     return triples
 
 
@@ -959,7 +1003,7 @@ def estimate(
                 source,
                 hop.predicates,
                 hop.qualifiers,
-                template.categories[target],
+                template.cats(target),
             )
             already = siblings.get(sibling_key, 0)
             if already:

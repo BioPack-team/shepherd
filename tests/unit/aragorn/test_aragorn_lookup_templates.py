@@ -283,14 +283,14 @@ async def test_expansions_bind_the_original_answer_qnode(message):
 
 def test_probe_query_orients_the_edge_from_the_spec():
     outgoing = build_probe_query(
-        ProbeSpec(("biolink:associated_with",), PROTEIN, True), "MONDO:1", 1000
+        ProbeSpec(("biolink:associated_with",), (PROTEIN,), True), "MONDO:1", 1000
     )
     edge = outgoing["message"]["query_graph"]["edges"]["e0"]
     assert edge["subject"] == "probe_disease"
     assert edge["object"] == FAR_QNODE
 
     incoming = build_probe_query(
-        ProbeSpec(("biolink:causes",), PROTEIN, False), "MONDO:1", 1000
+        ProbeSpec(("biolink:causes",), (PROTEIN,), False), "MONDO:1", 1000
     )
     edge = incoming["message"]["query_graph"]["edges"]["e0"]
     assert edge["subject"] == FAR_QNODE
@@ -300,7 +300,7 @@ def test_probe_query_orients_the_edge_from_the_spec():
 def test_probe_query_is_dehydrated_and_degree_capped():
     """A probe on a hub disease must not return a large payload."""
     query = build_probe_query(
-        ProbeSpec(("biolink:associated_with",), PROTEIN, True), "MONDO:1", 250
+        ProbeSpec(("biolink:associated_with",), (PROTEIN,), True), "MONDO:1", 250
     )
 
     assert query["parameters"]["dehydrated"] is True
@@ -337,7 +337,7 @@ async def test_probe_measurements_reach_the_estimates(message, mocker):
     message["parameters"]["template_tiers"] = list(TIER_ORDER)
     message["parameters"]["probe"] = True
     message["parameters"]["template_path_budget"] = 2000
-    spec = ProbeSpec(("biolink:associated_with",), PROTEIN, True)
+    spec = ProbeSpec(("biolink:associated_with",), (PROTEIN,), True)
 
     probe = mocker.patch(
         "workers.aragorn_lookup.worker.probe_disease",
@@ -359,7 +359,7 @@ async def test_a_failing_probe_does_not_fail_the_query(mocker):
         "httpx.AsyncClient.post",
         new=mocker.AsyncMock(side_effect=RuntimeError("connection refused")),
     )
-    spec = ProbeSpec(("biolink:associated_with",), PROTEIN, True)
+    spec = ProbeSpec(("biolink:associated_with",), (PROTEIN,), True)
 
     assert await probe_disease("MONDO:1", [spec], logger) == {}
 
@@ -377,7 +377,7 @@ async def test_probe_ignores_a_non_200(mocker):
     response = mocker.Mock()
     response.status_code = 500
     mocker.patch("httpx.AsyncClient.post", new=mocker.AsyncMock(return_value=response))
-    spec = ProbeSpec(("biolink:associated_with",), PROTEIN, True)
+    spec = ProbeSpec(("biolink:associated_with",), (PROTEIN,), True)
 
     assert await probe_disease("MONDO:1", [spec], logger) == {}
 
