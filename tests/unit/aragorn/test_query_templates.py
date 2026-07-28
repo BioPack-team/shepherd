@@ -713,3 +713,21 @@ def test_answer_compatible_accepts_any_matching_answer_category():
     assert template.answer_compatible([DRUG])
     assert template.answer_compatible([SMALL_MOLECULE])
     assert template.answer_compatible([CHEMICAL])
+
+
+def test_census_triples_defaults_to_every_portfolio():
+    """The loader keeps only the rows named here, so a portfolio left out of the
+    default prices every one of its templates at nothing and the budget goes
+    blind to it -- which is exactly what happened when this defaulted to the
+    treats portfolio alone."""
+    from workers.aragorn_lookup.query_templates import ALL_TEMPLATES, census_triples
+
+    triples = census_triples()
+
+    for template in ALL_TEMPLATES:
+        for direction in ("increased", "decreased"):
+            for hop in template.resolved_hops(direction):
+                for subject in template.cats(hop.subject):
+                    for obj in template.cats(hop.object):
+                        for predicate in hop.predicates:
+                            assert (subject, predicate, obj) in triples, template.name

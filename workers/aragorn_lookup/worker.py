@@ -621,6 +621,18 @@ async def expand_census_query(input_message, logger: logging.Logger):
             template.name,
             summary["skipped"],
         )
+    blind = [
+        (template.name, summary["missing_triples"])
+        for template, summary in selected
+        if summary.get("missing_triples")
+    ]
+    for name, gaps in blind:
+        logger.warning(
+            "Template %s priced with no census row for %s -- its estimate is "
+            "meaningless and the path budget cannot see it.",
+            name,
+            "; ".join(gaps),
+        )
     return messages, labels
 
 

@@ -1299,9 +1299,13 @@ class Census:
 
 
 def census_triples(
-    templates: Sequence[QueryTemplate] = TEMPLATES,
+    templates: Sequence[QueryTemplate] = ALL_TEMPLATES,
 ) -> set[tuple[str, str, str]]:
     """Every census row a set of templates can ask for.
+
+    Defaults to ALL_TEMPLATES, not one portfolio: the loader keeps only the rows
+    named here, so a portfolio left out of this call prices every one of its
+    templates at nothing and the budget goes blind to it.
 
     One row per (hop, predicate), since ``Census.stats`` reads each predicate of
     a multi-predicate qedge separately and takes the largest.
@@ -1323,7 +1327,7 @@ def census_triples(
     return triples
 
 
-def needs_signatures(templates: Sequence[QueryTemplate] = TEMPLATES) -> bool:
+def needs_signatures(templates: Sequence[QueryTemplate] = ALL_TEMPLATES) -> bool:
     """Whether any template constrains more than one qualifier on a hop."""
     return any(
         len(hop.qualifiers) > 1 for template in templates for hop in template.hops
@@ -1332,7 +1336,7 @@ def needs_signatures(templates: Sequence[QueryTemplate] = TEMPLATES) -> bool:
 
 def load_census(
     directory: Optional[str],
-    templates: Sequence[QueryTemplate] = TEMPLATES,
+    templates: Sequence[QueryTemplate] = ALL_TEMPLATES,
 ) -> Optional[Census]:
     """Load a census directory, or return None if it is absent or unreadable.
 
