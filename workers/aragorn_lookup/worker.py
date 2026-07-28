@@ -57,6 +57,56 @@ TREATS_PREDICATES = frozenset(
 
 TEMPLATE_SETS = frozenset({"census", "amie", "both"})
 
+# Creative edges the census portfolio answers, and the graph predicates behind
+# them. Aragorn's AMIE rule keys use biolink:contraindicated_for, but this graph
+# records biolink:contraindicated_in (22,859 edges) -- both are accepted.
+DIRECTION_QUALIFIER = "biolink:object_direction_qualifier"
+AFFECTS_PREDICATES = frozenset({"biolink:affects"})
+CONTRAINDICATED_PREDICATES = frozenset(
+    {"biolink:contraindicated_for", "biolink:contraindicated_in"}
+)
+
+
+def creative_query_type(predicate, qualifiers, source_input):
+    """Which census portfolio answers this creative edge, and in which direction.
+
+    Returns ``(query_type, direction)``, or ``(None, None)`` when nothing in the
+    portfolio covers the edge and the AMIE rules should handle it.
+
+    ``source_input`` says whether the *subject* of the qedge is the pinned node.
+    For every one of these predicates the subject is the chemical, so a pinned
+    subject means "what does this chemical do" and a pinned object means "what
+    acts on this thing".
+    """
+    if predicate in TREATS_PREDICATES and not qualifiers:
+        # Only the disease-pinned form; "what does this drug treat" has no
+        # templates.
+        return ("treats", None) if not source_input else (None, None)
+    if predicate in CONTRAINDICATED_PREDICATES and not qualifiers:
+        return ("contraindicated", None) if not source_input else (None, None)
+    if predicate in AFFECTS_PREDICATES:
+        direction = _requested_direction(qualifiers)
+        if direction is None:
+            # An affects query with no direction asked for has no sign to
+            # propagate, so the sign-carrying templates cannot be built.
+            return None, None
+        query_type = (
+            "affects_chemical_pinned" if source_input else "affects_gene_pinned"
+        )
+        return query_type, direction
+    return None, None
+
+
+def _requested_direction(qualifiers):
+    """The object_direction_qualifier the query asked for, if any."""
+    for constraint in (qualifiers or {}).get("qualifier_constraints", []) or []:
+        for qualifier in constraint.get("qualifier_set", []) or []:
+            if qualifier.get("qualifier_type_id") == DIRECTION_QUALIFIER:
+                value = qualifier.get("qualifier_value")
+                if value in ("increased", "decreased"):
+                    return value
+    return None
+
 
 def examine_query(message):
     """Decides whether the input is an infer. Returns the grouping node"""
@@ -395,13 +445,8 @@ def build_direct_message(input_message) -> dict:
 
 
 def census_templates_applicable(predicate, qualifiers, source_input) -> bool:
-    """Whether the census portfolio can answer this creative edge.
-
-    It answers one question -- what chemicals may treat this disease -- so it
-    needs a treats-family predicate, no qualifier constraints, and the disease
-    (the object of ``treats``) to be the pinned node.
-    """
-    return predicate in TREATS_PREDICATES and not qualifiers and not source_input
+    """Whether any census portfolio can answer this creative edge."""
+    return creative_query_type(predicate, qualifiers, source_input)[0] is not None
 
 
 def expand_aragorn_query(input_message, logger: logging.Logger):
@@ -461,9 +506,13 @@ async def expand_census_query(input_message, logger: logging.Logger):
     input_id, predicate, qualifiers, source, source_input, target, qedge_id = (
         get_infer_parameters(input_message)
     )
-    # treats runs chemical -> disease, and applicability has already established
-    # the disease end is the pinned one.
-    question_qnode, answer_qnode = target, source
+    query_type, direction = creative_query_type(predicate, qualifiers, source_input)
+    if query_type is None:
+        return [], []
+    # Whichever end carries the ids is the question; the other is the answer.
+    question_qnode, answer_qnode = (
+        (source, target) if source_input else (target, source)
+    )
     qnodes = input_message["message"]["query_graph"]["nodes"]
     answer_categories = qnodes.get(answer_qnode, {}).get("categories") or []
 
@@ -473,7 +522,7 @@ async def expand_census_query(input_message, logger: logging.Logger):
     tiers = parameters.get("template_tiers") or settings.template_tier_list
     candidates = [
         template
-        for template in query_templates.TEMPLATES
+        for template in query_templates.templates_for(query_type)
         if template.answer_compatible(answer_categories)
         and (requested is None or template.name in requested)
         and (not tiers or template.tier in tiers)
@@ -481,8 +530,9 @@ async def expand_census_query(input_message, logger: logging.Logger):
     ]
     if not candidates:
         logger.warning(
-            "No census templates match this query (answer categories %s); "
+            "No %s templates match this query (answer categories %s); "
             "falling back to the AMIE expansions.",
+            query_type,
             answer_categories,
         )
         return [], []
@@ -504,6 +554,7 @@ async def expand_census_query(input_message, logger: logging.Logger):
         tiers=tiers,
         answer_categories=answer_categories,
         skipped=skipped,
+        direction=direction,
     )
     if not selected:
         logger.warning(
@@ -521,6 +572,7 @@ async def expand_census_query(input_message, logger: logging.Logger):
             answer_qnode,
             pinned_node=qnodes.get(question_qnode),
             answer_node=qnodes.get(answer_qnode),
+            direction=direction,
         )
         template_parameters = copy.deepcopy(parameters)
         # The template's degree caps are defaults; anything the caller set
@@ -549,8 +601,10 @@ async def expand_census_query(input_message, logger: logging.Logger):
         else "census"
     )
     logger.info(
-        "Census portfolio for %s: %d templates, ~%d expected paths, priced from "
-        "%s%s (%s)",
+        "Census portfolio (%s%s) for %s: %d templates, ~%d expected paths, "
+        "priced from %s%s (%s)",
+        query_type,
+        f", {direction}" if direction else "",
         input_id,
         len(selected),
         sum(summary["expected_paths"] for _, summary in selected),

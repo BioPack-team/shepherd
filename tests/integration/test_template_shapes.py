@@ -31,7 +31,7 @@ build_graph_from_jsonl = pytest.importorskip(
 ).build_graph_from_jsonl
 lookup = pytest.importorskip("gandalf.search.lookup").lookup
 
-from workers.aragorn_lookup.query_templates import TEMPLATES  # noqa: E402
+from workers.aragorn_lookup.query_templates import ALL_TEMPLATES  # noqa: E402
 
 DISEASE = "MONDO:0004979"
 OTHER_DISEASE = "MONDO:0009999"
@@ -51,6 +51,10 @@ SM = "CHEBI:100001"
 DRUG = "CHEBI:200001"
 PATHWAY = "REACT:R-HSA-1"
 PHENOTYPE = "HP:0001250"
+GENE_FAMILY = "PANTHER.FAMILY:PTHR1"
+MOL_ACTIVITY = "GO:0004672"
+PARALOG = "UniProtKB:P00007"
+REGULATOR = "UniProtKB:P00008"
 
 NODES = [
     (DISEASE, "Asthma", ["biolink:Disease"]),
@@ -65,6 +69,12 @@ NODES = [
     (DRUG, "A drug", ["biolink:Drug"]),
     (PATHWAY, "Pathway", ["biolink:Pathway"]),
     (PHENOTYPE, "Seizure", ["biolink:PhenotypicFeature"]),
+    (GENE_FAMILY, "Kinase family", ["biolink:GeneFamily"]),
+    (MOL_ACTIVITY, "Kinase activity", ["biolink:MolecularActivity"]),
+    # Gene CURIEs carry both categories in the real graph, so the fixture does
+    # too -- that is what the GENE_CATS template qnodes rely on.
+    (PARALOG, "Paralogue", ["biolink:Protein", "biolink:Gene"]),
+    (REGULATOR, "Regulator", ["biolink:Protein", "biolink:Gene"]),
 ]
 
 DECREASED = [
@@ -89,6 +99,7 @@ EDGES = [
     *[(SM, "biolink:affects", p, DECREASED) for p in WITNESSES],
     (SM, "biolink:affects", CAUSAL, DECREASED),
     (SM, "biolink:affects", PARTNER, DECREASED),
+    (SM, "biolink:affects", PARTNER, INCREASED),
     (SM, "biolink:affects", PROTEIN_A, INCREASED),
     (SM, "biolink:affects", PROTEIN_A, INHIBITION),
     (DRUG, "biolink:affects", PROTEIN_A, DECREASED),
@@ -98,6 +109,29 @@ EDGES = [
     (PATHWAY, "biolink:has_participant", SM, []),
     (PHENOTYPE, "biolink:associated_with", DRUG, []),
     (DRUG, "biolink:treats_or_applied_or_studied_to_treat", OTHER_DISEASE, []),
+    # --- gene/chemical query types -----------------------------------------
+    (PROTEIN_A, "biolink:member_of", GENE_FAMILY, []),
+    (PARALOG, "biolink:member_of", GENE_FAMILY, []),
+    (PROTEIN_A, "biolink:enables", MOL_ACTIVITY, []),
+    (PARALOG, "biolink:enables", MOL_ACTIVITY, []),
+    (PARALOG, "biolink:participates_in", PATHWAY, []),
+    (SM, "biolink:affects", PARALOG, DECREASED),
+    (SM, "biolink:affects", PARALOG, INCREASED),
+    (SM, "biolink:directly_physically_interacts_with", PROTEIN_A, []),
+    # Regulatory chain, both signs, so the activator and repressor cascades
+    # each have an edge to travel.
+    (REGULATOR, "biolink:affects", PROTEIN_A, INCREASED),
+    (REGULATOR, "biolink:affects", PROTEIN_A, DECREASED),
+    (SM, "biolink:affects", REGULATOR, DECREASED),
+    (SM, "biolink:affects", REGULATOR, INCREASED),
+    (PROTEIN_A, "biolink:affects", PROTEIN_B, INCREASED),
+    (PROTEIN_A, "biolink:affects", PROTEIN_B, DECREASED),
+    # --- contraindication ---------------------------------------------------
+    (DRUG, "biolink:has_side_effect", DISEASE, []),
+    (DRUG, "biolink:causes", DISEASE, []),
+    (DRUG, "biolink:predisposes_to_condition", DISEASE, []),
+    (DRUG, "biolink:contraindicated_in", OTHER_DISEASE, []),
+    (DRUG, "biolink:affects", CAUSAL, INCREASED),
 ]
 
 
@@ -156,10 +190,29 @@ PINNED_NODE = {
 ANSWER_NODE = {"set_interpretation": "BATCH"}
 
 
-@pytest.mark.parametrize("template", TEMPLATES, ids=lambda t: t.name)
+# What each creative question pins, and whether it carries a direction.
+PINS = {
+    "treats": (DISEASE, PINNED_NODE, None),
+    "contraindicated": (DISEASE, PINNED_NODE, None),
+    "affects_gene_pinned": (PROTEIN_A, {"categories": ["biolink:Gene"]}, "decreased"),
+    "affects_chemical_pinned": (
+        SM,
+        {"categories": ["biolink:ChemicalEntity"]},
+        "decreased",
+    ),
+}
+
+
+@pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.name)
 def test_gandalf_accepts_the_rendered_template(template, graph):
+    curie, pinned, direction = PINS[template.query_type]
     query_graph = template.render(
-        DISEASE, "ON", "SN", pinned_node=PINNED_NODE, answer_node=ANSWER_NODE
+        curie,
+        "ON",
+        "SN",
+        pinned_node=pinned,
+        answer_node=ANSWER_NODE,
+        direction=direction,
     )
     response = lookup(
         graph,
@@ -174,12 +227,30 @@ def test_gandalf_accepts_the_rendered_template(template, graph):
         assert result["node_bindings"].get("SN")
 
 
+@pytest.mark.parametrize("direction", ["increased", "decreased"])
+@pytest.mark.parametrize(
+    "template",
+    [t for t in ALL_TEMPLATES if t.query_type.startswith("affects")],
+    ids=lambda t: t.name,
+)
+def test_both_directions_execute(template, direction, graph):
+    """A sign-carrying template has to work in both directions, since the same
+    template serves 'what increases' and 'what decreases'."""
+    curie, pinned, _ = PINS[template.query_type]
+    query_graph = template.render(
+        curie, "ON", "SN", pinned_node=pinned, direction=direction
+    )
+    response = lookup(graph, {"message": {"query_graph": query_graph}})
+
+    assert response["message"].get("results"), f"{template.name} {direction} empty"
+
+
 def test_two_witness_returns_the_degenerate_pairs_it_documents(graph):
     """The defect in the template's notes, pinned to the behaviour that causes
     it: N associated proteins yield NxN ordered pairs, N of them degenerate.
     merge_message drops the degenerate ones and collapses the mirrored pairs --
     see tests/unit/aragorn/test_aragorn_lookup_templates.py."""
-    template = next(t for t in TEMPLATES if t.name == "two_witness_inhibition")
+    template = next(t for t in ALL_TEMPLATES if t.name == "two_witness_inhibition")
     query_graph = template.render(DISEASE, "ON", "SN", pinned_node=PINNED_NODE)
     response = lookup(graph, {"message": {"query_graph": query_graph}})
 
@@ -205,7 +276,7 @@ def test_branching_template_survives_the_merge_filters(graph):
         filter_repeated_nodes,
     )
 
-    template = next(t for t in TEMPLATES if t.name == "two_witness_inhibition")
+    template = next(t for t in ALL_TEMPLATES if t.name == "two_witness_inhibition")
     query_graph = template.render(DISEASE, "ON", "SN", pinned_node=PINNED_NODE)
     response = lookup(graph, {"message": {"query_graph": query_graph}})
     assert len(response["message"]["results"]) > 10

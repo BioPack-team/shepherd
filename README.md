@@ -48,11 +48,33 @@ A creative (inferred-edge) query is answered by fanning out a set of templated
 TRAPI queries to Gandalf in parallel and letting the ranker filter what comes
 back. Two template sets exist, and which one runs is the A/B knob:
 
-- **`census`** (default) — the portfolio in
+- **`census`** (default) — the portfolios in
   `workers/aragorn_lookup/query_templates.py`, derived from a census of the
-  graph's metagraph rather than from biomedical intuition. Twelve shapes in four
-  tiers: mechanism (qualified), broad (recall), associative, and a quarantined
-  tier that reads `treats`-family edges.
+  graph's metagraph rather than from biomedical intuition. 28 shapes across four
+  creative question types, tiered: mechanism (qualified), broad (recall),
+  associative, and a quarantined tier that reads indication/contraindication
+  edges.
+
+  | question | pinned | answered | templates |
+  | --- | --- | --- | ---: |
+  | `treats` — what may treat this disease | disease | chemical | 12 |
+  | `affects` — what moves this gene | gene | chemical | 6 |
+  | `affects` — what genes does this move | chemical | gene | 5 |
+  | `contraindicated` — what is unsafe here | disease | chemical | 5 |
+
+  The `affects` portfolios carry a **sign**. Inference through a causal chain
+  multiplies directions: if a chemical decreases regulator R and R *decreases*
+  gene G, the chemical *increases* G. Hops therefore declare `SAME` or
+  `OPPOSITE` relative to the direction the query asked for, and
+  `Hop.resolve()` binds them per query — so one template serves both the
+  "increased" and "decreased" form of a question. Analogy hops (same family,
+  same pathway) use `SAME`: no flip.
+
+  One deliberate relaxation: the incoming `affects` query constrains both
+  aspect and direction, but constraining both on an *intermediate* hop cuts
+  coverage from 33,052 proteins to 2,487. A creative template infers the
+  qualified edge rather than travelling one, so intermediate hops constrain
+  direction only — 13x recall at no cost in meaning.
 - **`amie`** — the mined AMIE rules in
   `rules_with_types_cleaned_finalized.json`, which is how this worked before.
 

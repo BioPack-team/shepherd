@@ -55,9 +55,20 @@ def test_treats_with_the_chemical_pinned_is_not_applicable():
     assert not lookup_worker.census_templates_applicable("biolink:treats", {}, True)
 
 
-def test_non_treats_predicates_are_not_applicable():
-    assert not lookup_worker.census_templates_applicable(
+def test_contraindication_is_applicable():
+    """contraindicated_for is the AMIE key; this graph records
+    contraindicated_in. Both route to the same portfolio."""
+    assert lookup_worker.census_templates_applicable(
         "biolink:contraindicated_for", {}, False
+    )
+    assert lookup_worker.census_templates_applicable(
+        "biolink:contraindicated_in", {}, False
+    )
+
+
+def test_a_predicate_with_no_portfolio_is_not_applicable():
+    assert not lookup_worker.census_templates_applicable(
+        "biolink:genetic_association", {}, False
     )
 
 
@@ -143,7 +154,7 @@ async def test_non_treats_creative_edge_falls_back_to_amie(message, mocker):
     """A creative edge the portfolio cannot answer must not fire nothing."""
     mocker.patch("workers.aragorn_lookup.worker.get_amie_expansions", return_value={})
     edge = message["message"]["query_graph"]["edges"]["e0"]
-    edge["predicates"] = ["biolink:contraindicated_for"]
+    edge["predicates"] = ["biolink:genetic_association"]
     message["parameters"]["template_set"] = "census"
 
     messages, labels = await lookup_worker.build_lookup_messages(message, logger)
@@ -555,3 +566,134 @@ def test_config_line_attributes_a_dotenv_override(monkeypatch):
     line = w.describe_expansion_config()
 
     assert "[.env, overriding" in line
+
+
+# ---------------------------------------------------------------------------
+# The other creative query types
+# ---------------------------------------------------------------------------
+
+AFFECTS_DECREASED = {
+    "qualifier_constraints": [
+        {
+            "qualifier_set": [
+                {
+                    "qualifier_type_id": "biolink:object_aspect_qualifier",
+                    "qualifier_value": "activity",
+                },
+                {
+                    "qualifier_type_id": "biolink:object_direction_qualifier",
+                    "qualifier_value": "decreased",
+                },
+            ]
+        }
+    ]
+}
+
+
+def test_affects_routes_by_which_end_is_pinned():
+    """The same predicate is two different questions depending on the pin."""
+    assert lookup_worker.creative_query_type(
+        "biolink:affects", AFFECTS_DECREASED, False
+    ) == ("affects_gene_pinned", "decreased")
+    assert lookup_worker.creative_query_type(
+        "biolink:affects", AFFECTS_DECREASED, True
+    ) == ("affects_chemical_pinned", "decreased")
+
+
+def test_affects_without_a_direction_has_no_sign_to_propagate():
+    """Sign-carrying templates cannot be built without a requested direction."""
+    assert lookup_worker.creative_query_type("biolink:affects", {}, False) == (
+        None,
+        None,
+    )
+
+
+def test_treats_and_contraindication_carry_no_direction():
+    assert lookup_worker.creative_query_type("biolink:treats", {}, False) == (
+        "treats",
+        None,
+    )
+    assert lookup_worker.creative_query_type(
+        "biolink:contraindicated_in", {}, False
+    ) == ("contraindicated", None)
+
+
+def affects_message(pinned_subject: bool, direction: str):
+    """A creative affects query, pinned on one end or the other."""
+    subject = {"categories": ["biolink:ChemicalEntity"]}
+    obj = {"categories": ["biolink:Gene"]}
+    if pinned_subject:
+        subject["ids"] = ["CHEBI:6801"]
+    else:
+        obj["ids"] = ["NCBIGene:1017"]
+    qualifiers = copy.deepcopy(AFFECTS_DECREASED)
+    qualifiers["qualifier_constraints"][0]["qualifier_set"][1][
+        "qualifier_value"
+    ] = direction
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {"SN": subject, "ON": obj},
+                "edges": {
+                    "e0": {
+                        "subject": "SN",
+                        "object": "ON",
+                        "predicates": ["biolink:affects"],
+                        "knowledge_type": "inferred",
+                        **qualifiers,
+                    }
+                },
+            }
+        },
+        "parameters": {"timeout": 60, "probe": False},
+        "submitter": "test",
+    }
+
+
+@pytest.mark.asyncio
+async def test_gene_pinned_affects_fires_its_own_portfolio(mocker):
+    mocker.patch("workers.aragorn_lookup.worker.get_census", return_value=None)
+    msg = affects_message(pinned_subject=False, direction="decreased")
+    msg["parameters"]["template_tiers"] = list(TIER_ORDER)
+    _, labels = await lookup_worker.build_lookup_messages(msg, logger)
+
+    assert "gene_family_analogue" in labels
+    # Templates for other question types must not leak in.
+    assert "target_inhibition_sm" not in labels
+    assert "chem_binding_target" not in labels
+
+
+@pytest.mark.asyncio
+async def test_chemical_pinned_affects_fires_the_mirror_portfolio(mocker):
+    mocker.patch("workers.aragorn_lookup.worker.get_census", return_value=None)
+    msg = affects_message(pinned_subject=True, direction="increased")
+    msg["parameters"]["template_tiers"] = list(TIER_ORDER)
+    _, labels = await lookup_worker.build_lookup_messages(msg, logger)
+
+    assert "chem_binding_target" in labels
+    assert "gene_family_analogue" not in labels
+
+
+@pytest.mark.asyncio
+async def test_the_requested_direction_reaches_the_rendered_qedges(mocker):
+    """The sign algebra has to survive into the actual TRAPI request."""
+    mocker.patch("workers.aragorn_lookup.worker.get_census", return_value=None)
+    msg = affects_message(pinned_subject=False, direction="decreased")
+    msg["parameters"]["templates"] = ["gene_upstream_repressor"]
+    msg["parameters"]["template_tiers"] = list(TIER_ORDER)
+    messages, labels = await lookup_worker.build_lookup_messages(msg, logger)
+
+    graph = dict(zip(labels, messages))["gene_upstream_repressor"]["message"][
+        "query_graph"
+    ]
+    directions = {}
+    for edge in graph["edges"].values():
+        for constraint in edge.get("qualifier_constraints", []):
+            for qualifier in constraint["qualifier_set"]:
+                if qualifier["qualifier_type_id"].endswith("direction_qualifier"):
+                    directions[edge["object"]] = qualifier["qualifier_value"]
+    # Repressor decreases the gene; to DECREASE the gene the chemical must
+    # INCREASE the repressor. No sentinel may survive into the request.
+    assert directions["ON"] == "decreased"
+    assert directions["n_reg"] == "increased"
+    assert "@same" not in json.dumps(graph) and "@opposite" not in json.dumps(graph)

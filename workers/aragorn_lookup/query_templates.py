@@ -34,7 +34,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -46,9 +46,26 @@ SMALL_MOLECULE = "biolink:SmallMolecule"
 DRUG = "biolink:Drug"
 PROTEIN = "biolink:Protein"
 PATHWAY = "biolink:Pathway"
+GENE = "biolink:Gene"
+GENE_FAMILY = "biolink:GeneFamily"
+MOLECULAR_ACTIVITY = "biolink:MolecularActivity"
+# "The gene, however the census filed it." Nearly every node here is
+# multi-category and the census picks one most-specific name per node, so a
+# qnode meaning a gene product has to claim both or it loses half its matches.
+GENE_CATS = (PROTEIN, GENE)
+# The chemical side of a gene query: the caller asks for ChemicalEntity, and
+# answer_compatible narrows this per query when they ask for something tighter.
+CHEM_CATS = (SMALL_MOLECULE, DRUG, CHEMICAL)
 PHENOTYPE = "biolink:PhenotypicFeature"
 
 DIRECTION = "biolink:object_direction_qualifier"
+# Direction sentinels. A hop qualified SAME moves the node the way the query
+# asked; OPPOSITE moves it the other way. Resolved per query by Hop.resolve, so
+# one template serves both the "increased" and "decreased" forms of a question.
+SAME = "@same"
+OPPOSITE = "@opposite"
+_SENTINELS = frozenset({SAME, OPPOSITE})
+_INVERSE_DIRECTION = {"increased": "decreased", "decreased": "increased"}
 ASPECT = "biolink:object_aspect_qualifier"
 MECHANISM = "biolink:causal_mechanism_qualifier"
 
@@ -109,12 +126,53 @@ class Hop:
     ``subject``/``object`` are template-local qnode keys.  The direction must
     match the census row the estimate is read from, since fan-out is not
     symmetric.
+
+    A direction qualifier may be the sentinel ``SAME`` or ``OPPOSITE`` instead
+    of a literal value, resolved against the direction the *query* asked for.
+    See ``resolve``.
     """
 
     subject: str
     object: str
     predicates: tuple[str, ...]
     qualifiers: tuple[tuple[str, str], ...] = ()
+
+    def resolve(self, direction: Optional[str]) -> "Hop":
+        """Bind ``SAME``/``OPPOSITE`` direction sentinels to a real value.
+
+        Inference through a causal chain carries a sign, and getting it wrong
+        inverts the claim.  If a chemical decreases a regulator R and R
+        *decreases* gene G, the chemical *increases* G -- two negatives.  So a
+        template asking "what decreases G" cannot hard-code ``decreased`` on
+        every hop; each hop's direction is fixed relative to the requested one,
+        and the product has to come out to what was asked.
+
+        Analogy hops (same family, same pathway) use ``SAME``: a chemical that
+        decreases a paralog is assumed to decrease the gene, no sign flip.
+        """
+        if not any(value in _SENTINELS for _, value in self.qualifiers):
+            return self
+        if direction not in _INVERSE_DIRECTION:
+            # Nothing to bind against; drop the sentinel hops' direction rather
+            # than emit a qualifier value Gandalf would never match.
+            kept = tuple(
+                (type_id, value)
+                for type_id, value in self.qualifiers
+                if value not in _SENTINELS
+            )
+            return replace(self, qualifiers=kept)
+        resolved = tuple(
+            (
+                type_id,
+                (
+                    direction
+                    if value == SAME
+                    else _INVERSE_DIRECTION[direction] if value == OPPOSITE else value
+                ),
+            )
+            for type_id, value in self.qualifiers
+        )
+        return replace(self, qualifiers=resolved)
 
     def qualifier_constraints(self) -> list[dict]:
         """TRAPI qualifier_constraints for this hop (AND within the set)."""
@@ -180,11 +238,18 @@ class QueryTemplate:
     categories: dict[str, "str | tuple[str, ...]"]
     hops: tuple[Hop, ...]
     baseline: Baseline
+    # Which creative question this template answers. The worker matches it
+    # against the pinned end and predicate of the inferred qedge.
+    query_type: str = "treats"
     pinned: str = "n_disease"
     answer: str = "n_chem"
     leaky: bool = False
     filter_config: dict = field(default_factory=dict)
     notes: str = ""
+
+    def resolved_hops(self, direction: Optional[str] = None) -> tuple[Hop, ...]:
+        """This template's hops with direction sentinels bound to ``direction``."""
+        return tuple(hop.resolve(direction) for hop in self.hops)
 
     def cats(self, key: str) -> tuple[str, ...]:
         """The categories for a qnode, normalised to a tuple."""
@@ -232,6 +297,7 @@ class QueryTemplate:
         answer_qnode: str,
         pinned_node: Optional[dict] = None,
         answer_node: Optional[dict] = None,
+        direction: Optional[str] = None,
     ) -> dict:
         """Build the TRAPI query graph, bound to the caller's qnode keys.
 
@@ -275,7 +341,7 @@ class QueryTemplate:
             ]
 
         edges: dict[str, dict] = {}
-        for index, hop in enumerate(self.hops):
+        for index, hop in enumerate(self.resolved_hops(direction)):
             edge: dict = {
                 "subject": rename[hop.subject],
                 "object": rename[hop.object],
@@ -581,7 +647,394 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
     ),
 )
 
-TEMPLATES_BY_NAME: dict[str, QueryTemplate] = {t.name: t for t in TEMPLATES}
+# ---------------------------------------------------------------------------
+# "What chemicals move this gene?"  (gene pinned, chemical answered)
+#
+# This query type is the majority of Aragorn's creative surface -- four of the
+# six AMIE rule keys, 109 of 160 rules -- and it sits in the dense part of the
+# graph rather than the sparse part.  Where the drug/disease workhorse hop
+# reaches 8,832 diseases, `Protein -member_of-> GeneFamily` reaches 55,283
+# nodes and `SmallMolecule -affects-> Protein` carries 1.45M edges.
+#
+# One deliberate relaxation runs through all of these: the incoming query
+# constrains BOTH aspect and direction, but constraining both on an
+# intermediate hop collapses coverage from 33,052 proteins to 2,487 -- 13x.
+# A creative template *infers* the qualified edge rather than travelling one,
+# so these hops constrain direction only.  That is 13x recall for free, and it
+# is the §7 qualifier trap ("adding a qualifier excludes edges that lack it")
+# turned around.
+# ---------------------------------------------------------------------------
+
+AFFECTS_GENE_PINNED: tuple[QueryTemplate, ...] = (
+    QueryTemplate(
+        name="gene_family_analogue",
+        tier="A-mechanism",
+        query_type="affects_gene_pinned",
+        mechanism="A chemical moves a paralogue of the gene the same way.",
+        categories={
+            "n_gene": GENE_CATS,
+            "n_family": GENE_FAMILY,
+            "n_paralog": GENE_CATS,
+            "n_chem": CHEM_CATS,
+        },
+        hops=(
+            Hop("n_gene", "n_family", ("biolink:member_of",)),
+            Hop("n_paralog", "n_family", ("biolink:member_of",)),
+            Hop("n_chem", "n_paralog", ("biolink:affects",), ((DIRECTION, SAME),)),
+        ),
+        baseline=Baseline(92, 58799, 1.0),
+        pinned="n_gene",
+        answer="n_chem",
+        filter_config={"max_node_degree": 500},
+        notes="Analogy, so the sign is preserved: a chemical that decreases a "
+        "family member is assumed to decrease this one. The best-covered entry "
+        "hop in the set (55,283 nodes) and the mechanism behind most "
+        "off-target pharmacology -- kinase inhibitors hit their family.",
+    ),
+    QueryTemplate(
+        name="gene_upstream_activator",
+        tier="A-mechanism",
+        query_type="affects_gene_pinned",
+        mechanism="A chemical moves an activator of the gene the same way, so "
+        "the gene follows.",
+        categories={"n_gene": GENE_CATS, "n_reg": GENE_CATS, "n_chem": CHEM_CATS},
+        hops=(
+            Hop("n_reg", "n_gene", ("biolink:affects",), ((DIRECTION, "increased"),)),
+            Hop("n_chem", "n_reg", ("biolink:affects",), ((DIRECTION, SAME),)),
+        ),
+        baseline=Baseline(187, 13766, 13.8),
+        pinned="n_gene",
+        answer="n_chem",
+        filter_config={"max_node_degree": 500},
+        notes="Causal chain, so the signs multiply. The regulator activates the "
+        "gene (+1), so the chemical must move the regulator the way the query "
+        "asked for the gene to follow.",
+    ),
+    QueryTemplate(
+        name="gene_upstream_repressor",
+        tier="A-mechanism",
+        query_type="affects_gene_pinned",
+        mechanism="A chemical moves a repressor of the gene the opposite way, "
+        "releasing the gene.",
+        categories={"n_gene": GENE_CATS, "n_reg": GENE_CATS, "n_chem": CHEM_CATS},
+        hops=(
+            Hop("n_reg", "n_gene", ("biolink:affects",), ((DIRECTION, "decreased"),)),
+            Hop("n_chem", "n_reg", ("biolink:affects",), ((DIRECTION, OPPOSITE),)),
+        ),
+        baseline=Baseline(191, 14539, 16.6),
+        pinned="n_gene",
+        answer="n_chem",
+        filter_config={"max_node_degree": 500},
+        notes="The double negative, and the reason directions cannot be "
+        "hard-coded: the repressor decreases the gene (-1), so a chemical that "
+        "decreases the repressor INCREASES the gene.",
+    ),
+    QueryTemplate(
+        name="gene_pathway_analogue",
+        tier="B-broad",
+        query_type="affects_gene_pinned",
+        mechanism="A chemical moves another participant of a pathway this gene "
+        "participates in.",
+        categories={
+            "n_gene": GENE_CATS,
+            "n_path": PATHWAY,
+            "n_other": GENE_CATS,
+            "n_chem": CHEM_CATS,
+        },
+        hops=(
+            Hop("n_gene", "n_path", ("biolink:participates_in",)),
+            Hop("n_other", "n_path", ("biolink:participates_in",)),
+            Hop("n_chem", "n_other", ("biolink:affects",), ((DIRECTION, SAME),)),
+        ),
+        baseline=Baseline(1413, 15849, 14.2),
+        pinned="n_gene",
+        answer="n_chem",
+        filter_config={"max_node_degree": 200},
+        notes="Pathway co-membership is not a sign-carrying relation, so the "
+        "SAME assumption is weaker here than for a paralogue. Tier B.",
+    ),
+    QueryTemplate(
+        name="gene_ppi_neighbour",
+        tier="B-broad",
+        query_type="affects_gene_pinned",
+        mechanism="A chemical moves a protein that physically interacts with "
+        "this gene's product.",
+        categories={"n_gene": GENE_CATS, "n_partner": GENE_CATS, "n_chem": CHEM_CATS},
+        hops=(
+            Hop("n_gene", "n_partner", ("biolink:physically_interacts_with",)),
+            Hop("n_chem", "n_partner", ("biolink:affects",), ((DIRECTION, SAME),)),
+        ),
+        baseline=Baseline(620, 27912, 45.8),
+        pinned="n_gene",
+        answer="n_chem",
+        filter_config={"max_node_degree": 100},
+        notes="Binding carries no direction, so assuming the effect propagates "
+        "unchanged is the weakest claim here. Recall play, keep the cap tight.",
+    ),
+    QueryTemplate(
+        name="gene_shared_activity",
+        tier="B-broad",
+        query_type="affects_gene_pinned",
+        mechanism="A chemical moves a protein with the same molecular activity.",
+        categories={
+            "n_gene": GENE_CATS,
+            "n_act": MOLECULAR_ACTIVITY,
+            "n_other": GENE_CATS,
+            "n_chem": CHEM_CATS,
+        },
+        hops=(
+            Hop("n_gene", "n_act", ("biolink:enables",)),
+            Hop("n_other", "n_act", ("biolink:enables",)),
+            Hop("n_chem", "n_other", ("biolink:affects",), ((DIRECTION, SAME),)),
+        ),
+        baseline=Baseline(1862, 62260, 3.6),
+        pinned="n_gene",
+        answer="n_chem",
+        filter_config={"max_node_degree": 200},
+        notes="Shared GO molecular function: broad (53,900 nodes) and the most "
+        "expensive of the set.",
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# "What genes does this chemical move?"  (chemical pinned, gene answered)
+#
+# The mirror question. Entry-hop coverage here is the best anywhere in the
+# portfolio: 810,336 chemicals carry a direct binding edge to a protein.
+# Chemical-to-chemical similarity is effectively absent from this graph
+# (derives_from is 1,344 edges), so there is no analogue-of-the-drug template
+# to write -- every route goes out through a protein.
+# ---------------------------------------------------------------------------
+
+AFFECTS_CHEMICAL_PINNED: tuple[QueryTemplate, ...] = (
+    QueryTemplate(
+        name="chem_binding_target",
+        tier="A-mechanism",
+        query_type="affects_chemical_pinned",
+        mechanism="The chemical physically binds the gene product, which is "
+        "how it moves it.",
+        categories={"n_chem": CHEM_CATS, "n_gene": GENE_CATS},
+        hops=(
+            Hop(
+                "n_chem",
+                "n_gene",
+                ("biolink:directly_physically_interacts_with",),
+            ),
+        ),
+        baseline=Baseline(1, 814782, 1.5),
+        pinned="n_chem",
+        answer="n_gene",
+        filter_config={"max_node_degree": 500},
+        notes="Binding implies affecting, which is a real inference rather than "
+        "a lookup: the binding edge carries no direction qualifier, so the "
+        "direct query cannot see it. Widest coverage in the whole portfolio.",
+    ),
+    QueryTemplate(
+        name="chem_cascade_activator",
+        tier="A-mechanism",
+        query_type="affects_chemical_pinned",
+        mechanism="The chemical moves an intermediate that activates the gene.",
+        categories={"n_chem": CHEM_CATS, "n_inter": GENE_CATS, "n_gene": GENE_CATS},
+        hops=(
+            Hop("n_chem", "n_inter", ("biolink:affects",), ((DIRECTION, SAME),)),
+            Hop("n_inter", "n_gene", ("biolink:affects",), ((DIRECTION, "increased"),)),
+        ),
+        baseline=Baseline(167, 126732, 9.4),
+        pinned="n_chem",
+        answer="n_gene",
+        filter_config={"max_node_degree": 500},
+        notes="Signs multiply: intermediate activates the gene (+1), so the "
+        "chemical moves the intermediate the way the query asked.",
+    ),
+    QueryTemplate(
+        name="chem_cascade_repressor",
+        tier="A-mechanism",
+        query_type="affects_chemical_pinned",
+        mechanism="The chemical moves an intermediate that represses the gene, "
+        "the opposite way.",
+        categories={"n_chem": CHEM_CATS, "n_inter": GENE_CATS, "n_gene": GENE_CATS},
+        hops=(
+            Hop("n_chem", "n_inter", ("biolink:affects",), ((DIRECTION, OPPOSITE),)),
+            Hop("n_inter", "n_gene", ("biolink:affects",), ((DIRECTION, "decreased"),)),
+        ),
+        baseline=Baseline(654, 31396, 32.3),
+        pinned="n_chem",
+        answer="n_gene",
+        filter_config={"max_node_degree": 500},
+        notes="The double negative on the chemical-pinned side.",
+    ),
+    QueryTemplate(
+        name="chem_ppi_propagation",
+        tier="B-broad",
+        query_type="affects_chemical_pinned",
+        mechanism="The chemical moves a protein that physically interacts with "
+        "the gene product.",
+        categories={"n_chem": CHEM_CATS, "n_inter": GENE_CATS, "n_gene": GENE_CATS},
+        hops=(
+            Hop("n_chem", "n_inter", ("biolink:affects",), ((DIRECTION, SAME),)),
+            Hop("n_inter", "n_gene", ("biolink:physically_interacts_with",)),
+        ),
+        baseline=Baseline(431, 126732, 9.4),
+        pinned="n_chem",
+        answer="n_gene",
+        filter_config={"max_node_degree": 100},
+        notes="Binding carries no direction, so the propagated sign is assumed.",
+    ),
+    QueryTemplate(
+        name="chem_pathway_target",
+        tier="B-broad",
+        query_type="affects_chemical_pinned",
+        mechanism="The chemical moves a protein sharing a pathway with the "
+        "gene product.",
+        categories={
+            "n_chem": CHEM_CATS,
+            "n_inter": GENE_CATS,
+            "n_path": PATHWAY,
+            "n_gene": GENE_CATS,
+        },
+        hops=(
+            Hop("n_chem", "n_inter", ("biolink:affects",), ((DIRECTION, SAME),)),
+            Hop("n_inter", "n_path", ("biolink:participates_in",)),
+            Hop("n_gene", "n_path", ("biolink:participates_in",)),
+        ),
+        baseline=Baseline(983, 126732, 9.4),
+        pinned="n_chem",
+        answer="n_gene",
+        filter_config={"max_node_degree": 200},
+        notes="Pathways are hubs; the degree cap does real work here.",
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# "What chemicals are contraindicated in this disease?"
+#
+# Note the predicate: this graph records `contraindicated_in` (22,859 edges),
+# while the AMIE rule key is the older `contraindicated_for`. Templates name
+# what the graph actually holds.
+#
+# Contraindication is the inverse claim to treatment, so the mechanism is
+# aggravation rather than correction -- a chemical that causes the disease, or
+# lists it as a side effect, or pushes a causal protein the wrong way.
+# ---------------------------------------------------------------------------
+
+CONTRAINDICATED: tuple[QueryTemplate, ...] = (
+    QueryTemplate(
+        name="side_effect_match",
+        tier="A-mechanism",
+        query_type="contraindicated",
+        mechanism="The chemical lists this disease as a side effect.",
+        categories={"n_disease": DISEASE, "n_chem": CHEM_CATS},
+        hops=(Hop("n_chem", "n_disease", ("biolink:has_side_effect",)),),
+        baseline=Baseline(18, 3757, 17.6),
+        pinned="n_disease",
+        answer="n_chem",
+        notes="72,798 edges. Causing a condition as a side effect is the most "
+        "direct expressible reason not to give a drug to someone who has it.",
+    ),
+    QueryTemplate(
+        name="disease_aggravation",
+        tier="A-mechanism",
+        query_type="contraindicated",
+        mechanism="The chemical causes or contributes to the disease.",
+        categories={"n_disease": DISEASE, "n_chem": CHEM_CATS},
+        hops=(
+            Hop(
+                "n_chem",
+                "n_disease",
+                (
+                    "biolink:causes",
+                    "biolink:contributes_to",
+                    "biolink:exacerbates_condition",
+                ),
+            ),
+        ),
+        baseline=Baseline(13, 7117, 12.7),
+        pinned="n_disease",
+        answer="n_chem",
+        notes="contributes_to is 76,725 edges and causes 15,539.",
+    ),
+    QueryTemplate(
+        name="causal_target_aggravation",
+        tier="A-mechanism",
+        query_type="contraindicated",
+        mechanism="The chemical increases a protein that causes or contributes "
+        "to the disease.",
+        categories={"n_disease": DISEASE, "n_protein": GENE_CATS, "n_chem": CHEM_CATS},
+        hops=(
+            Hop("n_protein", "n_disease", CAUSAL_GENE),
+            Hop(
+                "n_chem",
+                "n_protein",
+                ("biolink:affects",),
+                ((DIRECTION, "increased"),),
+            ),
+        ),
+        baseline=Baseline(64, 2890, 5.6),
+        pinned="n_disease",
+        answer="n_chem",
+        filter_config={"max_node_degree": 500},
+        notes="The mechanistic mirror of causal_gene_inhibition: same causal "
+        "protein, opposite drug direction.",
+    ),
+    QueryTemplate(
+        name="predisposition",
+        tier="C-associative",
+        query_type="contraindicated",
+        mechanism="The chemical predisposes to or disrupts the condition.",
+        categories={"n_disease": DISEASE, "n_chem": CHEM_CATS},
+        hops=(
+            Hop(
+                "n_chem",
+                "n_disease",
+                ("biolink:predisposes_to_condition", "biolink:disrupts"),
+            ),
+        ),
+        baseline=Baseline(3, 730, 3.3),
+        pinned="n_disease",
+        answer="n_chem",
+        notes="Small (2,464 + 2,298 edges) and cheap enough to keep.",
+    ),
+    QueryTemplate(
+        name="contraindication_transfer",
+        tier="D-leaky",
+        query_type="contraindicated",
+        mechanism="The chemical is contraindicated in another disease sharing a "
+        "phenotype with this one.",
+        categories={
+            "n_disease": DISEASE,
+            "n_phenotype": PHENOTYPE,
+            "n_other": DISEASE,
+            "n_chem": CHEM_CATS,
+        },
+        hops=(
+            Hop("n_disease", "n_phenotype", ("biolink:has_phenotype",)),
+            Hop("n_other", "n_phenotype", ("biolink:has_phenotype",)),
+            Hop("n_chem", "n_other", ("biolink:contraindicated_in",)),
+        ),
+        baseline=Baseline(4072, 10070, 17.0),
+        pinned="n_disease",
+        answer="n_chem",
+        leaky=True,
+        filter_config={"max_node_degree": 200},
+        notes="Reads contraindication edges, so it will flatter itself against "
+        "ground truth drawn from the same source. Same quarantine as "
+        "indication_transfer.",
+    ),
+)
+
+
+ALL_TEMPLATES: tuple[QueryTemplate, ...] = (
+    TEMPLATES + AFFECTS_GENE_PINNED + AFFECTS_CHEMICAL_PINNED + CONTRAINDICATED
+)
+
+TEMPLATES_BY_NAME: dict[str, QueryTemplate] = {t.name: t for t in ALL_TEMPLATES}
+
+
+def templates_for(query_type: str) -> tuple[QueryTemplate, ...]:
+    """Every template answering one creative question."""
+    return tuple(t for t in ALL_TEMPLATES if t.query_type == query_type)
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +1308,14 @@ def census_triples(
     """
     triples: set[tuple[str, str, str]] = set()
     for template in templates:
-        for hop in template.hops:
+        # Both resolutions: the census is loaded once at startup, before any
+        # query has said which direction it wants.
+        hops = [
+            hop
+            for direction in ("increased", "decreased")
+            for hop in template.resolved_hops(direction)
+        ]
+        for hop in hops:
             for subject in template.cats(hop.subject):
                 for obj in template.cats(hop.object):
                     for predicate in hop.predicates:
@@ -921,6 +1381,7 @@ def estimate(
     template: QueryTemplate,
     census: Census,
     probe: Optional[dict[str, int]] = None,
+    direction: Optional[str] = None,
 ) -> dict:
     """Walk the query graph from the pinned node, multiplying fan-outs.
 
@@ -944,7 +1405,7 @@ def estimate(
     # category. See the sibling handling below.
     siblings: dict[tuple, int] = {}
 
-    remaining = list(template.hops)
+    remaining = list(template.resolved_hops(direction))
     while remaining:
         progressed = False
         for hop in list(remaining):
@@ -1093,10 +1554,11 @@ def price(
     template: QueryTemplate,
     census: Optional[Census],
     probe: Optional[dict[str, int]] = None,
+    direction: Optional[str] = None,
 ) -> dict:
     """Estimate a template's cost, from the census when there is one."""
     if census is not None:
-        return estimate(template, census, probe)
+        return estimate(template, census, probe, direction)
     return baseline_estimate(template, probe)
 
 
@@ -1122,6 +1584,7 @@ def select_portfolio(
     tiers: Optional[Sequence[str]] = None,
     answer_categories: Sequence[str] = (),
     skipped: Optional[list] = None,
+    direction: Optional[str] = None,
 ) -> list[tuple[QueryTemplate, dict]]:
     """Choose which templates to fire, and price each one.
 
@@ -1155,7 +1618,9 @@ def select_portfolio(
         and template.answer_compatible(answer_categories)
     ]
 
-    priced = [(template, price(template, census, probe)) for template in candidates]
+    priced = [
+        (template, price(template, census, probe, direction)) for template in candidates
+    ]
 
     if probe is not None:
         kept = []
