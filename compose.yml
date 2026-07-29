@@ -364,8 +364,8 @@ services:
       # data (LMDB / sqlite) downloads"). Requires your SSH key to have access
       # to that host.
       - ./arax_pathfinder_dbs:/app/arax_pathfinder_dbs
-      # Replace '/Users/facadmin' with your local home directory path
-      - /Users/facadmin/.ssh:/home/nru/.ssh:ro
+      # Replace '~/' with your local home directory path if needed
+      - ~/.ssh:/home/nru/.ssh:ro
 
   arax_rank:
     container_name: arax_rank
