@@ -80,9 +80,27 @@ back. Two template sets exist, and which one runs is the A/B knob:
 
 Set the default with `TEMPLATE_SET`, or override per query with
 `parameters.template_set` (`census` | `amie` | `both`). `both` fires both sets
-and emits the direct lookup query once. Only drug-for-disease creative edges
-have census templates; every other creative edge uses the AMIE rules whatever
-this is set to.
+and emits the direct lookup query once.
+
+**Only `treats` uses the census portfolios by default** (`TEMPLATE_QUERY_TYPES`).
+The others are written and tested but do not fire, because the benchmark splits
+by question type into two very different problems:
+
+| half | n | TopAnswer, AMIE | TopAnswer, census | NeverShow never retrieved |
+| --- | ---: | ---: | ---: | ---: |
+| drug/disease | 47 | 29 | **33** | 113 / 252 (45%) |
+| gene/chemical | 55 | **32** | 31 | 0 / 183 (0%) |
+
+The gene/chemical half has **no retrieval gap at all** — every one of its 183
+`NeverShow` entities is already retrieved, and only 2 of 55 `TopAnswer` entities
+are missed. There is nothing for a template to find, so extra templates can only
+add candidates that displace true answers, which is exactly the −1. The
+drug/disease half is the opposite: 45% of its `NeverShow` entities are never
+retrieved at all, and that is where the census portfolio earns its +4.
+
+Counted across both halves, 86 `TopAnswer`/`Acceptable` assertions are retrieved
+but ranked too low, against 14 never retrieved. **Ranking has roughly six times
+the headroom of retrieval**, so further template work is the wrong lever.
 
 Per-query knobs, all under `parameters`, for narrowing an experiment:
 

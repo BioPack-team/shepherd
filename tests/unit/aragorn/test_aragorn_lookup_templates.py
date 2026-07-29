@@ -655,6 +655,7 @@ async def test_gene_pinned_affects_fires_its_own_portfolio(mocker):
     mocker.patch("workers.aragorn_lookup.worker.get_census", return_value=None)
     msg = affects_message(pinned_subject=False, direction="decreased")
     msg["parameters"]["template_tiers"] = list(TIER_ORDER)
+    msg["parameters"]["template_query_types"] = []
     _, labels = await lookup_worker.build_lookup_messages(msg, logger)
 
     assert "gene_family_analogue" in labels
@@ -668,6 +669,7 @@ async def test_chemical_pinned_affects_fires_the_mirror_portfolio(mocker):
     mocker.patch("workers.aragorn_lookup.worker.get_census", return_value=None)
     msg = affects_message(pinned_subject=True, direction="increased")
     msg["parameters"]["template_tiers"] = list(TIER_ORDER)
+    msg["parameters"]["template_query_types"] = []
     _, labels = await lookup_worker.build_lookup_messages(msg, logger)
 
     assert "chem_binding_target" in labels
@@ -681,6 +683,7 @@ async def test_the_requested_direction_reaches_the_rendered_qedges(mocker):
     msg = affects_message(pinned_subject=False, direction="decreased")
     msg["parameters"]["templates"] = ["gene_upstream_repressor"]
     msg["parameters"]["template_tiers"] = list(TIER_ORDER)
+    msg["parameters"]["template_query_types"] = []
     messages, labels = await lookup_worker.build_lookup_messages(msg, logger)
 
     graph = dict(zip(labels, messages))["gene_upstream_repressor"]["message"][
@@ -697,3 +700,26 @@ async def test_the_requested_direction_reaches_the_rendered_qedges(mocker):
     assert directions["ON"] == "decreased"
     assert directions["n_reg"] == "increased"
     assert "@same" not in json.dumps(graph) and "@opposite" not in json.dumps(graph)
+
+
+@pytest.mark.asyncio
+async def test_gene_chemical_uses_amie_by_default(mocker):
+    """Measured: census templates cost a TopAnswer pass on this half and close
+    no retrieval gap, because AMIE already retrieves everything there is to
+    retrieve (0 of 183 NeverShow entities missed). They stay in the registry
+    but do not fire."""
+    mocker.patch("workers.aragorn_lookup.worker.get_census", return_value=None)
+    mocker.patch("workers.aragorn_lookup.worker.get_amie_expansions", return_value={})
+    msg = affects_message(pinned_subject=False, direction="decreased")
+
+    _, labels = await lookup_worker.build_lookup_messages(msg, logger)
+
+    assert labels == ["direct_lookup"]
+
+
+@pytest.mark.asyncio
+async def test_treats_still_uses_census_by_default(message):
+    """The half where the portfolios measurably win stays on."""
+    _, labels = await lookup_worker.build_lookup_messages(message, logger)
+
+    assert "target_inhibition_sm" in labels

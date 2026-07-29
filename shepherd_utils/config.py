@@ -97,6 +97,22 @@ class Settings(BaseSettings):
     # A/B is run without a redeploy. Only drug-for-disease queries have census
     # templates; anything else falls back to AMIE whatever this says.
     template_set: str = "census"
+    # Which creative question types actually use the census portfolios;
+    # everything else falls back to the AMIE rules. Comma-separated, empty means
+    # all of them. Overridable per query with parameters.template_query_types.
+    #
+    # Only "treats" by default, on measured evidence. Split by question type,
+    # scored as TopAnswer PASSED:
+    #
+    #   drug/disease (n=47)    AMIE 29  ->  census 33   (+4)
+    #   gene/chemical (n=55)   AMIE 32  ->  census 31   (-1)
+    #
+    # The gene/chemical half has no retrieval gap for templates to close: every
+    # one of its 183 NeverShow entities is already retrieved by AMIE, and only 2
+    # of 55 TopAnswer entities are missed. Extra templates there can only add
+    # candidates that displace true answers, which is what the -1 is. The
+    # portfolios stay in the registry for when that changes.
+    template_query_types: str = "treats"
     # Census output directory (from gandalf's scripts/metagraph_census.py),
     # shipped as a build artifact alongside the mmap graph and versioned with
     # it. Only the rows the portfolio prices are read, so this costs ~25MB
@@ -371,6 +387,11 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+
+    @property
+    def template_query_type_list(self) -> list[str]:
+        """Creative question types allowed to use census templates."""
+        return [q.strip() for q in self.template_query_types.split(",") if q.strip()]
 
     @property
     def template_tier_list(self) -> list[str]:

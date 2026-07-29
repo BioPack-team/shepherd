@@ -509,6 +509,17 @@ async def expand_census_query(input_message, logger: logging.Logger):
     query_type, direction = creative_query_type(predicate, qualifiers, source_input)
     if query_type is None:
         return [], []
+    parameters = input_message.get("parameters") or {}
+    # `is None` rather than a falsy check: an explicit empty list from the
+    # caller means "every query type", which must not fall back to the setting.
+    allowed = parameters.get("template_query_types")
+    if allowed is None:
+        allowed = settings.template_query_type_list
+    if allowed and query_type not in allowed:
+        logger.debug(
+            "Census templates are disabled for %s; using AMIE expansions.", query_type
+        )
+        return [], []
     # Whichever end carries the ids is the question; the other is the answer.
     question_qnode, answer_qnode = (
         (source, target) if source_input else (target, source)
@@ -516,7 +527,6 @@ async def expand_census_query(input_message, logger: logging.Logger):
     qnodes = input_message["message"]["query_graph"]["nodes"]
     answer_categories = qnodes.get(answer_qnode, {}).get("categories") or []
 
-    parameters = input_message.get("parameters") or {}
     requested = parameters.get("templates")
     exclude_leaky = parameters.get("exclude_leaky", settings.template_exclude_leaky)
     tiers = parameters.get("template_tiers") or settings.template_tier_list
