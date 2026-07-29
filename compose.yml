@@ -3,6 +3,12 @@ services:
     container_name: shepherd_server
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
+      # The server handles every client request (sync-query status polling,
+      # /callback lookups) so it needs a bigger Postgres pool than the
+      # workers' default of 10. Budget: each container has its own pool, so
+      # keep (sum of pool max sizes) under Postgres max_connections below.
+      POSTGRES_POOL_MIN_SIZE: 10
+      POSTGRES_POOL_MAX_SIZE: 30
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile

@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # giving up. Kept short so callers fail fast when the DB is unreachable
     # instead of blocking; raise it if you hit pool timeouts under heavy load.
     postgres_pool_timeout: float = 5.0
+    # Per-process Postgres pool bounds. Every container (server + each worker)
+    # holds its own pool, so the fleet-wide ceiling is (number of containers x
+    # max size) and must stay under Postgres's max_connections (200 in
+    # compose.yml). The server fields all client HTTP traffic (sync-query
+    # status polling, /callback lookups) and is the component that exhausts
+    # its pool first under load, so compose.yml/Helm give it a larger pool via
+    # these env vars while the workers keep the small default.
+    postgres_pool_min_size: int = 5
+    postgres_pool_max_size: int = 10
     # Size of the Postgres data volume, set from the SAME Helm value that sizes
     # the PVC (e.g. "100Gi"). Lets the monitor compute how full the disk is and
     # alert before it fills. Empty disables the db-capacity alert.
