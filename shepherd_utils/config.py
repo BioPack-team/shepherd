@@ -88,7 +88,6 @@ class Settings(BaseSettings):
 
     # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
-    plover_url: str = "https://kg2cploverdb.ci.transltr.io"
     arax_biolink_version: str = "4.2.5"
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
