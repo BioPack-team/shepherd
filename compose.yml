@@ -198,7 +198,7 @@ services:
       - ./.env:/app/.env
       # First run? Set PATHFINDER_EMBEDDINGS_URL in your .env to a .tar.gz and
       # the worker downloads + extracts the embeddings LMDB into this mount on
-      # startup (see README "Worker data (LMDB) downloads").
+      # startup (see README "Worker data (LMDB / sqlite) downloads").
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
 
   ######### Example ARA
@@ -305,7 +305,7 @@ services:
       - ./.env:/app/.env
       # First run? Set OMNICORP_LMDB_URL in your .env to a .tar.gz and the worker
       # downloads + extracts curies.lmdb / shared_counts.lmdb into this mount on
-      # startup (see README "Worker data (LMDB) downloads").
+      # startup (see README "Worker data (LMDB / sqlite) downloads").
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
@@ -352,7 +352,14 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      # First run? The worker scp's its two sqlite dbs down from
+      # arax-databases.rtx.ai on startup. Set ARAX_PATHFINDER_TIER_VERSION in
+      # your .env if you need a tier other than the default (see README "Worker
+      # data (LMDB / sqlite) downloads"). Requires your SSH key to have access
+      # to that host.
       - ./arax_pathfinder_dbs:/app/arax_pathfinder_dbs
+      # Replace '/Users/facadmin' with your local home directory path
+      - /Users/facadmin/.ssh:/home/nru/.ssh:ro
 
   arax_rank:
     container_name: arax_rank

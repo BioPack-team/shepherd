@@ -13,6 +13,10 @@ from biolink_helper_pkg import BiolinkHelper
 from pathfinder.Pathfinder import Pathfinder
 
 from shepherd_utils.config import settings
+from shepherd_utils.data_download import (
+    arax_pathfinder_sqlite_paths,
+    ensure_arax_pathfinder_dbs,
+)
 from shepherd_utils.db import (
     get_message,
     save_message,
@@ -115,10 +119,11 @@ def execute_pathfinding_sync(
 
     blocked_curies, blocked_synonyms = get_blocked_list()
 
+    curie_ngd_path, node_degree_path = arax_pathfinder_sqlite_paths()
     pathfinder_instance = Pathfinder(
         f"retriever:{settings.sync_kg_retrieval_url}",
-        settings.curie_ngd_addr,
-        settings.node_degree_addr,
+        f"sqlite:{curie_ngd_path}",
+        f"sqlite:{node_degree_path}",
         blocked_curies,
         blocked_synonyms,
         logger,
@@ -262,6 +267,11 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
+    # Ensure the two sqlite databases exist before any task tries to open them
+    # (a first-run local `docker compose up` starts with the volume-mounted
+    # directory empty). No-op once present or when no scp source is configured
+    # (e.g. production, where the data is mounted out of band).
+    ensure_arax_pathfinder_dbs(logging.getLogger(STREAM))
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(

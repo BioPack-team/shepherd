@@ -14,33 +14,46 @@ The main entrypoint is `./compose.yml` and will spin everything up.
 
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`.
 
-### Worker data (LMDB) downloads
+### Worker data (LMDB / sqlite) downloads
 
-A couple of workers read from large, read-only LMDB datasets that are too big to
+A couple of workers read from large, read-only sqlite databases and LMDB datasets that are too big to
 commit to git (they're gitignored and volume-mounted from the host):
 
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
+- **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`)
 
-So a new developer doesn't have to source these by hand, each worker can fetch
-its dataset on first startup. Point it at a `.tar.gz` on an external server by
-adding the matching variable to your root `.env` file:
+So a new developer doesn't have to source these by hand, each worker can fetch its dataset on first
+startup. Two download mechanisms are supported, depending on where the dataset lives:
+
+**LMDB datasets (`aragorn_omnicorp`, `score_paths`)** are fetched as a `.tar.gz` from a plain HTTP(S)
+URL and extracted in place. Add the matching variable to your root `.env` file:
 
 ```dotenv
 OMNICORP_LMDB_URL=https://example.org/path/omnicorp_lmdb.tar.gz
 PATHFINDER_EMBEDDINGS_URL=https://example.org/path/pathfinder_embeddings.tar.gz
 ```
 
-On startup the worker checks whether its LMDB files already exist in the
-volume-mounted directory. If they're missing and a URL is set, it downloads the
-archive and extracts it into that directory — which lives on the host, so the
-data persists across restarts and is only downloaded once. If the files are
-already present, or no URL is configured, the download is skipped (production
-mounts this data out of band, so it's unaffected).
+The archive for each dataset should contain the expected files at its top level: `curies.lmdb` and
+`shared_counts.lmdb` for omnicorp, `data.mdb` (and `lock.mdb`) for the embeddings.
 
-The archive for each dataset should contain the expected files at its top level:
-`curies.lmdb` and `shared_counts.lmdb` for omnicorp, `data.mdb` (and
-`lock.mdb`) for the embeddings.
+**`arax_pathfinder`'s sqlite databases** don't live behind a URL — they're on a private,
+SSH-accessible host (`arax-databases.rtx.ai`), so each file is fetched individually via `scp`
+instead. The filenames and remote directory both embed a data-tier version that changes
+periodically, so only one variable needs updating when a new tier ships:
+
+```dotenv
+ARAX_PATHFINDER_TIER_VERSION=tier0-20260621
+```
+
+This requires an SSH key with access to that host, mounted read-only into the container
+(`~/.ssh:/root/.ssh:ro` in docker-compose.yml).
+
+On startup, each worker checks whether its files already exist in the volume-mounted directory. If
+they're missing and a source is configured (URL or scp path), it fetches them into that directory —
+which lives on the host, so the data persists across restarts and is only downloaded once. If the
+files are already present, or no source is configured, the download is skipped (production mounts
+this data out of band, so it's unaffected).
 
 ### Worker
 
