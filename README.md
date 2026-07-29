@@ -47,7 +47,7 @@ ARAX_PATHFINDER_TIER_VERSION=tier0-20260621
 ```
 
 This requires an SSH key with access to that host, mounted read-only into the container
-(`~/.ssh:/home/nru/.ssh:ro` in docker-compose.yml).
+(`~/.ssh:/home/nru/.ssh:ro` in compose.yml).
 
 On startup, each worker checks whether its files already exist in the volume-mounted directory. If
 they're missing and a source is configured (URL or scp path), it fetches them into that directory —
