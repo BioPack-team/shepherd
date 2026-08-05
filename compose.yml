@@ -358,14 +358,11 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-      # First run? The worker scp's its two sqlite dbs down from
-      # arax-databases.rtx.ai on startup. Set ARAX_PATHFINDER_TIER_VERSION in
-      # your .env if you need a tier other than the default (see README "Worker
-      # data (LMDB / sqlite) downloads"). Requires your SSH key to have access
-      # to that host.
+      # First run? The worker downloads its two sqlite dbs from
+      # kg2webhost.rtx.ai on startup, no credentials needed. Set
+      # ARAX_PATHFINDER_TIER_VERSION in your .env if you need a tier other than
+      # the default (see README "Worker data (LMDB / sqlite) downloads").
       - ./arax_pathfinder_dbs:/app/arax_pathfinder_dbs
-      # Replace '~/' with your local home directory path if needed
-      - ~/.ssh:/home/nru/.ssh:ro
 
   arax_rank:
     container_name: arax_rank

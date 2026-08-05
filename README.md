@@ -37,10 +37,9 @@ PATHFINDER_EMBEDDINGS_URL=https://example.org/path/pathfinder_embeddings.tar.gz
 The archive for each dataset should contain the expected files at its top level: `curies.lmdb` and
 `shared_counts.lmdb` for omnicorp, `data.mdb` (and `lock.mdb`) for the embeddings.
 
-**`arax_pathfinder`'s sqlite databases** don't live behind a URL — they're on a private,
-SSH-accessible host (`arax-databases.rtx.ai`), so each file is fetched individually via `scp`
-instead. The filenames and remote directory both embed a data-tier version that changes
-periodically, so only one variable needs updating when a new tier ships:
+**arax_pathfinder's sqlite databases** are served as plain files over HTTPS. The
+filenames embed a Knowledge Graph version that changes periodically, so only one variable needs updating
+when a new Knowledge Graph ships:
 
 ```dotenv
 ARAX_PATHFINDER_TIER_VERSION=tier0-20260621

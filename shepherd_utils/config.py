@@ -98,8 +98,7 @@ class Settings(BaseSettings):
     arax_pathfinder_tier_version: str = "tier0-20260621"
     arax_pathfinder_curie_ngd_sqlite_filename: str = "curie_ngd_v1.0_{version}.sqlite"
     arax_pathfinder_tier0_overlay_sqlite_filename: str = "tier0-info-for-overlay_v1.0_{version}.sqlite"
-    arax_pathfinder_sqlite_host: str = "rtxconfig@arax-databases.rtx.ai"
-    arax_pathfinder_sqlite_remote_dir: str = "~/{version}"
+    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
     # End of ARAX configs
 
     pathfinder_redis_host: str = "host.docker.internal"
