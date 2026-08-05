@@ -71,22 +71,20 @@ def get_blocked_list():
     synonyms = set(s.lower() for s in json_block_list["synonyms"])
     return set(json_block_list["curies"]), synonyms
 
+
 async def rehydrate(kg, retriever_url, logger):
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     payload = {
-        "message": {
-            "knowledge_graph": kg
-        },
-        "parameters": {
-            "rehydrate": True,
-            "tier": 0
-        }
+        "message": {"knowledge_graph": kg},
+        "parameters": {"rehydrate": True, "tier": 0},
     }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.post(
-                retriever_url.replace("query", "rehydrate"), headers=headers, json=payload
+                retriever_url.replace("query", "rehydrate"),
+                headers=headers,
+                json=payload,
             )
         res.raise_for_status()
         return res.json()["message"]["knowledge_graph"]
@@ -112,6 +110,7 @@ async def rehydrate(kg, retriever_url, logger):
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         raise e
+
 
 def execute_pathfinding_sync(
     pinned_node_ids, pinned_node_keys, intermediate_categories, logger
@@ -209,7 +208,9 @@ async def pathfinder(task, logger: logging.Logger):
             logger,
         )
         logger.info(f"Rehydrating knowledge graph with retriever")
-        knowledge_graph = await rehydrate(knowledge_graph, settings.kg_rehydrate_url, logger)
+        knowledge_graph = await rehydrate(
+            knowledge_graph, settings.kg_rehydrate_url, logger
+        )
 
         res = []
         if result is not None:
