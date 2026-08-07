@@ -5,8 +5,7 @@ a descendant of `qualifier` in biolink-model, so BMT/Retriever route it into TRA
 edge.qualifiers[]. get_statistical_significance() therefore reads edge['qualifiers']
 ONLY. (ARAX is likewise qualifier-only as of RTXteam/RTX#2859 — its defensive
 edge.attributes lookup was removed; add a fallback here only if a KP is found to
-send the qualifier as an attribute.) Shared by aragorn_score + arax_rank (ranking)
-and the filter_edges_by_statistical_significance worker (filtering).
+send the qualifier as an attribute.) Shared by aragorn_score + arax_rank (ranking).
 """
 
 from typing import Any, Dict, Optional
@@ -24,7 +23,7 @@ SIGNIFICANCE_BAND_SCORES: Dict[str, float] = {
     "not_significant": 0.0,
 }
 
-# Ordinal ranking for filtering (remove edges below a threshold).
+# Ordinal scale of the significance bands (higher = more significant).
 SIGNIFICANCE_ORDINAL: Dict[str, int] = {
     "very_strongly_significant": 4,
     "strongly_significant": 3,
