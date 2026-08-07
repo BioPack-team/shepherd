@@ -2,7 +2,6 @@
 
 from shepherd_utils.statistical_significance_qualifier import (
     SIGNIFICANCE_BAND_SCORES,
-    SIGNIFICANCE_ORDINAL,
     get_statistical_significance,
 )
 
@@ -17,11 +16,6 @@ def test_band_scores_descending():
     ]
     scores = [SIGNIFICANCE_BAND_SCORES[b] for b in bands]
     assert scores == sorted(scores, reverse=True) and scores[-1] == 0.0
-
-
-def test_ordinal_matches_band_order():
-    assert SIGNIFICANCE_ORDINAL["very_strongly_significant"] == 4
-    assert SIGNIFICANCE_ORDINAL["not_significant"] == 0
 
 
 def test_lookup_in_qualifiers():

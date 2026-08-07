@@ -23,15 +23,6 @@ SIGNIFICANCE_BAND_SCORES: Dict[str, float] = {
     "not_significant": 0.0,
 }
 
-# Ordinal scale of the significance bands (higher = more significant).
-SIGNIFICANCE_ORDINAL: Dict[str, int] = {
-    "very_strongly_significant": 4,
-    "strongly_significant": 3,
-    "significant": 2,
-    "suggestive": 1,
-    "not_significant": 0,
-}
-
 # Source-agnostic trust weight applied to the band score in ranking (conservative;
 # matches RTX trust=0.5). NOT routed through aragorn's per-source get_source_weight.
 SIGNIFICANCE_SOURCE_WEIGHT: float = 0.5
@@ -39,7 +30,7 @@ SIGNIFICANCE_SOURCE_WEIGHT: float = 0.5
 
 def _strip_biolink(value: Any) -> Optional[str]:
     if isinstance(value, str) and value.startswith("biolink:"):
-        return value[len("biolink:"):]
+        return value[len("biolink:") :]
     return value
 
 
