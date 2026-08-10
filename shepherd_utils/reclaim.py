@@ -49,6 +49,9 @@ PER_STREAM_MIN_IDLE_SEC: Dict[str, int] = {
     "aragorn.score": 240,
     "bte.lookup": 240,
     "example.lookup": 240,
+    # Pathfinding runs in a process pool bounded by pool_task_timeout_sec
+    # (300s), so no legitimate task can outlive that; the floor sits just above.
+    "arax.pathfinder": 360,
     # Medium-duration workers.
     "arax.rank": 60,
     "merge_message": 60,
