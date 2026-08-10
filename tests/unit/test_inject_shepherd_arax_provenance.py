@@ -1,4 +1,4 @@
-"""Tests for ``workers.arax.inject_shepherd_arax_provenance``.
+"""Tests for ``shepherd_utils.inject_shepherd_arax_provenance``.
 
 The shepherd-arax injector tags every kgraph edge with an aggregator
 ``infores:shepherd-arax`` source so downstream consumers can attribute
@@ -12,7 +12,7 @@ through its package path here.
 
 import copy
 
-from workers.arax.inject_shepherd_arax_provenance import (
+from shepherd_utils.inject_shepherd_arax_provenance import (
     SHEPHERD_ARAX_SOURCE,
     add_shepherd_arax_to_edge_sources,
 )
