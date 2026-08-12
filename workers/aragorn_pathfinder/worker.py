@@ -68,8 +68,8 @@ async def shadowfax(task, logger: logging.Logger) -> str:
 
     filter_config = parameters.get("filter_config", {})
     parameters["filter_config"] = {
-        "min_information_content": filter_config.get("min_information_content", 69),
-        "max_node_degree": filter_config.get("max_node_degree", 5000),
+        "min_information_content": filter_config.get("min_information_content", 60),
+        "max_node_degree": filter_config.get("max_node_degree", 10000),
     }
     parameters["dehydrated"] = parameters.get("dehydrated", True)
     message["parameters"] = parameters
