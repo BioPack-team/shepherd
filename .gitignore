@@ -5,6 +5,7 @@ debug/
 gandalf_mmap/
 omnicorp_lmdb/
 pathfinder_embeddings/
+arax_pathfinder_dbs/
 
 # Project specific
 scripts/

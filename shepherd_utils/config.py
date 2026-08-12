@@ -84,7 +84,23 @@ class Settings(BaseSettings):
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
     kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
     default_data_tier: int = 0
+
+    # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
+    arax_biolink_version: str = "4.2.5"
+    arax_blocked_list_url: str = (
+        "https://raw.githubusercontent.com/RTXteam/RTX/master/"
+        "code/ARAX/KnowledgeSources/general_concepts.json"
+    )
+
+    arax_pathfinder_dbs_dir: str = "arax_pathfinder_dbs"
+    arax_pathfinder_tier_version: str = "tier0-20260621"
+    arax_pathfinder_curie_ngd_sqlite_filename: str = "curie_ngd_v1.0_{version}.sqlite"
+    arax_pathfinder_tier0_overlay_sqlite_filename: str = (
+        "tier0-info-for-overlay_v1.0_{version}.sqlite"
+    )
+    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    # End of ARAX configs
 
     pathfinder_redis_host: str = "host.docker.internal"
     pathfinder_redis_port: int = 6383
