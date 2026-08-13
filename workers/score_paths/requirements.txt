@@ -3,4 +3,3 @@ lmdb
 numpy
 torch>=2.10.0
 scikit-learn
-xgboost>=3.2.0
