@@ -14,9 +14,10 @@ from pathfinder.Pathfinder import Pathfinder
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import (
+    arax_blocked_list_path,
     arax_pathfinder_sqlite_paths,
+    ensure_arax_blocked_list,
     ensure_arax_pathfinder_dbs,
-    ensure_http_files_dataset,
 )
 from shepherd_utils.db import (
     get_message_sync,
@@ -25,6 +26,7 @@ from shepherd_utils.db import (
 from shepherd_utils.inject_shepherd_arax_provenance import (
     add_shepherd_arax_to_edge_sources,
 )
+from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
@@ -36,19 +38,13 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
+LOGGER = get_worker_logger(STREAM)
 
 NUM_TOTAL_HOPS = 4
 MAX_HOPS_TO_EXPLORE = 4
 MAX_PATHFINDER_PATHS = 500
 PRUNE_TOP_K = 75
 NODE_DEGREE_THRESHOLD = 10000
-
-# The ARAX blocked-concept list, fetched once at worker startup (see
-# poll_for_tasks) and read by each pool child. Kept in the working directory
-# (/app in the image) so it needs no extra volume mount.
-BLOCKED_LIST_DIR = "."
-BLOCKED_LIST_FILENAME = "general_concepts.json"
-BLOCKED_LIST_PATH = Path(BLOCKED_LIST_DIR) / BLOCKED_LIST_FILENAME
 
 BIOLINK_CACHE_DIR = "/tmp/biolink"
 
@@ -65,30 +61,16 @@ _biolink_helper = None
 _descendants_cache: dict = {}
 
 
-def ensure_blocked_list(logger: logging.Logger) -> None:
-    """Fetch the ARAX blocked-concept list if it isn't on disk yet.
-
-    Uses the shared downloader so the file lands via a temp file + atomic
-    rename; the previous per-task ``requests.get`` wrote the destination
-    directly, so concurrent tasks could race on a half-written file.
-    Idempotent, so it is safe to call at startup and again lazily in a child.
-    """
-    ensure_http_files_dataset(
-        name="arax_blocked_list",
-        target_dir=BLOCKED_LIST_DIR,
-        file_sources={BLOCKED_LIST_FILENAME: settings.arax_blocked_list_url},
-        logger=logger,
-    )
-
-
 def get_blocked_list(logger: logging.Logger):
     """``(blocked_curies, blocked_synonyms)``, parsed once per pool child."""
     global _blocked_list_cache
     if _blocked_list_cache is None:
-        if not BLOCKED_LIST_PATH.exists():
-            # Startup fetch failed or this child outlived a wiped working dir.
-            ensure_blocked_list(logger)
-        with open(BLOCKED_LIST_PATH, "r") as file:
+        blocked_list_path = Path(arax_blocked_list_path())
+        if not blocked_list_path.exists():
+            # Startup fetch failed, or the volume was replaced under a
+            # long-lived child.
+            ensure_arax_blocked_list(logger)
+        with open(blocked_list_path, "r") as file:
             json_block_list = json.load(file)
         synonyms = set(s.lower() for s in json_block_list["synonyms"])
         _blocked_list_cache = (set(json_block_list["curies"]), synonyms)
@@ -326,21 +308,25 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
-    startup_logger = logging.getLogger(STREAM)
     # Ensure the two sqlite databases exist before any task tries to open them
     # (a first-run local `docker compose up` starts with the volume-mounted
-    # directory empty). No-op once present or when no scp source is configured
-    # (e.g. production, where the data is mounted out of band).
-    ensure_arax_pathfinder_dbs(startup_logger)
+    # directory empty). No-op once present -- which is the case in production,
+    # where the data is mounted out of band. Note the "already present" check is
+    # an exact match on ARAX_PATHFINDER_DBS_DIR plus the tier-versioned
+    # filenames, so a deployment whose mount path or ARAX_PATHFINDER_TIER_VERSION
+    # disagrees with those settings downloads the databases again rather than
+    # using the mounted copies.
+    ensure_arax_pathfinder_dbs(LOGGER)
     # Fetch the blocked-concept list once here rather than per task, so the pool
-    # children only ever read it.
-    ensure_blocked_list(startup_logger)
+    # children only ever read it. It lives on the same volume as the sqlite dbs,
+    # so this is a no-op after the first run.
+    ensure_arax_blocked_list(LOGGER)
     loop = asyncio.get_running_loop()
     # Size the pool by the pod's actual CPU allocation (cgroup limit), not
     # os.cpu_count() -- see aragorn_score.poll_for_tasks. Each child loads a full
     # message, so this also bounds peak memory. POOL_MAX_WORKERS overrides.
-    max_workers = resolve_pool_workers(TASK_LIMIT, startup_logger)
-    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
+    LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     pool = ProcessPoolManager(
         max_workers,
         max_tasks_per_child=settings.pool_max_tasks_per_child,
@@ -356,9 +342,9 @@ async def poll_for_tasks():
                     process_task(task, parent_ctx, logger, limiter, loop, pool)
                 )
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            LOGGER.info("Poll loop cancelled, shutting down.")
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
 
 

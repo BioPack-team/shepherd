@@ -7,6 +7,7 @@ from shepherd_utils.logger import (
     QueryLogger,
     ReasonerLogEntryFormatter,
     get_logging_config,
+    get_worker_logger,
 )
 
 
@@ -91,7 +92,7 @@ def test_get_logging_config_local_includes_file_handler(monkeypatch, tmp_path):
     config = get_logging_config()
     assert "file" in config["handlers"]
     assert "console" in config["handlers"]
-    assert set(config["loggers"]["shepherd"]["handlers"]) == {"console", "file"}
+    assert set(config["root"]["handlers"]) == {"console", "file"}
     # The function eagerly creates the logs/ dir for file output.
     assert os.path.isdir(tmp_path / "logs")
 
@@ -100,7 +101,7 @@ def test_get_logging_config_kubernetes_skips_file_handler(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     config = get_logging_config()
     assert "file" not in config["handlers"]
-    assert config["loggers"]["shepherd"]["handlers"] == ["console"]
+    assert config["root"]["handlers"] == ["console"]
 
 
 def test_get_logging_config_pool_child_skips_file_handler(monkeypatch, tmp_path):
@@ -119,4 +120,64 @@ def test_get_logging_config_pool_child_skips_file_handler(monkeypatch, tmp_path)
     )
     config = get_logging_config()
     assert "file" not in config["handlers"]
-    assert config["loggers"]["shepherd"]["handlers"] == ["console"]
+    assert config["root"]["handlers"] == ["console"]
+
+
+# --- worker logger namespacing ----------------------------------------------
+#
+# Regression cover for a silent-startup bug: workers logged through
+# ``logging.getLogger(STREAM)`` (e.g. "arax.pathfinder"), which sits outside the
+# only namespace ``setup_logging`` attaches handlers to. Those records reached a
+# handler-less root and were dropped by logging's lastResort fallback, so a
+# worker that hung during startup produced no output whatsoever.
+
+
+def test_get_worker_logger_namespaces_stream_names():
+    assert get_worker_logger("arax.pathfinder").name == "shepherd.arax.pathfinder"
+
+
+def test_get_worker_logger_does_not_double_prefix():
+    """Safe to apply to names that are already namespaced."""
+    assert get_worker_logger("shepherd.monitor").name == "shepherd.monitor"
+    assert get_worker_logger("shepherd").name == "shepherd"
+
+
+def test_worker_logger_inherits_configured_handlers(monkeypatch):
+    """The whole point: a worker logger must resolve to a real handler at INFO."""
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    logging.config.dictConfig(get_logging_config())
+
+    worker_logger = get_worker_logger("arax.pathfinder")
+    # Walk the ancestry the way logging does when emitting a record.
+    effective = []
+    node = worker_logger
+    while node:
+        effective.extend(node.handlers)
+        node = node.parent if node.propagate else None
+
+    assert effective, "worker logger resolved to no handler"
+    assert worker_logger.getEffectiveLevel() <= logging.INFO
+
+
+def test_root_logger_configured_as_warning_backstop(monkeypatch):
+    """Stray records outside ``shepherd.*`` still land somewhere, formatted.
+
+    WARNING rather than INFO on purpose -- at INFO, libraries such as httpx emit
+    a line per request and drown out our own logs.
+    """
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    config = get_logging_config()
+    assert config["root"]["level"] == "WARNING"
+    assert config["root"]["handlers"] == ["console"]
+
+
+def test_handlers_are_attached_only_once(monkeypatch):
+    """Handlers live on root only; shepherd sets a level and propagates to them.
+
+    Attaching them in both places would emit every shepherd record twice.
+    """
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    config = get_logging_config()
+    assert config["root"]["handlers"] == ["console"]
+    assert "handlers" not in config["loggers"]["shepherd"]
+    assert config["loggers"]["shepherd"]["level"] == "DEBUG"

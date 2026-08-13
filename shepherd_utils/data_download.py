@@ -15,7 +15,8 @@ Two flavors of HTTP source are supported:
   ``aragorn_omnicorp`` and ``score_paths`` below).
 * **Per-file** -- individual files fetched directly, no archive/extract step
   (``arax_pathfinder`` below, whose two sqlite databases are served as plain
-  files rather than bundled into one archive).
+  files rather than bundled into one archive, plus the ARAX blocked-concept
+  list that shares their directory).
 
 When a download source is configured (read via :mod:`shepherd_utils.config`),
 each worker calls its matching ``ensure_*`` helper at startup:
@@ -50,14 +51,25 @@ def _missing_files(target_dir: str, required_files: List[str]) -> List[str]:
 
 
 def _download(url: str, dest_path: str, logger: logging.Logger) -> None:
-    """Stream ``url`` to ``dest_path``, logging progress periodically."""
+    """Stream ``url`` to ``dest_path``, logging progress periodically.
+
+    Bounded by ``dataset_download_timeout_sec`` (see config). The timeout is
+    per socket operation rather than for the whole transfer, so a multi-GB file
+    downloads for as long as it needs while a stalled connection raises instead
+    of hanging worker startup indefinitely.
+    """
     logger.info(f"Downloading dataset from {url} ...")
+    timeout = float(settings.dataset_download_timeout_sec)
+    # urlopen treats timeout=None as "no timeout"; 0 is the documented opt-out.
+    kwargs = {"timeout": timeout} if timeout > 0 else {}
+    # Hoisted so the timeout handler below can report how far the transfer got
+    # even when it never made it past opening the connection.
+    read = 0
     try:
         # nosec B310: the URL is operator-configured (an env var), not user input.
-        with urllib.request.urlopen(url) as resp:  # noqa: S310
+        with urllib.request.urlopen(url, **kwargs) as resp:  # noqa: S310
             header = resp.headers.get("Content-Length")
             total = int(header) if header and header.isdigit() else None
-            read = 0
             step = 50 * 1024 * 1024  # log roughly every 50 MB
             next_log = step
             with open(dest_path, "wb") as out:
@@ -82,9 +94,21 @@ def _download(url: str, dest_path: str, logger: logging.Logger) -> None:
             f"URL is correct and reachable."
         ) from e
     except urllib.error.URLError as e:
+        # A connect timeout arrives here, wrapped, with e.reason set to the
+        # underlying socket.timeout.
         raise RuntimeError(
             f"download failed for {url}: {e.reason}. Confirm the URL is correct "
             f"and reachable from inside the container."
+        ) from e
+    except TimeoutError as e:
+        # A stall part-way through the body raises straight out of resp.read()
+        # rather than being wrapped in URLError, so it needs its own handler --
+        # otherwise this surfaces as a bare TimeoutError with no context.
+        raise RuntimeError(
+            f"download failed for {url}: no data for {timeout:.0f}s "
+            f"({read / 1e6:.0f} MB transferred). The host is reachable but the "
+            f"transfer stalled -- check for an egress proxy or a rate limit, or "
+            f"raise DATASET_DOWNLOAD_TIMEOUT_SEC."
         ) from e
     logger.info(f"Download complete: {read / 1e6:.0f} MB")
 
@@ -123,7 +147,7 @@ def ensure_lmdb_dataset(
     Idempotent: once the files are present this returns immediately, so it's safe
     to call unconditionally on every worker startup.
     """
-    logger = logger or logging.getLogger(__name__)
+    logger = logger or logging.getLogger("shepherd.data_download")
 
     missing = _missing_files(target_dir, required_files)
     if not missing:
@@ -191,7 +215,7 @@ def ensure_http_files_dataset(
     Idempotent: once a file is present it's left alone, so it's safe to call
     unconditionally on every worker startup.
     """
-    logger = logger or logging.getLogger(__name__)
+    logger = logger or logging.getLogger("shepherd.data_download")
     required_files = list(file_sources.keys())
 
     missing = _missing_files(target_dir, required_files)
@@ -342,5 +366,46 @@ def ensure_arax_pathfinder_dbs(logger: Optional[logging.Logger] = None) -> None:
             curie_ngd_filename: f"{base_url}/{curie_ngd_filename}",
             node_degree_filename: f"{base_url}/{node_degree_filename}",
         },
+        logger=logger,
+    )
+
+
+# The ARAX blocked-concept list lives alongside the pathfinder sqlite databases
+# so it lands on the same mounted volume. It previously went to the worker's
+# working directory (``/app``), which is the container's writable layer and
+# therefore thrown away on every restart -- meaning each new pod re-fetched it
+# from GitHub during startup, before the poll loop, on a code path whose logs
+# were being discarded. On the volume it is fetched once and persists.
+ARAX_BLOCKED_LIST_FILENAME = "general_concepts.json"
+
+
+def arax_blocked_list_path() -> str:
+    """Return the on-disk path of the ARAX blocked-concept list.
+
+    Single source of truth, in the same spirit as
+    ``arax_pathfinder_sqlite_paths``: ``ensure_arax_blocked_list`` uses it to
+    know where to download, and worker.py uses it to know what to open.
+    """
+    return os.path.join(settings.arax_pathfinder_dbs_dir, ARAX_BLOCKED_LIST_FILENAME)
+
+
+def ensure_arax_blocked_list(logger: Optional[logging.Logger] = None) -> None:
+    """Ensure the ARAX blocked-concept list is present next to the sqlite dbs.
+
+    Fetched via the shared downloader so it lands through a temp file + atomic
+    rename (a direct write let concurrent tasks race on a half-written file)
+    and inherits the download timeout. Idempotent, so it is safe to call at
+    startup and again lazily from a pool child.
+
+    Note the flip side of persisting this on the volume: it is now only fetched
+    when absent, so a refreshed upstream list is not picked up until the file is
+    deleted. Delete it from the volume to force a re-fetch on the next restart.
+    """
+    ensure_http_files_dataset(
+        name="arax_blocked_list",
+        # ``or "."`` so an unset/blank dbs dir degrades to the working directory
+        # rather than handing makedirs an empty path.
+        target_dir=os.path.dirname(arax_blocked_list_path()) or ".",
+        file_sources={ARAX_BLOCKED_LIST_FILENAME: settings.arax_blocked_list_url},
         logger=logger,
     )
