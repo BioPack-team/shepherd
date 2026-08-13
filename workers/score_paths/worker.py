@@ -12,7 +12,6 @@ import numpy as np
 import torch
 from bmt import Toolkit
 from torch import nn
-from xgboost import XGBClassifier
 
 from shepherd_utils.config import settings
 from shepherd_utils.data_download import ensure_pathfinder_embeddings
@@ -214,19 +213,10 @@ def score_paths(task, logger):
         if feature_rows:
             features = np.stack(feature_rows).astype(np.float32)
             t0 = time.time()
-            mlp_out = mlp(torch.from_numpy(features))
+            with torch.inference_mode():
+                logits = mlp(torch.from_numpy(features)).squeeze(-1)
+                all_scores = torch.sigmoid(logits).numpy()
             mlp_time = time.time() - t0
-            path_embeddings = (
-                nn.functional.normalize(mlp_out, p=2, dim=1).detach().numpy()
-            )
-
-            t0 = time.time()
-            try:
-                all_scores = clf.predict_proba(path_embeddings)[:, 1]
-            except Exception as e:
-                logger.error(f"Classifier batch failed: {e}")
-                all_scores = np.zeros(len(path_embeddings))
-            clf_time = time.time() - t0
 
             scores = []
             for (r_idx, a_idx), s in zip(embedding_index, all_scores):
@@ -235,8 +225,7 @@ def score_paths(task, logger):
                 scores.append(s)
 
             logger.info(
-                f"Scored {len(scores)} paths in {mlp_time + clf_time:.1f}s "
-                f"(MLP {mlp_time:.2f}s, classifier {clf_time:.2f}s); "
+                f"Scored {len(scores)} paths in {mlp_time:.1f}s; "
                 f"scores [{min(scores):.3f}, {max(scores):.3f}] "
                 f"mean {sum(scores) / len(scores):.3f}"
             )
@@ -270,14 +259,12 @@ async def process_task(task, parent_ctx, logger, limiter):
 
 
 async def poll_for_tasks():
-    global clf, bmt, mlp, embedding_env, executor
+    global bmt, mlp, embedding_env, executor
     # Ensure the embeddings LMDB exists before we open it below (a first-run
     # local `docker compose up` starts with the volume-mounted directory empty).
     # No-op once present or when no download URL is configured (e.g. production,
     # where the data is mounted out of band).
     ensure_pathfinder_embeddings(logging.getLogger(STREAM))
-    clf = XGBClassifier()
-    clf.load_model("model_weights/squashbert_classifier_weights.json")
     bmt = Toolkit()
     embedding_env = lmdb.open(
         EMBEDDING_DIR, readonly=True, lock=False, readahead=False, subdir=True
@@ -291,9 +278,9 @@ async def poll_for_tasks():
         nn.Linear(1536, 1536),
         nn.GELU(),
         nn.LayerNorm(1536),
-        nn.Linear(1536, 768),
+        nn.Linear(1536, 1),
     )
-    ckpt = torch.load("model_weights/squashbert_mlp_hop3.pt", map_location="cpu")
+    ckpt = torch.load("model_weights/squashbert_direct_3hop.pt", map_location="cpu")
     mlp.load_state_dict({k.removeprefix("net."): v for k, v in ckpt["model"].items()})
     mlp.eval()
     executor = ThreadPoolExecutor(max_workers=TASK_LIMIT)
