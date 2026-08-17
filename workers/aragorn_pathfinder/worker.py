@@ -148,7 +148,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     "biolink:contains_process",
                     "biolink:occurs_in",
                     "biolink:affects_likelihood_of",
-                    "biolink:likelihood_affected_by"
+                    "biolink:likelihood_affected_by",
                     "biolink:active_in",
                     "biolink:has_active_component",
                 ],
@@ -185,7 +185,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     "biolink:contains_process",
                     "biolink:occurs_in",
                     "biolink:affects_likelihood_of",
-                    "biolink:likelihood_affected_by"
+                    "biolink:likelihood_affected_by",
                     "biolink:active_in",
                     "biolink:has_active_component",
                 ],
@@ -222,7 +222,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     "biolink:contains_process",
                     "biolink:occurs_in",
                     "biolink:affects_likelihood_of",
-                    "biolink:likelihood_affected_by"
+                    "biolink:likelihood_affected_by",
                     "biolink:active_in",
                     "biolink:has_active_component",
                 ],
