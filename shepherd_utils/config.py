@@ -122,6 +122,19 @@ class Settings(BaseSettings):
     omnicorp_lmdb_url: str = ""
     pathfinder_embeddings_url: str = ""
 
+    # Socket timeout (seconds) for those startup dataset downloads. This bounds
+    # each individual blocking socket operation -- the connect and every
+    # subsequent read -- not the transfer as a whole, so a genuinely large file
+    # still downloads for as long as it needs provided it keeps making progress.
+    # Without it, urllib inherits Python's default of no timeout: a connection
+    # that opens and then stalls (an egress proxy that swallows the request, a
+    # server that accepts and never responds) hangs the worker's startup
+    # forever, before it ever reaches the poll loop. That is silent -- the
+    # worker never registers a heartbeat and never picks up a task, but it also
+    # never crashes. With a timeout the download fails loudly instead. Set to 0
+    # to restore the unbounded behavior.
+    dataset_download_timeout_sec: float = 60.0
+
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317

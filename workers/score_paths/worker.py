@@ -1,7 +1,6 @@
 """Path scoring module"""
 
 import asyncio
-import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +16,7 @@ from xgboost import XGBClassifier
 from shepherd_utils.config import settings
 from shepherd_utils.data_download import ensure_pathfinder_embeddings
 from shepherd_utils.db import get_message_sync, save_message_sync
+from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
@@ -26,6 +26,7 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 4
 EMBEDDING_DIR = settings.pathfinder_embeddings_dir
 tracer = setup_tracer(STREAM)
+LOGGER = get_worker_logger(STREAM)
 
 
 def convert_path_to_components(source, target, path, knowledge_graph, logger):
@@ -275,7 +276,7 @@ async def poll_for_tasks():
     # local `docker compose up` starts with the volume-mounted directory empty).
     # No-op once present or when no download URL is configured (e.g. production,
     # where the data is mounted out of band).
-    ensure_pathfinder_embeddings(logging.getLogger(STREAM))
+    ensure_pathfinder_embeddings(LOGGER)
     clf = XGBClassifier()
     clf.load_model("model_weights/squashbert_classifier_weights.json")
     bmt = Toolkit()
@@ -283,7 +284,7 @@ async def poll_for_tasks():
         EMBEDDING_DIR, readonly=True, lock=False, readahead=False, subdir=True
     )
     count, sample = _probe_cache(embedding_env)
-    logging.info(f"embeddings cache: {count} entries (sample key: {sample!r})")
+    LOGGER.info(f"embeddings cache: {count} entries (sample key: {sample!r})")
     mlp = nn.Sequential(
         nn.Linear(11 * 768, 1536),
         nn.GELU(),
@@ -304,9 +305,9 @@ async def poll_for_tasks():
             ):
                 asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            LOGGER.info("Poll loop cancelled, shutting down.")
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)
 
 

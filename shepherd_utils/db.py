@@ -193,7 +193,7 @@ async def initialize_db() -> None:
     except Exception:
         # A failed upgrade must never keep a worker from starting: the schema
         # additions are performance aids, and the janitor/next boot retries.
-        logging.getLogger(__name__).warning(
+        logging.getLogger("shepherd.db").warning(
             "Failed to apply startup schema upgrades", exc_info=True
         )
 

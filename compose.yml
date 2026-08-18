@@ -359,9 +359,14 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env
       # First run? The worker downloads its two sqlite dbs from
-      # kg2webhost.rtx.ai on startup, no credentials needed. Set
+      # kg2webhost.rtx.ai, plus the ARAX blocked-concept list from GitHub, on
+      # startup -- no credentials needed. All three live here, so they persist
+      # across restarts instead of being re-fetched by each new container. Set
       # ARAX_PATHFINDER_TIER_VERSION in your .env if you need a tier other than
       # the default (see README "Worker data (LMDB / sqlite) downloads").
+      # Deploying elsewhere? ARAX_PATHFINDER_DBS_DIR must point at the mount --
+      # it defaults to a path relative to /app, and a mismatch silently
+      # re-downloads everything instead of using the mounted copies.
       - ./arax_pathfinder_dbs:/app/arax_pathfinder_dbs
 
   arax_rank:
