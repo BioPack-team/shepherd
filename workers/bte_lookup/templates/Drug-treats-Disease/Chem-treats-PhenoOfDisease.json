@@ -17,7 +17,7 @@
       "eA": {
         "subject": "$source",
         "object": "nA",
-        "predicates": ["biolink:treats", "biolink:ameliorates"]
+        "predicates": ["biolink:treats"]
       },
       "eB": {
         "subject": "$target",
