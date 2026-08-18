@@ -7,6 +7,7 @@ import random
 import uuid
 from shepherd_utils.db import get_message, save_message
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
@@ -15,6 +16,7 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 3
 tracer = setup_tracer(STREAM)
+LOGGER = get_worker_logger(STREAM)
 
 
 async def example_score(task, logger: logging.Logger):
@@ -47,9 +49,9 @@ async def poll_for_tasks():
             ):
                 asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            LOGGER.info("Poll loop cancelled, shutting down.")
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
 
 

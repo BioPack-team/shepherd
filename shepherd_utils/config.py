@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # giving up. Kept short so callers fail fast when the DB is unreachable
     # instead of blocking; raise it if you hit pool timeouts under heavy load.
     postgres_pool_timeout: float = 5.0
+    # Per-process Postgres pool bounds. Every container (server + each worker)
+    # holds its own pool, so the fleet-wide ceiling is (number of containers x
+    # max size) and must stay under Postgres's max_connections (200 in
+    # compose.yml). The server fields all client HTTP traffic (sync-query
+    # status polling, /callback lookups) and is the component that exhausts
+    # its pool first under load, so compose.yml/Helm give it a larger pool via
+    # these env vars while the workers keep the small default.
+    postgres_pool_min_size: int = 5
+    postgres_pool_max_size: int = 10
     # Size of the Postgres data volume, set from the SAME Helm value that sizes
     # the PVC (e.g. "100Gi"). Lets the monitor compute how full the disk is and
     # alert before it fills. Empty disables the db-capacity alert.
@@ -75,7 +84,23 @@ class Settings(BaseSettings):
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
     kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
     default_data_tier: int = 0
+
+    # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
+    arax_biolink_version: str = "4.2.5"
+    arax_blocked_list_url: str = (
+        "https://raw.githubusercontent.com/RTXteam/RTX/master/"
+        "code/ARAX/KnowledgeSources/general_concepts.json"
+    )
+
+    arax_pathfinder_dbs_dir: str = "arax_pathfinder_dbs"
+    arax_pathfinder_tier_version: str = "tier0-20260621"
+    arax_pathfinder_curie_ngd_sqlite_filename: str = "curie_ngd_v1.0_{version}.sqlite"
+    arax_pathfinder_tier0_overlay_sqlite_filename: str = (
+        "tier0-info-for-overlay_v1.0_{version}.sqlite"
+    )
+    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    # End of ARAX configs
 
     pathfinder_redis_host: str = "host.docker.internal"
     pathfinder_redis_port: int = 6383
@@ -96,6 +121,19 @@ class Settings(BaseSettings):
     # download is skipped there. See shepherd_utils/data_download.py.
     omnicorp_lmdb_url: str = ""
     pathfinder_embeddings_url: str = ""
+
+    # Socket timeout (seconds) for those startup dataset downloads. This bounds
+    # each individual blocking socket operation -- the connect and every
+    # subsequent read -- not the transfer as a whole, so a genuinely large file
+    # still downloads for as long as it needs provided it keeps making progress.
+    # Without it, urllib inherits Python's default of no timeout: a connection
+    # that opens and then stalls (an egress proxy that swallows the request, a
+    # server that accepts and never responds) hangs the worker's startup
+    # forever, before it ever reaches the poll loop. That is silent -- the
+    # worker never registers a heartbeat and never picks up a task, but it also
+    # never crashes. With a timeout the download fails loudly instead. Set to 0
+    # to restore the unbounded behavior.
+    dataset_download_timeout_sec: float = 60.0
 
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"

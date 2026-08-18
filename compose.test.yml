@@ -64,6 +64,9 @@ services:
   arax:
     cpus: 1
     mem_limit: 3g
+  arax_pathfinder:
+    cpus: 6
+    mem_limit: 22g
   arax_rank:
     cpus: 4
     mem_limit: 10g

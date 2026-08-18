@@ -128,10 +128,32 @@ def get_logging_config():
             "default": {"format": "[%(asctime)s: %(levelname)s/%(name)s]: %(message)s"}
         },
         "handlers": handlers,
+        # The output handlers live on root, and root alone. Previously they were
+        # attached to ``shepherd`` and root was left unconfigured, so any record
+        # logged outside that namespace -- a stray ``logging.info``, a
+        # third-party library, a logger named for its module or its Redis stream
+        # -- reached a handler-less root and was dropped by logging's
+        # ``lastResort`` fallback, which only emits WARNING+ and ignores our
+        # formatter. That silently swallowed every worker's entire startup
+        # phase; see ``get_worker_logger``.
+        #
+        # Root's level applies only to records logged directly on root, not to
+        # ones propagated up from a child (those are level-checked at the
+        # originating logger). So WARNING here means third-party libraries are
+        # quiet below WARNING -- httpx logs a line per request at INFO, which
+        # would bury our own output -- while ``shepherd.*`` still emits at DEBUG
+        # via the entry below. Everything then reaches these handlers by
+        # propagation, which also keeps pytest's ``caplog`` working.
+        "root": {
+            "level": "WARNING",
+            "handlers": logger_handlers,
+        },
         "loggers": {
+            # No handlers: records propagate to root's. Only the level is set
+            # here, which is what lets our own logging through at DEBUG while
+            # leaving third-party loggers at root's WARNING.
             "shepherd": {
                 "level": "DEBUG",
-                "handlers": logger_handlers,
             },
             # psycopg's pool retries to keep min_size connections warm and logs
             # a WARNING on every failed attempt. When the DB is down that floods
@@ -148,6 +170,25 @@ def get_logging_config():
     }
 
     return logging_config
+
+
+def get_worker_logger(name: str) -> logging.Logger:
+    """Return a logger under the configured ``shepherd`` namespace.
+
+    ``setup_logging`` only attaches handlers to ``shepherd`` (and, as a
+    WARNING-level backstop, root), so a logger named for the stream alone
+    (``logging.getLogger("arax.pathfinder")``) inherits no handler at INFO and
+    its records vanish. Every worker's startup phase -- dataset downloads, pool
+    sizing, poll-loop errors -- logged through exactly such a logger, so a
+    worker that hung before reaching ``get_tasks`` produced no output at all
+    and looked identical to a healthy idle one.
+
+    Passing a name that is already namespaced is a no-op, so this is safe to
+    apply to existing ``shepherd.``-prefixed names.
+    """
+    if name == "shepherd" or name.startswith("shepherd."):
+        return logging.getLogger(name)
+    return logging.getLogger(f"shepherd.{name}")
 
 
 def setup_logging():

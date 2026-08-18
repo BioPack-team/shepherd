@@ -5,7 +5,9 @@ network by serving a locally-built ``.tar.gz`` over a ``file://`` URL.
 """
 
 import logging
+import os
 import tarfile
+import urllib.request  # noqa: F401  (patched by name in the timeout tests)
 
 import pytest
 
@@ -155,3 +157,91 @@ def test_ensure_pathfinder_embeddings_wires_settings(tmp_path, mocker):
 
     assert (target / "data.mdb").exists()
     assert (target / "lock.mdb").exists()
+
+
+# --- download timeout --------------------------------------------------------
+#
+# urllib defaults to no timeout, so a connection that opens and then stalls hung
+# worker startup forever -- before the poll loop, before any heartbeat, and with
+# no crash to point at.
+
+
+def test_download_passes_configured_timeout(tmp_path, mocker):
+    mocker.patch.object(data_download.settings, "dataset_download_timeout_sec", 12.5)
+    urlopen = mocker.patch.object(data_download.urllib.request, "urlopen")
+    urlopen.return_value.__enter__.return_value.headers.get.return_value = None
+    urlopen.return_value.__enter__.return_value.read.return_value = b""
+
+    data_download._download("http://example.invalid/x", str(tmp_path / "out"), logger)
+
+    assert urlopen.call_args.kwargs["timeout"] == 12.5
+
+
+def test_download_timeout_zero_restores_unbounded_behavior(tmp_path, mocker):
+    mocker.patch.object(data_download.settings, "dataset_download_timeout_sec", 0)
+    urlopen = mocker.patch.object(data_download.urllib.request, "urlopen")
+    urlopen.return_value.__enter__.return_value.headers.get.return_value = None
+    urlopen.return_value.__enter__.return_value.read.return_value = b""
+
+    data_download._download("http://example.invalid/x", str(tmp_path / "out"), logger)
+
+    assert "timeout" not in urlopen.call_args.kwargs
+
+
+def test_download_reports_a_mid_transfer_stall(tmp_path, mocker):
+    """A stall inside resp.read() raises TimeoutError directly rather than being
+    wrapped in URLError, so it needs its own handler to get a useful message."""
+    mocker.patch.object(data_download.settings, "dataset_download_timeout_sec", 30)
+    urlopen = mocker.patch.object(data_download.urllib.request, "urlopen")
+    resp = urlopen.return_value.__enter__.return_value
+    resp.headers.get.return_value = None
+    resp.read.side_effect = [b"partial", TimeoutError("timed out")]
+
+    with pytest.raises(RuntimeError, match="transfer stalled"):
+        data_download._download(
+            "http://example.invalid/x", str(tmp_path / "out"), logger
+        )
+
+
+# --- ARAX blocked list -------------------------------------------------------
+
+
+def test_blocked_list_lives_with_the_pathfinder_sqlite_dbs(tmp_path, mocker):
+    """It used to be written to the working directory -- the container's
+    writable layer -- so every new pod re-fetched it from GitHub at startup."""
+    mocker.patch.object(
+        data_download.settings, "arax_pathfinder_dbs_dir", str(tmp_path / "dbs")
+    )
+
+    path = data_download.arax_blocked_list_path()
+
+    assert path == str(tmp_path / "dbs" / "general_concepts.json")
+    curie_ngd, _ = data_download.arax_pathfinder_sqlite_paths()
+    # Same volume as the sqlite databases, which is the whole point.
+    assert os.path.dirname(path) == os.path.dirname(curie_ngd)
+
+
+def test_ensure_arax_blocked_list_downloads_into_the_volume(tmp_path, mocker):
+    target = tmp_path / "dbs"
+    source = tmp_path / "general_concepts.json"
+    source.write_text('{"curies": ["CHEBI:1"], "synonyms": ["Water"]}')
+    mocker.patch.object(data_download.settings, "arax_pathfinder_dbs_dir", str(target))
+    mocker.patch.object(
+        data_download.settings, "arax_blocked_list_url", source.as_uri()
+    )
+
+    data_download.ensure_arax_blocked_list(logger)
+
+    assert (target / "general_concepts.json").exists()
+
+
+def test_ensure_arax_blocked_list_is_a_noop_once_present(tmp_path, mocker):
+    target = tmp_path / "dbs"
+    target.mkdir()
+    (target / "general_concepts.json").write_text('{"curies": [], "synonyms": []}')
+    mocker.patch.object(data_download.settings, "arax_pathfinder_dbs_dir", str(target))
+    spy = mocker.patch.object(data_download, "_download")
+
+    data_download.ensure_arax_blocked_list(logger)
+
+    spy.assert_not_called()

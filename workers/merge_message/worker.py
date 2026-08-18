@@ -30,7 +30,7 @@ from shepherd_utils.db import (
     save_logs,
     save_message_sync,
 )
-from shepherd_utils.logger import QueryLogger
+from shepherd_utils.logger import QueryLogger, get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
@@ -41,6 +41,7 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
+LOGGER = get_worker_logger(STREAM)
 
 
 def get_edgeset(result):
@@ -690,7 +691,7 @@ def merge_messages_by_ids(
     # otherwise handlers would accumulate across the child's successive tasks
     # and leak one query's logs into the next.
     query_log_handler = QueryLogger().log_handler
-    worker_logger = logging.getLogger(f"merge_message.worker.{os.getpid()}")
+    worker_logger = get_worker_logger(f"merge_message.worker.{os.getpid()}")
     worker_logger.setLevel(log_level)
     worker_logger.addHandler(query_log_handler)
     try:
@@ -766,8 +767,8 @@ async def poll_for_tasks():
     # and the in-flight task limit below: each merge runs a child that loads the
     # growing response blob, so pool size == concurrency bounds peak memory.
     # POOL_MAX_WORKERS overrides.
-    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
-    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
+    LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     # Shared self-healing pool: spawn-context executor that replaces itself in
     # place on a BrokenProcessPool (same implementation the aragorn.omnicorp /
     # aragorn.score / arax.rank workers use). run() swaps the dead pool before
@@ -957,13 +958,13 @@ async def poll_for_tasks():
                 inflight.add(t)
                 t.add_done_callback(inflight.discard)
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            LOGGER.info("Poll loop cancelled, shutting down.")
             for t in inflight:
                 t.cancel()
             pool.shutdown()
             return
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
 
 

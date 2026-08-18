@@ -14,33 +14,74 @@ The main entrypoint is `./compose.yml` and will spin everything up.
 
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`.
 
-### Worker data (LMDB) downloads
+### Worker data (LMDB / sqlite) downloads
 
-A couple of workers read from large, read-only LMDB datasets that are too big to
+A couple of workers read from large, read-only sqlite databases and LMDB datasets that are too big to
 commit to git (they're gitignored and volume-mounted from the host):
 
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
+- **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`, `general_concepts.json`)
 
-So a new developer doesn't have to source these by hand, each worker can fetch
-its dataset on first startup. Point it at a `.tar.gz` on an external server by
-adding the matching variable to your root `.env` file:
+So a new developer doesn't have to source these by hand, each worker can fetch its dataset on first
+startup. Two download mechanisms are supported, depending on where the dataset lives:
+
+**LMDB datasets (`aragorn_omnicorp`, `score_paths`)** are fetched as a `.tar.gz` from a plain HTTP(S)
+URL and extracted in place. Add the matching variable to your root `.env` file:
 
 ```dotenv
 OMNICORP_LMDB_URL=https://example.org/path/omnicorp_lmdb.tar.gz
 PATHFINDER_EMBEDDINGS_URL=https://example.org/path/pathfinder_embeddings.tar.gz
 ```
 
-On startup the worker checks whether its LMDB files already exist in the
-volume-mounted directory. If they're missing and a URL is set, it downloads the
-archive and extracts it into that directory — which lives on the host, so the
-data persists across restarts and is only downloaded once. If the files are
-already present, or no URL is configured, the download is skipped (production
-mounts this data out of band, so it's unaffected).
+The archive for each dataset should contain the expected files at its top level: `curies.lmdb` and
+`shared_counts.lmdb` for omnicorp, `data.mdb` (and `lock.mdb`) for the embeddings.
 
-The archive for each dataset should contain the expected files at its top level:
-`curies.lmdb` and `shared_counts.lmdb` for omnicorp, `data.mdb` (and
-`lock.mdb`) for the embeddings.
+**arax_pathfinder's sqlite databases** are served as plain files over HTTPS, no credentials needed. The
+filenames embed a Knowledge Graph version that changes periodically, so only one variable needs updating
+when a new Knowledge Graph ships:
+
+```dotenv
+ARAX_PATHFINDER_TIER_VERSION=tier0-20260621
+```
+
+The ARAX blocked-concept list (`general_concepts.json`, fetched from GitHub) lands in this same
+directory, so it is downloaded once and then persists with the databases rather than being re-fetched
+by every new container. It is only fetched when absent — delete it from the volume to pick up an
+updated upstream list.
+
+On startup, each worker checks whether its files already exist in the volume-mounted directory. If
+they're missing and a URL is configured, it fetches them into that directory — which lives on the
+host, so the data persists across restarts and is only downloaded once. If the files are already
+present, or no source is configured, the download is skipped (production mounts this data out of
+band, so it's unaffected).
+
+Downloads are bounded by `DATASET_DOWNLOAD_TIMEOUT_SEC` (default 60), which applies per socket
+operation rather than to the whole transfer — a large file downloads for as long as it needs, but a
+connection that opens and then stalls fails loudly instead of hanging worker startup.
+
+#### Deploying these workers
+
+The presence check is an exact match on the configured directory **and** the tier-versioned filenames.
+A deployment that mounts the data somewhere else, or whose `ARAX_PATHFINDER_TIER_VERSION` doesn't match
+the filenames on the volume, will not use the mounted copies — it will decide the dataset is missing and
+download it again, into whatever path the settings do point at. If that path isn't the mount, the files
+land on the container's writable layer and the pod is eventually evicted for exceeding its ephemeral
+storage. So when deploying, set the directory explicitly and confirm it resolves to your mount:
+
+```dotenv
+ARAX_PATHFINDER_DBS_DIR=/data/arax_pathfinder_dbs   # default is relative: resolved against /app
+```
+
+```console
+$ kubectl exec deploy/arax-pathfinder -- python -c \
+    "from shepherd_utils.data_download import arax_pathfinder_sqlite_paths as p; print(*p(), sep='\n')"
+```
+
+Because `general_concepts.json` now shares that directory, the volume needs to be writable for the
+first startup that fetches it — or the file can be preloaded alongside the sqlite databases, after
+which the worker only ever reads it. A read-only mount with no preloaded copy fails at startup with a
+permission error rather than silently continuing.
 
 ### Worker
 

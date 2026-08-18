@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKER_FILES = [
     "workers/arax_rank/worker.py",
     "workers/aragorn_score/worker.py",
+    "workers/arax_pathfinder/worker.py",
 ]
 
 
