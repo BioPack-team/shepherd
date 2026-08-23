@@ -257,6 +257,13 @@ class Settings(BaseSettings):
     # under pathological bursts; leftover ready callbacks are swept by the next
     # drain iteration. 0 disables the cap (fold everything ready in one pass).
     merge_max_fold: int = 25
+    # Cap on how many log entries are lifted out of a single callback message.
+    # Subservices report their retrieval work in the TRAPI ``logs`` list they
+    # post back, and those entries are folded into the query's log list. A
+    # chatty (or broken) one can return tens of thousands of them, which would
+    # then be stored per query and echoed in the final response, so keep only
+    # the first N. 0 disables the cap.
+    merge_max_callback_logs: int = 1000
 
     # Monitor (dashboard) worker
     monitor_port: int = 5440

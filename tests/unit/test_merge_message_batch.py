@@ -3,6 +3,8 @@
 Covers:
 - ``merge_messages_by_ids`` folds multiple callbacks with a single load/save and
   is equivalent to merging them one at a time (the pre-existing behavior).
+- The KG retrieval logs a callback carries back are handed to the parent
+  instead of being dropped with the rest of the callback message.
 - ``merge_messages_by_id`` still works as a one-callback delegate.
 - The per-query "ready callback" index helpers in ``shepherd_utils.db``.
 """
@@ -24,10 +26,12 @@ from tests.helpers.generate_messages import (
     response_1,
     response_2,
 )
+from shepherd_utils.config import settings
 from workers.merge_message.worker import (
     merge_messages,
     merge_messages_by_id,
     merge_messages_by_ids,
+    take_callback_logs,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,6 +146,127 @@ def test_merge_messages_by_ids_child_handler_not_leaked(mocker):
     assert not any(
         getattr(h, "name", None) == "query_log_handler" for h in child_logger.handlers
     )
+
+
+def _callback_with_logs(logs):
+    """A callback message carrying the log entries a subservice returned."""
+    callback = copy.deepcopy(response_2)
+    callback["logs"] = logs
+    return callback
+
+
+def test_take_callback_logs_returns_and_clears_entries():
+    """The subservice's entries come back out, and the field is blanked on the
+    message so the log store stays the single source of the final logs."""
+    entries = [
+        {
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "level": "INFO",
+            "message": "Calling KP infores:example",
+        },
+        {
+            "timestamp": "2024-01-01T00:00:01+00:00",
+            "level": "WARNING",
+            "message": "KP infores:example timed out",
+        },
+    ]
+    callback = _callback_with_logs(copy.deepcopy(entries))
+
+    taken = take_callback_logs(callback, "c1", logging.INFO, logger)
+
+    assert taken == entries
+    assert callback["logs"] == []
+
+
+def test_take_callback_logs_filters_below_requested_level():
+    """A subservice that reports at DEBUG shouldn't flood an INFO query."""
+    callback = _callback_with_logs(
+        [
+            {"level": "DEBUG", "message": "chatty"},
+            {"level": "INFO", "message": "useful"},
+            {"message": "no level at all"},
+        ]
+    )
+
+    taken = take_callback_logs(callback, "c1", logging.INFO, logger)
+
+    assert [entry["message"] for entry in taken] == ["useful", "no level at all"]
+
+
+def test_take_callback_logs_handles_malformed_logs():
+    """Missing, null, non-list, and non-dict logs are all survivable."""
+    assert take_callback_logs({}, "c1", logging.INFO, logger) == []
+    assert take_callback_logs({"logs": None}, "c1", logging.INFO, logger) == []
+    assert take_callback_logs({"logs": "nope"}, "c1", logging.INFO, logger) == []
+    assert take_callback_logs(
+        {"logs": ["bare string"]}, "c1", logging.INFO, logger
+    ) == [{"message": "bare string", "level": "INFO"}]
+
+
+def test_take_callback_logs_caps_entry_count(mocker):
+    """A subservice dumping tens of thousands of entries is truncated rather
+    than stored (and echoed back) in full."""
+    mocker.patch.object(settings, "merge_max_callback_logs", 2)
+    callback = _callback_with_logs(
+        [{"level": "INFO", "message": f"log {i}"} for i in range(5)]
+    )
+
+    taken = take_callback_logs(callback, "c1", logging.INFO, logger)
+
+    assert [entry["message"] for entry in taken] == ["log 0", "log 1"]
+
+
+def test_merge_messages_by_ids_returns_callback_logs(mocker):
+    """The logs the KG retrieval sent back with each callback are returned to
+    the parent (which folds them into the query's log list) rather than being
+    dropped when the callback is merged into the response."""
+    query_graph = response_1["message"]["query_graph"]
+    _patch_sync_store(mocker)
+    from shepherd_utils.db import save_message_sync
+
+    save_message_sync("qid", {"message": {"query_graph": copy.deepcopy(query_graph)}})
+    save_message_sync("rid", generate_response())
+    save_message_sync(
+        "c1", _callback_with_logs([{"level": "INFO", "message": "c1 retrieval log"}])
+    )
+    save_message_sync(
+        "c2", _callback_with_logs([{"level": "ERROR", "message": "c2 retrieval log"}])
+    )
+
+    merged, log_entries = merge_messages_by_ids(
+        "test_ara", "qid", "rid", ["c1", "c2"], logging.INFO
+    )
+
+    assert merged == ["c1", "c2"]
+    messages = [entry.get("message") for entry in log_entries]
+    assert "c1 retrieval log" in messages
+    assert "c2 retrieval log" in messages
+    # Retrieval logs are oldest-first and lead the merge's own records.
+    assert messages.index("c1 retrieval log") < messages.index("c2 retrieval log")
+    # ...and they aren't left on the merged response, which would duplicate
+    # them once finish_query splices the log store in.
+    assert get_message_sync("rid").get("logs") == []
+
+
+def test_merge_messages_by_ids_direct_lookup_logs_not_left_on_message(mocker):
+    """The direct-lookup path returns the callback message as the accumulator
+    verbatim, so its logs have to be taken off it too."""
+    query_graph = response_2["message"]["query_graph"]
+    _patch_sync_store(mocker)
+    from shepherd_utils.db import save_message_sync
+
+    save_message_sync("qid", {"message": {"query_graph": copy.deepcopy(query_graph)}})
+    save_message_sync("rid", copy.deepcopy(response_2))
+    save_message_sync(
+        "c1", _callback_with_logs([{"level": "INFO", "message": "lookup log"}])
+    )
+
+    _, log_entries = merge_messages_by_ids(
+        "test_ara", "qid", "rid", ["c1"], logging.INFO
+    )
+
+    assert "lookup log" in [entry.get("message") for entry in log_entries]
+    assert get_message_sync("rid").get("logs") == []
 
 
 def test_merge_messages_by_id_delegates(mocker):
