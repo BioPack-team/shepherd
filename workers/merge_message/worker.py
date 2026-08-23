@@ -30,7 +30,7 @@ from shepherd_utils.db import (
     save_logs,
     save_message_sync,
 )
-from shepherd_utils.logger import QueryLogger, get_worker_logger
+from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
@@ -796,14 +796,10 @@ def merge_messages_by_ids(
 
         if merged:
             save_message_sync(response_id, accumulator)
-        # contents() is newest-first (emit appendlefts); hand back oldest-first
-        # so the parent can appendleft them in order and keep the queue's
-        # newest-first invariant.
-        log_entries = list(query_log_handler.contents())
-        log_entries.reverse()
-        # The retrieval logs describe work that happened before this merge, so
-        # they lead; both lists are oldest-first.
-        return merged, callback_log_entries + log_entries
+        # drain() hands back oldest-first, which is the order the parent's
+        # handler.ingest wants. The retrieval logs describe work that happened
+        # before this merge, so they lead.
+        return merged, callback_log_entries + query_log_handler.drain()
     finally:
         worker_logger.removeHandler(query_log_handler)
 
@@ -875,14 +871,7 @@ async def poll_for_tasks():
         """
         if not entries:
             return
-        handler = next(
-            (
-                h
-                for h in logger.handlers
-                if getattr(h, "name", None) == "query_log_handler"
-            ),
-            None,
-        )
+        handler = get_query_handler(logger)
         if handler is not None:
             handler.ingest(entries)
 

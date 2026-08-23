@@ -63,6 +63,22 @@ class QueryLogHandler(logging.Handler):
         for entry in entries:
             self.log_queue.appendleft(entry)
 
+    def drain(self):
+        """Pop everything queued and return it oldest-first.
+
+        Reading is destructive on purpose. These handlers hang off loggers that
+        ``logging.getLogger`` hands back as process-wide singletons, so the same
+        queue is flushed repeatedly -- once per task a worker runs for the same
+        query. Leaving entries behind meant every flush re-persisted every
+        record the queue had accumulated since the process started, which is how
+        one log line ended up in a query's logs several times over. Callers that
+        fail to persist what they drained put it back with ``ingest``.
+        """
+        entries = list(self.log_queue)
+        entries.reverse()
+        self.log_queue.clear()
+        return entries
+
 
 # Create unique logger for each query
 # https://stackoverflow.com/a/37967421
@@ -78,6 +94,32 @@ class QueryLogger(object):
     def log_handler(self):
         """Return the internal log handler."""
         return self._log_handler
+
+
+def get_query_handler(logger: logging.Logger):
+    """Return the query log handler attached to ``logger``, or None."""
+    return next(
+        (h for h in logger.handlers if getattr(h, "name", None) == "query_log_handler"),
+        None,
+    )
+
+
+def attach_query_handler(logger: logging.Logger) -> QueryLogHandler:
+    """Give ``logger`` a query log handler, reusing one it already has.
+
+    ``logging.getLogger`` returns the same object for a given name for the life
+    of the process, so callers that build "a logger per task" or "per request"
+    keep landing on one shared logger. Adding a fresh handler each time stacked
+    them up: every record was then queued once per attached handler, the list
+    grew without bound, and ``save_logs`` -- which flushes whichever handler
+    comes first -- kept re-reading the oldest queue. One handler per logger,
+    drained on flush, stores each record exactly once.
+    """
+    handler = get_query_handler(logger)
+    if handler is None:
+        handler = QueryLogger().log_handler
+        logger.addHandler(handler)
+    return handler
 
 
 def get_logging_config():
