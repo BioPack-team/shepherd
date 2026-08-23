@@ -677,6 +677,12 @@ def take_callback_logs(
     reached the query's log list. Lift them out here so the caller can fold them
     in alongside the merge's own records.
 
+    Each entry is tagged with the callback id it arrived under, the same
+    ``[callback_id]`` prefix the lookup worker and the callback handler use.
+    One query fans out into many retrievals whose logs all land in one list, so
+    the tag is what ties a line back to the retrieval that emitted it -- and
+    joins it to the dispatch and merge lines on either side.
+
     The field is blanked on the callback message itself: the merged response's
     logs are spliced in from the log store when the query finishes, so a
     leftover list here would show up twice in that payload (the direct-lookup
@@ -699,11 +705,13 @@ def take_callback_logs(
         if not isinstance(log, dict):
             # Not a TRAPI LogEntry, but there's still something a human wrote in
             # there -- keep it rather than silently dropping it.
-            entries.append({"message": str(log), "level": "INFO"})
+            entries.append({"message": f"[{callback_id}] {log}", "level": "INFO"})
             continue
         level = TRAPI_LOG_LEVELS.get(str(log.get("level", "")).upper())
         if level is not None and level < log_level:
             continue
+        message = log.get("message")
+        log["message"] = f"[{callback_id}] {message}" if message else f"[{callback_id}]"
         entries.append(log)
     max_logs = settings.merge_max_callback_logs
     if max_logs > 0 and len(entries) > max_logs:

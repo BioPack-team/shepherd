@@ -156,8 +156,9 @@ def _callback_with_logs(logs):
 
 
 def test_take_callback_logs_returns_and_clears_entries():
-    """The subservice's entries come back out, and the field is blanked on the
-    message so the log store stays the single source of the final logs."""
+    """The subservice's entries come back out tagged with the callback id they
+    arrived under, and the field is blanked on the message so the log store
+    stays the single source of the final logs."""
     entries = [
         {
             "timestamp": "2024-01-01T00:00:00+00:00",
@@ -174,8 +175,39 @@ def test_take_callback_logs_returns_and_clears_entries():
 
     taken = take_callback_logs(callback, "c1", logging.INFO, logger)
 
-    assert taken == entries
+    assert taken == [
+        {**entry, "message": f"[c1] {entry['message']}"} for entry in entries
+    ]
     assert callback["logs"] == []
+
+
+def test_take_callback_logs_tags_entries_without_a_message():
+    """A LogEntry can carry only a code; it still gets the callback id."""
+    callback = _callback_with_logs([{"level": "INFO", "code": "KPTimeout"}])
+
+    taken = take_callback_logs(callback, "c1", logging.INFO, logger)
+
+    assert taken == [{"level": "INFO", "code": "KPTimeout", "message": "[c1]"}]
+
+
+def test_take_callback_logs_tags_each_callback_separately():
+    """One query fans out into many retrievals whose logs all land in the same
+    list -- the tag is what says which retrieval a line came from."""
+    first = take_callback_logs(
+        _callback_with_logs([{"level": "INFO", "message": "found 3 edges"}]),
+        "cb-one",
+        logging.INFO,
+        logger,
+    )
+    second = take_callback_logs(
+        _callback_with_logs([{"level": "INFO", "message": "found 3 edges"}]),
+        "cb-two",
+        logging.INFO,
+        logger,
+    )
+
+    assert first[0]["message"] == "[cb-one] found 3 edges"
+    assert second[0]["message"] == "[cb-two] found 3 edges"
 
 
 def test_take_callback_logs_filters_below_requested_level():
@@ -190,7 +222,10 @@ def test_take_callback_logs_filters_below_requested_level():
 
     taken = take_callback_logs(callback, "c1", logging.INFO, logger)
 
-    assert [entry["message"] for entry in taken] == ["useful", "no level at all"]
+    assert [entry["message"] for entry in taken] == [
+        "[c1] useful",
+        "[c1] no level at all",
+    ]
 
 
 def test_take_callback_logs_handles_malformed_logs():
@@ -200,7 +235,7 @@ def test_take_callback_logs_handles_malformed_logs():
     assert take_callback_logs({"logs": "nope"}, "c1", logging.INFO, logger) == []
     assert take_callback_logs(
         {"logs": ["bare string"]}, "c1", logging.INFO, logger
-    ) == [{"message": "bare string", "level": "INFO"}]
+    ) == [{"message": "[c1] bare string", "level": "INFO"}]
 
 
 def test_take_callback_logs_caps_entry_count(mocker):
@@ -213,7 +248,7 @@ def test_take_callback_logs_caps_entry_count(mocker):
 
     taken = take_callback_logs(callback, "c1", logging.INFO, logger)
 
-    assert [entry["message"] for entry in taken] == ["log 0", "log 1"]
+    assert [entry["message"] for entry in taken] == ["[c1] log 0", "[c1] log 1"]
 
 
 def test_merge_messages_by_ids_returns_callback_logs(mocker):
@@ -239,10 +274,14 @@ def test_merge_messages_by_ids_returns_callback_logs(mocker):
 
     assert merged == ["c1", "c2"]
     messages = [entry.get("message") for entry in log_entries]
-    assert "c1 retrieval log" in messages
-    assert "c2 retrieval log" in messages
+    # Tagged with the callback each came back on, so a line can be traced to
+    # the retrieval that emitted it.
+    assert "[c1] c1 retrieval log" in messages
+    assert "[c2] c2 retrieval log" in messages
     # Retrieval logs are oldest-first and lead the merge's own records.
-    assert messages.index("c1 retrieval log") < messages.index("c2 retrieval log")
+    assert messages.index("[c1] c1 retrieval log") < messages.index(
+        "[c2] c2 retrieval log"
+    )
     # ...and they aren't left on the merged response, which would duplicate
     # them once finish_query splices the log store in.
     assert get_message_sync("rid").get("logs") == []
@@ -265,7 +304,7 @@ def test_merge_messages_by_ids_direct_lookup_logs_not_left_on_message(mocker):
         "test_ara", "qid", "rid", ["c1"], logging.INFO
     )
 
-    assert "lookup log" in [entry.get("message") for entry in log_entries]
+    assert "[c1] lookup log" in [entry.get("message") for entry in log_entries]
     assert get_message_sync("rid").get("logs") == []
 
 
