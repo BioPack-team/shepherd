@@ -31,6 +31,7 @@ from workers.merge_message.worker import (
     merge_messages,
     merge_messages_by_id,
     merge_messages_by_ids,
+    requested_log_level,
     take_callback_logs,
 )
 
@@ -249,6 +250,90 @@ def test_take_callback_logs_caps_entry_count(mocker):
     taken = take_callback_logs(callback, "c1", logging.INFO, logger)
 
     assert [entry["message"] for entry in taken] == ["[c1] log 0", "[c1] log 1"]
+
+
+def test_requested_log_level_prefers_the_stored_query():
+    """The task's level comes from the callback body, which has no log_level
+    field to carry it -- so the stored query is what says DEBUG was asked for."""
+    assert requested_log_level({"log_level": "DEBUG"}, logging.INFO) == logging.DEBUG
+    assert requested_log_level({"log_level": "debug"}, logging.INFO) == logging.DEBUG
+    assert requested_log_level({"log_level": "ERROR"}, logging.INFO) == logging.ERROR
+
+
+def test_requested_log_level_falls_back_to_the_task_level():
+    """A query that didn't ask for a level, or asked for one we don't know,
+    keeps whatever the task was given."""
+    assert requested_log_level({}, logging.INFO) == logging.INFO
+    assert requested_log_level({"log_level": None}, logging.WARNING) == logging.WARNING
+    assert requested_log_level({"log_level": "LOUD"}, logging.INFO) == logging.INFO
+
+
+def test_merge_messages_by_ids_keeps_debug_logs_for_a_debug_query(mocker):
+    """A DEBUG query gets DEBUG logs back from the KG retrieval (the lookup
+    worker forwards the level on the way out); they must not be filtered off
+    against the INFO the callback body implies."""
+    query_graph = response_1["message"]["query_graph"]
+    _patch_sync_store(mocker)
+    from shepherd_utils.db import save_message_sync
+
+    save_message_sync(
+        "qid",
+        {
+            "log_level": "DEBUG",
+            "message": {"query_graph": copy.deepcopy(query_graph)},
+        },
+    )
+    save_message_sync("rid", generate_response())
+    save_message_sync(
+        "c1",
+        _callback_with_logs(
+            [
+                {"level": "DEBUG", "message": "asked KP for 200 edges"},
+                {"level": "INFO", "message": "got 12 edges"},
+            ]
+        ),
+    )
+
+    # logging.INFO is what the task carries -- the callback body never says
+    # otherwise -- so this is exactly the mismatch being guarded.
+    _, log_entries = merge_messages_by_ids(
+        "test_ara", "qid", "rid", ["c1"], logging.INFO
+    )
+
+    messages = [entry.get("message") for entry in log_entries]
+    assert "[c1] asked KP for 200 edges" in messages
+    assert "[c1] got 12 edges" in messages
+
+
+def test_merge_messages_by_ids_drops_debug_logs_for_an_info_query(mocker):
+    """A retrieval that reports at DEBUG regardless still doesn't get to flood
+    a query that asked for INFO."""
+    query_graph = response_1["message"]["query_graph"]
+    _patch_sync_store(mocker)
+    from shepherd_utils.db import save_message_sync
+
+    save_message_sync(
+        "qid",
+        {"log_level": "INFO", "message": {"query_graph": copy.deepcopy(query_graph)}},
+    )
+    save_message_sync("rid", generate_response())
+    save_message_sync(
+        "c1",
+        _callback_with_logs(
+            [
+                {"level": "DEBUG", "message": "chatty"},
+                {"level": "INFO", "message": "useful"},
+            ]
+        ),
+    )
+
+    _, log_entries = merge_messages_by_ids(
+        "test_ara", "qid", "rid", ["c1"], logging.INFO
+    )
+
+    messages = [entry.get("message") for entry in log_entries]
+    assert "[c1] useful" in messages
+    assert "[c1] chatty" not in messages
 
 
 def test_merge_messages_by_ids_returns_callback_logs(mocker):

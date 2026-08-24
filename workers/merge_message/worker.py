@@ -662,6 +662,24 @@ TRAPI_LOG_LEVELS = {
 }
 
 
+def requested_log_level(original_query: dict[str, Any], default: int) -> int:
+    """The log level the client actually asked for, from the stored query.
+
+    The merge task carries a ``log_level``, but it is derived from the callback
+    body -- and a TRAPI response has no ``log_level`` field for a retrieval
+    service to echo back, so it reads INFO for every callback no matter what the
+    query asked for. The lookup workers do forward the level on the way out, so
+    a DEBUG query gets DEBUG logs back from the retrieval and would then have
+    them filtered off here against the wrong level. The stored query is the
+    record of what was asked for; fall back to the task's level when it doesn't
+    say (the client didn't set one, or set something unrecognized).
+    """
+    name = original_query.get("log_level")
+    if not name:
+        return default
+    return TRAPI_LOG_LEVELS.get(str(name).upper(), default)
+
+
 def take_callback_logs(
     callback_response: dict[str, Any],
     callback_id: str,
@@ -778,6 +796,9 @@ def merge_messages_by_ids(
             raise
 
         original_query_graph = original_query["message"]["query_graph"]
+        # What the client asked for, which is not necessarily the task's level.
+        query_level = requested_log_level(original_query, log_level)
+        worker_logger.setLevel(query_level)
         merged: list[str] = []
         callback_log_entries: list[dict] = []
         for callback_id in callback_ids:
@@ -790,7 +811,7 @@ def merge_messages_by_ids(
                 continue
             callback_log_entries.extend(
                 take_callback_logs(
-                    callback_response, callback_id, log_level, worker_logger
+                    callback_response, callback_id, query_level, worker_logger
                 )
             )
             accumulator = merge_messages(
