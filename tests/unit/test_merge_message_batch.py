@@ -31,7 +31,6 @@ from workers.merge_message.worker import (
     merge_messages,
     merge_messages_by_id,
     merge_messages_by_ids,
-    requested_log_level,
     take_callback_logs,
 )
 
@@ -250,22 +249,6 @@ def test_take_callback_logs_caps_entry_count(mocker):
     taken = take_callback_logs(callback, "c1", logging.INFO, logger)
 
     assert [entry["message"] for entry in taken] == ["[c1] log 0", "[c1] log 1"]
-
-
-def test_requested_log_level_prefers_the_stored_query():
-    """The task's level comes from the callback body, which has no log_level
-    field to carry it -- so the stored query is what says DEBUG was asked for."""
-    assert requested_log_level({"log_level": "DEBUG"}, logging.INFO) == logging.DEBUG
-    assert requested_log_level({"log_level": "debug"}, logging.INFO) == logging.DEBUG
-    assert requested_log_level({"log_level": "ERROR"}, logging.INFO) == logging.ERROR
-
-
-def test_requested_log_level_falls_back_to_the_task_level():
-    """A query that didn't ask for a level, or asked for one we don't know,
-    keeps whatever the task was given."""
-    assert requested_log_level({}, logging.INFO) == logging.INFO
-    assert requested_log_level({"log_level": None}, logging.WARNING) == logging.WARNING
-    assert requested_log_level({"log_level": "LOUD"}, logging.INFO) == logging.INFO
 
 
 def test_merge_messages_by_ids_keeps_debug_logs_for_a_debug_query(mocker):

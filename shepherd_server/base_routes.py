@@ -23,12 +23,17 @@ from shepherd_utils.db import (
     get_callback_query_id,
     get_logs,
     get_message,
+    get_query_log_level,
     get_query_state,
     remove_callback_id,
     save_logs,
     save_message,
 )
-from shepherd_utils.logger import attach_query_handler, setup_logging
+from shepherd_utils.logger import (
+    attach_query_handler,
+    resolve_log_level,
+    setup_logging,
+)
 from shepherd_utils.otel import setup_tracer
 
 setup_logging()
@@ -86,8 +91,11 @@ async def run_query(
     query_id = str(uuid.uuid4())[:8]
     response_id = str(uuid.uuid4())[:8]
     # Set up logger
-    log_level = query.get("log_level") or settings.log_level
-    level_number = logging._nameToLevel[log_level]
+    # Same resolver the callback handler and the merge use, so an unparseable
+    # level from a client falls back to the default instead of failing intake.
+    level_number = resolve_log_level(
+        query.get("log_level"), resolve_log_level(settings.log_level)
+    )
     logger = logging.getLogger(f"shepherd.{query_id}")
     logger.setLevel(level_number)
     attach_query_handler(logger)
@@ -346,10 +354,22 @@ async def callback(
             content={"detail": "Invalid request body"},
             status_code=422,
         )
-    # Now that the body is parsed, apply the query's requested log level.
-    log_level = response.get("log_level") or "INFO"
-    level_number = logging._nameToLevel[log_level]
+    # get associated query id for this callback. Resolved before anything else
+    # is logged: the level to log it at is a property of the query, and this
+    # mapping is the only route back to it.
+    original_query = await get_callback_query_id(callback_id, logger)
+    if original_query is None:
+        # No callback->query mapping, so there's no response_id to persist these
+        # logs under; surface it in the console/collector at least.
+        logger.warning(f"Callback {callback_id}: couldn't find original query.")
+        return Response("Couldn't find original query.", 500)
+    # Apply the level the client asked for. It lives in the stored query -- a
+    # TRAPI response has no log_level field, so the body we were just posted
+    # can't tell us (it used to be read from there, which quietly meant INFO for
+    # every callback and dropped a DEBUG query's logs from here on).
+    level_number = await get_query_log_level(original_query[0], logger)
     logger.setLevel(level_number)
+    logger.debug(f"Got original query: {original_query}")
     # logger.info(response)
     results = response["message"].get("results")
     if results is None:
@@ -367,14 +387,6 @@ async def callback(
     logger.debug(
         f"[{callback_id}] for query graph: {response['message'].get('query_graph')}"
     )
-    # get associated query id for this callback
-    original_query = await get_callback_query_id(callback_id, logger)
-    logger.debug(f"Got original query: {original_query}")
-    if original_query is None:
-        # No callback->query mapping, so there's no response_id to persist these
-        # logs under; surface it in the console/collector at least.
-        logger.warning(f"Callback {callback_id}: couldn't find original query.")
-        return Response("Couldn't find original query.", 500)
     # if len(response["message"]["results"]) > 0:
     #     with open(
     #         f"shepherd_server/debug/{query_id}_{callback_id}_response.json",
@@ -445,7 +457,7 @@ async def get_query_response(
     query_id: str,
 ):
     """Get a query response."""
-    level_number = logging._nameToLevel["INFO"]
+    level_number = logging.INFO
     logger = logging.getLogger("shepherd.get_query")
     logger.setLevel(level_number)
     attach_query_handler(logger)

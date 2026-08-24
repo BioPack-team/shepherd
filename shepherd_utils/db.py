@@ -14,7 +14,7 @@ from psycopg import OperationalError
 from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
-from .logger import get_query_handler
+from .logger import get_query_handler, resolve_log_level
 
 PG_RETRIES = 5
 
@@ -408,6 +408,33 @@ async def get_message(
     logger.debug(f"Decompression took {time.time() - start_decomp}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
+
+
+async def get_query_log_level(
+    query_id: str,
+    logger: logging.Logger,
+    default: Union[int, None] = None,
+) -> int:
+    """The log level the client asked for, read back from the stored query.
+
+    The stored query is the only record of the requested level once a request
+    has been handed off. A TRAPI *response* has no ``log_level`` field, so
+    nothing a subservice posts back to ``/callback`` carries it -- everything
+    hanging off a callback (the handler's own logs, the merge task it enqueues,
+    the retrieval logs that merge folds into the query's log list) has to come
+    back here for it.
+
+    Falls back to the server default when the query didn't ask for a level, or
+    when it can no longer be read.
+    """
+    if default is None:
+        default = resolve_log_level(settings.log_level)
+    try:
+        query = await get_message(query_id, logger)
+    except Exception as e:
+        logger.warning(f"Couldn't read the log level for query {query_id}: {e}")
+        return default
+    return resolve_log_level(query.get("log_level"), default)
 
 
 # ---------------------------------------------------------------------------
