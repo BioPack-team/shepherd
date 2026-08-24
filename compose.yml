@@ -33,11 +33,33 @@ services:
     ports:
       - "5432:5432"
     restart: unless-stopped
+    # Two things were wrong here, and together they made ``docker compose up``
+    # fail intermittently with "dependency shepherd_db failed to start".
+    #
+    # 1. No ``start_period``. Docker counts healthcheck failures from the moment
+    #    the container starts, so 5 retries x 2s flipped the DB to *unhealthy*
+    #    barely 10s in -- and Postgres routinely needs longer than that. Before
+    #    it even logs "starting PostgreSQL" the entrypoint stats/chowns the
+    #    bind-mounted ./pgdata, and then crash recovery still has to run; with
+    #    ~25 containers booting at once and contending for IO, that easily eats
+    #    the whole budget. The "FATAL: the database system is starting up" line
+    #    in the logs is exactly that: a probe correctly rejected mid-recovery,
+    #    which then happened to be the last retry. Inside ``start_period``
+    #    failures don't count against ``retries`` (and one success ends it
+    #    early), so a slow-but-healthy boot no longer trips the check while a
+    #    genuinely broken DB still fails, just 60s later.
+    # 2. ``pg_isready`` over the default Unix socket. On a first run (empty
+    #    ./pgdata) the entrypoint boots a *temporary* server to apply
+    #    docker-entrypoint-initdb.d/init_db.sql; it listens on the socket only.
+    #    A socket probe reports ready against that temp server, dependents
+    #    connect, and the entrypoint then shuts it down under them. Probing
+    #    127.0.0.1 can only ever see the real server.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
       interval: 2s
       timeout: 2s
       retries: 5
+      start_period: 60s
     volumes:
       - ./pgdata:/var/lib/postgresql/data
   shepherd_broker:
