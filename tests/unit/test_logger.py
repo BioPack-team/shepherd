@@ -6,7 +6,9 @@ import os
 from shepherd_utils.logger import (
     QueryLogger,
     ReasonerLogEntryFormatter,
+    attach_query_handler,
     get_logging_config,
+    get_query_handler,
     get_worker_logger,
 )
 
@@ -65,6 +67,68 @@ def test_query_logger_handler_named_query_log_handler():
     """save_logs in db.py looks up the handler by name; verify the contract."""
     handler = QueryLogger().log_handler
     assert handler.name == "query_log_handler"
+
+
+def test_drain_empties_the_queue_and_returns_oldest_first():
+    """Reading is destructive: the same records must not be handed out twice."""
+    handler = QueryLogger().log_handler
+    sub_logger = logging.getLogger("test_query_logger.drain")
+    sub_logger.handlers.clear()
+    sub_logger.addHandler(handler)
+    sub_logger.setLevel(logging.DEBUG)
+    try:
+        sub_logger.info("first")
+        sub_logger.info("second")
+        assert [entry["message"] for entry in handler.drain()] == ["first", "second"]
+        assert handler.drain() == []
+        sub_logger.info("third")
+        assert [entry["message"] for entry in handler.drain()] == ["third"]
+    finally:
+        sub_logger.removeHandler(handler)
+
+
+def test_drained_records_can_be_put_back():
+    """A failed flush returns its records to the queue for the next attempt."""
+    handler = QueryLogger().log_handler
+    sub_logger = logging.getLogger("test_query_logger.putback")
+    sub_logger.handlers.clear()
+    sub_logger.addHandler(handler)
+    sub_logger.setLevel(logging.DEBUG)
+    try:
+        sub_logger.info("first")
+        sub_logger.info("second")
+        entries = handler.drain()
+        handler.ingest(entries)
+        assert [entry["message"] for entry in handler.drain()] == ["first", "second"]
+    finally:
+        sub_logger.removeHandler(handler)
+
+
+def test_attach_query_handler_does_not_stack_handlers():
+    """``logging.getLogger`` hands back one object per name, so a caller that
+    "makes a logger per task" keeps getting the same one. Attaching must be
+    idempotent -- stacked handlers queued every record once per handler and made
+    each flush re-persist the earlier tasks' records."""
+    sub_logger = logging.getLogger("test_query_logger.attach")
+    sub_logger.handlers.clear()
+    sub_logger.setLevel(logging.DEBUG)
+    try:
+        first = attach_query_handler(sub_logger)
+        second = attach_query_handler(sub_logger)
+        assert first is second
+        assert sub_logger.handlers == [first]
+        assert get_query_handler(sub_logger) is first
+
+        sub_logger.info("once")
+        assert [entry["message"] for entry in first.drain()] == ["once"]
+    finally:
+        sub_logger.handlers.clear()
+
+
+def test_get_query_handler_returns_none_without_one():
+    sub_logger = logging.getLogger("test_query_logger.none")
+    sub_logger.handlers.clear()
+    assert get_query_handler(sub_logger) is None
 
 
 def test_query_logger_respects_maxlen():

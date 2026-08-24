@@ -25,7 +25,7 @@ from .broker import (
 from .config import settings
 from .db import initialize_db, save_logs
 from .heartbeat import Heartbeat
-from .logger import QueryLogger, setup_logging
+from .logger import attach_query_handler, setup_logging
 from .reclaim import reclaim_orphaned
 
 # Cap each per-stream duration queue so a stopped monitor can't OOM the broker.
@@ -325,13 +325,15 @@ def _build_task_context(
     level_number: int,
 ) -> Tuple[Context, logging.Logger]:
     """Build the per-task logger and otel context for a fetched/reclaimed task."""
-    log_handler = QueryLogger().log_handler
     task_logger = logging.getLogger(
         f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
     )
     task_log_level = int(ara_task[1].get("log_level", level_number))
     task_logger.setLevel(task_log_level)
-    task_logger.addHandler(log_handler)
+    # One handler per logger: this logger is shared by every task this worker
+    # runs for the query, and stacking a handler per task made each flush
+    # re-persist the previous tasks' records.
+    attach_query_handler(task_logger)
     task_logger.debug(f"Doing task {ara_task}")
     ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
     # Stamp the task payload with our delivery time so wrap_up_task /
@@ -481,10 +483,9 @@ async def get_tasks(
     """
     # Set up logger
     level_number = logging._nameToLevel[settings.log_level]
-    log_handler = QueryLogger().log_handler
     worker_logger = logging.getLogger(f"shepherd.{stream}.{consumer}")
     worker_logger.setLevel(level_number)
-    worker_logger.addHandler(log_handler)
+    attach_query_handler(worker_logger)
     # allow ops to tune concurrency per Deployment without a code change
     task_limit = _resolve_task_limit(stream, task_limit, worker_logger)
     # initialize opens the db connection

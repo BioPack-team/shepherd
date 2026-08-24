@@ -103,8 +103,11 @@ async def run_async_lookup(
 
         message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
 
-        logger.debug(
-            f"""Sending lookup query to {settings.kg_retrieval_url} with callback {message['callback']}"""
+        # INFO, and tagged with the callback id: this is the head of the trail
+        # for one retrieval, and the callback handler, the retrieval's own logs
+        # and the merge all carry the same tag on the way back.
+        logger.info(
+            f"[{callback_id}] Sending lookup query to {settings.kg_retrieval_url}"
         )
         try:
             response = await client.post(
@@ -160,7 +163,9 @@ async def aragorn_lookup(task, logger: logging.Logger):
         # with open("./debug/direct_query.json", "w", encoding="utf-8") as f:
         #     json.dump(message, f, indent=2)
 
-        logger.debug(f"""Sending lookup query to {settings.kg_retrieval_url}.""")
+        logger.info(
+            f"[{callback_id}] Sending lookup query to {settings.kg_retrieval_url}"
+        )
         with tracer.start_as_current_span("aragorn.lookup") as span:
             span.set_attribute("callback_id", callback_id)
             async with httpx.AsyncClient(timeout=100) as client:
@@ -193,7 +198,8 @@ async def aragorn_lookup(task, logger: logging.Logger):
                 elif isinstance(response, AsyncResponse):
                     if not response.success:
                         logger.error(
-                            f"Failed to do lookup, removing callback id: {response.error}"
+                            f"[{response.callback_id}] Failed to do lookup, "
+                            f"removing callback id: {response.error}"
                         )
                         await remove_callback_id(response.callback_id, logger)
                 else:

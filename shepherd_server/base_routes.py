@@ -28,7 +28,7 @@ from shepherd_utils.db import (
     save_logs,
     save_message,
 )
-from shepherd_utils.logger import QueryLogger, setup_logging
+from shepherd_utils.logger import attach_query_handler, setup_logging
 from shepherd_utils.otel import setup_tracer
 
 setup_logging()
@@ -88,10 +88,9 @@ async def run_query(
     # Set up logger
     log_level = query.get("log_level") or settings.log_level
     level_number = logging._nameToLevel[log_level]
-    log_handler = QueryLogger().log_handler
     logger = logging.getLogger(f"shepherd.{query_id}")
     logger.setLevel(level_number)
-    logger.addHandler(log_handler)
+    attach_query_handler(logger)
 
     logger.info(f"Sending {query_id} to {target}")
 
@@ -309,9 +308,8 @@ async def callback(
     # have, so the rejection / parse-error paths below can persist their logs
     # too. The requested log level lives in the body -- which those paths never
     # parse -- so leave the logger at its inherited default until we have it.
-    log_handler = QueryLogger().log_handler
     logger = logging.getLogger(f"shepherd.{callback_id}")
-    logger.addHandler(log_handler)
+    attach_query_handler(logger)
     max_bytes = settings.callback_max_request_size_bytes
     raw = await _read_body_within_limit(request, max_bytes)
     if raw is None:
@@ -448,10 +446,9 @@ async def get_query_response(
 ):
     """Get a query response."""
     level_number = logging._nameToLevel["INFO"]
-    log_handler = QueryLogger().log_handler
     logger = logging.getLogger("shepherd.get_query")
     logger.setLevel(level_number)
-    logger.addHandler(log_handler)
+    attach_query_handler(logger)
     response = await get_message(query_id, logger)
     if response is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)

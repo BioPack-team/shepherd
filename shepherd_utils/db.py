@@ -14,6 +14,7 @@ from psycopg import OperationalError
 from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
+from .logger import get_query_handler
 
 PG_RETRIES = 5
 
@@ -521,6 +522,36 @@ def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
     )
 
 
+async def _append_logs(response_id: str, entries: List[dict]) -> None:
+    """Append log entries to a query's list and (re)set the key's TTL.
+
+    Both in one round trip, so a crash can't leave the key without an
+    expiration.
+    """
+    pipe = logs_db_client.pipeline()
+    pipe.rpush(response_id, *(orjson.dumps(entry) for entry in entries))
+    pipe.expire(response_id, settings.redis_ttl)
+    await pipe.execute()
+
+
+async def _convert_legacy_logs(response_id: str) -> None:
+    """Rewrite a pre-list logs key as a list of entries.
+
+    Logs used to be stored as one JSON array under this key, rewritten whole on
+    every flush. Appending to a list instead is atomic, so concurrent flushes
+    no longer clobber each other -- but a query mid-flight across the version
+    change still has the old blob. Replace it with the equivalent list; both
+    reads and writes fall back here on the type error and then carry on.
+
+    ``GETDEL`` so that concurrent flushes can't each read the blob and push its
+    contents back a second time: exactly one of them comes away with it.
+    """
+    blob = await logs_db_client.getdel(response_id)
+    entries = orjson.loads(blob) if blob else []
+    if entries:
+        await _append_logs(response_id, entries)
+
+
 async def save_logs(
     response_id: str,
     logger: logging.Logger,
@@ -528,32 +559,38 @@ async def save_logs(
     """
     Save logs from a worker to the db.
 
+    The query's logs are a Redis list that every flush appends to. Appending is
+    atomic, so the several producers a single query has -- the callback handler,
+    each worker stage, one merge task per callback -- can flush concurrently
+    without the read-modify-write of a whole-list rewrite dropping or doubling
+    anyone's entries.
+
+    Draining the handler is what keeps each record to a single copy: the logger
+    behind it is a process-wide singleton shared by every task for this query,
+    so anything left in the queue would be written again by the next flush.
+
     Args:
         response_id (str): UID for a query response
     """
+    # Drain before the first await: another flush for this query may interleave
+    # here, and each must come away with a disjoint set of records.
+    handler = get_query_handler(logger)
+    new_logs = handler.drain() if handler is not None else []
+    if not new_logs:
+        return
     try:
-        existing_logs = await logs_db_client.get(response_id)
-        if existing_logs is None:
-            existing_logs = []
-        else:
-            existing_logs = orjson.loads(existing_logs)
-        # get log handler from logger
-        handler = next(
-            (
-                h
-                for h in logger.handlers
-                if getattr(h, "name", None) == "query_log_handler"
-            ),
-            None,
-        )
-        if handler is not None:
-            new_logs = list(handler.contents())
-            new_logs.reverse()
-            existing_logs.extend(new_logs)
-        await logs_db_client.set(
-            response_id, orjson.dumps(existing_logs), ex=settings.redis_ttl
-        )
+        try:
+            await _append_logs(response_id, new_logs)
+        except redis.ResponseError:
+            # Key still holds the single-JSON-blob format this used to write --
+            # a query that was already in flight when this version rolled out.
+            # Convert it in place so its earlier logs survive.
+            await _convert_legacy_logs(response_id)
+            await _append_logs(response_id, new_logs)
     except Exception as e:
+        # Put them back so the next flush retries rather than dropping them --
+        # they're no longer anywhere else now that the queue has been drained.
+        handler.ingest(new_logs)
         logger.error(f"Failed to save logs for response {response_id}: {e}")
 
 
@@ -568,23 +605,28 @@ async def get_logs(
         response_id (str): UID for a query response
     """
     try:
-        logs = await logs_db_client.get(response_id)
-        if logs is not None:
-            logs = orjson.loads(logs)
-            # The stored list reflects the order in which workers *flushed*
-            # their logs, not the order events happened: a callback can arrive
-            # and be merged (and flushed) before the lookup that dispatched the
-            # query finishes and flushes its own logs. Every entry carries an
-            # ISO8601 UTC timestamp, so sort by it to present the logs in
-            # chronological order. Stable sort keeps same-timestamp entries in
-            # their original relative order.
-            logs.sort(key=lambda entry: entry.get("timestamp", ""))
-            return logs
-        else:
+        try:
+            entries = await logs_db_client.lrange(response_id, 0, -1)
+        except redis.ResponseError:
+            # Pre-list format (see ``_convert_legacy_logs``).
+            await _convert_legacy_logs(response_id)
+            entries = await logs_db_client.lrange(response_id, 0, -1)
+        if not entries:
             logger.error(f"Failed to get logs for response {response_id}")
             return []
+        logs = [orjson.loads(entry) for entry in entries]
+        # The stored list reflects the order in which workers *flushed*
+        # their logs, not the order events happened: a callback can arrive
+        # and be merged (and flushed) before the lookup that dispatched the
+        # query finishes and flushes its own logs. Every entry carries an
+        # ISO8601 UTC timestamp, so sort by it to present the logs in
+        # chronological order. Stable sort keeps same-timestamp entries in
+        # their original relative order.
+        logs.sort(key=lambda entry: entry.get("timestamp", ""))
+        return logs
     except Exception as e:
         logger.error(f"Failed to get logs from query: {e}")
+        return []
 
 
 async def add_callback_id(

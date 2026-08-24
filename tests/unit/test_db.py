@@ -6,6 +6,7 @@ helpers (``add_query``, ``add_callback_id`` etc.) are exercised via
 ``postgres_mock`` from the conftest.
 """
 
+import asyncio
 import io
 import logging
 
@@ -13,6 +14,7 @@ import orjson
 import pytest
 import zstandard
 
+import shepherd_utils.db as db_module
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     ResponseTooLargeError,
@@ -30,7 +32,7 @@ from shepherd_utils.db import (
     save_message,
     save_message_sync,
 )
-from shepherd_utils.logger import QueryLogger
+from shepherd_utils.logger import attach_query_handler
 
 logger = logging.getLogger(__name__)
 
@@ -192,53 +194,145 @@ def test_get_message_sync_raises_keyerror_for_missing(mocker):
         get_message_sync("missing-sid")
 
 
+def _query_logger(name):
+    """A logger with nothing but a fresh query log handler on it."""
+    sub_logger = logging.getLogger(name)
+    sub_logger.handlers.clear()
+    sub_logger.setLevel(logging.DEBUG)
+    attach_query_handler(sub_logger)
+    return sub_logger
+
+
 @pytest.mark.asyncio
 async def test_save_logs_appends_query_log_handler_records(redis_mock):
     """save_logs reads logs from a QueryLogHandler attached to the logger and
-    persists them (newest-first reversed) into the logs db."""
-    handler = QueryLogger().log_handler
-    sub_logger = logging.getLogger("test.save_logs.appends")
-    sub_logger.handlers.clear()
-    sub_logger.addHandler(handler)
-    sub_logger.setLevel(logging.DEBUG)
+    persists them (oldest-first) into the logs db."""
+    sub_logger = _query_logger("test.save_logs.appends")
     sub_logger.info("first message")
     sub_logger.info("second message")
     try:
         await save_logs("resp-1", sub_logger)
     finally:
-        sub_logger.removeHandler(handler)
+        sub_logger.handlers.clear()
 
-    raw = await redis_mock["logs"].get("resp-1")
-    assert raw is not None
-    logs = orjson.loads(raw)
-    messages = [entry["message"] for entry in logs]
-    # Insertion order: handler emits to a deque (appendleft), reversed in
-    # save_logs, so logs end up oldest-first.
-    assert messages == ["first message", "second message"]
+    logs = await get_logs("resp-1", logger)
+    # Insertion order: handler emits to a deque (appendleft), reversed on drain,
+    # so logs end up oldest-first.
+    assert [entry["message"] for entry in logs] == ["first message", "second message"]
 
 
 @pytest.mark.asyncio
 async def test_save_logs_extends_existing_logs(redis_mock):
-    """A pre-existing log array in redis is preserved and extended."""
-    existing = [
-        {"message": "from-earlier", "timestamp": "2024-01-01T00:00:00", "level": "INFO"}
-    ]
-    await redis_mock["logs"].set("resp-2", orjson.dumps(existing))
+    """Each flush appends; whatever earlier flushes stored is preserved."""
+    earlier = _query_logger("test.save_logs.earlier")
+    earlier.info("from-earlier")
+    await save_logs("resp-2", earlier)
+    earlier.handlers.clear()
 
-    handler = QueryLogger().log_handler
-    sub_logger = logging.getLogger("test.save_logs.extends")
-    sub_logger.handlers.clear()
-    sub_logger.addHandler(handler)
-    sub_logger.setLevel(logging.DEBUG)
+    sub_logger = _query_logger("test.save_logs.extends")
     sub_logger.info("new entry")
     try:
         await save_logs("resp-2", sub_logger)
     finally:
-        sub_logger.removeHandler(handler)
+        sub_logger.handlers.clear()
 
-    raw = await redis_mock["logs"].get("resp-2")
-    logs = orjson.loads(raw)
+    logs = await get_logs("resp-2", logger)
     assert [entry["message"] for entry in logs] == ["from-earlier", "new entry"]
+
+
+@pytest.mark.asyncio
+async def test_save_logs_does_not_rewrite_already_flushed_records(redis_mock):
+    """The regression this guards: a worker runs several tasks for one query and
+    they all share a logger, so a flush that left its records in the handler had
+    them written again by the next flush -- once more per task."""
+    sub_logger = _query_logger("test.save_logs.no_dupes")
+    try:
+        sub_logger.info("callback one retrieval log")
+        await save_logs("resp-dupes", sub_logger)
+        sub_logger.info("callback two retrieval log")
+        await save_logs("resp-dupes", sub_logger)
+        # A flush with nothing new to say stores nothing at all.
+        await save_logs("resp-dupes", sub_logger)
+    finally:
+        sub_logger.handlers.clear()
+
+    logs = await get_logs("resp-dupes", logger)
+    assert [entry["message"] for entry in logs] == [
+        "callback one retrieval log",
+        "callback two retrieval log",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_save_logs_keeps_records_when_the_write_fails(redis_mock, mocker):
+    """Draining is destructive, so a failed write has to put the records back --
+    they're nowhere else -- for the next flush to retry."""
+    sub_logger = _query_logger("test.save_logs.retry")
+    try:
+        sub_logger.info("only copy")
+        mocker.patch.object(
+            db_module.logs_db_client, "pipeline", side_effect=RuntimeError("redis down")
+        )
+        await save_logs("resp-retry", sub_logger)
+        assert await get_logs("resp-retry", logger) == []
+
+        mocker.stopall()
+        await save_logs("resp-retry", sub_logger)
+    finally:
+        sub_logger.handlers.clear()
+
+    assert "only copy" in [
+        entry["message"] for entry in await get_logs("resp-retry", logger)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_save_logs_concurrent_flushes_all_land(redis_mock):
+    """Two producers flushing the same query at once is normal (the callback
+    handler and a merge task, say). Appends are atomic, so neither loses."""
+    loggers = []
+    for i in range(5):
+        sub_logger = _query_logger(f"test.save_logs.concurrent.{i}")
+        sub_logger.info(f"entry {i}")
+        loggers.append(sub_logger)
+    try:
+        await asyncio.gather(*(save_logs("resp-concurrent", lg) for lg in loggers))
+    finally:
+        for sub_logger in loggers:
+            sub_logger.handlers.clear()
+
+    logs = await get_logs("resp-concurrent", logger)
+    assert sorted(entry["message"] for entry in logs) == [
+        f"entry {i}" for i in range(5)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_save_logs_converts_pre_list_logs_key(redis_mock):
+    """A query already in flight when this version rolls out has its logs stored
+    in the old whole-blob format; it's converted rather than lost."""
+    existing = [
+        {"message": "from-earlier", "timestamp": "2024-01-01T00:00:00", "level": "INFO"}
+    ]
+    await redis_mock["logs"].set("resp-legacy", orjson.dumps(existing))
+
+    sub_logger = _query_logger("test.save_logs.legacy")
+    try:
+        sub_logger.info("new entry")
+        await save_logs("resp-legacy", sub_logger)
+    finally:
+        sub_logger.handlers.clear()
+
+    logs = await get_logs("resp-legacy", logger)
+    assert [entry["message"] for entry in logs] == ["from-earlier", "new entry"]
+
+
+@pytest.mark.asyncio
+async def test_get_logs_reads_pre_list_logs_key(redis_mock):
+    """Same, for a query that finishes before anything flushes to it again."""
+    stored = [{"message": "hello", "timestamp": "ts", "level": "INFO"}]
+    await redis_mock["logs"].set("resp-legacy-read", orjson.dumps(stored))
+    assert await get_logs("resp-legacy-read", logger) == stored
 
 
 @pytest.mark.asyncio

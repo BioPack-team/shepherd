@@ -655,3 +655,39 @@ async def test_run_task_lifecycle_cancellation_does_not_route_failure(mocker):
 
     assert not mock_fail.called
     assert limiter.released
+
+
+@pytest.mark.asyncio
+async def test_tasks_for_one_query_do_not_duplicate_each_others_logs(redis_mock):
+    """A worker gets one task per callback for the same query, and every one of
+    them builds "its" logger from the same process-wide name. Each task's flush
+    must store only what that task logged: stacking a handler per task, and
+    flushing without emptying it, wrote the earlier tasks' records again every
+    time -- so a single retrieval log line showed up once per later callback.
+    """
+    from shepherd_utils.db import get_logs, save_logs
+    from shepherd_utils.shared import _build_task_context
+
+    def task(msg_id):
+        return (msg_id, {"query_id": "q1", "response_id": "rid", "log_level": "20"})
+
+    _, first_logger = _build_task_context("merge_message", "c", task("1-1"), 20)
+    first_logger.info("callback one retrieval log")
+    await save_logs("rid", first_logger)
+
+    _, second_logger = _build_task_context("merge_message", "c", task("1-2"), 20)
+    assert second_logger is first_logger
+    # ...and the second task reused the handler rather than stacking another on
+    # top, which would queue every subsequent record once per attached handler.
+    assert (
+        len([h for h in second_logger.handlers if h.name == "query_log_handler"]) == 1
+    )
+    second_logger.info("callback two retrieval log")
+    await save_logs("rid", second_logger)
+
+    logs = await get_logs("rid", first_logger)
+    assert [entry["message"] for entry in logs] == [
+        "callback one retrieval log",
+        "callback two retrieval log",
+    ]
+    first_logger.handlers.clear()

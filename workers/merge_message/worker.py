@@ -30,7 +30,7 @@ from shepherd_utils.db import (
     save_logs,
     save_message_sync,
 )
-from shepherd_utils.logger import QueryLogger, get_worker_logger
+from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
@@ -651,6 +651,79 @@ def merge_messages(
     raise TypeError("Unsupported query type.")
 
 
+# TRAPI LogEntry level names, mapped to the ``logging`` levels they filter
+# against. Anything else (a missing or unrecognized level) isn't filtered.
+TRAPI_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def take_callback_logs(
+    callback_response: dict[str, Any],
+    callback_id: str,
+    log_level: int,
+    logger: logging.Logger,
+) -> list[dict]:
+    """Take the log entries a subservice returned with its callback message.
+
+    The KG retrieval services report what they did -- which KPs they called,
+    what timed out, why an edge came back empty -- in the TRAPI ``logs`` list of
+    the response they post back to ``/callback``. Merging only ever builds a
+    fresh message, so those entries used to be dropped on the floor and never
+    reached the query's log list. Lift them out here so the caller can fold them
+    in alongside the merge's own records.
+
+    Each entry is tagged with the callback id it arrived under, the same
+    ``[callback_id]`` prefix the lookup worker and the callback handler use.
+    One query fans out into many retrievals whose logs all land in one list, so
+    the tag is what ties a line back to the retrieval that emitted it -- and
+    joins it to the dispatch and merge lines on either side.
+
+    The field is blanked on the callback message itself: the merged response's
+    logs are spliced in from the log store when the query finishes, so a
+    leftover list here would show up twice in that payload (the direct-lookup
+    path returns the callback message as the accumulator verbatim).
+
+    Entries below the query's requested ``log_level`` are dropped, matching what
+    the rest of the pipeline persists.
+    """
+    logs = callback_response.pop("logs", None)
+    callback_response["logs"] = []
+    if not logs:
+        return []
+    if not isinstance(logs, list):
+        logger.warning(
+            f"Callback {callback_id} returned a non-list 'logs' field; ignoring it."
+        )
+        return []
+    entries = []
+    for log in logs:
+        if not isinstance(log, dict):
+            # Not a TRAPI LogEntry, but there's still something a human wrote in
+            # there -- keep it rather than silently dropping it.
+            entries.append({"message": f"[{callback_id}] {log}", "level": "INFO"})
+            continue
+        level = TRAPI_LOG_LEVELS.get(str(log.get("level", "")).upper())
+        if level is not None and level < log_level:
+            continue
+        message = log.get("message")
+        log["message"] = f"[{callback_id}] {message}" if message else f"[{callback_id}]"
+        entries.append(log)
+    max_logs = settings.merge_max_callback_logs
+    if max_logs > 0 and len(entries) > max_logs:
+        dropped = len(entries) - max_logs
+        entries = entries[:max_logs]
+        logger.warning(
+            f"Callback {callback_id} returned {dropped} log entries beyond the "
+            f"{max_logs}-entry cap; the rest were dropped."
+        )
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Worker entry point
 #
@@ -680,11 +753,13 @@ def merge_messages_by_ids(
     callback ids that were actually folded in, so the caller knows which to
     clear from the ready index and the callbacks table (a single missing
     callback is skipped rather than aborting the whole batch). ``log_entries``
-    is the list of formatted log records produced during the merge, oldest
-    first -- this runs in a ProcessPoolExecutor child, so its logger can't be
+    is the list of log records to add to the query's log list, oldest first:
+    the ones each callback carried back from the KG retrieval that produced it
+    (see ``take_callback_logs``), followed by the ones this merge emitted
+    itself. This runs in a ProcessPoolExecutor child, so its logger can't be
     the parent's query logger; instead we attach a fresh ``QueryLogHandler``
     here and hand its contents back across the process boundary for the parent
-    to fold into the query's log list.
+    to fold in.
     """
     # A logger.getLogger call in a child returns the same object for the whole
     # process life, so attach a call-scoped handler and remove it in finally --
@@ -704,6 +779,7 @@ def merge_messages_by_ids(
 
         original_query_graph = original_query["message"]["query_graph"]
         merged: list[str] = []
+        callback_log_entries: list[dict] = []
         for callback_id in callback_ids:
             try:
                 callback_response = get_message_sync(callback_id)
@@ -712,6 +788,11 @@ def merge_messages_by_ids(
                     f"Missing callback {callback_id} while folding; skipping."
                 )
                 continue
+            callback_log_entries.extend(
+                take_callback_logs(
+                    callback_response, callback_id, log_level, worker_logger
+                )
+            )
             accumulator = merge_messages(
                 target,
                 original_query_graph,
@@ -723,12 +804,10 @@ def merge_messages_by_ids(
 
         if merged:
             save_message_sync(response_id, accumulator)
-        # contents() is newest-first (emit appendlefts); hand back oldest-first
-        # so the parent can appendleft them in order and keep the queue's
-        # newest-first invariant.
-        log_entries = list(query_log_handler.contents())
-        log_entries.reverse()
-        return merged, log_entries
+        # drain() hands back oldest-first, which is the order the parent's
+        # handler.ingest wants. The retrieval logs describe work that happened
+        # before this merge, so they lead.
+        return merged, callback_log_entries + query_log_handler.drain()
     finally:
         worker_logger.removeHandler(query_log_handler)
 
@@ -800,14 +879,7 @@ async def poll_for_tasks():
         """
         if not entries:
             return
-        handler = next(
-            (
-                h
-                for h in logger.handlers
-                if getattr(h, "name", None) == "query_log_handler"
-            ),
-            None,
-        )
+        handler = get_query_handler(logger)
         if handler is not None:
             handler.ingest(entries)
 
