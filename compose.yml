@@ -26,7 +26,14 @@ services:
     container_name: shepherd_db
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
-    command: postgres -c max_connections=200
+    # Connection budget: every container holds its own psycopg pool, so the
+    # fleet ceiling is (containers x pool max size). 22 workers/monitor at the
+    # default max of 10, plus shepherd_server at 30, is 250 -- which overran
+    # the old 200 and surfaced as "sorry, too many clients already" under load
+    # even though the comments in this file and shepherd_utils/config.py both
+    # say the sum must stay under it. 300 restores the headroom the docs claim.
+    # Adding a worker service? Re-do this arithmetic.
+    command: postgres -c max_connections=300
     build:
       context: .
       dockerfile: shepherd_db/Dockerfile

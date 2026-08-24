@@ -163,9 +163,17 @@ def decompress_zstd(blob: bytes) -> bytes:
 # predates a schema addition never pick it up from there; re-running these
 # here upgrades them in place. Everything in this list must be safe to re-run
 # and effectively free once already applied.
+# ``(index name, DDL)``. The name is what the pre-flight check below looks for
+# in the catalog, so it must match the index the DDL creates.
 _SCHEMA_UPGRADES = (
-    "CREATE INDEX IF NOT EXISTS idx_callbacks_callback_id ON callbacks (callback_id)",
-    "CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id)",
+    (
+        "idx_callbacks_callback_id",
+        "CREATE INDEX IF NOT EXISTS idx_callbacks_callback_id ON callbacks (callback_id)",
+    ),
+    (
+        "idx_callbacks_query_id",
+        "CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id)",
+    ),
 )
 
 # Arbitrary-but-fixed advisory lock id serializing the upgrades across the
@@ -177,10 +185,26 @@ _SCHEMA_UPGRADE_LOCK_ID = 762_297_531
 async def apply_schema_upgrades() -> None:
     """Bring an existing database up to date with init_db.sql additions."""
     async with pool.connection(settings.postgres_pool_timeout) as conn:
+        # Pre-flight catalog check, deliberately OUTSIDE the advisory lock.
+        # Every container in the stack runs this at boot, and they all boot the
+        # instant Postgres reports healthy, so taking the lock unconditionally
+        # made ~23 containers queue up on a single lock for work that is a
+        # no-op on any volume created since these indexes landed in
+        # init_db.sql. Whoever lost that queue blew ``postgres_pool_timeout``
+        # and logged a PoolTimeout traceback on an otherwise healthy startup.
+        # The check is a single indexed catalog read and does not serialize, so
+        # the common "already applied" case now costs one query and no lock.
+        cursor = await conn.execute(
+            "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",
+            ([name for name, _ in _SCHEMA_UPGRADES],),
+        )
+        row = await cursor.fetchone()
+        if row is not None and row[0] == len(_SCHEMA_UPGRADES):
+            return
         await conn.execute(
             "SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_UPGRADE_LOCK_ID,)
         )
-        for ddl in _SCHEMA_UPGRADES:
+        for _, ddl in _SCHEMA_UPGRADES:
             await conn.execute(ddl)
         await conn.commit()
 
@@ -188,14 +212,23 @@ async def apply_schema_upgrades() -> None:
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
-    try:
-        await apply_schema_upgrades()
-    except Exception:
-        # A failed upgrade must never keep a worker from starting: the schema
-        # additions are performance aids, and the janitor/next boot retries.
-        logging.getLogger("shepherd.db").warning(
-            "Failed to apply startup schema upgrades", exc_info=True
-        )
+    for attempt in range(PG_RETRIES):
+        try:
+            await apply_schema_upgrades()
+            return
+        except Exception:
+            # Retry with the same backoff the query paths use. Workers boot the
+            # moment the DB reports healthy, so a Postgres crash-restart (or
+            # any blip in the first seconds) otherwise burned the single
+            # attempt and every container logged a traceback at once.
+            if attempt == PG_RETRIES - 1:
+                break
+            await asyncio.sleep(0.1 * (2**attempt))
+    # A failed upgrade must never keep a worker from starting: the schema
+    # additions are performance aids, and the janitor/next boot retries.
+    logging.getLogger("shepherd.db").warning(
+        "Failed to apply startup schema upgrades", exc_info=True
+    )
 
 
 async def shutdown_db() -> None:
