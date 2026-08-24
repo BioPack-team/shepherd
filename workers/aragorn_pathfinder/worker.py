@@ -16,6 +16,7 @@ from shepherd_utils.db import (
     get_running_callbacks,
     save_message,
 )
+from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import (
     get_tasks,
@@ -29,6 +30,7 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
+LOGGER = get_worker_logger(STREAM)
 
 
 async def shadowfax(task, logger: logging.Logger) -> str:
@@ -237,7 +239,9 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     retriever_query["callback"] = (
         f"{settings.callback_host}/aragorn/callback/{callback_id}"
     )
-    logger.debug(f"""Sending pathfinder query to {settings.kg_retrieval_url}.""")
+    logger.info(
+        f"[{callback_id}] Sending pathfinder query to {settings.kg_retrieval_url}"
+    )
     with tracer.start_as_current_span("aragorn.pathfinder") as span:
         span.set_attribute("callback_id", callback_id)
         async with httpx.AsyncClient(timeout=100) as client:
@@ -302,9 +306,9 @@ async def poll_for_tasks():
             ):
                 asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            LOGGER.info("Poll loop cancelled, shutting down.")
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
 
 

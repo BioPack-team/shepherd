@@ -23,6 +23,7 @@ from shepherd_utils.db import (
     remove_callback_id,
     save_message,
 )
+from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
@@ -33,6 +34,7 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 100
 tracer = setup_tracer(STREAM)
+LOGGER = get_worker_logger(STREAM)
 
 
 def examine_query(message):
@@ -101,8 +103,11 @@ async def run_async_lookup(
 
         message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
 
-        logger.debug(
-            f"""Sending lookup query to {settings.kg_retrieval_url} with callback {message['callback']}"""
+        # INFO, and tagged with the callback id: this is the head of the trail
+        # for one retrieval, and the callback handler, the retrieval's own logs
+        # and the merge all carry the same tag on the way back.
+        logger.info(
+            f"[{callback_id}] Sending lookup query to {settings.kg_retrieval_url}"
         )
         try:
             response = await client.post(
@@ -151,6 +156,9 @@ async def bte_lookup(task, logger: logging.Logger):
         await add_callback_id(query_id, callback_id, otel, logger)
         message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
 
+        logger.info(
+            f"[{callback_id}] Sending lookup query to {settings.kg_retrieval_url}"
+        )
         with tracer.start_as_current_span("bte.lookup") as span:
             span.set_attribute("callback_id", callback_id)
             async with httpx.AsyncClient(timeout=100) as client:
@@ -183,7 +191,8 @@ async def bte_lookup(task, logger: logging.Logger):
                 elif isinstance(response, AsyncResponse):
                     if not response.success:
                         logger.error(
-                            f"Failed to do lookup, removing callback id: {response.error}"
+                            f"[{response.callback_id}] Failed to do lookup, "
+                            f"removing callback id: {response.error}"
                         )
                         await remove_callback_id(response.callback_id, logger)
                 else:
@@ -443,9 +452,9 @@ async def poll_for_tasks():
             ):
                 asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            LOGGER.info("Poll loop cancelled, shutting down.")
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
 
 

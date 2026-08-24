@@ -63,6 +63,22 @@ class QueryLogHandler(logging.Handler):
         for entry in entries:
             self.log_queue.appendleft(entry)
 
+    def drain(self):
+        """Pop everything queued and return it oldest-first.
+
+        Reading is destructive on purpose. These handlers hang off loggers that
+        ``logging.getLogger`` hands back as process-wide singletons, so the same
+        queue is flushed repeatedly -- once per task a worker runs for the same
+        query. Leaving entries behind meant every flush re-persisted every
+        record the queue had accumulated since the process started, which is how
+        one log line ended up in a query's logs several times over. Callers that
+        fail to persist what they drained put it back with ``ingest``.
+        """
+        entries = list(self.log_queue)
+        entries.reverse()
+        self.log_queue.clear()
+        return entries
+
 
 # Create unique logger for each query
 # https://stackoverflow.com/a/37967421
@@ -78,6 +94,32 @@ class QueryLogger(object):
     def log_handler(self):
         """Return the internal log handler."""
         return self._log_handler
+
+
+def get_query_handler(logger: logging.Logger):
+    """Return the query log handler attached to ``logger``, or None."""
+    return next(
+        (h for h in logger.handlers if getattr(h, "name", None) == "query_log_handler"),
+        None,
+    )
+
+
+def attach_query_handler(logger: logging.Logger) -> QueryLogHandler:
+    """Give ``logger`` a query log handler, reusing one it already has.
+
+    ``logging.getLogger`` returns the same object for a given name for the life
+    of the process, so callers that build "a logger per task" or "per request"
+    keep landing on one shared logger. Adding a fresh handler each time stacked
+    them up: every record was then queued once per attached handler, the list
+    grew without bound, and ``save_logs`` -- which flushes whichever handler
+    comes first -- kept re-reading the oldest queue. One handler per logger,
+    drained on flush, stores each record exactly once.
+    """
+    handler = get_query_handler(logger)
+    if handler is None:
+        handler = QueryLogger().log_handler
+        logger.addHandler(handler)
+    return handler
 
 
 def get_logging_config():
@@ -128,10 +170,32 @@ def get_logging_config():
             "default": {"format": "[%(asctime)s: %(levelname)s/%(name)s]: %(message)s"}
         },
         "handlers": handlers,
+        # The output handlers live on root, and root alone. Previously they were
+        # attached to ``shepherd`` and root was left unconfigured, so any record
+        # logged outside that namespace -- a stray ``logging.info``, a
+        # third-party library, a logger named for its module or its Redis stream
+        # -- reached a handler-less root and was dropped by logging's
+        # ``lastResort`` fallback, which only emits WARNING+ and ignores our
+        # formatter. That silently swallowed every worker's entire startup
+        # phase; see ``get_worker_logger``.
+        #
+        # Root's level applies only to records logged directly on root, not to
+        # ones propagated up from a child (those are level-checked at the
+        # originating logger). So WARNING here means third-party libraries are
+        # quiet below WARNING -- httpx logs a line per request at INFO, which
+        # would bury our own output -- while ``shepherd.*`` still emits at DEBUG
+        # via the entry below. Everything then reaches these handlers by
+        # propagation, which also keeps pytest's ``caplog`` working.
+        "root": {
+            "level": "WARNING",
+            "handlers": logger_handlers,
+        },
         "loggers": {
+            # No handlers: records propagate to root's. Only the level is set
+            # here, which is what lets our own logging through at DEBUG while
+            # leaving third-party loggers at root's WARNING.
             "shepherd": {
                 "level": "DEBUG",
-                "handlers": logger_handlers,
             },
             # psycopg's pool retries to keep min_size connections warm and logs
             # a WARNING on every failed attempt. When the DB is down that floods
@@ -148,6 +212,25 @@ def get_logging_config():
     }
 
     return logging_config
+
+
+def get_worker_logger(name: str) -> logging.Logger:
+    """Return a logger under the configured ``shepherd`` namespace.
+
+    ``setup_logging`` only attaches handlers to ``shepherd`` (and, as a
+    WARNING-level backstop, root), so a logger named for the stream alone
+    (``logging.getLogger("arax.pathfinder")``) inherits no handler at INFO and
+    its records vanish. Every worker's startup phase -- dataset downloads, pool
+    sizing, poll-loop errors -- logged through exactly such a logger, so a
+    worker that hung before reaching ``get_tasks`` produced no output at all
+    and looked identical to a healthy idle one.
+
+    Passing a name that is already namespaced is a no-op, so this is safe to
+    apply to existing ``shepherd.``-prefixed names.
+    """
+    if name == "shepherd" or name.startswith("shepherd."):
+        return logging.getLogger(name)
+    return logging.getLogger(f"shepherd.{name}")
 
 
 def setup_logging():

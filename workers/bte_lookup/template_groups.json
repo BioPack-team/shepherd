@@ -8,7 +8,7 @@
       "ComplexMolecularMixture",
       "MolecularMixture"
     ],
-    "predicate": ["treats", "ameliorates"],
+    "predicate": ["treats"],
     "object": ["Disease", "PhenotypicFeature", "DiseaseOrPhenotypicFeature"],
     "templates": [
       "Chem-treats-PhenoOfDisease.json",

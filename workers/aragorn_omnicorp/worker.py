@@ -29,6 +29,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_omnicorp_lmdb
 from shepherd_utils.db import get_message_sync, save_message_sync
+from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
@@ -43,6 +44,7 @@ CONSUMER = str(uuid.uuid4())[:8]
 # many run in parallel; keep it modest since each message can be large.
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
+LOGGER = get_worker_logger(STREAM)
 
 # Matches the upstream `redis_batch_size`.
 LMDB_BATCH_SIZE = 1000
@@ -560,7 +562,7 @@ async def poll_for_tasks():
     # to open them lazily (a first-run local `docker compose up` starts with the
     # volume-mounted directory empty). No-op once present or when no download URL
     # is configured (e.g. production, where the data is mounted out of band).
-    ensure_omnicorp_lmdb(logging.getLogger(STREAM))
+    ensure_omnicorp_lmdb(LOGGER)
 
     loop = asyncio.get_running_loop()
     # The overlay is CPU-bound, so cap real parallelism at the number of cores.
@@ -571,8 +573,8 @@ async def poll_for_tasks():
     # messages at once and OOM-killing the pod). resolve_pool_workers reads the
     # cgroup CPU limit and honours a POOL_MAX_WORKERS override for memory-tight
     # deployments. Extra in-flight tasks queue against the pool without blocking.
-    max_workers = resolve_pool_workers(TASK_LIMIT, logging.getLogger(STREAM))
-    logging.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
+    LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     pool = ProcessPoolManager(
         max_workers,
         max_tasks_per_child=settings.pool_max_tasks_per_child,
@@ -588,9 +590,9 @@ async def poll_for_tasks():
                     process_task(task, parent_ctx, logger, limiter, loop, pool)
                 )
         except asyncio.CancelledError:
-            logging.info("Poll loop cancelled, shutting down.")
+            LOGGER.info("Poll loop cancelled, shutting down.")
         except Exception as e:
-            logging.error(f"Error in task polling loop: {e}", exc_info=True)
+            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
             await asyncio.sleep(5)  # back off before retrying
 
 

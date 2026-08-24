@@ -122,6 +122,19 @@ class Settings(BaseSettings):
     omnicorp_lmdb_url: str = ""
     pathfinder_embeddings_url: str = ""
 
+    # Socket timeout (seconds) for those startup dataset downloads. This bounds
+    # each individual blocking socket operation -- the connect and every
+    # subsequent read -- not the transfer as a whole, so a genuinely large file
+    # still downloads for as long as it needs provided it keeps making progress.
+    # Without it, urllib inherits Python's default of no timeout: a connection
+    # that opens and then stalls (an egress proxy that swallows the request, a
+    # server that accepts and never responds) hangs the worker's startup
+    # forever, before it ever reaches the poll loop. That is silent -- the
+    # worker never registers a heartbeat and never picks up a task, but it also
+    # never crashes. With a timeout the download fails loudly instead. Set to 0
+    # to restore the unbounded behavior.
+    dataset_download_timeout_sec: float = 60.0
+
     otel_enabled: bool = True
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
@@ -244,6 +257,13 @@ class Settings(BaseSettings):
     # under pathological bursts; leftover ready callbacks are swept by the next
     # drain iteration. 0 disables the cap (fold everything ready in one pass).
     merge_max_fold: int = 25
+    # Cap on how many log entries are lifted out of a single callback message.
+    # Subservices report their retrieval work in the TRAPI ``logs`` list they
+    # post back, and those entries are folded into the query's log list. A
+    # chatty (or broken) one can return tens of thousands of them, which would
+    # then be stored per query and echoed in the final response, so keep only
+    # the first N. 0 disables the cap.
+    merge_max_callback_logs: int = 1000
 
     # Monitor (dashboard) worker
     monitor_port: int = 5440
