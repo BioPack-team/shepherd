@@ -18,6 +18,11 @@ from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.statistical_significance_qualifier import (
+    SIGNIFICANCE_BAND_SCORES,
+    SIGNIFICANCE_SOURCE_WEIGHT,
+    get_statistical_significance,
+)
 
 # Queue name
 STREAM = "aragorn.score"
@@ -892,6 +897,7 @@ class Ranker:
             "literature_coocurrence": None,
             "p_value": None,
             "affinity": None,
+            "statistical_significance": None,
         }
 
         # Look through attributes and
@@ -1000,6 +1006,10 @@ class Ranker:
             if orig_attr_name == "biolink:tmkp_confidence_score":
                 usable_edge_attr["confidence_score"] = attribute.get("value", 0)
 
+        # Qualifier lives in edge["qualifiers"] (BMT/Retriever path); the
+        # attribute loop above won't see it.
+        usable_edge_attr["statistical_significance"] = get_statistical_significance(edge)
+
         # At this point we have all of the information extracted from the edge
         # We have have looked through all attributes and updated
         # usable_edge_attr. Now we can construct the edge values using these
@@ -1092,6 +1102,17 @@ class Ranker:
                 "source_weight": source_w,
                 "weight": property_w * source_w,
             }
+
+        if usable_edge_attr["statistical_significance"] is not None:
+            band = usable_edge_attr["statistical_significance"]
+            property_w = SIGNIFICANCE_BAND_SCORES.get(band, 0.0)
+            if property_w > 0:
+                this_edge_vals[edge_source]["statistical_significance"] = {
+                    "value": band,
+                    "property_weight": property_w,
+                    "source_weight": SIGNIFICANCE_SOURCE_WEIGHT,
+                    "weight": property_w * SIGNIFICANCE_SOURCE_WEIGHT,
+                }
 
         # Cache it
         self.edge_values[edge_id] = this_edge_vals

@@ -673,3 +673,85 @@ def test_score_jaccard_like_returns_score_over_one_minus_score():
         assert scored["analyses"][0]["score"] == pytest.approx(
             raw_score / (1 - raw_score)
         )
+
+
+# --- statistical significance qualifier (shepherd#134) --------------------
+
+
+def test_get_edge_values_extracts_significance_qualifier():
+    """A qualifier-bearing edge gets a statistical_significance property."""
+    edge = {
+        "subject": "A",
+        "object": "B",
+        "predicate": "biolink:related_to",
+        "sources": [
+            {"resource_id": "infores:test", "resource_role": "primary_knowledge_source"}
+        ],
+        "qualifiers": [
+            {
+                "qualifier_type_id": "biolink:statistical_significance_qualifier",
+                "qualifier_value": "very_strongly_significant",
+            }
+        ],
+    }
+    r = Ranker(_make_msg_with_edge(edge), logger)
+    vals = r.get_edge_values("e1")
+    assert "statistical_significance" in vals["infores:test"]
+    prop = vals["infores:test"]["statistical_significance"]
+    assert prop["value"] == "very_strongly_significant"
+    assert prop["weight"] > 0
+    assert prop["weight"] == pytest.approx(0.70 * 0.5)
+
+
+def test_get_edge_values_significance_strips_biolink_prefix():
+    """biolink:-prefixed qualifier values are stripped."""
+    edge = {
+        "subject": "A",
+        "object": "B",
+        "sources": [
+            {"resource_id": "infores:test", "resource_role": "primary_knowledge_source"}
+        ],
+        "qualifiers": [
+            {
+                "qualifier_type_id": "biolink:statistical_significance_qualifier",
+                "qualifier_value": "biolink:significant",
+            }
+        ],
+    }
+    r = Ranker(_make_msg_with_edge(edge), logger)
+    vals = r.get_edge_values("e1")
+    assert vals["infores:test"]["statistical_significance"]["value"] == "significant"
+
+
+def test_not_significant_contributes_nothing():
+    """Band score 0 -> property omitted -> no admittance contribution (no penalty)."""
+    edge = {
+        "subject": "A",
+        "object": "B",
+        "sources": [
+            {"resource_id": "infores:test", "resource_role": "primary_knowledge_source"}
+        ],
+        "qualifiers": [
+            {
+                "qualifier_type_id": "biolink:statistical_significance_qualifier",
+                "qualifier_value": "not_significant",
+            }
+        ],
+    }
+    r = Ranker(_make_msg_with_edge(edge), logger)
+    vals = r.get_edge_values("e1")
+    assert "statistical_significance" not in vals["infores:test"]
+
+
+def test_qualifierless_edge_has_no_significance_property():
+    """Edges without the qualifier get no statistical_significance property."""
+    edge = {
+        "subject": "A",
+        "object": "B",
+        "sources": [
+            {"resource_id": "infores:test", "resource_role": "primary_knowledge_source"}
+        ],
+    }
+    r = Ranker(_make_msg_with_edge(edge), logger)
+    vals = r.get_edge_values("e1")
+    assert "statistical_significance" not in vals["infores:test"]
