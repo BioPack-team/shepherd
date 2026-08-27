@@ -265,7 +265,7 @@ async def poll_for_tasks():
     # local `docker compose up` starts with the volume-mounted directory empty).
     # No-op once present or when no download URL is configured (e.g. production,
     # where the data is mounted out of band).
-    ensure_pathfinder_embeddings(logging.getLogger(STREAM))
+    ensure_pathfinder_embeddings(LOGGER)
     bmt = Toolkit()
     embedding_env = lmdb.open(
         EMBEDDING_DIR, readonly=True, lock=False, readahead=False, subdir=True
