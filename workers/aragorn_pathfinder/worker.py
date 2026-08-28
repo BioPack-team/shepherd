@@ -70,8 +70,8 @@ async def shadowfax(task, logger: logging.Logger) -> str:
 
     filter_config = parameters.get("filter_config", {})
     parameters["filter_config"] = {
-        "min_information_content": filter_config.get("min_information_content", 69),
-        "max_node_degree": filter_config.get("max_node_degree", 5000),
+        "min_information_content": filter_config.get("min_information_content", 60),
+        "max_node_degree": filter_config.get("max_node_degree", 10000),
     }
     parameters["dehydrated"] = parameters.get("dehydrated", True)
     message["parameters"] = parameters
@@ -145,6 +145,14 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     "biolink:has_gene_product",
                     "biolink:gene_product_of",
                     "biolink:genetically_associated_with",
+                    "biolink:located_in",
+                    "biolink:location_of",
+                    "biolink:contains_process",
+                    "biolink:occurs_in",
+                    "biolink:affects_likelihood_of",
+                    "biolink:likelihood_affected_by",
+                    "biolink:active_in",
+                    "biolink:has_active_component",
                 ],
             },
             "e1": {
@@ -174,6 +182,14 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     "biolink:has_gene_product",
                     "biolink:gene_product_of",
                     "biolink:genetically_associated_with",
+                    "biolink:located_in",
+                    "biolink:location_of",
+                    "biolink:contains_process",
+                    "biolink:occurs_in",
+                    "biolink:affects_likelihood_of",
+                    "biolink:likelihood_affected_by",
+                    "biolink:active_in",
+                    "biolink:has_active_component",
                 ],
             },
             "e2": {
@@ -203,6 +219,14 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     "biolink:has_gene_product",
                     "biolink:gene_product_of",
                     "biolink:genetically_associated_with",
+                    "biolink:located_in",
+                    "biolink:location_of",
+                    "biolink:contains_process",
+                    "biolink:occurs_in",
+                    "biolink:affects_likelihood_of",
+                    "biolink:likelihood_affected_by",
+                    "biolink:active_in",
+                    "biolink:has_active_component",
                 ],
             },
         },
