@@ -299,14 +299,47 @@ async def test_initialize_db_applies_callback_indexes(mocker):
 
 
 @pytest.mark.asyncio
+async def test_initialize_db_skips_upgrades_when_indexes_present(mocker):
+    """The pre-flight catalog check short-circuits the common case: when every
+    upgrade index already exists, no advisory lock is taken and no DDL runs, so
+    a whole fleet booting at once doesn't queue on one lock for a no-op."""
+    mock_conn, mock_pool = _install_pool_mock(
+        mocker, cursor_fetchone=(len(db._SCHEMA_UPGRADES),)
+    )
+    await db.initialize_db()
+    assert mock_pool.open.called
+    executed = " ".join(str(c.args[0]) for c in mock_conn.execute.call_args_list)
+    assert "pg_advisory_xact_lock" not in executed
+    assert "CREATE INDEX" not in executed
+
+
+@pytest.mark.asyncio
 async def test_initialize_db_survives_schema_upgrade_failure(mocker):
     """A failed upgrade (e.g. transient connection error) is logged, not
     raised -- workers must still start."""
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
     mock_conn, mock_pool = _install_pool_mock(
         mocker, raise_on_execute=OperationalError("pg not ready")
     )
     await db.initialize_db()
     assert mock_pool.open.called
+
+
+@pytest.mark.asyncio
+async def test_initialize_db_retries_schema_upgrades(mocker):
+    """A blip on the first attempt (the DB is still coming up) is retried with
+    backoff rather than burning the one attempt and logging a traceback."""
+    sleep = mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+    apply = mocker.patch.object(
+        db,
+        "apply_schema_upgrades",
+        new_callable=mocker.AsyncMock,
+        side_effect=[OperationalError("pg in recovery"), None],
+    )
+    mocker.patch.object(db, "pool", AsyncMock(spec=AsyncConnectionPool))
+    await db.initialize_db()
+    assert apply.await_count == 2
+    assert sleep.await_count == 1
 
 
 # --- check_connection -----------------------------------------------------
