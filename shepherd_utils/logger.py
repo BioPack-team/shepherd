@@ -96,6 +96,30 @@ class QueryLogger(object):
         return self._log_handler
 
 
+# TRAPI's LogLevel enum (plus CRITICAL), mapped to the ``logging`` levels the
+# pipeline filters against. The one place level names are understood, so the
+# server, the workers and the log entries subservices send back all agree.
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def resolve_log_level(name, default: int = logging.INFO) -> int:
+    """Turn a TRAPI log level name into a ``logging`` level number.
+
+    Anything unusable -- absent, empty, or a name we don't know -- falls back to
+    ``default`` rather than raising: a query asking for a level we can't parse
+    should still run.
+    """
+    if not name:
+        return default
+    return LOG_LEVELS.get(str(name).upper(), default)
+
+
 def get_query_handler(logger: logging.Logger):
     """Return the query log handler attached to ``logger``, or None."""
     return next(

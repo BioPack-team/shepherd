@@ -25,7 +25,7 @@ from .broker import (
 from .config import settings
 from .db import initialize_db, save_logs
 from .heartbeat import Heartbeat
-from .logger import attach_query_handler, setup_logging
+from .logger import attach_query_handler, resolve_log_level, setup_logging
 from .reclaim import reclaim_orphaned
 
 # Cap each per-stream duration queue so a stopped monitor can't OOM the broker.
@@ -482,7 +482,7 @@ async def get_tasks(
     it ``None`` to fall back to ``PER_STREAM_MIN_IDLE_SEC`` / settings.
     """
     # Set up logger
-    level_number = logging._nameToLevel[settings.log_level]
+    level_number = resolve_log_level(settings.log_level)
     worker_logger = logging.getLogger(f"shepherd.{stream}.{consumer}")
     worker_logger.setLevel(level_number)
     attach_query_handler(worker_logger)

@@ -30,7 +30,13 @@ from shepherd_utils.db import (
     save_logs,
     save_message_sync,
 )
-from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
+from shepherd_utils.logger import (
+    LOG_LEVELS,
+    QueryLogger,
+    get_query_handler,
+    get_worker_logger,
+    resolve_log_level,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
@@ -651,17 +657,6 @@ def merge_messages(
     raise TypeError("Unsupported query type.")
 
 
-# TRAPI LogEntry level names, mapped to the ``logging`` levels they filter
-# against. Anything else (a missing or unrecognized level) isn't filtered.
-TRAPI_LOG_LEVELS = {
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": logging.WARNING,
-    "ERROR": logging.ERROR,
-    "CRITICAL": logging.CRITICAL,
-}
-
-
 def take_callback_logs(
     callback_response: dict[str, Any],
     callback_id: str,
@@ -707,7 +702,9 @@ def take_callback_logs(
             # there -- keep it rather than silently dropping it.
             entries.append({"message": f"[{callback_id}] {log}", "level": "INFO"})
             continue
-        level = TRAPI_LOG_LEVELS.get(str(log.get("level", "")).upper())
+        # An entry whose level we don't recognize (or that has none) isn't
+        # filtered -- we can't tell how loud it is, so we keep it.
+        level = LOG_LEVELS.get(str(log.get("level", "")).upper())
         if level is not None and level < log_level:
             continue
         message = log.get("message")
@@ -778,6 +775,10 @@ def merge_messages_by_ids(
             raise
 
         original_query_graph = original_query["message"]["query_graph"]
+        # The level the client asked for. The task carries it too, but the
+        # stored query is where it comes from and it's already loaded here.
+        query_level = resolve_log_level(original_query.get("log_level"), log_level)
+        worker_logger.setLevel(query_level)
         merged: list[str] = []
         callback_log_entries: list[dict] = []
         for callback_id in callback_ids:
@@ -790,7 +791,7 @@ def merge_messages_by_ids(
                 continue
             callback_log_entries.extend(
                 take_callback_logs(
-                    callback_response, callback_id, log_level, worker_logger
+                    callback_response, callback_id, query_level, worker_logger
                 )
             )
             accumulator = merge_messages(

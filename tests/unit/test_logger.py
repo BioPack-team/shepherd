@@ -10,6 +10,7 @@ from shepherd_utils.logger import (
     get_logging_config,
     get_query_handler,
     get_worker_logger,
+    resolve_log_level,
 )
 
 
@@ -67,6 +68,24 @@ def test_query_logger_handler_named_query_log_handler():
     """save_logs in db.py looks up the handler by name; verify the contract."""
     handler = QueryLogger().log_handler
     assert handler.name == "query_log_handler"
+
+
+def test_resolve_log_level_maps_trapi_level_names():
+    """The one place level names are understood -- the requested level on a
+    query, and the level on a log entry a subservice sends back."""
+    assert resolve_log_level("DEBUG") == logging.DEBUG
+    assert resolve_log_level("debug") == logging.DEBUG
+    assert resolve_log_level("WARNING") == logging.WARNING
+    assert resolve_log_level("ERROR") == logging.ERROR
+
+
+def test_resolve_log_level_falls_back_for_anything_unusable():
+    """A query naming a level we can't parse should still run."""
+    assert resolve_log_level(None) == logging.INFO
+    assert resolve_log_level("") == logging.INFO
+    assert resolve_log_level("LOUD") == logging.INFO
+    assert resolve_log_level("LOUD", logging.WARNING) == logging.WARNING
+    assert resolve_log_level(None, logging.DEBUG) == logging.DEBUG
 
 
 def test_drain_empties_the_queue_and_returns_oldest_first():
