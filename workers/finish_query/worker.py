@@ -46,6 +46,97 @@ CALLBACK_ERROR_BODY_BYTES = 500
 # the inline copy.
 RETRY_LOG_SPLICE_MAX_BYTES = 64 * 1024 * 1024
 
+# The phases of a callback POST we time separately, keyed by the httpcore trace
+# event that brackets each one. httpcore prefixes the event with the component
+# that emitted it ("connection.connect_tcp", "http11.send_request_body"), so we
+# key on the stem only and let the prefix vary. Note "connect" covers DNS
+# resolution as well as the TCP handshake -- httpcore does both inside
+# connect_tcp -- and "wait" is the gap between finishing the upload and the
+# receiver's first response byte, i.e. its own processing time.
+_CALLBACK_PHASES = {
+    "connect_tcp": "connect",
+    "connect_unix_socket": "connect",
+    "start_tls": "tls",
+    "send_request_headers": "send",
+    "send_request_body": "send",
+    "receive_response_headers": "wait",
+    "receive_response_body": "receive",
+}
+# Report order, coarsest cause first; also the order they occur in.
+_CALLBACK_PHASE_ORDER = ("connect", "tls", "send", "wait", "receive")
+
+
+class _CallbackTrace:
+    """Accumulate per-phase wall time for one callback POST.
+
+    A total duration is the number we already had, and it's the one that can't
+    be acted on: a 120s callback looks identical whether the receiver is
+    unreachable (all of it in connect), slow to accept a multi-hundred-megabyte
+    upload (send), or slow to answer once it has the payload (wait). httpcore
+    brackets each phase with ``<phase>.started`` / ``.complete`` / ``.failed``
+    events on the request's ``trace`` extension, so timing those splits the
+    total into parts that point at a cause.
+
+    Must be a coroutine function -- httpcore rejects a plain callable on the
+    async interface -- and it runs inline in the request path, so it does
+    nothing but read the clock. Timings are monotonic; the dict is mutated in
+    place, so a caller can hold a reference to ``phases`` before the send and
+    read it afterwards however the attempt ended.
+    """
+
+    __slots__ = ("phases", "_clock", "_started")
+
+    def __init__(self, clock=time.monotonic) -> None:
+        # ``clock`` is injectable so a test can assert exact phase durations
+        # without stubbing the module clock the event loop also reads.
+        self.phases: dict[str, float] = {}
+        self._clock = clock
+        self._started: dict[str, float] = {}
+
+    async def __call__(self, event: str, info: dict) -> None:
+        stem, _, status = event.rpartition(".")
+        phase = _CALLBACK_PHASES.get(stem.rpartition(".")[2])
+        if phase is None:
+            return
+        now = self._clock()
+        if status == "started":
+            self._started[phase] = now
+            return
+        # "complete" or "failed": a phase that failed still burned the time it
+        # took to fail, which is the whole point of measuring it. Phases can
+        # fire more than once per attempt (headers then body both count as
+        # "send"), so accumulate rather than overwrite.
+        start = self._started.pop(phase, None)
+        if start is not None:
+            self.phases[phase] = self.phases.get(phase, 0.0) + (now - start)
+
+
+def _phase_attributes(phases: dict[str, float], prefix: str = "") -> dict[str, int]:
+    """Phase timings as span attributes, in milliseconds.
+
+    Only phases that actually ran are included -- an absent "tls" means plain
+    HTTP, and an absent "wait" means the attempt died before the receiver
+    answered, both of which are more legible than a zero.
+    """
+    return {
+        f"{prefix}{phase}_ms": int(phases[phase] * 1000)
+        for phase in _CALLBACK_PHASE_ORDER
+        if phase in phases
+    }
+
+
+def _format_phases(phases: dict[str, float]) -> str:
+    """One-line phase breakdown for a log message, or "" if nothing was timed.
+
+    Empty whenever the attempt never reached the network (or the client was
+    stubbed out), in which case the caller leaves the breakdown off entirely.
+    """
+    return ", ".join(
+        f"{phase} {phases[phase]:.3f}s"
+        for phase in _CALLBACK_PHASE_ORDER
+        if phase in phases
+    )
+
 
 def _log_entry(message: str, level: str = "ERROR") -> dict:
     """Build a TRAPI LogEntry, matching ReasonerLogEntryFormatter's shape.
@@ -86,6 +177,19 @@ def _describe_callback_failure(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"
 
 
+def _attempt_detail(attempt: int, payload_bytes: int, phases: dict) -> str:
+    """The shared "(attempt 1/3, 1234 bytes, connect 0.01s, ...)" body.
+
+    The phase breakdown is appended only when there is one: an attempt that
+    never reached the network has nothing to say about connect or send time,
+    and a run of bare "connect 0.000s" entries would read as a measurement
+    rather than the absence of one.
+    """
+    detail = f"attempt {attempt}/{CALLBACK_RETRIES}, {payload_bytes} bytes"
+    breakdown = _format_phases(phases)
+    return f"{detail}, {breakdown}" if breakdown else detail
+
+
 def _append_log_entry(payload: bytes, entry: dict) -> bytes:
     """Return ``payload`` with ``entry`` appended to its trailing logs array.
 
@@ -112,10 +216,12 @@ async def send_callback(
 
     Every attempt is timed and logged *after* the send completes -- how long a
     callback takes is a property of the receiver we otherwise have no record
-    of, and a failure is only actionable with the reason attached. Failures are
-    also spliced into the next attempt's payload (size permitting), so a
-    receiver that eventually gets the response can see the attempts that didn't
-    make it.
+    of, and a failure is only actionable with the reason attached. Each attempt
+    is also broken down by phase (connect / tls / send / wait / receive) so a
+    slow or failed callback says *where* the time went rather than just how
+    much of it there was. Failures are spliced into the next attempt's payload
+    (size permitting), so a receiver that eventually gets the response can see
+    the attempts that didn't make it.
 
     Returns True if the response was delivered.
     """
@@ -130,22 +236,28 @@ async def send_callback(
     payload_size = len(message_bytes)
     delivered = False
     attempts = 0
+    # Bound before the loop so the phase timings of whichever attempt ran last
+    # -- the delivering one, or the one we gave up on -- are what lands on the
+    # span. Each attempt rebinds it to its own (in-place mutated) dict.
+    phases: dict[str, float] = {}
     for attempt in range(1, CALLBACK_RETRIES + 1):
         attempts = attempt
         attempt_start = time.time()
+        trace_phases = _CallbackTrace()
+        phases = trace_phases.phases
         try:
             async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT) as client:
                 response = await client.post(
                     callback_url,
                     content=message_bytes,
                     headers=headers,
+                    extensions={"trace": trace_phases},
                 )
                 response.raise_for_status()
                 elapsed = time.time() - attempt_start
                 logger.info(
                     f"Sent response back to {callback_url} in {elapsed:.3f}s "
-                    f"({len(message_bytes)} bytes, "
-                    f"attempt {attempt}/{CALLBACK_RETRIES})"
+                    f"({_attempt_detail(attempt, len(message_bytes), phases)})"
                 )
                 delivered = True
                 break
@@ -153,13 +265,17 @@ async def send_callback(
             elapsed = time.time() - attempt_start
             failure = (
                 f"Failed to send callback to {callback_url} after {elapsed:.3f}s "
-                f"(attempt {attempt}/{CALLBACK_RETRIES}, "
-                f"{len(message_bytes)} bytes): {_describe_callback_failure(e)}"
+                f"({_attempt_detail(attempt, len(message_bytes), phases)}): "
+                f"{_describe_callback_failure(e)}"
             )
             logger.error(failure)
             span.add_event(
                 "callback_attempt_failed",
-                {"attempt": attempt, "duration_ms": int(elapsed * 1000)},
+                {
+                    "attempt": attempt,
+                    "duration_ms": int(elapsed * 1000),
+                    **_phase_attributes(phases),
+                },
             )
             if attempt < CALLBACK_RETRIES:
                 if len(message_bytes) <= RETRY_LOG_SPLICE_MAX_BYTES:
@@ -186,6 +302,20 @@ async def send_callback(
     span.set_attribute("callback.attempts", attempts)
     span.set_attribute("callback.payload_bytes", payload_size)
     span.set_attribute("callback.delivered", delivered)
+    # The last attempt's breakdown -- the delivering one when we delivered.
+    # Earlier attempts keep theirs on their callback_attempt_failed events, so
+    # nothing is lost by the top-level attributes describing only one attempt.
+    for name, value in _phase_attributes(phases, "callback.").items():
+        span.set_attribute(name, value)
+    # Which receiver these timings belong to, so they can be grouped by service
+    # across queries. Host only: callback URLs carry per-query paths and query
+    # strings we have no reason to put in a trace.
+    try:
+        host = httpx.URL(callback_url).host
+    except Exception:
+        host = None
+    if host:
+        span.set_attribute("callback.host", host)
     return delivered
 
 

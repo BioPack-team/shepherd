@@ -15,8 +15,11 @@ import pytest
 from workers.finish_query.worker import (
     CALLBACK_ERROR_BODY_BYTES,
     CALLBACK_RETRIES,
+    _CallbackTrace,
     _append_log_entry,
     _describe_callback_failure,
+    _format_phases,
+    _phase_attributes,
     finish_query,
 )
 
@@ -244,3 +247,194 @@ def test_append_log_entry_leaves_an_unexpected_tail_alone():
     """Rather than corrupt a payload we don't recognize, send it as-is."""
     payload = orjson.dumps({"logs": [], "message": {}})
     assert _append_log_entry(payload, {"message": "late"}) == payload
+
+
+class _FakeSpan:
+    """Records what the worker puts on the current span.
+
+    The worker reaches for the ambient span rather than being handed one, so
+    the cheapest way to see what it reported is to be that span.
+    """
+
+    def __init__(self):
+        self.attributes = {}
+        self.events = []
+
+    def set_attribute(self, key, value):
+        self.attributes[key] = value
+
+    def add_event(self, name, attributes=None):
+        self.events.append((name, attributes or {}))
+
+
+def _patch_span(mocker) -> _FakeSpan:
+    span = _FakeSpan()
+    mocker.patch(
+        "workers.finish_query.worker.get_current_span",
+        return_value=span,
+    )
+    return span
+
+
+# The phases httpcore reports for a plain HTTP/1.1 POST that reaches a server,
+# in the order it reports them.
+_HTTP_PHASE_EVENTS = (
+    "connection.connect_tcp",
+    "http11.send_request_headers",
+    "http11.send_request_body",
+    "http11.receive_response_headers",
+    "http11.receive_response_body",
+)
+
+
+async def _drive_trace_hook(kwargs, stems=_HTTP_PHASE_EVENTS, failed_after=None):
+    """Emit the httpcore trace events the real transport would for one POST.
+
+    ``failed_after`` names the phase whose ``.failed`` event ends the attempt --
+    a connect that never lands, say -- so a test can exercise a request that
+    died mid-flight without a real socket.
+    """
+    hook = kwargs["extensions"]["trace"]
+    for stem in stems:
+        await hook(f"{stem}.started", {})
+        if failed_after is not None and stem == failed_after:
+            await hook(f"{stem}.failed", {"exception": httpx.ConnectError("")})
+            return
+        await hook(f"{stem}.complete", {"return_value": None})
+
+
+@pytest.mark.asyncio
+async def test_callback_trace_times_each_phase():
+    """Every phase of the POST is timed separately, from httpcore's events."""
+    # Halves and quarters, so the expected millisecond counts are exact rather
+    # than a float-rounding artifact of the test's own arithmetic.
+    ticks = iter([0.0, 0.5, 0.5, 1.5, 1.5, 1.75, 1.75, 2.0, 2.0, 3.0, 3.0, 3.25])
+    trace = _CallbackTrace(clock=lambda: next(ticks))
+
+    for stem in (
+        "connection.connect_tcp",
+        "connection.start_tls",
+        "http11.send_request_headers",
+        "http11.send_request_body",
+        "http11.receive_response_headers",
+        "http11.receive_response_body",
+    ):
+        await trace(f"{stem}.started", {})
+        await trace(f"{stem}.complete", {})
+    # Events we don't time must not consume the clock either.
+    await trace("http11.response_closed.started", {})
+    await trace("http11.response_closed.complete", {})
+
+    assert _phase_attributes(trace.phases) == {
+        "connect_ms": 500,
+        "tls_ms": 1000,
+        # Headers and body are both "send", so their times add up.
+        "send_ms": 500,
+        "wait_ms": 1000,
+        "receive_ms": 250,
+    }
+
+
+@pytest.mark.asyncio
+async def test_callback_trace_counts_the_time_a_phase_took_to_fail():
+    """A phase that failed still burned that time -- that's where it went."""
+    ticks = iter([0.0, 30.0])
+    trace = _CallbackTrace(clock=lambda: next(ticks))
+
+    await trace("connection.connect_tcp.started", {})
+    await trace("connection.connect_tcp.failed", {"exception": httpx.ConnectError("")})
+
+    assert _phase_attributes(trace.phases) == {"connect_ms": 30000}
+
+
+@pytest.mark.asyncio
+async def test_span_carries_the_phase_breakdown_of_the_delivering_attempt(
+    redis_mock, mocker, caplog
+):
+    """A slow callback says where the time went, not just how much there was."""
+    _patch_async_query(mocker)
+    span = _patch_span(mocker)
+
+    async def post(*args, **kwargs):
+        await _drive_trace_hook(kwargs)
+        return _http_error_response(200, b"ok")
+
+    mocker.patch("httpx.AsyncClient.post", side_effect=post)
+
+    with caplog.at_level(logging.INFO):
+        await finish_query(TASK, logger)
+
+    # Phases that ran are reported; TLS, which plain HTTP never does, isn't.
+    for phase in ("connect", "send", "wait", "receive"):
+        assert isinstance(span.attributes[f"callback.{phase}_ms"], int)
+    assert "callback.tls_ms" not in span.attributes
+    assert span.attributes["callback.delivered"] is True
+    assert span.attributes["callback.host"] == "callback"
+    # And the same breakdown rides along in the query's own logs.
+    sent = next(r.message for r in caplog.records if "Sent response back" in r.message)
+    assert "connect " in sent and "wait " in sent
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_event_carries_its_own_phase_breakdown(
+    redis_mock, mocker, caplog
+):
+    """Each attempt's timings survive on its event, not just the last one's."""
+    _patch_async_query(mocker)
+    span = _patch_span(mocker)
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+
+    async def post(*args, **kwargs):
+        await _drive_trace_hook(kwargs, failed_after="connection.connect_tcp")
+        raise httpx.ConnectError("")
+
+    mocker.patch("httpx.AsyncClient.post", side_effect=post)
+
+    with caplog.at_level(logging.INFO):
+        await finish_query(TASK, logger)
+
+    failures = [
+        event for name, event in span.events if name == "callback_attempt_failed"
+    ]
+    assert len(failures) == CALLBACK_RETRIES
+    assert [event["attempt"] for event in failures] == [1, 2, 3]
+    # A callback that never connects spends all its time in connect, and says so.
+    assert all("connect_ms" in event for event in failures)
+    assert all("send_ms" not in event for event in failures)
+    assert span.attributes["callback.delivered"] is False
+    logged = [
+        r.message for r in caplog.records if "Failed to send callback" in r.message
+    ]
+    assert "connect " in logged[0]
+
+
+@pytest.mark.asyncio
+async def test_untimed_attempt_reports_no_phases(redis_mock, mocker, caplog):
+    """An attempt that never reached the network reports nothing about phases.
+
+    A row of "connect 0.000s" entries would read as a measurement rather than
+    the absence of one.
+    """
+    _patch_async_query(mocker)
+    span = _patch_span(mocker)
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=_http_error_response(200, b"ok"),
+    )
+
+    with caplog.at_level(logging.INFO):
+        await finish_query(TASK, logger)
+
+    assert not [
+        key for key in span.attributes if key.endswith("_ms") and "duration" not in key
+    ]
+    sent = next(r.message for r in caplog.records if "Sent response back" in r.message)
+    assert "connect" not in sent
+
+
+def test_format_phases_reports_in_request_order():
+    """Read top to bottom, the breakdown walks the request from start to end."""
+    phases = {"receive": 0.004, "connect": 1.5, "wait": 12.0}
+    assert _format_phases(phases) == "connect 1.500s, wait 12.000s, receive 0.004s"
+    assert _format_phases({}) == ""
