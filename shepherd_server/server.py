@@ -65,7 +65,14 @@ APP.add_middleware(
 
 APP.mount("/static", StaticFiles(directory="shepherd_server/static"), name="static")
 
-FastAPIInstrumentor.instrument_app(APP, excluded_urls="docs,openapi.json")
+FastAPIInstrumentor.instrument_app(
+    APP,
+    excluded_urls="docs,openapi.json",
+    # Drop the per-ASGI-message receive/send spans.
+    # They represent individual events that are part of a larger message
+    # and can flood the OTEL backend with traces that aren't interesting.
+    exclude_spans=["receive", "send"],
+)
 
 
 @APP.get("/docs", include_in_schema=False)
