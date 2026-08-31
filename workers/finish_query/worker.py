@@ -7,8 +7,10 @@ import time
 import uuid
 import orjson
 
+from datetime import datetime, timezone
+
 from opentelemetry.propagate import inject
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import Status, StatusCode, get_current_span
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
@@ -16,6 +18,7 @@ from shepherd_utils.db import (
     get_logs,
     get_message,
     get_query_state,
+    save_logs,
     set_query_completed,
 )
 from shepherd_utils.shared import get_tasks
@@ -30,6 +33,160 @@ TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 CALLBACK_RETRIES = 3
+CALLBACK_TIMEOUT = 120
+# How much of a rejecting server's response body goes into the failure log. The
+# body is already in memory (we don't stream the response), but it can be an
+# arbitrarily large HTML error page, and this string is copied into the query's
+# logs -- and possibly into the retry payload -- so keep only the head of it.
+CALLBACK_ERROR_BODY_BYTES = 500
+# Ceiling on the payload size for which we splice a failed attempt's note into
+# the *next* attempt's body. Splicing rebuilds the whole buffer, so for a large
+# response the transient second copy costs far more than the note is worth. The
+# note is in the query's own logs either way, so oversized payloads just skip
+# the inline copy.
+RETRY_LOG_SPLICE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _log_entry(message: str, level: str = "ERROR") -> dict:
+    """Build a TRAPI LogEntry, matching ReasonerLogEntryFormatter's shape.
+
+    Used for entries we splice straight into an outgoing payload, which never
+    pass through the logging handler that would otherwise format them.
+    """
+    return {
+        "message": message,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+    }
+
+
+def _describe_callback_failure(e: Exception) -> str:
+    """One bounded line explaining why a callback POST failed.
+
+    The reason is the whole point of logging the failure -- "callback failed"
+    alone doesn't say whether the receiver is down, slow, or rejecting the
+    payload -- so pull out the status code and the head of the response body
+    for an HTTP error, and the exception type otherwise (httpx reports connect
+    failures, TLS errors and timeouts as distinct classes, and several of them
+    stringify to an empty message).
+    """
+    if isinstance(e, httpx.HTTPStatusError):
+        detail = ""
+        try:
+            body = e.response.content[:CALLBACK_ERROR_BODY_BYTES]
+            if body:
+                detail = f": {body.decode('utf-8', 'replace')}"
+        except Exception:
+            # Body not readable (streamed/closed response) -- the status code
+            # is still worth reporting on its own.
+            pass
+        return f"HTTP {e.response.status_code}{detail}"
+    if isinstance(e, httpx.TimeoutException):
+        return f"{type(e).__name__} (no response within {CALLBACK_TIMEOUT}s)"
+    return f"{type(e).__name__}: {e}"
+
+
+def _append_log_entry(payload: bytes, entry: dict) -> bytes:
+    """Return ``payload`` with ``entry`` appended to its trailing logs array.
+
+    Only sound for a payload this worker built, which always ends with the logs
+    array followed by the closing brace. Rebuilding costs a transient second
+    copy of the payload, so callers guard on size; the rebind releases the old
+    buffer immediately. If the payload doesn't have the expected tail, hand it
+    back untouched rather than risk shipping malformed JSON.
+    """
+    entry_bytes = orjson.dumps(entry)
+    if payload.endswith(b"[]}"):
+        return payload[:-3] + b"[" + entry_bytes + b"]}"
+    if payload.endswith(b"]}"):
+        return payload[:-2] + b"," + entry_bytes + b"]}"
+    return payload
+
+
+async def send_callback(
+    callback_url: str,
+    message_bytes: bytes,
+    logger: logging.Logger,
+) -> bool:
+    """POST the finished response to the caller's callback URL.
+
+    Every attempt is timed and logged *after* the send completes -- how long a
+    callback takes is a property of the receiver we otherwise have no record
+    of, and a failure is only actionable with the reason attached. Failures are
+    also spliced into the next attempt's payload (size permitting), so a
+    receiver that eventually gets the response can see the attempts that didn't
+    make it.
+
+    Returns True if the response was delivered.
+    """
+    headers = {"Content-Type": "application/json"}
+    # Propagate the otel trace context through the callback.
+    # Matches the inject() carrier pattern used by the
+    # lookup workers; the active span comes from process_task's
+    # start_as_current_span.
+    inject(headers)
+    span = get_current_span()
+    started = time.time()
+    payload_size = len(message_bytes)
+    delivered = False
+    attempts = 0
+    for attempt in range(1, CALLBACK_RETRIES + 1):
+        attempts = attempt
+        attempt_start = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT) as client:
+                response = await client.post(
+                    callback_url,
+                    content=message_bytes,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                elapsed = time.time() - attempt_start
+                logger.info(
+                    f"Sent response back to {callback_url} in {elapsed:.3f}s "
+                    f"({len(message_bytes)} bytes, "
+                    f"attempt {attempt}/{CALLBACK_RETRIES})"
+                )
+                delivered = True
+                break
+        except Exception as e:
+            elapsed = time.time() - attempt_start
+            failure = (
+                f"Failed to send callback to {callback_url} after {elapsed:.3f}s "
+                f"(attempt {attempt}/{CALLBACK_RETRIES}, "
+                f"{len(message_bytes)} bytes): {_describe_callback_failure(e)}"
+            )
+            logger.error(failure)
+            span.add_event(
+                "callback_attempt_failed",
+                {"attempt": attempt, "duration_ms": int(elapsed * 1000)},
+            )
+            if attempt < CALLBACK_RETRIES:
+                if len(message_bytes) <= RETRY_LOG_SPLICE_MAX_BYTES:
+                    message_bytes = _append_log_entry(
+                        message_bytes, _log_entry(failure)
+                    )
+                await asyncio.sleep(1 * (2 ** (attempt - 1)))
+
+    total = time.time() - started
+    if not delivered:
+        logger.error(
+            f"Gave up sending callback to {callback_url} after "
+            f"{CALLBACK_RETRIES} attempts and {total:.3f}s. The response was "
+            "not delivered."
+        )
+    elif attempts > 1:
+        logger.info(
+            f"Callback to {callback_url} succeeded on attempt {attempts} "
+            f"after {total:.3f}s total."
+        )
+    # Attributes rather than another log line: same numbers, no per-query log
+    # storage, and they're queryable alongside the rest of the trace.
+    span.set_attribute("callback.duration_ms", int(total * 1000))
+    span.set_attribute("callback.attempts", attempts)
+    span.set_attribute("callback.payload_bytes", payload_size)
+    span.set_attribute("callback.delivered", delivered)
+    return delivered
 
 
 async def finish_query(task, logger: logging.Logger):
@@ -63,29 +220,22 @@ async def finish_query(task, logger: logging.Logger):
                 )
             else:
                 message = orjson.loads(message_bytes)
+                # Re-insert rather than assign in place so "logs" is last in
+                # the serialized payload -- send_callback appends retry notes
+                # by rewriting the payload's tail.
+                message.pop("logs", None)
                 message["logs"] = logs
                 message_bytes = orjson.dumps(message)
                 del message
-            headers = {"Content-Type": "application/json"}
-            # Propagate the otel trace context through the callback.
-            # Matches the inject() carrier pattern used by the
-            # lookup workers; the active span comes from process_task's
-            # start_as_current_span.
-            inject(headers)
-            for attempt in range(CALLBACK_RETRIES):
-                try:
-                    async with httpx.AsyncClient(timeout=120) as client:
-                        response = await client.post(
-                            callback_url,
-                            content=message_bytes,
-                            headers=headers,
-                        )
-                        response.raise_for_status()
-                        logger.info(f"Sent response back to {callback_url}")
-                        break
-                except Exception as e:
-                    logger.error(f"Failed to send callback to {callback_url}: {e}")
-                    await asyncio.sleep(1 * (2**attempt))
+            # The logs list and its serialization are a full second copy of
+            # every log line the query produced; they're inside the payload
+            # now, so drop them before the send rather than holding them for
+            # its duration.
+            del logs, logs_bytes
+
+            await send_callback(callback_url, message_bytes, logger)
+            # Release the payload before the remaining db round trips.
+            del message_bytes
 
         await set_query_completed(query_id, status, logger)
 
@@ -97,6 +247,17 @@ async def finish_query(task, logger: logging.Logger):
         logger.error(f"Failed to clean up callbacks for {query_id}: {e}")
 
     logger.info(f"Finished task {task[0]} in {time.time() - start}")
+
+    # This worker acks directly instead of going through wrap_up_task, so
+    # nothing else flushes what it logged. Persist here so the callback
+    # outcome -- how long delivery took, or why it failed -- survives in the
+    # query's logs (GET /response/{query_id}) instead of only in the pod's
+    # stdout. Draining also clears the handler's queue, which for this
+    # process-wide logger would otherwise just accumulate.
+    try:
+        await save_logs(response_id, logger)
+    except Exception as e:
+        logger.error(f"Failed to save logs for {response_id}: {e}")
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
