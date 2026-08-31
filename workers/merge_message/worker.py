@@ -7,7 +7,7 @@ import os
 import time
 import traceback
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
 from typing import Any, Union
@@ -57,6 +57,238 @@ def get_edgeset(result):
         for edge_id, edgelist in analysis["edge_bindings"].items():
             edgeset.update([e["id"] for e in edgelist])
     return frozenset(edgeset)
+
+
+def edge_is_negated(edge):
+    """Return whether a knowledge edge is explicitly negated."""
+    for attribute in edge.get("attributes", []) or []:
+        if (
+            attribute.get("attribute_type_id") == "biolink:negated"
+            and attribute.get("value") is True
+        ):
+            return True
+    return False
+
+
+def get_support_graph_ids(edge):
+    """Return auxiliary graph ids referenced by a knowledge edge."""
+    support_graph_ids = []
+    for attribute in edge.get("attributes", []) or []:
+        if attribute.get("attribute_type_id") == "biolink:support_graphs":
+            values = attribute.get("value", []) or []
+            if isinstance(values, str):
+                support_graph_ids.append(values)
+            else:
+                support_graph_ids.extend(values)
+    return support_graph_ids
+
+
+def _propagate_support_problem(
+    initial_edges,
+    initial_auxgraphs,
+    edge_to_containing_auxgraphs,
+    auxgraph_to_supporting_edges,
+):
+    """Propagate a problem from support edges to every dependent parent edge."""
+    affected_edges = set(initial_edges)
+    affected_auxgraphs = set(initial_auxgraphs)
+    pending = deque(
+        [("edge", edge_id) for edge_id in affected_edges]
+        + [("auxgraph", auxgraph_id) for auxgraph_id in affected_auxgraphs]
+    )
+
+    while pending:
+        item_type, item_id = pending.popleft()
+        if item_type == "edge":
+            for auxgraph_id in edge_to_containing_auxgraphs.get(item_id, ()):
+                if auxgraph_id in affected_auxgraphs:
+                    continue
+                affected_auxgraphs.add(auxgraph_id)
+                pending.append(("auxgraph", auxgraph_id))
+        else:
+            for edge_id in auxgraph_to_supporting_edges.get(item_id, ()):
+                if edge_id in affected_edges:
+                    continue
+                affected_edges.add(edge_id)
+                pending.append(("edge", edge_id))
+
+    return affected_edges, affected_auxgraphs
+
+
+def build_support_problem_index(
+    message_edges,
+    message_auxgraphs,
+    directly_negated_edges,
+):
+    """Index all edges and auxiliary graphs affected by bad support evidence."""
+    edge_to_containing_auxgraphs = defaultdict(set)
+    auxgraph_to_supporting_edges = defaultdict(set)
+    invalid_edges = set()
+    invalid_auxgraphs = set()
+
+    for auxgraph_id, auxgraph in message_auxgraphs.items():
+        for edge_id in auxgraph.get("edges", []) or []:
+            if edge_id not in message_edges:
+                invalid_auxgraphs.add(auxgraph_id)
+                continue
+            edge_to_containing_auxgraphs[edge_id].add(auxgraph_id)
+
+    for edge_id, edge in message_edges.items():
+        for auxgraph_id in get_support_graph_ids(edge):
+            if auxgraph_id not in message_auxgraphs:
+                invalid_edges.add(edge_id)
+                continue
+            auxgraph_to_supporting_edges[auxgraph_id].add(edge_id)
+
+    negated_edges, negated_auxgraphs = _propagate_support_problem(
+        directly_negated_edges,
+        set(),
+        edge_to_containing_auxgraphs,
+        auxgraph_to_supporting_edges,
+    )
+    invalid_edges, invalid_auxgraphs = _propagate_support_problem(
+        invalid_edges,
+        invalid_auxgraphs,
+        edge_to_containing_auxgraphs,
+        auxgraph_to_supporting_edges,
+    )
+    return negated_edges, negated_auxgraphs, invalid_edges, invalid_auxgraphs
+
+
+def filter_negated_creative_results(
+    response,
+    message_edges,
+    message_auxgraphs,
+    logger: logging.Logger,
+):
+    """Prune invalid bindings and remove analyses with unsupported query edges."""
+    results = response.get("message", {}).get("results", []) or []
+    if not results:
+        return 0
+
+    directly_negated_edges = {
+        edge_id for edge_id, edge in message_edges.items() if edge_is_negated(edge)
+    }
+    if not directly_negated_edges:
+        return 0
+
+    (
+        negated_edges,
+        negated_auxgraphs,
+        invalid_edges,
+        invalid_auxgraphs,
+    ) = build_support_problem_index(
+        message_edges,
+        message_auxgraphs,
+        directly_negated_edges,
+    )
+
+    filtered_results = []
+    removed_analyses = 0
+    negated_bindings = 0
+    invalid_bindings = 0
+    negated_analysis_supports = 0
+    invalid_analysis_supports = 0
+
+    for result in results:
+        analyses = result.get("analyses")
+        if not analyses:
+            filtered_results.append(result)
+            continue
+
+        valid_analyses = []
+        for analysis in analyses:
+            support_graph_ids = analysis.get("support_graphs", []) or []
+            if any(
+                auxgraph_id not in message_auxgraphs or auxgraph_id in invalid_auxgraphs
+                for auxgraph_id in support_graph_ids
+            ):
+                invalid_analysis_supports += 1
+                removed_analyses += 1
+                logger.warning(
+                    "Filtering creative analysis with an incomplete "
+                    "analysis-level support chain."
+                )
+                continue
+
+            if any(
+                auxgraph_id in negated_auxgraphs for auxgraph_id in support_graph_ids
+            ):
+                negated_analysis_supports += 1
+                removed_analyses += 1
+                continue
+
+            filtered_edge_bindings = {}
+            has_empty_qedge = False
+            for qedge_id, bindings in analysis.get("edge_bindings", {}).items():
+                valid_bindings = []
+                for binding in bindings:
+                    edge_id = binding.get("id")
+                    if (
+                        edge_id is None
+                        or edge_id not in message_edges
+                        or edge_id in invalid_edges
+                    ):
+                        invalid_bindings += 1
+                        logger.warning(
+                            "Filtering creative edge binding with an "
+                            "incomplete support chain."
+                        )
+                        continue
+
+                    if edge_id in negated_edges:
+                        negated_bindings += 1
+                        continue
+                    valid_bindings.append(binding)
+
+                filtered_edge_bindings[qedge_id] = valid_bindings
+                if not valid_bindings:
+                    has_empty_qedge = True
+
+            if has_empty_qedge:
+                removed_analyses += 1
+                continue
+
+            analysis["edge_bindings"] = filtered_edge_bindings
+            valid_analyses.append(analysis)
+
+        if valid_analyses:
+            result["analyses"] = valid_analyses
+            filtered_results.append(result)
+
+    response["message"]["results"] = filtered_results
+    if negated_bindings:
+        logger.info(
+            f"Filtered {negated_bindings} creative edge bindings because their "
+            "load-bearing edge chains had biolink:negated=true."
+        )
+    if invalid_bindings:
+        logger.warning(
+            f"Filtered {invalid_bindings} creative edge bindings because their "
+            "load-bearing edge chains could not be fully resolved."
+        )
+    if negated_analysis_supports:
+        logger.info(
+            f"Filtered {negated_analysis_supports} creative analyses because "
+            "an analysis-level support graph had biolink:negated=true."
+        )
+    if invalid_analysis_supports:
+        logger.warning(
+            f"Filtered {invalid_analysis_supports} creative analyses because "
+            "their analysis-level support graphs could not be fully resolved."
+        )
+    return removed_analyses
+
+
+def is_creative_query(query_graph):
+    """Return whether this is Aragorn's supported single-edge inferred query."""
+    return (
+        sum(
+            edge.get("knowledge_type", "lookup") == "inferred"
+            for edge in query_graph.get("edges", {}).values()
+        )
+        == 1
+    )
 
 
 def create_aux_graph(analysis):
@@ -514,6 +746,14 @@ def merge_messages(
                         )
                 else:
                     existing[key] = val
+
+    if target == "aragorn" and is_creative_query(original_query_graph):
+        filter_negated_creative_results(
+            new_response,
+            result["message"]["knowledge_graph"]["edges"],
+            merged_aux,
+            logger,
+        )
 
     # Determine type of message
     if "edges" in original_query_graph:
