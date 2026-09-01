@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 import orjson
 import zstandard
-from fastapi import APIRouter, Body, Request, Response
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, ORJSONResponse
 from opentelemetry.propagate import extract, inject
 
@@ -52,6 +52,13 @@ class QueryIntakeError(Exception):
     logged server-side (see ``PG_DISK_FULL`` in ``shepherd_utils.db``)."""
 
 
+class QueryBodyError(Exception):
+    """Raised when a posted query body isn't a JSON object.
+
+    Client-safe like ``QueryIntakeError``: the message is returned verbatim as
+    the 422 ``detail``."""
+
+
 class ARATargetEnum(str, Enum):
     ARAGORN = "aragorn"
     ARAX = "arax"
@@ -80,6 +87,76 @@ default_input_query: dict = {
         "auxiliary_graphs": {},
     }
 }
+
+
+# OpenAPI overrides for /query and /asyncquery.
+#
+# Those routes take the raw ``Request`` so the body can be parsed with orjson
+# (see ``parse_query_body``), which leaves FastAPI with no body parameter to
+# infer a schema from -- and so no auto-generated request body or 422. Declaring
+# both here, and wiring them in via each route's ``openapi_extra``, keeps
+# /openapi.json equivalent to what the old
+# ``query: dict = Body(..., examples=[default_input_query])`` signature
+# produced, so the TRAPI validators and the Swagger "Try it out" example are
+# unaffected by the parser swap.
+#
+# The 422 body is documented as ``{"detail": str}`` rather than FastAPI's
+# ``HTTPValidationError`` (``{"detail": [ValidationError, ...]}``): the rejection
+# is ours now, and it carries a single message.
+query_openapi_extra: dict = {
+    "requestBody": {
+        "content": {
+            "application/json": {
+                "schema": {
+                    "additionalProperties": True,
+                    "type": "object",
+                    "title": "Query",
+                    "examples": [default_input_query],
+                }
+            }
+        },
+        "required": True,
+    },
+    "responses": {
+        "422": {
+            "description": "Validation Error",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "title": "QueryValidationError",
+                        "properties": {"detail": {"type": "string"}},
+                    }
+                }
+            },
+        }
+    },
+}
+
+
+async def parse_query_body(request: Request) -> dict:
+    """Read and parse a posted TRAPI query body.
+
+    Deliberately bypasses FastAPI's own body handling, which routes through
+    Starlette's ``Request.json()`` -> stdlib ``json.loads``. TRAPI query bodies
+    routinely carry a populated knowledge graph, and stdlib parsing of one costs
+    ~100ms per 13MB -- all of it blocking the single event loop this server runs
+    on, so it delays every other in-flight request too. orjson is ~30% faster on
+    the same payload, and skipping FastAPI's ``dict`` body field drops a
+    pydantic pass that only ever re-copied the four top-level keys.
+
+    Raises ``QueryBodyError`` for anything that isn't a JSON object. The old
+    ``query: dict`` annotation got that check for free from pydantic; without it
+    a posted list or string would reach ``query.get(...)`` downstream and 500.
+    """
+    raw = await request.body()
+    try:
+        query = orjson.loads(raw)
+    except orjson.JSONDecodeError as e:
+        raise QueryBodyError("Invalid request body: not valid JSON.") from e
+    if not isinstance(query, dict):
+        raise QueryBodyError("Invalid request body: expected a JSON object.")
+    return query
 
 
 async def run_query(
@@ -177,11 +254,13 @@ async def run_query(
 
 async def run_sync_query(
     target: ARATargetEnum,
-    query: dict = Body(..., examples=[default_input_query]),
+    request: Request,
 ) -> Response:
     """Handle synchronous TRAPI queries."""
-    # query_dict = query.dict()
-    query_dict = query
+    try:
+        query_dict = await parse_query_body(request)
+    except QueryBodyError as e:
+        return ORJSONResponse(content={"detail": str(e)}, status_code=422)
     try:
         query_id, response_id, logger = await run_query(target, query_dict)
     except QueryIntakeError as e:
@@ -227,9 +306,13 @@ async def run_sync_query(
 
 async def run_async_query(
     target: ARATargetEnum,
-    query: dict = Body(..., examples=[default_input_query]),
+    request: Request,
 ) -> JSONResponse:
     """Handle asynchronous TRAPI queries."""
+    try:
+        query = await parse_query_body(request)
+    except QueryBodyError as e:
+        return JSONResponse(content={"detail": str(e)}, status_code=422)
     callback_url = query.get("callback")
     if callback_url is None:
         return JSONResponse(
