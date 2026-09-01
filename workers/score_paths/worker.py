@@ -27,6 +27,17 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 4
 EMBEDDING_DIR = settings.pathfinder_embeddings_dir
 MODEL_WEIGHTS = "model_weights/squashbert_direct_3hop.pt"
+# 11 embeddings of 768 dims each (4 node names, 4 categories, 3 hop phrases) --
+# the MLP's input width, and the width of every feature row.
+FEATURE_DIM = 11 * 768
+# Analyses scored per forward pass. Peak memory is bounded by this rather than
+# by the message's size: one float32 batch (4096 x 8448 x 4 = 138 MB) plus the
+# float16 rows still pending in the chunk (69 MB), and both are freed at the end
+# of each chunk. Scoring the whole message in one pass instead is what
+# OOM-killed the pod on large messages -- a 387k-analysis message needed the
+# row list, its stacked copy and the float32 cast all live at once, 24 GiB in
+# total. The MLP is row-independent, so chunk size changes only the batching.
+SCORE_CHUNK_SIZE = 4096
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
@@ -165,7 +176,7 @@ def _build_mlp(logger):
     pre-mmap behaviour and strictly better than failing every task.
     """
     model = nn.Sequential(
-        nn.Linear(11 * 768, 1536),
+        nn.Linear(FEATURE_DIM, 1536),
         nn.GELU(),
         nn.LayerNorm(1536),
         nn.Linear(1536, 1536),
@@ -237,6 +248,34 @@ def _ensure_scoring_state(logger) -> None:
     logger.debug(f"score_paths child {os.getpid()} loaded its scoring state.")
 
 
+def _score_chunk(rows, index, results):
+    """Score one chunk of feature rows and write the scores onto the analyses.
+
+    The rows are copied straight into a float32 batch rather than stacked as
+    float16 and cast afterwards, so only one array of the batch exists at a
+    time. float16 converts to float32 exactly, so this is the same input the
+    stack-then-cast path produced.
+
+    Returns ``(count, minimum, maximum, total)`` for the chunk, letting the
+    caller keep running statistics for the summary log line without holding
+    every score of a large message in a list.
+    """
+    features = np.empty((len(rows), FEATURE_DIM), dtype=np.float32)
+    for i, row in enumerate(rows):
+        features[i] = row
+    with torch.inference_mode():
+        logits = mlp(torch.from_numpy(features)).squeeze(-1)
+        scores = torch.sigmoid(logits).numpy()
+    for (result_ind, analysis_ind), score in zip(index, scores):
+        results[result_ind]["analyses"][analysis_ind]["score"] = float(score)
+    return (
+        len(scores),
+        float(scores.min()),
+        float(scores.max()),
+        float(scores.sum(dtype=np.float64)),
+    )
+
+
 def score_paths(response_id, logger):
     message = get_message_sync(response_id)
     try:
@@ -252,12 +291,38 @@ def score_paths(response_id, logger):
             f"Scoring {response_id}: {len(results)} results, "
             f"{total_analyses} analyses, {len(auxiliary_graphs)} aux graphs"
         )
-        feature_rows = []
-        embedding_index = []
+        chunk_rows = []
+        chunk_index = []
         skip_no_binding = 0
         skip_bad_path = 0
         skip_missing_emb = 0
         missing_samples = []
+        # Running totals for the summary lines. Scoring is interleaved with the
+        # feature build now, so the two timings are accumulated separately
+        # rather than measured as consecutive phases.
+        mlp_time = 0.0
+        scored = 0
+        score_min = float("inf")
+        score_max = float("-inf")
+        score_sum = 0.0
+
+        def flush_chunk():
+            """Score the pending rows, write them back, and free the chunk."""
+            nonlocal mlp_time, scored, score_min, score_max, score_sum
+            if not chunk_rows:
+                return
+            started = time.time()
+            count, lowest, highest, total = _score_chunk(
+                chunk_rows, chunk_index, results
+            )
+            mlp_time += time.time() - started
+            scored += count
+            score_min = min(score_min, lowest)
+            score_max = max(score_max, highest)
+            score_sum += total
+            chunk_rows.clear()
+            chunk_index.clear()
+
         t0 = time.time()
         with embedding_env.begin() as txn:
             for result_ind, result in enumerate(results):
@@ -307,11 +372,14 @@ def score_paths(response_id, logger):
                         analysis["score"] = 0.0
                         skip_missing_emb += 1
                         continue
-                    feature_rows.append(features)
-                    embedding_index.append((result_ind, analysis_ind))
-        build_time = time.time() - t0
+                    chunk_rows.append(features)
+                    chunk_index.append((result_ind, analysis_ind))
+                    if len(chunk_rows) >= SCORE_CHUNK_SIZE:
+                        flush_chunk()
+            flush_chunk()
+        build_time = time.time() - t0 - mlp_time
         skipped = skip_no_binding + skip_bad_path + skip_missing_emb
-        msg = f"Feature build: {len(feature_rows)}/{total_analyses} ready in {build_time:.1f}s"
+        msg = f"Feature build: {scored}/{total_analyses} ready in {build_time:.1f}s"
         if skipped:
             msg += (
                 f"; skipped {skipped} "
@@ -322,24 +390,11 @@ def score_paths(response_id, logger):
             if missing_samples:
                 msg += f"; missing keys e.g. {missing_samples}"
         logger.info(msg)
-        if feature_rows:
-            features = np.stack(feature_rows).astype(np.float32)
-            t0 = time.time()
-            with torch.inference_mode():
-                logits = mlp(torch.from_numpy(features)).squeeze(-1)
-                all_scores = torch.sigmoid(logits).numpy()
-            mlp_time = time.time() - t0
-
-            scores = []
-            for (r_idx, a_idx), s in zip(embedding_index, all_scores):
-                s = float(s)
-                results[r_idx]["analyses"][a_idx]["score"] = s
-                scores.append(s)
-
+        if scored:
             logger.info(
-                f"Scored {len(scores)} paths in {mlp_time:.1f}s; "
-                f"scores [{min(scores):.3f}, {max(scores):.3f}] "
-                f"mean {sum(scores) / len(scores):.3f}"
+                f"Scored {scored} paths in {mlp_time:.1f}s; "
+                f"scores [{score_min:.3f}, {score_max:.3f}] "
+                f"mean {score_sum / scored:.3f}"
             )
         else:
             logger.info("No paths to score")

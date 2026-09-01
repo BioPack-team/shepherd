@@ -89,3 +89,28 @@ def test_cpu_bound_work_runs_in_a_process_pool(worker_file):
         f"{worker_file}: offloads with asyncio.to_thread, which has the same "
         "GIL/heartbeat problem as a ThreadPoolExecutor. Use ProcessPoolManager."
     )
+
+
+def test_score_paths_scores_in_bounded_chunks():
+    """score_paths must not materialise a whole message's features at once.
+
+    Scoring every analysis in one batch held the float16 row list, its stacked
+    copy and the float32 cast live simultaneously -- 24 GiB for an observed
+    387k-analysis message, which cgroup-OOM-killed the pod (SIGKILL, so no
+    traceback: the logs simply stopped mid-task). Chunking bounds that at
+    SCORE_CHUNK_SIZE rows regardless of message size.
+
+    This is a string check because CI cannot import the module (torch, lmdb and
+    bmt live only in the worker's image), so there is no other guard on it.
+    """
+    src = _worker_source("workers/score_paths/worker.py")
+
+    assert (
+        "SCORE_CHUNK_SIZE" in src
+    ), "score_paths must score in bounded chunks; SCORE_CHUNK_SIZE is gone."
+    # The one-shot shape: stacking every feature row into a single array.
+    assert "np.stack(" not in src, (
+        "score_paths stacks all feature rows into one array again. That scales "
+        "peak memory with the message and OOM-killed the pod on large ones; "
+        "score in SCORE_CHUNK_SIZE batches instead."
+    )
