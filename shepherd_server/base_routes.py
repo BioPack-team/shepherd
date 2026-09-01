@@ -186,6 +186,26 @@ async def run_query(
     return query_id, response_id, logger
 
 
+def apply_query_status(response: dict, status: Optional[str]) -> None:
+    """Stamp a non-OK query status onto the TRAPI response, in place.
+
+    ``status``/``description`` are TRAPI Response fields, so a caller reading
+    the body it already parses can tell a failed query from an empty one. An
+    error the ARA reported itself is left alone -- it is more specific than the
+    query-level status -- but a body that claims nothing, or claims success for
+    a query that failed, is corrected here.
+    """
+    if not status or status == "OK":
+        return
+    current = response.get("status")
+    if isinstance(current, str) and (
+        "error" in current.lower() or "fail" in current.lower()
+    ):
+        return
+    response["status"] = "Error"
+    response.setdefault("description", f"Query finished with status {status}.")
+
+
 async def run_sync_query(
     target: ARATargetEnum,
     query: dict = Body(..., examples=[default_input_query]),
@@ -224,6 +244,11 @@ async def run_sync_query(
                     )
                 logs = await get_logs(response_id, logger)
                 response["logs"] = logs
+                # The stored status is the one thing that knows the query
+                # failed -- a response an operation never got to write looks
+                # exactly like one that legitimately found nothing. Report it
+                # rather than handing back a body that only says "here you go".
+                apply_query_status(response, query_state[10])
                 return ORJSONResponse(content=response)
         else:
             # Debug, not warning: this fires every 0.5s while a query is still
@@ -455,17 +480,54 @@ async def callback(
     return Response("Callback received.", 200)
 
 
+# shepherd_brain.state/status (see shepherd_db/init_db.sql) mapped onto the
+# TRAPI AsyncQueryStatusResponse vocabulary. A query is inserted QUEUED/OK and
+# only leaves that state when it finishes, is abandoned, or times out.
+TERMINAL_QUERY_STATES = {"COMPLETED", "ABANDONED"}
+OK_QUERY_STATUS = "OK"
+
+
 @base_router.get("/asyncquery_status/{qid}", status_code=200)
 async def query_status(
     qid: str,
-) -> dict:
+):
     """Handle query status requests."""
-    # TODO: get query status from db
-    return {
-        "status": "Queued",
-        "description": "Query is currently waiting to be run.",
-        "logs": [],
-    }
+    logger = logging.getLogger("shepherd.query_status")
+    logger.setLevel(logging.INFO)
+    attach_query_handler(logger)
+    query_state = await get_query_state(qid, logger)
+    if query_state is None:
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
+
+    response_id = query_state[7]
+    state = query_state[9]
+    status = query_state[10]
+    description = query_state[11]
+    logs = await get_logs(response_id, logger) if response_id else []
+
+    if state not in TERMINAL_QUERY_STATES:
+        # Shepherd doesn't track a separate running state: a query is in the
+        # pipeline from the moment it is accepted until it finishes.
+        trapi_status = "Running"
+        default_description = "Query is currently running."
+    elif status == OK_QUERY_STATUS:
+        trapi_status = "Completed"
+        default_description = "Query has finished."
+    else:
+        # The query reached the end of the line with something other than OK
+        # (ERROR from a failed operation, TIMEOUT, ABANDONED). Previously this
+        # endpoint answered "Queued" for every query it was ever asked about,
+        # so a failed query and a healthy one looked exactly alike here.
+        trapi_status = "Failed"
+        default_description = f"Query finished with status {status}."
+
+    return ORJSONResponse(
+        content={
+            "status": trapi_status,
+            "description": description or default_description,
+            "logs": logs,
+        }
+    )
 
 
 @base_router.get("/response/{query_id}", status_code=200)

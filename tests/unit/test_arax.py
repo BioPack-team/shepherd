@@ -216,3 +216,74 @@ async def test_pathfinder_query_is_routed_without_calling_arax(mocker):
     assert not post.called
     assert not save.called
     assert json.loads(task[1]["workflow"]) == [{"id": "arax.pathfinder"}]
+
+
+# --- TRAPI-level failures reported inside a 200 -----------------------------
+#
+# ARAX answers HTTP 200 for most of its own failures and puts the failure in
+# the TRAPI status field, so checking the HTTP code alone reports every one of
+# them as a healthy query.
+
+
+def _trapi(status=None, description=None):
+    body = {"message": {"query_graph": {}, "knowledge_graph": {}, "results": []}}
+    if status is not None:
+        body["status"] = status
+    if description is not None:
+        body["description"] = description
+    return body
+
+
+@pytest.mark.parametrize("status", ["Error", "ERROR", "InternalError", "Failed"])
+@pytest.mark.asyncio
+async def test_trapi_error_status_in_a_200_fails_the_query(mocker, status):
+    save = _patch_db(mocker)
+    span = _patch_span(mocker)
+    _patch_post(
+        mocker,
+        _http_response(200, json_body=_trapi(status, "internal issues upstream")),
+    )
+    task = _task()
+
+    with pytest.raises(ARAXServiceError) as excinfo:
+        await arax(task, logger)
+
+    assert excinfo.value.status_code == 200
+    assert status in str(excinfo.value)
+    assert "internal issues upstream" in str(excinfo.value)
+    span.set_attribute.assert_any_call("arax.trapi_status", status)
+    # ARAX's own body is what the caller gets -- its status and description say
+    # more than anything we could synthesize.
+    assert save.await_args.args[1]["status"] == status
+    assert save.await_args.args[1]["description"] == "internal issues upstream"
+
+
+@pytest.mark.parametrize("status", ["Success", "OK", "QueryNotTraversable", None])
+@pytest.mark.asyncio
+async def test_non_error_trapi_status_still_succeeds(mocker, status):
+    """Only statuses naming an error fail the query; the rest are outcomes."""
+    save = _patch_db(mocker)
+    _patch_span(mocker)
+    _patch_post(mocker, _http_response(200, json_body=_trapi(status)))
+    task = _task()
+
+    await arax(task, logger)
+
+    assert save.await_args.args[1].get("status") == status
+    assert json.loads(task[1]["workflow"]) == [{"id": "arax"}]
+
+
+@pytest.mark.asyncio
+async def test_json_body_that_is_not_trapi_fails_the_query(mocker):
+    save = _patch_db(mocker)
+    _patch_span(mocker)
+    _patch_post(mocker, _http_response(200, json_body={"detail": "Internal Error"}))
+
+    with pytest.raises(ARAXServiceError) as excinfo:
+        await arax(_task(), logger)
+
+    assert excinfo.value.status_code == 200
+    assert "not a TRAPI response" in str(excinfo.value)
+    # Nothing usable came back, so the caller gets one we build.
+    assert save.await_args.args[1]["status"] == "Error"
+    assert "[HTTP 200]" in save.await_args.args[1]["description"]

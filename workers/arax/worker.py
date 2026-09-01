@@ -44,11 +44,35 @@ class ARAXServiceError(Exception):
     non-TRAPI ``{"status": "error"}`` blob that the workflow then reported as a
     successful response, which left nothing downstream with a status code to
     report (see the same fix in ``arax_pathfinder``).
+
+    ``trapi_response`` holds ARAX's own response when it sent a usable one --
+    an HTTP 200 that reports the failure in the TRAPI ``status`` field. That
+    body, not one we synthesize, is what the caller should get back.
     """
 
-    def __init__(self, message: str, status_code: int):
+    def __init__(self, message: str, status_code: int, trapi_response: dict = None):
         super().__init__(message)
         self.status_code = status_code
+        self.trapi_response = trapi_response
+
+
+def trapi_error_status(result: dict) -> str:
+    """ARAX's TRAPI ``status``, when it reports an error. Empty string if not.
+
+    ARAX answers HTTP 200 for most of its own failures and reports them in the
+    TRAPI ``status`` field, so a service having internal issues still looks
+    perfectly healthy to anything that only checks the HTTP code. Only statuses
+    that name an error or a failure count: the rest of the TRAPI status
+    vocabulary describes outcomes that aren't service failures, and treating an
+    unrecognized status as one would fail queries ARAX answered fine.
+    """
+    status = result.get("status")
+    if not isinstance(status, str):
+        return ""
+    lowered = status.lower()
+    if "error" in lowered or "fail" in lowered:
+        return status
+    return ""
 
 
 def body_head(response: httpx.Response) -> str:
@@ -139,7 +163,32 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
             status_code,
         ) from e
 
-    return add_shepherd_arax_to_edge_sources(result)
+    if not isinstance(result, dict) or not isinstance(result.get("message"), dict):
+        # Parseable JSON, but not a TRAPI response -- an error envelope from
+        # ARAX or from something in front of it ({"detail": "..."}), which
+        # nothing downstream can merge, score or hand back.
+        raise ARAXServiceError(
+            f"ARAX service at {settings.arax_url} returned HTTP {status_code} "
+            "with a body that is not a TRAPI response: "
+            f"{str(result)[:ERROR_BODY_BYTES]}",
+            status_code,
+        )
+
+    result = add_shepherd_arax_to_edge_sources(result)
+
+    error_status = trapi_error_status(result)
+    if error_status:
+        span.set_attribute("arax.trapi_status", error_status)
+        description = result.get("description") or "no description given"
+        raise ARAXServiceError(
+            f"ARAX service at {settings.arax_url} returned HTTP {status_code} "
+            f'reporting TRAPI status "{error_status}": '
+            f"{str(description)[:ERROR_BODY_BYTES]}",
+            status_code,
+            trapi_response=result,
+        )
+
+    return result
 
 
 def error_response(message: dict, error: ARAXServiceError) -> dict:
@@ -181,7 +230,12 @@ async def arax(task, logger: logging.Logger):
             # status. Without this the response id still holds the echo of the
             # incoming query, so the caller gets a query that looks like it
             # simply found nothing.
-            await save_message(response_id, error_response(message, e), logger)
+            # ARAX's own body wins when it sent one: its status, description
+            # and logs say more about the failure than anything we can build.
+            saved = e.trapi_response
+            if saved is None:
+                saved = error_response(message, e)
+            await save_message(response_id, saved, logger)
             raise
         await save_message(response_id, result, logger)
         task[1]["workflow"] = json.dumps([{"id": "arax"}])
