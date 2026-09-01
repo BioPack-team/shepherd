@@ -13,11 +13,13 @@ import orjson
 import pytest
 
 from workers.finish_query.worker import (
+    CALLBACK_ATTEMPTS,
     CALLBACK_ERROR_BODY_BYTES,
-    CALLBACK_RETRIES,
     _append_log_entry,
     _describe_callback_failure,
+    _is_retryable,
     finish_query,
+    send_callback,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,7 +85,7 @@ async def test_successful_callback_logs_duration_and_size(redis_mock, mocker, ca
     assert "http://callback" in sent[0]
     # "<n>.<mmm>s" duration and a byte count, both after the send completed.
     assert "s (" in sent[0] and "bytes" in sent[0]
-    assert f"attempt 1/{CALLBACK_RETRIES}" in sent[0]
+    assert f"attempt 1/{CALLBACK_ATTEMPTS}" in sent[0]
 
 
 @pytest.mark.asyncio
@@ -103,10 +105,10 @@ async def test_failed_callback_logs_status_and_body(redis_mock, mocker, caplog):
     failures = [
         r.message for r in caplog.records if "Failed to send callback" in r.message
     ]
-    assert len(failures) == CALLBACK_RETRIES
+    assert len(failures) == CALLBACK_ATTEMPTS
     assert "HTTP 502" in failures[0]
     assert "upstream exploded" in failures[0]
-    assert f"attempt 1/{CALLBACK_RETRIES}" in failures[0]
+    assert f"attempt 1/{CALLBACK_ATTEMPTS}" in failures[0]
     # And a single summary line once the retries are spent.
     gave_up = [
         r.message for r in caplog.records if "Gave up sending callback" in r.message
@@ -128,7 +130,7 @@ async def test_failure_is_spliced_into_the_retry_payload(redis_mock, mocker):
 
     async def record(*args, **kwargs):
         payloads.append(kwargs["content"])
-        if len(payloads) < 3:
+        if len(payloads) < CALLBACK_ATTEMPTS:
             return _http_error_response(503, b"try again later")
         return _http_error_response(200, b"ok")
 
@@ -137,16 +139,16 @@ async def test_failure_is_spliced_into_the_retry_payload(redis_mock, mocker):
 
     await finish_query(TASK, logger)
 
-    assert len(payloads) == 3
-    first, second, third = (orjson.loads(p) for p in payloads)
+    assert len(payloads) == CALLBACK_ATTEMPTS
+    first, second = (orjson.loads(p) for p in payloads)
     assert [entry["message"] for entry in first["logs"]] == ["earlier"]
+    # The retry adds only the one failure that preceded it, and the message
+    # itself survives the splice intact.
     assert len(second["logs"]) == 2
     assert "HTTP 503" in second["logs"][1]["message"]
     assert second["logs"][1]["level"] == "ERROR"
     assert second["logs"][1]["timestamp"]
-    # Each attempt adds only its own failure, and the message survives intact.
-    assert len(third["logs"]) == 3
-    assert third["message"] == {}
+    assert second["message"] == {}
 
 
 @pytest.mark.asyncio
@@ -165,7 +167,7 @@ async def test_oversized_payload_skips_the_inline_retry_note(redis_mock, mocker)
 
     await finish_query(TASK, logger)
 
-    assert len(payloads) == CALLBACK_RETRIES
+    assert len(payloads) == CALLBACK_ATTEMPTS
     assert len(set(payloads)) == 1
 
 
@@ -244,3 +246,109 @@ def test_append_log_entry_leaves_an_unexpected_tail_alone():
     """Rather than corrupt a payload we don't recognize, send it as-is."""
     payload = orjson.dumps({"logs": [], "message": {}})
     assert _append_log_entry(payload, {"message": "late"}) == payload
+
+
+@pytest.mark.asyncio
+async def test_client_error_is_not_retried(redis_mock, mocker, caplog):
+    """A 4xx is the receiver's verdict on these bytes, so we stop after one POST.
+
+    Retrying costs a full extra round trip -- up to CALLBACK_TIMEOUT of it --
+    with the whole payload pinned in memory, for a response that cannot change.
+    """
+    _patch_async_query(mocker)
+    mock_post = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=_http_error_response(400, b"malformed TRAPI"),
+    )
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+
+    with caplog.at_level(logging.INFO):
+        await finish_query(TASK, logger)
+
+    assert mock_post.call_count == 1
+    messages = [r.message for r in caplog.records]
+    assert any("Not retrying the callback" in m for m in messages)
+    assert any("HTTP 400" in m and "malformed TRAPI" in m for m in messages)
+    # The give-up line reports the attempt actually spent, not the budget.
+    gave_up = [m for m in messages if "Gave up sending callback" in m]
+    assert len(gave_up) == 1
+    assert "1 attempt(s)" in gave_up[0]
+
+
+@pytest.mark.asyncio
+async def test_server_error_is_still_retried(redis_mock, mocker):
+    """A 5xx may well be transient, so the retry budget still applies to it."""
+    _patch_async_query(mocker)
+    mock_post = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=_http_error_response(502, b"bad gateway"),
+    )
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+
+    await finish_query(TASK, logger)
+
+    assert mock_post.call_count == CALLBACK_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_is_retried_despite_being_4xx(redis_mock, mocker):
+    """429 asks us to come back later -- the one 4xx where a retry is the point."""
+    _patch_async_query(mocker)
+    mock_post = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=_http_error_response(429, b"slow down"),
+    )
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+
+    await finish_query(TASK, logger)
+
+    assert mock_post.call_count == CALLBACK_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_callback_reports_undelivered_on_a_client_error(redis_mock, mocker):
+    """Bailing out early reports undelivered, and skips the backoff entirely.
+
+    Driven through ``send_callback`` rather than ``finish_query`` so the retry
+    loop is the only thing that could reach ``asyncio.sleep`` -- the wrap-up's
+    own db retries have a backoff of their own.
+    """
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=_http_error_response(404, b"no such message"),
+    )
+    mock_sleep = mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+
+    assert await send_callback("http://callback", b'{"logs":[]}', logger) is False
+    # The backoff exists only to space out a retry we are no longer making.
+    mock_sleep.assert_not_awaited()
+
+
+def test_is_retryable_splits_client_from_server_errors():
+    """4xx stops the loop; 5xx and the transient 4xx codes keep it going."""
+
+    def status_error(code: int) -> httpx.HTTPStatusError:
+        return httpx.HTTPStatusError(
+            "boom",
+            request=httpx.Request("POST", "http://callback"),
+            response=_http_error_response(code, b""),
+        )
+
+    for code in (400, 401, 403, 404, 413, 422):
+        assert _is_retryable(status_error(code)) is False, code
+    for code in (408, 429, 500, 502, 503, 504):
+        assert _is_retryable(status_error(code)) is True, code
+
+
+def test_is_retryable_keeps_transport_and_unknown_failures():
+    """Narrowing the loop must not silently stop retrying real transients."""
+    assert _is_retryable(httpx.ConnectError("")) is True
+    assert _is_retryable(httpx.ReadTimeout("")) is True
+    assert _is_retryable(httpx.RemoteProtocolError("")) is True
+    # An exception we don't recognize keeps the old behavior rather than
+    # quietly becoming terminal.
+    assert _is_retryable(Exception("simulated network error")) is True
