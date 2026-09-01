@@ -101,9 +101,7 @@ async def send_to_actor(actor, parent, parent_data, logger):
     actor_url = f"{actor.get('agent_uri', '')}{actor.get('path', '')}"
     callback = None
     if not actor_url.startswith("/ara-explanatory/api/runquery"):
-        callback = (
-            f"{settings.ars_public_host}/ars/api/messages/{child_pk}"
-        )
+        callback = f"{settings.ars_public_host}/ars/api/messages/{child_pk}"
         data["callback"] = callback
 
     endpoint = smartapi.endpoint(inforesid)
@@ -131,9 +129,7 @@ async def send_to_actor(actor, parent, parent_data, logger):
             if endpoint == "asyncquery":
                 # results arrive on the callback; upstream persists nothing
                 # here and the child stays R/202 from creation
-                logger.info(
-                    f"[{child_pk}] {inforesid} accepted async query"
-                )
+                logger.info(f"[{child_pk}] {inforesid} accepted async query")
                 return
             # synchronous (query) actor: process the response inline
             results = get_safe(rdata, "message", "results")
@@ -176,9 +172,13 @@ async def send_to_actor(actor, parent, parent_data, logger):
                         f"Validation problem found for agent {agent_name} "
                         f"with pk {parent['id']}"
                     )
-                    updates = {"status": "E", "code": 422, "url": final_url,
-                               "result_count": result_count,
-                               "result_stat": result_stat}
+                    updates = {
+                        "status": "E",
+                        "code": 422,
+                        "url": final_url,
+                        "result_count": result_count,
+                        "result_stat": result_stat,
+                    }
             updated = await ars_db.update_message(child_pk, **updates)
             if updated and updated["status"] in ("D", "S", "E", "U"):
                 await ars_db.persist_data_copy(child_pk, logger)

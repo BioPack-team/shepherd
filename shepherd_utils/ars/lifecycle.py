@@ -57,9 +57,7 @@ async def seed_registry(task_logger: logging.Logger) -> None:
             try:
                 await ars_db.get_or_create_actor(spec, inactive_list=inactive)
             except Exception as e:
-                task_logger.error(
-                    f"Failed to seed actor {spec['agent']['name']}: {e}"
-                )
+                task_logger.error(f"Failed to seed actor {spec['agent']['name']}: {e}")
     except Exception as e:
         # a seeding failure must never keep the server from starting; the
         # lazy get_or_create paths cover the built-ins on first use

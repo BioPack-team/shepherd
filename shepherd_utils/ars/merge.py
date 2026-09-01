@@ -397,10 +397,14 @@ def mergeDicts(dcurrent, dmerged):
             else:
                 try:
                     if (
-                        isinstance(mv, typing.Hashable)
-                        and isinstance(cv, typing.Hashable)
-                        and mv == cv
-                    ) or cv is None or mv is None:
+                        (
+                            isinstance(mv, typing.Hashable)
+                            and isinstance(cv, typing.Hashable)
+                            and mv == cv
+                        )
+                        or cv is None
+                        or mv is None
+                    ):
                         continue
                     else:
                         if key == "score":

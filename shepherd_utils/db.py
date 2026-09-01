@@ -188,9 +188,7 @@ def _ars_schema_statements():
     """
     import pathlib
 
-    sql = (
-        pathlib.Path(__file__).resolve().parent / "ars" / "schema.sql"
-    ).read_text()
+    sql = (pathlib.Path(__file__).resolve().parent / "ars" / "schema.sql").read_text()
     # Drop comment lines FIRST: a ';' inside a comment must not split.
     sql = "\n".join(
         line for line in sql.splitlines() if not line.strip().startswith("--")

@@ -24,9 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def load_corpus(name):
-    return json.loads(
-        pathlib.Path(f"tests/fixtures/ars_corpus/{name}").read_text()
-    )
+    return json.loads(pathlib.Path(f"tests/fixtures/ars_corpus/{name}").read_text())
 
 
 def appraised(data):
@@ -34,7 +32,9 @@ def appraised(data):
     out = json.loads(json.dumps(data))
     for result in out["message"]["results"]:
         result["ordering_components"] = {
-            "novelty": 0.5, "confidence": 0.8, "clinical_evidence": 0.2
+            "novelty": 0.5,
+            "confidence": 0.8,
+            "clinical_evidence": 0.2,
         }
     return out
 
@@ -44,12 +44,21 @@ def env(mocker, redis_mock):
     parent_pk = uuid.uuid4()
     merged_pk = uuid.uuid4()
     merged_row = {
-        "id": merged_pk, "status": "R", "code": 202, "actor": 3,
-        "ref": parent_pk, "result_count": None, "params": None,
+        "id": merged_pk,
+        "status": "R",
+        "code": 202,
+        "actor": 3,
+        "ref": parent_pk,
+        "result_count": None,
+        "params": None,
     }
     parent_row = {
-        "id": parent_pk, "status": "R", "code": 202, "actor": 1,
-        "result_count": None, "merged_versions_list": [[str(merged_pk), "ara-x"]],
+        "id": parent_pk,
+        "status": "R",
+        "code": 202,
+        "actor": 1,
+        "result_count": None,
+        "merged_versions_list": [[str(merged_pk), "ara-x"]],
     }
     data = load_corpus("response_aragorn.json")
 
@@ -74,9 +83,7 @@ def env(mocker, redis_mock):
         "load_message_data": _patch("load_message_data", return_value=data),
         "save_message_data": _patch("save_message_data"),
         "persist_data_copy": _patch("persist_data_copy"),
-        "notify": mocker.patch.object(
-            pp, "notify_subscribers", new_callable=AsyncMock
-        ),
+        "notify": mocker.patch.object(pp, "notify_subscribers", new_callable=AsyncMock),
         "completion": mocker.patch.object(
             pp.lifecycle, "check_parent_completion", new_callable=AsyncMock
         ),
@@ -99,9 +106,7 @@ def _task(env, stats=None):
 
 
 def _appraiser_response(env):
-    payload = zstandard.compress(
-        json.dumps(appraised(env["data"])).encode("utf-8")
-    )
+    payload = zstandard.compress(json.dumps(appraised(env["data"])).encode("utf-8"))
     return httpx.Response(
         status_code=200,
         content=payload,
@@ -138,7 +143,8 @@ async def test_postprocess_happy_path(env, http, redis_mock):
 
     # merged child -> D/200 with result_count + result_stat
     final = next(
-        c.kwargs for c in env["update_message"].await_args_list
+        c.kwargs
+        for c in env["update_message"].await_args_list
         if str(c.args[0]) == str(env["merged_pk"]) and "status" in c.kwargs
     )
     assert final["status"] == "D"
@@ -153,7 +159,8 @@ async def test_postprocess_happy_path(env, http, redis_mock):
     assert all("sugeno" in r and "rank" in r for r in results)
     nodes = saved["message"]["knowledge_graph"]["nodes"]
     annotated = [
-        a for a in nodes["MONDO:0005148"]["attributes"]
+        a
+        for a in nodes["MONDO:0005148"]["attributes"]
         if a.get("attribute_type_id") == "biothings_annotations"
     ]
     assert len(annotated) == 1
@@ -175,18 +182,18 @@ async def test_postprocess_appraiser_failure_is_422(env, mocker, redis_mock):
     def _route(url, **kwargs):
         if "appraise" in str(url) or "get_appraisal" in str(url):
             return httpx.Response(
-                status_code=500, text="appraiser down",
+                status_code=500,
+                text="appraiser down",
                 request=httpx.Request("POST", "https://appraiser.example/x"),
             )
         return _annotator_response()
 
-    mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route
-    )
+    mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route)
     await pp.ars_postprocess(_task(env), LOGGER)
 
     final = next(
-        c.kwargs for c in env["update_message"].await_args_list
+        c.kwargs
+        for c in env["update_message"].await_args_list
         if str(c.args[0]) == str(env["merged_pk"]) and c.kwargs.get("code") == 422
     )
     assert final["status"] == "E"
@@ -194,7 +201,9 @@ async def test_postprocess_appraiser_failure_is_422(env, mocker, redis_mock):
     saved = env["save_message_data"].await_args_list[-1].args[1]
     for result in saved["message"]["results"]:
         assert result["ordering_components"] == {
-            "novelty": 0, "confidence": 0, "clinical_evidence": 0
+            "novelty": 0,
+            "confidence": 0,
+            "clinical_evidence": 0,
         }
     # notification + completion still happen (upstream notifies regardless)
     env["notify"].assert_awaited()
@@ -207,9 +216,7 @@ async def test_postprocess_annotator_failure_is_444(env, mocker, redis_mock):
             return _appraiser_response(env)
         raise httpx.ConnectError("annotator down")
 
-    mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route
-    )
+    mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route)
     await pp.ars_postprocess(_task(env), LOGGER)
     # the 444 was recorded when annotation failed...
     saw_444 = any(

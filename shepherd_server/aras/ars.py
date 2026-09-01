@@ -60,7 +60,9 @@ ARS = FastAPI(title="Translator ARS on Shepherd", docs_url=None, redirect_slashe
 
 def text(body: str, status: int = 200) -> Response:
     """Django HttpResponse equivalent (text/html by default)."""
-    return Response(content=body, status_code=status, media_type="text/html; charset=utf-8")
+    return Response(
+        content=body, status_code=status, media_type="text/html; charset=utf-8"
+    )
 
 
 def dj_json(obj: Any, status: int = 200) -> Response:
@@ -408,8 +410,7 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
         )
         if mesg["status"] == "D":
             return text(
-                "ARS has already received %s results from pk: %s"
-                % (result_length, key)
+                "ARS has already received %s results from pk: %s" % (result_length, key)
             )
         if mesg.get("result_count") is not None and mesg["result_count"] > 0:
             return text(
@@ -441,9 +442,7 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
             if "validate" in params.keys() and not params["validate"]:
                 valid = True
             else:
-                await asyncio.to_thread(
-                    remove_phantom_support_graphs, message_to_merge
-                )
+                await asyncio.to_thread(remove_phantom_support_graphs, message_to_merge)
                 valid = await asyncio.to_thread(validate, message_to_merge)
             if valid:
                 if agent_name.startswith("ara-"):
@@ -575,12 +574,10 @@ async def actors(request: Request) -> Response:
                 ch["fields"]["name"] for ch in (a.get("channel") or [])
             ]
             actor["fields"]["agent"] = a["agent_name"]
-            actor["fields"]["urlRemote"] = url_remote_from_inforesid(
-                a.get("inforesid")
-            )
-            actor["fields"]["path"] = (
-                f"{_host_base(request)}{a.get('agent_uri', '')}{a['path']}"
-            )
+            actor["fields"]["urlRemote"] = url_remote_from_inforesid(a.get("inforesid"))
+            actor["fields"][
+                "path"
+            ] = f"{_host_base(request)}{a.get('agent_uri', '')}{a['path']}"
             actor["fields"]["active"] = a["active"]
             actor["fields"]["inforesid"] = a["inforesid"]
             out.append(actor)
@@ -923,9 +920,7 @@ async def get_status(request: Request) -> Response:
         return JSONResponse(
             content={
                 "message": str(e),
-                "timestamp": datetime.datetime.now(
-                    datetime.timezone.utc
-                ).isoformat(),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             },
             status_code=405,
         )
@@ -1002,9 +997,7 @@ async def _verify_signature(request: Request, body: bytes):
         return JSONResponse(
             content={
                 "message": "Signature not provided",
-                "timestamp": datetime.datetime.now(
-                    datetime.timezone.utc
-                ).isoformat(),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             },
             status_code=400,
         )
@@ -1087,7 +1080,8 @@ async def query_event_subscribe(request: Request) -> Response:
                 ).isoformat()
                 out, status = _analyze_response(out)
                 return Response(
-                    content=json.dumps(out), status_code=status,
+                    content=json.dumps(out),
+                    status_code=status,
                     media_type="text/html; charset=utf-8",
                 )
             out["success"] = []
@@ -1102,12 +1096,11 @@ async def query_event_subscribe(request: Request) -> Response:
                 else:
                     await ars_db.add_subscription(mesg["id"], client["id"])
                     out["success"].append(key)
-            out["timestamp"] = datetime.datetime.now(
-                datetime.timezone.utc
-            ).isoformat()
+            out["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             out, status = _analyze_response(out)
             return Response(
-                content=json.dumps(out), status_code=status,
+                content=json.dumps(out),
+                status_code=status,
                 media_type="text/html; charset=utf-8",
             )
         return text("Method POST not supported!", 400)
@@ -1121,17 +1114,17 @@ async def query_event_subscribe(request: Request) -> Response:
                     ).isoformat(),
                 }
                 return Response(
-                    content=json.dumps(out), status_code=200,
+                    content=json.dumps(out),
+                    status_code=200,
                     media_type="text/html; charset=utf-8",
                 )
             out = {
                 "message": "Invalid Signature provided",
-                "timestamp": datetime.datetime.now(
-                    datetime.timezone.utc
-                ).isoformat(),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             }
             return Response(
-                content=json.dumps(out), status_code=401,
+                content=json.dumps(out),
+                status_code=401,
                 media_type="text/html; charset=utf-8",
             )
     return text(f"Method {request.method} not supported!", 400)
@@ -1167,15 +1160,14 @@ async def query_event_unsubscribe(request: Request) -> Response:
                 elif not subscribed:
                     out["success"].append(pk)
                 elif mesg["status"] in ("D", "E"):
-                    out["failure"][pk] = (
-                        "Failure in auto-subscription upon completion"
-                    )
+                    out["failure"][pk] = "Failure in auto-subscription upon completion"
         else:
             out["message"] = "Invalid Signature provided"
         out["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         out, status = _analyze_response(out)
         return Response(
-            content=json.dumps(out), status_code=status,
+            content=json.dumps(out),
+            status_code=status,
             media_type="text/html; charset=utf-8",
         )
     return text("Only POST is permitted!", 405)

@@ -22,9 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def load_corpus(name):
-    return json.loads(
-        pathlib.Path(f"tests/fixtures/ars_corpus/{name}").read_text()
-    )
+    return json.loads(pathlib.Path(f"tests/fixtures/ars_corpus/{name}").read_text())
 
 
 @pytest.fixture
@@ -33,9 +31,14 @@ def env(mocker, redis_mock):
     child_pk = uuid.uuid4()
     merge_pk = uuid.uuid4()
     parent = {
-        "id": parent_pk, "status": "R", "code": 202, "actor": 1,
-        "merged_version": None, "merged_versions_list": None,
-        "params": {"query_type": "standard"}, "result_count": None,
+        "id": parent_pk,
+        "status": "R",
+        "code": 202,
+        "actor": 1,
+        "merged_version": None,
+        "merged_versions_list": None,
+        "params": {"query_type": "standard"},
+        "result_count": None,
     }
 
     def _patch(name, **kwargs):
@@ -70,7 +73,9 @@ def env(mocker, redis_mock):
             merge_worker, "notify_subscribers", new_callable=AsyncMock
         ),
         "ensure_ars_actor": mocker.patch.object(
-            merge_worker.lifecycle, "ensure_ars_actor", new_callable=AsyncMock,
+            merge_worker.lifecycle,
+            "ensure_ars_actor",
+            new_callable=AsyncMock,
             return_value={"id": 3, "agent_name": "ars-ars-agent"},
         ),
         "try_lock": mocker.patch.object(
@@ -80,7 +85,9 @@ def env(mocker, redis_mock):
             merge_worker, "remove_lock", new_callable=AsyncMock
         ),
         "run_merge": mocker.patch.object(
-            merge_worker, "_run_merge_in_pool", new_callable=AsyncMock,
+            merge_worker,
+            "_run_merge_in_pool",
+            new_callable=AsyncMock,
         ),
     }
     return mocks
@@ -100,9 +107,13 @@ def _task(env, agent="ara-aragorn"):
 
 
 async def test_first_merge(env, redis_mock):
-    env["run_merge"].return_value = {"results": 2, "knowledge_graph_nodes": 4,
-                                     "knowledge_graph_edges": 3,
-                                     "auxiliary_graphs": 1, "query_graph": 2}
+    env["run_merge"].return_value = {
+        "results": 2,
+        "knowledge_graph_nodes": 4,
+        "knowledge_graph_edges": 3,
+        "auxiliary_graphs": 1,
+        "query_graph": 2,
+    }
     await merge_worker.ars_merge(_task(env), LOGGER)
 
     # merge child created under the ars actor, ref = parent
@@ -118,7 +129,8 @@ async def test_first_merge(env, redis_mock):
 
     # parent bookkeeping in one update
     pupdate = next(
-        c.kwargs for c in env["update_message"].await_args_list
+        c.kwargs
+        for c in env["update_message"].await_args_list
         if str(c.args[0]) == str(env["parent_pk"]) and "merged_version" in c.kwargs
     )
     assert str(pupdate["merged_version"]) == str(env["merge_pk"])
@@ -151,7 +163,8 @@ async def test_second_merge_uses_current(env, redis_mock):
     args = env["run_merge"].await_args.args
     assert str(args[0]) == str(prev)
     pupdate = next(
-        c.kwargs for c in env["update_message"].await_args_list
+        c.kwargs
+        for c in env["update_message"].await_args_list
         if str(c.args[0]) == str(env["parent_pk"]) and "merged_version" in c.kwargs
     )
     assert pupdate["merged_versions_list"] == [
@@ -178,7 +191,8 @@ async def test_merge_failure_leaves_merge_child_running(env, redis_mock):
     await merge_worker.ars_merge(_task(env), LOGGER)
     # no parent bookkeeping, no postprocess task
     parent_updates = [
-        c for c in env["update_message"].await_args_list
+        c
+        for c in env["update_message"].await_args_list
         if str(c.args[0]) == str(env["parent_pk"]) and "merged_version" in c.kwargs
     ]
     assert parent_updates == []
@@ -215,5 +229,8 @@ def test_merge_in_child_folds_messages(monkeypatch):
     merged = shepherd_db.get_message_sync(new_pk)
     assert stats["results"] == 3
     assert set(merged["message"]["knowledge_graph"]["edges"].keys()) == {
-        "e1", "e2", "e3", "e9"
+        "e1",
+        "e2",
+        "e3",
+        "e9",
     }

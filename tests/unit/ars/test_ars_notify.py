@@ -34,9 +34,14 @@ def env(mocker):
     encrypted = crypto.encrypt_secret(SECRET, base64.b64decode(MASTER_KEY), IV)
     message_pk = uuid.uuid4()
     clients = [
-        {"id": 1, "client_id": "ui", "client_secret": encrypted,
-         "callback_url": "https://ui.example/notify", "active": True,
-         "subscriptions": [str(message_pk)]},
+        {
+            "id": 1,
+            "client_id": "ui",
+            "client_secret": encrypted,
+            "callback_url": "https://ui.example/notify",
+            "active": True,
+            "subscriptions": [str(message_pk)],
+        },
     ]
 
     def _patch(name, **kwargs):
@@ -65,7 +70,8 @@ def _task(env, fields, code="202"):
 
 async def test_notification_posted_with_valid_hmac(env, mocker):
     post = mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=httpx.Response(
             200, request=httpx.Request("POST", "https://ui.example/notify")
         ),
@@ -94,14 +100,16 @@ async def test_notification_posted_with_valid_hmac(env, mocker):
 
 async def test_last_merged_completed_forces_code_200(env, mocker):
     post = mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=httpx.Response(
             200, request=httpx.Request("POST", "https://ui.example/notify")
         ),
     )
     await notify_worker.ars_notify(
-        _task(env, {"event_type": "last_merged_completed", "complete": True},
-              code="202"),
+        _task(
+            env, {"event_type": "last_merged_completed", "complete": True}, code="202"
+        ),
         LOGGER,
     )
     notification = json.loads(post.await_args.kwargs["content"])
@@ -110,7 +118,8 @@ async def test_last_merged_completed_forces_code_200(env, mocker):
 
 async def test_failed_delivery_retries(env, mocker):
     post = mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=httpx.Response(
             500, request=httpx.Request("POST", "https://ui.example/notify")
         ),

@@ -1,0 +1,41 @@
+# Differential parity topology: the original Relay ARS and Shepherd's port,
+# side by side, both pointed at the same mockworld.
+#
+#   docker compose -f compose.yml -f tests/parity_e2e/compose.parity.yml up
+#   (plus the Relay stack from its own checkout -- see README.md)
+#
+# This overlay only adds the mockworld and repoints Shepherd's external
+# service URLs at it; the Relay stack runs from the pinned checkout with the
+# matching env (TR_NORMALIZER/TR_ANNOTATOR/TR_APPRAISE pointing at the same
+# mockworld, and its smart-api URL patched to the stub registry).
+
+services:
+  mockworld:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.12-slim
+        RUN pip install fastapi uvicorn httpx zstandard
+        COPY tests/parity_e2e/mockworld /mockworld
+        WORKDIR /mockworld
+        CMD ["python", "app.py"]
+    ports:
+      - "8099:8099"
+
+  shepherd_server:
+    environment:
+      ARS_PUBLIC_HOST: http://shepherd_server:5439
+      SMARTAPI_URL: http://mockworld:8099/api/query
+      TR_ANNOTATOR: http://mockworld:8099/curie
+      TR_APPRAISE: http://mockworld:8099/get_appraisal
+      TR_NORMALIZER: http://mockworld:8099/get_normalized_nodes
+
+  ars_fanout:
+    environment:
+      ARS_PUBLIC_HOST: http://shepherd_server:5439
+      SMARTAPI_URL: http://mockworld:8099/api/query
+
+  ars_postprocess:
+    environment:
+      TR_ANNOTATOR: http://mockworld:8099/curie
+      TR_APPRAISE: http://mockworld:8099/get_appraisal

@@ -42,9 +42,7 @@ def merge(status="D", results=10, code=200):
 
 def test_happy_path_all_merged():
     """P-LC-1: N result-bearing ARA children + N done merges -> complete."""
-    decision = evaluate_completion(
-        [ara(), ara(agent="ara-arax"), merge(), merge()]
-    )
+    decision = evaluate_completion([ara(), ara(agent="ara-arax"), merge(), merge()])
     assert decision.finished
     assert decision.orig_count == 2
     assert decision.merge_count == 2
@@ -64,9 +62,7 @@ def test_waiting_child_blocks_completion():
 
 
 def test_stopped_and_unknown_are_terminal():
-    decision = evaluate_completion(
-        [child("S", "ara-bte"), child("U", "ara-arax")]
-    )
+    decision = evaluate_completion([child("S", "ara-bte"), child("U", "ara-arax")])
     assert decision.finished
     assert decision.complete  # 0 == 0
     assert decision.empty
@@ -74,9 +70,7 @@ def test_stopped_and_unknown_are_terminal():
 
 def test_all_empty_results_is_empty_complete():
     """P-LC-2: ARA children done with 0 results count nothing -> empty merge."""
-    decision = evaluate_completion(
-        [ara(results=0), ara(results=0, agent="ara-arax")]
-    )
+    decision = evaluate_completion([ara(results=0), ara(results=0, agent="ara-arax")])
     assert decision.finished
     assert decision.orig_count == 0
     assert decision.merge_count == 0

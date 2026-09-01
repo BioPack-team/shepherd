@@ -96,9 +96,7 @@ async def run_forever():
                     settings.ars_data_retention_days
                 )
                 if purged:
-                    LOGGER.info(
-                        f"Purged durable payloads of {purged} old ARS messages"
-                    )
+                    LOGGER.info(f"Purged durable payloads of {purged} old ARS messages")
             except Exception as e:
                 LOGGER.error(f"Payload purge failed: {e}")
         await asyncio.sleep(settings.ars_watchdog_interval_sec)

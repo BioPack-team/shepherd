@@ -66,9 +66,7 @@ def merge_in_child(current_pk, child_pk, new_pk):
     t_to_merge = TranslatorMessage(to_merge)
     if current_pk is not None:
         current = get_message_sync(str(current_pk))["message"]
-        merged = mergeMessages(
-            [TranslatorMessage(current), t_to_merge], str(new_pk)
-        )
+        merged = mergeMessages([TranslatorMessage(current), t_to_merge], str(new_pk))
     else:
         merged = t_to_merge
     merged_dict = merged.to_dict()
@@ -130,9 +128,7 @@ async def ars_merge(task, logger: logging.Logger):
         except Exception as e:
             # merge_received swallows and returns {} -- the shell merge child
             # stays Running for the watchdog to reap
-            logger.error(
-                f"problem with merging for {agent_name}: {e}", exc_info=True
-            )
+            logger.error(f"problem with merging for {agent_name}: {e}", exc_info=True)
             await ars_db.update_message(parent_pk, merge_semaphore=False)
             return
 

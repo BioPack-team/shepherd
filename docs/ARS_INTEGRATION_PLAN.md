@@ -1,6 +1,6 @@
 # Translator ARS → Shepherd Integration Plan
 
-**Status:** Proposed
+**Status:** Implemented (see the delivery appendix at the bottom and docs/ARS_PARITY_REGISTER.md)
 **Scope:** Re-host the NCATS Translator ARS ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)) as a set of Shepherd workers + a Shepherd server sub-app, replacing its Django/Celery/RabbitMQ/MySQL runtime with Shepherd's FastAPI/Redis-Streams/Postgres infrastructure, while preserving externally observable ARS behavior exactly, as enforced by a parity test suite.
 
 ---
@@ -382,3 +382,29 @@ Each phase lands as a PR with its parity tests; layer-4 harness pieces are built
 - Schema: `ars_agent`, `ars_channel`, `ars_actor`, `ars_message`, `ars_client`, `ars_subscription`.
 - Settings: `ars_public_host`, `tr_env`, `tr_ver`, `tr_normalizer`, `tr_annotator`, `tr_appraise`, `aes_master_key`, `ars_data_retention_days`, `ars_watchdog_interval_sec`, timeout thresholds.
 - Tests: `tests/unit/ars/` (layers 1–3), `tests/fixtures/ars_{goldens,corpus,api_contract}`, `tests/parity_e2e/` (layer 4), `scripts/ars_parity/`, `docs/ARS_PARITY_REGISTER.md`.
+
+
+---
+
+## Appendix: delivery notes (what shipped vs. this plan)
+
+The implementation landed as planned with these consolidations, each made
+for closer parity with upstream:
+
+- **No `ars_premerge` worker.** Upstream runs pre-merge processing and
+  TRAPI validation inside the callback request; the port does the same
+  (offloaded to a worker thread), so the synchronous 422 validation
+  response is preserved and only five workers exist: `ars_fanout`,
+  `ars_merge`, `ars_postprocess`, `ars_watchdog`, `ars_notify`.
+- **Golden generation got stronger than planned**: the pinned Relay
+  checkout is executed directly (scripts/ars_parity/generate_goldens.py in
+  a dedicated venv), so layer-1 goldens are real upstream outputs, not a
+  container-mediated approximation.
+- **reasoner-pydantic** was replaced with Shepherd-native pydantic-v2
+  models per project direction (risk R1's option b, upgraded: field
+  requirements were dumped from the installed upstream package).
+- **SmartAPI cache** is per-process (matching upstream) rather than
+  Redis-shared; the hourly-refresh/30s-retry cadence is identical.
+- The complete invariant list and every accepted deviation live in
+  docs/ARS_PARITY_REGISTER.md, which supersedes §7's behavior-register
+  sketch.

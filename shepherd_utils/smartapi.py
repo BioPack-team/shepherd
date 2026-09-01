@@ -91,9 +91,7 @@ def _by_infores_latest(j, maturity, version):
         else:
             if _newer(irhit, extant):
                 by_irid[key] = irhit
-    logger.info(
-        f"found {len(by_irid)} registrations with maturity={maturity}"
-    )
+    logger.info(f"found {len(by_irid)} registrations with maturity={maturity}")
     return by_irid
 
 

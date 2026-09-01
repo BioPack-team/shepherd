@@ -16,7 +16,6 @@ import pytest
 from shepherd_utils.ars.notify import build_notification
 from shepherd_utils.ars import lifecycle
 
-
 # ---------------------------------------------------------------------------
 # build_notification: Message.notify_subscribers override rules
 # ---------------------------------------------------------------------------
@@ -40,9 +39,7 @@ def test_notification_running_parent_keeps_custom_fields():
 
 def test_notification_done_parent_overrides_with_admin():
     """P-NT-2: a 'D' parent always notifies admin/complete."""
-    out = build_notification(
-        _parent("D", 200), {"event_type": "custom"}, data=None
-    )
+    out = build_notification(_parent("D", 200), {"event_type": "custom"}, data=None)
     assert out == {"event_type": "admin", "complete": True}
 
 
@@ -98,26 +95,38 @@ def orchestration(mocker):
         "parent_pk": parent_pk,
         "parent": parent,
         "get_message_row": mocker.patch.object(
-            lifecycle.ars_db, "get_message_row", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "get_message_row",
+            new_callable=AsyncMock,
             return_value=parent,
         ),
         "get_children": mocker.patch.object(
-            lifecycle.ars_db, "get_children", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "get_children",
+            new_callable=AsyncMock,
             return_value=[],
         ),
         "update_message": mocker.patch.object(
-            lifecycle.ars_db, "update_message", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "update_message",
+            new_callable=AsyncMock,
             side_effect=lambda pk, **kw: {**parent, **kw, "id": pk},
         ),
         "create_message": mocker.patch.object(
-            lifecycle.ars_db, "create_message", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "create_message",
+            new_callable=AsyncMock,
             return_value={"id": uuid.uuid4(), "status": "R", "code": 202},
         ),
         "save_message_data": mocker.patch.object(
-            lifecycle.ars_db, "save_message_data", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "save_message_data",
+            new_callable=AsyncMock,
         ),
         "load_message_data": mocker.patch.object(
-            lifecycle.ars_db, "load_message_data", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "load_message_data",
+            new_callable=AsyncMock,
             return_value={
                 "message": {
                     "query_graph": {"nodes": {}, "edges": {}},
@@ -128,17 +137,25 @@ def orchestration(mocker):
             },
         ),
         "persist_data_copy": mocker.patch.object(
-            lifecycle.ars_db, "persist_data_copy", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "persist_data_copy",
+            new_callable=AsyncMock,
         ),
         "clear_subscriptions": mocker.patch.object(
-            lifecycle.ars_db, "clear_subscriptions", new_callable=AsyncMock,
+            lifecycle.ars_db,
+            "clear_subscriptions",
+            new_callable=AsyncMock,
         ),
         "ensure_ars_actor": mocker.patch.object(
-            lifecycle, "ensure_ars_actor", new_callable=AsyncMock,
+            lifecycle,
+            "ensure_ars_actor",
+            new_callable=AsyncMock,
             return_value={"id": 42, "agent_name": "ars-ars-agent"},
         ),
         "notify": mocker.patch.object(
-            lifecycle, "notify_subscribers", new_callable=AsyncMock,
+            lifecycle,
+            "notify_subscribers",
+            new_callable=AsyncMock,
         ),
     }
     return mocks
@@ -224,7 +241,8 @@ async def test_completion_empty_synthesizes_merged_message(orchestration):
 
     # parent got merged_version + merged_versions_list [(pk, "ars")]
     parent_updates = [
-        c.kwargs for c in orchestration["update_message"].await_args_list
+        c.kwargs
+        for c in orchestration["update_message"].await_args_list
         if c.args and c.args[0] == orchestration["parent_pk"]
     ]
     final = parent_updates[-1]

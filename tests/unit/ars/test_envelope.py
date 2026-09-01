@@ -94,12 +94,8 @@ def test_message_envelope_shape():
 def test_message_envelope_status_long_name():
     """P-ENV-3: fields.status carries the long name, not the letter."""
     assert message_envelope(_message_row())["fields"]["status"] == "Running"
-    assert (
-        message_envelope(_message_row(status="D"))["fields"]["status"] == "Done"
-    )
-    assert (
-        message_envelope(_message_row(status="E"))["fields"]["status"] == "Error"
-    )
+    assert message_envelope(_message_row(status="D"))["fields"]["status"] == "Done"
+    assert message_envelope(_message_row(status="E"))["fields"]["status"] == "Error"
 
 
 def test_message_envelope_data_none_and_inline():

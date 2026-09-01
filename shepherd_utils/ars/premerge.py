@@ -91,9 +91,7 @@ def scrub_null_attributes(data):
                     edgeAttributes.remove(None)
                 for edgeAttribute in edgeAttributes:
                     if "attributes" in edgeAttribute.keys():
-                        edgeAttributeAttributes = get_safe(
-                            edgeAttribute, "attributes"
-                        )
+                        edgeAttributeAttributes = get_safe(edgeAttribute, "attributes")
                         if edgeAttributeAttributes is None:
                             edgeAttribute["attributes"] = []
 
@@ -260,9 +258,7 @@ def normalizeScores(results):
 
         ranked = list(rankdata(scoreList) * 100 / len(scoreList)) if scoreList else []
         if len(ranked) != len(scoreList):
-            logger.debug(
-                "Score normalization aborted. Score list lengths not equal"
-            )
+            logger.debug("Score normalization aborted. Score list lengths not equal")
             return results
         if ranked:
             # upstream pops one rank per RESULT while only score-bearing

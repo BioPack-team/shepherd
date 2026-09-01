@@ -118,9 +118,7 @@ async def annotate_nodes(data, agent_name, logger):
                 "attribute_type_id": "biothings_annotations",
                 "value": value,
             }
-            add_attribute(
-                data["message"]["knowledge_graph"]["nodes"][key], attribute
-            )
+            add_attribute(data["message"]["knowledge_graph"]["nodes"][key], attribute)
     if len(invalid_nodes) > 0:
         data["message"]["knowledge_graph"]["nodes"].update(invalid_nodes)
 
@@ -215,8 +213,7 @@ async def ars_postprocess(task, logger: logging.Logger):
     try:
         await annotate_nodes(data, agent_name, logger)
         logger.info(
-            f"node annotation successful for agent {agent_name} and pk: "
-            f"{merged_pk}"
+            f"node annotation successful for agent {agent_name} and pk: " f"{merged_pk}"
         )
     except Exception as e:
         status = "E"
@@ -257,9 +254,7 @@ async def ars_postprocess(task, logger: logging.Logger):
             for result in results:
                 if "ordering_components" not in result.keys():
                     result["ordering_components"] = default_ordering_component
-        add_log_entry(
-            data, ["Error in Appraiser " + str(e), timestamp_hms(), "ERROR"]
-        )
+        add_log_entry(data, ["Error in Appraiser " + str(e), timestamp_hms(), "ERROR"])
         await ars_db.save_message_data(merged_pk, data, logger)
         await ars_db.update_message(merged_pk, status="E", code=422)
         row_code = 422
@@ -275,14 +270,10 @@ async def ars_postprocess(task, logger: logging.Logger):
         try:
             results = get_safe(data, "message", "results")
             if results is not None:
-                new_res = await asyncio.to_thread(
-                    scoring.compute_from_results, results
-                )
+                new_res = await asyncio.to_thread(scoring.compute_from_results, results)
                 data["message"]["results"] = new_res
             else:
-                logger.error(
-                    "results from appraiser returns None, cant do the scoring"
-                )
+                logger.error("results from appraiser returns None, cant do the scoring")
                 new_res = []
         except Exception as e:
             status = "E"

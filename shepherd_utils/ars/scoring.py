@@ -84,8 +84,8 @@ def weight_sets(
                     t_l = t_l + "_" + j
                 if idj == k - 1:
                     t_f = t_f + "_" + j
-            values[t] = values[t_l] + values[t_f] + (
-                lambda_val * (values[t_l] * values[t_f])
+            values[t] = (
+                values[t_l] + values[t_f] + (lambda_val * (values[t_l] * values[t_f]))
             )
             dict_t[t] = round(float(values[t]), 2)
     dict_t["weight_confidence"] = weight_confidence
@@ -184,9 +184,7 @@ def compute_weighted_mean(
 
 
 def compute_sugeno_rank(sugeno_scores):
-    sugeno_sorted = sorted(
-        enumerate(sugeno_scores), key=lambda x: x[1], reverse=True
-    )
+    sugeno_sorted = sorted(enumerate(sugeno_scores), key=lambda x: x[1], reverse=True)
     ranks = {index: rank + 1 for rank, (index, value) in enumerate(sugeno_sorted)}
     indexed_ranks = [ranks[index] for index in range(len(sugeno_scores))]
     return indexed_ranks

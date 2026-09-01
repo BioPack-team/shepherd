@@ -31,7 +31,7 @@ def decrypt_secret(encrypted_secret: str, key: bytes) -> str:
     iv = encrypted_data[: AES.block_size]
     cipher = AES.new(key, AES.MODE_CBC, iv)
     decrypted_secret = unpad(
-        cipher.decrypt(encrypted_data[AES.block_size:]), AES.block_size
+        cipher.decrypt(encrypted_data[AES.block_size :]), AES.block_size
     )
     return decrypted_secret.decode()
 
@@ -56,9 +56,9 @@ def notification_body_and_signature(
     notification: Dict[str, Any], client_secret: str
 ) -> tuple[bytes, str]:
     """The exact bytes + x-event-signature the notify worker POSTs."""
-    data_json = json.dumps(
-        notification, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    data_json = json.dumps(notification, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
     digest = hmac.new(
         client_secret.encode("utf-8"), data_json, hashlib.sha256
     ).hexdigest()
@@ -66,9 +66,7 @@ def notification_body_and_signature(
 
 
 def verify_body_signature(body: bytes, client_secret: str, signature: str) -> bool:
-    expected = hmac.new(
-        client_secret.encode("utf-8"), body, hashlib.sha256
-    ).hexdigest()
+    expected = hmac.new(client_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
 
 

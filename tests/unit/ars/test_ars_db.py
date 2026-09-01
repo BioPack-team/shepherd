@@ -87,8 +87,10 @@ async def test_update_message_coerces_running(pg):
     params = _executed_params(pg)
     fields = dict(
         zip(
-            [part.split(" = ")[0].strip() for part in
-             sql.split("SET ")[1].split("WHERE")[0].split(",")[:-1]],
+            [
+                part.split(" = ")[0].strip()
+                for part in sql.split("SET ")[1].split("WHERE")[0].split(",")[:-1]
+            ],
             params,
         )
     )

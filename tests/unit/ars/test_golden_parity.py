@@ -44,7 +44,7 @@ def _canonical_log_message(msg):
         import ast
 
         try:
-            names = ast.literal_eval(msg[len(prefix):])
+            names = ast.literal_eval(msg[len(prefix) :])
             return prefix + str(sorted(names))
         except (ValueError, SyntaxError):
             return msg
@@ -76,28 +76,28 @@ def _multiset(items):
 def assert_parity(actual, golden, path="$"):
     if isinstance(golden, dict):
         assert isinstance(actual, dict), f"{path}: {type(actual)} != dict"
-        assert set(actual.keys()) == set(golden.keys()), (
-            f"{path}: keys {sorted(actual.keys())} != {sorted(golden.keys())}"
-        )
+        assert set(actual.keys()) == set(
+            golden.keys()
+        ), f"{path}: keys {sorted(actual.keys())} != {sorted(golden.keys())}"
         for k in golden:
             assert_parity(actual[k], golden[k], f"{path}.{k}")
     elif isinstance(golden, list):
         assert isinstance(actual, list), f"{path}: {type(actual)} != list"
-        assert len(actual) == len(golden), (
-            f"{path}: length {len(actual)} != {len(golden)}"
-        )
+        assert len(actual) == len(
+            golden
+        ), f"{path}: length {len(actual)} != {len(golden)}"
         try:
             for i, (a, g) in enumerate(zip(actual, golden)):
                 assert_parity(a, g, f"{path}[{i}]")
         except AssertionError:
             # order-insensitive fallback for set-union ordering divergence
-            assert _multiset(actual) == _multiset(golden), (
-                f"{path}: list contents differ (even unordered)"
-            )
+            assert _multiset(actual) == _multiset(
+                golden
+            ), f"{path}: list contents differ (even unordered)"
     elif isinstance(golden, float) or isinstance(actual, float):
-        assert actual == pytest.approx(golden, rel=1e-9, abs=1e-12), (
-            f"{path}: {actual} != {golden}"
-        )
+        assert actual == pytest.approx(
+            golden, rel=1e-9, abs=1e-12
+        ), f"{path}: {actual} != {golden}"
     else:
         assert actual == golden, f"{path}: {actual!r} != {golden!r}"
 
@@ -117,9 +117,7 @@ def jsonable(obj):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "case", load("mergedicts_cases.json"), ids=lambda c: c["name"]
-)
+@pytest.mark.parametrize("case", load("mergedicts_cases.json"), ids=lambda c: c["name"])
 def test_mergedicts_parity(case):
     golden = next(g for g in GOLDENS["mergedicts"] if g["name"] == case["name"])
     dc = copy.deepcopy(case["dcurrent"])
@@ -193,9 +191,7 @@ def test_scrub_parity():
     assert_parity(jsonable(data), GOLDENS["scrub"])
 
 
-@pytest.mark.parametrize(
-    "case", load("decorate_cases.json"), ids=lambda c: c["name"]
-)
+@pytest.mark.parametrize("case", load("decorate_cases.json"), ids=lambda c: c["name"])
 def test_decorate_parity(case):
     golden = next(g for g in GOLDENS["decorate"] if g["name"] == case["name"])
     data = copy.deepcopy(case["data"])
@@ -241,9 +237,7 @@ def test_remove_phantom_parity():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "case", load("ordering_cases.json"), ids=lambda c: c["name"]
-)
+@pytest.mark.parametrize("case", load("ordering_cases.json"), ids=lambda c: c["name"])
 def test_compute_from_results_parity(case):
     golden = next(
         g for g in GOLDENS["compute_from_results"] if g["name"] == case["name"]
@@ -383,6 +377,6 @@ def _validate_cases():
 @pytest.mark.parametrize("name", sorted(GOLDENS["validate"].keys()))
 def test_validate_verdict_parity(name):
     cases = _validate_cases()
-    assert validate(cases[name]) == GOLDENS["validate"][name], (
-        f"verdict mismatch for {name}"
-    )
+    assert (
+        validate(cases[name]) == GOLDENS["validate"][name]
+    ), f"verdict mismatch for {name}"

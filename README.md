@@ -83,6 +83,22 @@ first startup that fetches it — or the file can be preloaded alongside the sql
 which the worker only ever reads it. A read-only mount with no preloaded copy fails at startup with a
 permission error rather than silently continuing.
 
+### Translator ARS
+
+Shepherd also hosts a full port of the NCATS Translator ARS
+([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)) at
+`/ars/...` -- the same `/ars/api/submit` / `messages/<pk>?trace=y` /
+`get_status` surface the Translator UI uses, backed by five workers
+(`ars_fanout`, `ars_merge`, `ars_postprocess`, `ars_watchdog`, `ars_notify`)
+on the shared Redis Streams fabric instead of Celery/RabbitMQ, and `ars_*`
+Postgres tables instead of MySQL. Behavior is pinned against the upstream
+codebase by a four-layer parity suite; see `docs/ARS_PARITY_REGISTER.md`
+for the invariants, the golden-regeneration procedure, and every documented
+deviation, and `tests/parity_e2e/README.md` for the side-by-side
+differential harness. Deployment knobs live in `shepherd_utils/config.py`
+under the "Translator ARS" block (`ARS_PUBLIC_HOST` must be reachable by
+remote ARAs for their result callbacks).
+
 ### Worker
 
 Each worker is it's own separate docker container. It spins up and begins to watch a central message broker for tasks to work on. Once it gets a task, it

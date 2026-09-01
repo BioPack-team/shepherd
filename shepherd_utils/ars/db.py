@@ -165,9 +165,7 @@ async def get_agent_by_name(name: str) -> Optional[Dict[str, Any]]:
 
 async def list_agents() -> List[Dict[str, Any]]:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"SELECT {_AGENT_SELECT} FROM ars_agent ORDER BY name"
-        )
+        cur = await conn.execute(f"SELECT {_AGENT_SELECT} FROM ars_agent ORDER BY name")
         rows = await cur.fetchall()
     return [_row_dict(AGENT_COLUMNS, r) for r in rows]
 
@@ -238,9 +236,7 @@ async def get_or_create_actor(
     if isinstance(agent, dict):
         agent_row, _ = await get_or_create_agent(agent)
     elif isinstance(agent, int) or (isinstance(agent, str) and agent.isnumeric()):
-        async with shepherd_db.pool.connection(
-            settings.postgres_pool_timeout
-        ) as conn:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
                 f"SELECT {_AGENT_SELECT} FROM ars_agent WHERE id = %s",
                 (int(agent),),
@@ -316,14 +312,12 @@ async def list_actors(exclude_empty_path: bool = False) -> List[Dict[str, Any]]:
     """Actors joined with their agent (name + uri), for fan-out/rendering."""
     where = "WHERE a.path <> ''" if exclude_empty_path else ""
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"""
+        cur = await conn.execute(f"""
             SELECT {_ACTOR_SELECT}, g.name, g.uri FROM ars_actor a
             JOIN ars_agent g ON g.id = a.agent
             {where}
             ORDER BY a.id
-            """
-        )
+            """)
         rows = await cur.fetchall()
     actors = []
     for r in rows:
@@ -773,9 +767,7 @@ async def clear_subscriptions(message_id: Union[str, uuid.UUID]) -> None:
             """,
             (str(pk), pk),
         )
-        await conn.execute(
-            "DELETE FROM ars_subscription WHERE message_id = %s", (pk,)
-        )
+        await conn.execute("DELETE FROM ars_subscription WHERE message_id = %s", (pk,))
         await conn.commit()
 
 
@@ -824,9 +816,7 @@ async def persist_data_copy(
     if blob is None:
         return
     try:
-        async with shepherd_db.pool.connection(
-            settings.postgres_pool_timeout
-        ) as conn:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
             await conn.execute(
                 "UPDATE ars_message SET data = %s WHERE id = %s",
                 (blob, uuid.UUID(str(message_id))),
@@ -848,9 +838,7 @@ async def load_message_data(
     except Exception as e:
         logger.warning(f"Redis read failed for {message_id}: {e}")
     try:
-        async with shepherd_db.pool.connection(
-            settings.postgres_pool_timeout
-        ) as conn:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
                 "SELECT data FROM ars_message WHERE id = %s",
                 (uuid.UUID(str(message_id)),),
@@ -874,9 +862,7 @@ async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
     if await shepherd_db.message_exists(str(message_id)):
         return True
     try:
-        async with shepherd_db.pool.connection(
-            settings.postgres_pool_timeout
-        ) as conn:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
                 "SELECT data IS NOT NULL FROM ars_message WHERE id = %s",
                 (uuid.UUID(str(message_id)),),

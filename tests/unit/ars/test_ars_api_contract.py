@@ -33,11 +33,21 @@ def client(app):
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def make_actor(actor_id=7, agent="ara-aragorn", inforesid="infores:aragorn",
-               path="runquery", channels=("general",), active=True, uri=None):
+def make_actor(
+    actor_id=7,
+    agent="ara-aragorn",
+    inforesid="infores:aragorn",
+    path="runquery",
+    channels=("general",),
+    active=True,
+    uri=None,
+):
     serialized = [
-        {"model": "tr_ars.channel", "pk": i + 1,
-         "fields": {"name": name, "description": None}}
+        {
+            "model": "tr_ars.channel",
+            "pk": i + 1,
+            "fields": {"name": name, "description": None},
+        }
         for i, name in enumerate(channels)
     ]
     return {
@@ -52,9 +62,19 @@ def make_actor(actor_id=7, agent="ara-aragorn", inforesid="infores:aragorn",
     }
 
 
-def make_message(pk=None, status="R", code=202, actor=7, ref=None,
-                 result_count=None, params=None, name="",
-                 merged_version=None, merged_versions_list=None, retain=False):
+def make_message(
+    pk=None,
+    status="R",
+    code=202,
+    actor=7,
+    ref=None,
+    result_count=None,
+    params=None,
+    name="",
+    merged_version=None,
+    merged_versions_list=None,
+    retain=False,
+):
     return {
         "id": pk or uuid.uuid4(),
         "name": name,
@@ -125,14 +145,25 @@ def db(mocker):
         "persist_data_copy": _patch("persist_data_copy"),
         "get_children": _patch("get_children", return_value=[]),
         "get_recent_messages": _patch("get_recent_messages", return_value=[]),
-        "get_actor": _patch("get_actor", side_effect=lambda aid: {1: default_actor, 7: ara_actor}.get(aid)),
-        "get_or_create_actor": _patch("get_or_create_actor", return_value=(ara_actor, 302)),
+        "get_actor": _patch(
+            "get_actor",
+            side_effect=lambda aid: {1: default_actor, 7: ara_actor}.get(aid),
+        ),
+        "get_or_create_actor": _patch(
+            "get_or_create_actor", return_value=(ara_actor, 302)
+        ),
         "get_or_create_agent": _patch(
             "get_or_create_agent",
             return_value=(
-                {"id": 4, "name": "ara-aragorn", "description": None,
-                 "uri": "/ara-aragorn/api/", "contact": None,
-                 "registered": TS, "updated": TS},
+                {
+                    "id": 4,
+                    "name": "ara-aragorn",
+                    "description": None,
+                    "uri": "/ara-aragorn/api/",
+                    "contact": None,
+                    "registered": TS,
+                    "updated": TS,
+                },
                 201,
             ),
         ),
@@ -147,9 +178,13 @@ def db(mocker):
         "get_status_rows": _patch("get_status_rows", return_value={}),
         "retain_tree": _patch("retain_tree"),
         "get_report_rows": _patch("get_report_rows", return_value=[]),
-        "get_parent_message_counts": _patch("get_parent_message_counts", return_value={}),
+        "get_parent_message_counts": _patch(
+            "get_parent_message_counts", return_value={}
+        ),
         "get_latest_parent_pks": _patch("get_latest_parent_pks", return_value=[]),
-        "get_running_parent_pks_24h": _patch("get_running_parent_pks_24h", return_value=[]),
+        "get_running_parent_pks_24h": _patch(
+            "get_running_parent_pks_24h", return_value=[]
+        ),
         "clear_subscriptions": _patch("clear_subscriptions"),
         "get_client": _patch("get_client", return_value=None),
         "add_subscription": _patch("add_subscription"),
@@ -158,15 +193,23 @@ def db(mocker):
             lifecycle, "check_parent_completion", new_callable=AsyncMock
         ),
         "ensure_default_actor": mocker.patch.object(
-            lifecycle, "ensure_default_actor", new_callable=AsyncMock,
+            lifecycle,
+            "ensure_default_actor",
+            new_callable=AsyncMock,
             return_value=default_actor,
         ),
         "ensure_workflow_actor": mocker.patch.object(
-            lifecycle, "ensure_workflow_actor", new_callable=AsyncMock,
-            return_value=make_actor(2, "ars-workflow-agent", "", "", ("workflow",), uri=""),
+            lifecycle,
+            "ensure_workflow_actor",
+            new_callable=AsyncMock,
+            return_value=make_actor(
+                2, "ars-workflow-agent", "", "", ("workflow",), uri=""
+            ),
         ),
         "ensure_ars_actor": mocker.patch.object(
-            lifecycle, "ensure_ars_actor", new_callable=AsyncMock,
+            lifecycle,
+            "ensure_ars_actor",
+            new_callable=AsyncMock,
             return_value=make_actor(3, "ars-ars-agent", "infores:ars", "", (), uri=""),
         ),
     }
@@ -194,9 +237,7 @@ async def test_submit_get_is_405(client, db, redis_mock):
     assert resp.text == "Only POST is permitted!"
 
 
-async def test_submit_returns_201_envelope_and_enqueues_fanout(
-    client, db, redis_mock
-):
+async def test_submit_returns_201_envelope_and_enqueues_fanout(client, db, redis_mock):
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 201
     body = resp.json()
@@ -307,8 +348,9 @@ async def test_message_get_envelope_uses_agent_name(client, db, redis_mock):
 
 async def test_message_trace_tree(client, db, redis_mock):
     child = dict(
-        make_message(actor=7, ref=db["parent_pk"], status="D", code=200,
-                     result_count=5),
+        make_message(
+            actor=7, ref=db["parent_pk"], status="D", code=200, result_count=5
+        ),
         inforesid="infores:aragorn",
         actor_channel=db["ara_actor"]["channel"],
         actor_path="runquery",
@@ -494,9 +536,15 @@ async def test_callback_header_status_override(client, db, redis_mock):
 
 async def test_agents_get(client, db, redis_mock):
     db["list_agents"].return_value = [
-        {"id": 4, "name": "ara-aragorn", "description": None,
-         "uri": "/ara-aragorn/api/", "contact": None,
-         "registered": TS, "updated": TS}
+        {
+            "id": 4,
+            "name": "ara-aragorn",
+            "description": None,
+            "uri": "/ara-aragorn/api/",
+            "contact": None,
+            "registered": TS,
+            "updated": TS,
+        }
     ]
     resp = await client.get("/api/agents")
     assert resp.status_code == 200
@@ -510,9 +558,7 @@ async def test_agents_post_missing_fields_400(client, db, redis_mock):
 
 
 async def test_agents_post_created_201(client, db, redis_mock):
-    resp = await client.post(
-        "/api/agents", json={"name": "ara-new", "uri": "/x/api/"}
-    )
+    resp = await client.post("/api/agents", json={"name": "ara-new", "uri": "/x/api/"})
     assert resp.status_code == 201
 
 
@@ -541,8 +587,12 @@ async def test_actors_post_is_400(client, db, redis_mock):
     400 'Not a valid json format' (the side effect still happens)."""
     resp = await client.post(
         "/api/actors",
-        json={"channel": ["general"], "agent": {"name": "a", "uri": "/a/"},
-              "path": "runquery", "inforesid": "infores:a"},
+        json={
+            "channel": ["general"],
+            "agent": {"name": "a", "uri": "/a/"},
+            "path": "runquery",
+            "inforesid": "infores:a",
+        },
     )
     assert resp.status_code == 400
     assert resp.text == "Not a valid json format"
@@ -580,7 +630,11 @@ async def test_filters_documentation(client, db, redis_mock):
     assert doc["hop_level"]["default"] == 3
     assert doc["score_level"]["default"] == [20, 80]
     assert set(doc.keys()) == {
-        "hop_level", "score_level", "node_type", "spec_node", "multi-filtering"
+        "hop_level",
+        "score_level",
+        "node_type",
+        "spec_node",
+        "multi-filtering",
     }
 
 
@@ -593,8 +647,10 @@ async def test_filter_redirects_302(client, db, redis_mock):
     db["load_message_data"].return_value = {
         "message": {
             "results": [
-                {"node_bindings": {"n0": [{"id": "A"}], "n1": [{"id": "B"}]},
-                 "normalized_score": 50},
+                {
+                    "node_bindings": {"n0": [{"id": "A"}], "n1": [{"id": "B"}]},
+                    "normalized_score": 50,
+                },
             ],
             "knowledge_graph": {"nodes": {}, "edges": {}},
         }
@@ -631,18 +687,26 @@ async def test_retain_done_parent(client, db, redis_mock):
 async def test_get_status_post(client, db, redis_mock):
     pk = str(db["parent_pk"])
     db["get_status_rows"].return_value = {
-        pk: {"status": "R", "merged_versions_list": [["m", "a"]],
-             "params": {"stats": {"results": 1}}}
+        pk: {
+            "status": "R",
+            "merged_versions_list": [["m", "a"]],
+            "params": {"stats": {"results": 1}},
+        }
     }
     resp = await client.post("/api/get_status", json={"pks": [pk, "unknown"]})
     assert resp.status_code == 200
     rows = resp.json()
     assert rows[0] == {
-        "pk": pk, "status": "Running", "merged_list": [["m", "a"]],
+        "pk": pk,
+        "status": "Running",
+        "merged_list": [["m", "a"]],
         "stats": {"results": 1},
     }
     assert rows[1] == {
-        "pk": "unknown", "status": None, "merged_list": None, "stats": None
+        "pk": "unknown",
+        "status": None,
+        "merged_list": None,
+        "stats": None,
     }
 
 
@@ -695,8 +759,13 @@ async def test_latest_pk_shape(client, db, redis_mock):
 async def test_report_shape(client, db, redis_mock):
     mid = uuid.uuid4()
     db["get_report_rows"].return_value = [
-        {"code": 200, "id": mid, "ts": TS,
-         "updated_at": TS + datetime.timedelta(seconds=90), "result_count": 4}
+        {
+            "code": 200,
+            "id": mid,
+            "ts": TS,
+            "updated_at": TS + datetime.timedelta(seconds=90),
+            "result_count": 4,
+        }
     ]
     resp = await client.get("/api/reports/aragorn")
     assert resp.status_code == 200

@@ -30,14 +30,24 @@ def serialized_channels(*names):
     equality of these entries, which works because they all come from the
     same channel table)."""
     return [
-        {"model": "tr_ars.channel", "pk": _CHANNEL_PKS[n],
-         "fields": {"name": n, "description": None}}
+        {
+            "model": "tr_ars.channel",
+            "pk": _CHANNEL_PKS[n],
+            "fields": {"name": n, "description": None},
+        }
         for n in names
     ]
 
 
-def actor_row(actor_id, agent, inforesid, channels=("general",), path="runquery",
-              active=True, uri=None):
+def actor_row(
+    actor_id,
+    agent,
+    inforesid,
+    channels=("general",),
+    path="runquery",
+    active=True,
+    uri=None,
+):
     return {
         "id": actor_id,
         "agent": actor_id,
@@ -65,9 +75,16 @@ def env(mocker):
     parent_pk = uuid.uuid4()
     parent_actor = actor_row(1, "ars-default-agent", "", ("general",), path="", uri="")
     parent = {
-        "id": parent_pk, "name": "", "code": 202, "status": "R", "actor": 1,
-        "ref": None, "result_count": None, "params": {"query_type": "standard"},
-        "merged_version": None, "merged_versions_list": None,
+        "id": parent_pk,
+        "name": "",
+        "code": 202,
+        "status": "R",
+        "actor": 1,
+        "ref": None,
+        "result_count": None,
+        "params": {"query_type": "standard"},
+        "merged_version": None,
+        "merged_versions_list": None,
     }
     actors = [
         parent_actor,  # self: skipped (empty path/uri anyway)
@@ -82,9 +99,14 @@ def env(mocker):
     def _create(**kw):
         pk = uuid.uuid4()
         child = {
-            "id": pk, "name": kw.get("name", ""), "code": 202, "status": "R",
-            "actor": kw["actor_id"], "ref": kw.get("ref"),
-            "result_count": None, "params": kw.get("params"),
+            "id": pk,
+            "name": kw.get("name", ""),
+            "code": 202,
+            "status": "R",
+            "actor": kw["actor_id"],
+            "ref": kw.get("ref"),
+            "result_count": None,
+            "params": kw.get("params"),
         }
         children[kw["actor_id"]] = child
         return child
@@ -110,7 +132,8 @@ def env(mocker):
             fanout.lifecycle, "check_parent_completion", new_callable=AsyncMock
         ),
         "url_remote": mocker.patch.object(
-            fanout.smartapi, "url_remote_from_inforesid",
+            fanout.smartapi,
+            "url_remote_from_inforesid",
             side_effect=lambda i: f"https://remote.example/{i}/asyncquery",
         ),
         "endpoint": mocker.patch.object(
@@ -129,8 +152,13 @@ def _task(parent_pk):
     ]
 
 
-def _accepted(url="https://remote.example/x", status_code=200, body=None,
-              text_body="", headers=None):
+def _accepted(
+    url="https://remote.example/x",
+    status_code=200,
+    body=None,
+    text_body="",
+    headers=None,
+):
     import httpx
 
     return httpx.Response(
@@ -143,7 +171,8 @@ def _accepted(url="https://remote.example/x", status_code=200, body=None,
 
 async def test_fanout_creates_children_for_matching_actors(env, mocker, redis_mock):
     post = mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=_accepted(),
     )
     await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
@@ -192,14 +221,13 @@ async def test_fanout_sync_endpoint_processes_inline(env, mocker, redis_mock):
     )
     env["endpoint"].side_effect = lambda i: "query"
     mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=_accepted(body=valid),
     )
     await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
 
-    updates = {
-        str(c.args[0]): c.kwargs for c in env["update_message"].await_args_list
-    }
+    updates = {str(c.args[0]): c.kwargs for c in env["update_message"].await_args_list}
     ara_child = env["children"][7]
     up = updates[str(ara_child["id"])]
     assert up["status"] == "D"
@@ -222,11 +250,16 @@ async def test_fanout_sync_endpoint_processes_inline(env, mocker, redis_mock):
 
 async def test_fanout_sync_empty_results_done_without_merge(env, mocker, redis_mock):
     env["endpoint"].side_effect = lambda i: "query"
-    empty = {"message": {"query_graph": {"nodes": {}, "edges": {}},
-                         "knowledge_graph": {"nodes": {}, "edges": {}},
-                         "results": []}}
+    empty = {
+        "message": {
+            "query_graph": {"nodes": {}, "edges": {}},
+            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "results": [],
+        }
+    }
     mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=_accepted(body=empty),
     )
     await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
@@ -243,9 +276,11 @@ async def test_fanout_http_error_marks_child_errored(env, mocker, redis_mock):
     import httpx
 
     mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=httpx.Response(
-            status_code=500, text="boom",
+            status_code=500,
+            text="boom",
             request=httpx.Request("POST", "https://remote.example/x"),
         ),
     )
@@ -263,9 +298,11 @@ async def test_fanout_503_leaves_child_unknown(env, mocker, redis_mock):
     import httpx
 
     mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=httpx.Response(
-            status_code=503, text="unavailable",
+            status_code=503,
+            text="unavailable",
             request=httpx.Request("POST", "https://remote.example/x"),
         ),
     )
@@ -281,9 +318,11 @@ async def test_fanout_202_records_aresponse_url(env, mocker, redis_mock):
     import httpx
 
     mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         return_value=httpx.Response(
-            status_code=202, text="job-123",
+            status_code=202,
+            text="job-123",
             request=httpx.Request(
                 "POST", "https://remote.example/infores:aragorn/asyncquery"
             ),
@@ -300,7 +339,8 @@ async def test_fanout_connect_error_is_e500(env, mocker, redis_mock):
     import httpx
 
     mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock,
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
         side_effect=httpx.ConnectError("nope"),
     )
     await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
@@ -310,9 +350,7 @@ async def test_fanout_connect_error_is_e500(env, mocker, redis_mock):
     env["completion"].assert_awaited()
 
 
-async def test_fanout_workflow_parent_matches_workflow_channel(
-    env, mocker, redis_mock
-):
+async def test_fanout_workflow_parent_matches_workflow_channel(env, mocker, redis_mock):
     env["get_actor"].return_value = actor_row(
         2, "ars-workflow-agent", "", ("workflow",), path="", uri=""
     )

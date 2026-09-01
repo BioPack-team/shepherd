@@ -47,10 +47,18 @@ def test_by_infores_latest_picks_matching_maturity_and_newest():
 def test_by_infores_latest_prefers_matching_version():
     j = {
         "hits": [
-            hit("infores:arax", "https://wrongver.example", updated="2026-06-01",
-                version="1.4.0"),
-            hit("infores:arax", "https://rightver.example", updated="2025-01-01",
-                version="1.5.0"),
+            hit(
+                "infores:arax",
+                "https://wrongver.example",
+                updated="2026-06-01",
+                version="1.4.0",
+            ),
+            hit(
+                "infores:arax",
+                "https://rightver.example",
+                updated="2025-01-01",
+                version="1.5.0",
+            ),
         ]
     }
     result = smartapi._by_infores_latest(j, "production", "1.5.0")
@@ -87,8 +95,7 @@ def test_url_remote_joins_endpoint_and_params(mocker):
     mocker.patch.object(smartapi, "endpoint", return_value=None)
     mocker.patch.object(smartapi, "params", return_value=None)
     assert (
-        smartapi.url_remote_from_inforesid("infores:x")
-        == "https://server.example/base"
+        smartapi.url_remote_from_inforesid("infores:x") == "https://server.example/base"
     )
 
 
@@ -114,7 +121,9 @@ async def test_seed_registry_upserts_every_actor(mocker):
     import shepherd_utils.ars.lifecycle as lifecycle
 
     goca = mocker.patch.object(
-        ars_db, "get_or_create_actor", new_callable=AsyncMock,
+        ars_db,
+        "get_or_create_actor",
+        new_callable=AsyncMock,
         return_value=({"id": 1}, 302),
     )
     await lifecycle.seed_registry(LOGGER)
