@@ -91,7 +91,14 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
     anything that isn't a parseable 2xx, so the code reaches the span, the
     query's logs and the response instead of being logged and dropped.
     """
-    message["submitter"] = "Shepherd"
+    if "submitter" not in message:
+        message["submitter"] = (
+            "infores:shepherd-arax:{maturity}@{location}@{url}".format(
+                maturity=settings.server_maturity,
+                location=settings.server_location,
+                url=settings.server_url,
+            )
+        )
     logger.info(f"Get the message from db {message}")
     headers = {"Content-Type": "application/json"}
     span = get_current_span()
