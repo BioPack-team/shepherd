@@ -1,0 +1,106 @@
+{
+  "results": [
+    {
+      "node_bindings": {
+        "n0": [
+          {
+            "id": "CHEBI:6801"
+          }
+        ],
+        "n1": [
+          {
+            "id": "MONDO:0005148"
+          }
+        ]
+      },
+      "normalized_score": 90.0
+    },
+    {
+      "node_bindings": {
+        "n0": [
+          {
+            "id": "NCBIGene:5468"
+          }
+        ],
+        "n1": [
+          {
+            "id": "MONDO:0005148"
+          }
+        ],
+        "n2": [
+          {
+            "id": "CHEBI:17234"
+          }
+        ]
+      },
+      "normalized_score": 50.0
+    },
+    {
+      "node_bindings": {
+        "n0": [
+          {
+            "id": "CHEBI:17234"
+          }
+        ],
+        "n1": [
+          {
+            "id": "MONDO:0005148"
+          }
+        ],
+        "n2": [
+          {
+            "id": "NCBIGene:5468"
+          }
+        ],
+        "n3": [
+          {
+            "id": "CHEBI:6801"
+          }
+        ]
+      },
+      "normalized_score": 25.0
+    },
+    {
+      "node_bindings": {
+        "n0": [
+          {
+            "id": "UMLS:C0004096"
+          }
+        ],
+        "n1": [
+          {
+            "id": "MONDO:0005148"
+          }
+        ]
+      }
+    }
+  ],
+  "kg_nodes": {
+    "CHEBI:6801": {
+      "categories": [
+        "biolink:ChemicalEntity",
+        "biolink:Drug"
+      ]
+    },
+    "MONDO:0005148": {
+      "categories": [
+        "biolink:Disease"
+      ]
+    },
+    "NCBIGene:5468": {
+      "categories": [
+        "biolink:Gene"
+      ]
+    },
+    "CHEBI:17234": {
+      "categories": [
+        "ChemicalEntity"
+      ]
+    },
+    "UMLS:C0004096": {
+      "categories": [
+        "biolink:DiseaseOrPhenotypicFeature"
+      ]
+    }
+  }
+}

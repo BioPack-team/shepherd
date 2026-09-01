@@ -1,0 +1,342 @@
+{
+  "message": {
+    "query_graph": {
+      "nodes": {
+        "sn": {
+          "ids": [
+            "MONDO:0005148"
+          ],
+          "categories": [
+            "biolink:Disease"
+          ]
+        },
+        "on": {
+          "categories": [
+            "biolink:ChemicalEntity"
+          ]
+        }
+      },
+      "edges": {
+        "t_edge": {
+          "subject": "on",
+          "object": "sn",
+          "predicates": [
+            "biolink:treats"
+          ],
+          "knowledge_type": "inferred"
+        }
+      }
+    },
+    "knowledge_graph": {
+      "nodes": {
+        "LOINC:LP231631-5": {
+          "name": "blocked one",
+          "categories": [
+            "biolink:NamedThing"
+          ],
+          "attributes": []
+        },
+        "PSY:25450": {
+          "name": "blocked two",
+          "categories": [
+            "biolink:NamedThing"
+          ],
+          "attributes": []
+        },
+        "CHEBI:6801": {
+          "name": "metformin",
+          "categories": [
+            "biolink:ChemicalEntity"
+          ],
+          "attributes": []
+        },
+        "MONDO:0005148": {
+          "name": "t2d",
+          "categories": [
+            "biolink:Disease"
+          ],
+          "attributes": []
+        },
+        "NCBIGene:5468": {
+          "name": "PPARG",
+          "categories": [
+            "biolink:Gene"
+          ],
+          "attributes": []
+        }
+      },
+      "edges": {
+        "bad_subj": {
+          "subject": "LOINC:LP231631-5",
+          "object": "MONDO:0005148",
+          "predicate": "biolink:affects",
+          "sources": [
+            {
+              "resource_id": "infores:test-kp",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            }
+          ],
+          "attributes": []
+        },
+        "bad_obj": {
+          "subject": "CHEBI:6801",
+          "object": "PSY:25450",
+          "predicate": "biolink:affects",
+          "sources": [
+            {
+              "resource_id": "infores:test-kp",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            }
+          ],
+          "attributes": []
+        },
+        "clean1": {
+          "subject": "CHEBI:6801",
+          "object": "MONDO:0005148",
+          "predicate": "biolink:treats",
+          "sources": [
+            {
+              "resource_id": "infores:test-kp",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            }
+          ],
+          "attributes": []
+        },
+        "clean2": {
+          "subject": "NCBIGene:5468",
+          "object": "MONDO:0005148",
+          "predicate": "biolink:affects",
+          "sources": [
+            {
+              "resource_id": "infores:test-kp",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            }
+          ],
+          "attributes": []
+        },
+        "support_only": {
+          "subject": "CHEBI:6801",
+          "object": "MONDO:0005148",
+          "predicate": "biolink:affects",
+          "sources": [
+            {
+              "resource_id": "infores:test-kp",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:support_graphs",
+              "value": [
+                "aux_all_bad"
+              ]
+            }
+          ]
+        },
+        "support_partial": {
+          "subject": "CHEBI:6801",
+          "object": "NCBIGene:5468",
+          "predicate": "biolink:affects",
+          "sources": [
+            {
+              "resource_id": "infores:test-kp",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:support_graphs",
+              "value": [
+                "aux_all_bad",
+                "aux_partial"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "auxiliary_graphs": {
+      "aux_all_bad": {
+        "edges": [
+          "bad_subj",
+          "bad_obj"
+        ],
+        "attributes": []
+      },
+      "aux_partial": {
+        "edges": [
+          "bad_obj",
+          "clean1"
+        ],
+        "attributes": []
+      },
+      "aux_clean": {
+        "edges": [
+          "clean2"
+        ],
+        "attributes": []
+      }
+    },
+    "results": [
+      {
+        "node_bindings": {
+          "sn": [
+            {
+              "id": "MONDO:0005148",
+              "attributes": []
+            }
+          ],
+          "on": [
+            {
+              "id": "LOINC:LP231631-5",
+              "attributes": []
+            }
+          ]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:x",
+            "edge_bindings": {
+              "t_edge": [
+                {
+                  "id": "bad_subj",
+                  "attributes": []
+                }
+              ]
+            },
+            "score": 0.5
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "sn": [
+            {
+              "id": "MONDO:0005148",
+              "attributes": []
+            }
+          ],
+          "on": [
+            {
+              "id": "CHEBI:6801",
+              "attributes": []
+            }
+          ]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:x",
+            "edge_bindings": {
+              "t_edge": [
+                {
+                  "id": "bad_obj",
+                  "attributes": []
+                },
+                {
+                  "id": "clean1",
+                  "attributes": []
+                }
+              ]
+            },
+            "score": 0.7
+          },
+          {
+            "resource_id": "infores:y",
+            "edge_bindings": {
+              "t_edge": [
+                {
+                  "id": "bad_obj",
+                  "attributes": []
+                }
+              ]
+            },
+            "support_graphs": [
+              "bad_subj",
+              "aux_clean"
+            ],
+            "score": 0.6
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "sn": [
+            {
+              "id": "MONDO:0005148",
+              "attributes": []
+            }
+          ],
+          "on": [
+            {
+              "id": "NCBIGene:5468",
+              "attributes": []
+            }
+          ]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:x",
+            "edge_bindings": {
+              "t_edge": [
+                {
+                  "id": "bad_subj",
+                  "attributes": []
+                }
+              ]
+            },
+            "score": 0.3
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "sn": [
+            {
+              "id": "MONDO:0005148",
+              "attributes": []
+            }
+          ],
+          "on": [
+            {
+              "id": "CHEBI:6801",
+              "attributes": []
+            }
+          ]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:x",
+            "path_bindings": {
+              "p0": [
+                {
+                  "id": "aux_all_bad"
+                },
+                {
+                  "id": "aux_clean"
+                }
+              ]
+            },
+            "score": 0.9
+          },
+          {
+            "resource_id": "infores:z",
+            "path_bindings": {
+              "p0": [
+                {
+                  "id": "aux_all_bad"
+                }
+              ]
+            },
+            "score": 0.1
+          }
+        ]
+      }
+    ]
+  }
+}

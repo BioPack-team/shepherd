@@ -1,0 +1,3067 @@
+{
+  "_relay_commit": "dd1e71b8284de746f9d11e4fc823bf57861e081f",
+  "compute_from_results": [
+    {
+      "name": "standard",
+      "output": [
+        {
+          "ordering_components": {
+            "clinical_evidence": 0.3,
+            "confidence": 0.9,
+            "novelty": 0.2
+          },
+          "rank": 1,
+          "sugeno": 0.9,
+          "weighted_mean": 0.6
+        },
+        {
+          "ordering_components": {
+            "clinical_evidence": 0.3,
+            "confidence": 0.9,
+            "novelty": 0.2
+          },
+          "rank": 2,
+          "sugeno": 0.9,
+          "weighted_mean": 0.6
+        },
+        {
+          "ordering_components": {
+            "confidence": 0.5
+          },
+          "rank": 3,
+          "sugeno": 0.5,
+          "weighted_mean": 0.25
+        },
+        {
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.1,
+            "novelty": 0.8
+          },
+          "rank": 4,
+          "sugeno": 0.1,
+          "weighted_mean": 0.05
+        },
+        {
+          "rank": 5,
+          "sugeno": 0,
+          "weighted_mean": 0.0
+        }
+      ]
+    },
+    {
+      "name": "all_zero",
+      "output": [
+        {
+          "ordering_components": {
+            "clinical_evidence": 0,
+            "confidence": 0,
+            "novelty": 0
+          },
+          "rank": 1,
+          "sugeno": 0,
+          "weighted_mean": 0.0
+        },
+        {
+          "rank": 2,
+          "sugeno": 0,
+          "weighted_mean": 0.0
+        }
+      ]
+    },
+    {
+      "name": "extremes",
+      "output": [
+        {
+          "ordering_components": {
+            "clinical_evidence": 1.0,
+            "confidence": 1.0,
+            "novelty": 1.0
+          },
+          "rank": 1,
+          "sugeno": 1.0,
+          "weighted_mean": 1.0
+        },
+        {
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 1.0,
+            "novelty": 0.0
+          },
+          "rank": 2,
+          "sugeno": 1.0,
+          "weighted_mean": 0.5
+        },
+        {
+          "ordering_components": {
+            "clinical_evidence": 1.0,
+            "confidence": 0.0,
+            "novelty": 1.0
+          },
+          "rank": 3,
+          "sugeno": 1.0,
+          "weighted_mean": 0.5
+        }
+      ]
+    }
+  ],
+  "decorate": [
+    {
+      "name": "no_sources_key",
+      "output": {
+        "message": {
+          "knowledge_graph": {
+            "edges": {
+              "e1": {
+                "object": "b",
+                "sources": [
+                  {
+                    "resource_id": "infores:aragorn",
+                    "resource_role": "primary_knowledge_source",
+                    "source_record_urls": null,
+                    "upstream_resource_ids": []
+                  }
+                ],
+                "subject": "a"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "empty_sources",
+      "output": {
+        "message": {
+          "knowledge_graph": {
+            "edges": {
+              "e1": {
+                "object": "b",
+                "sources": [
+                  {
+                    "resource_id": "infores:aragorn",
+                    "resource_role": "primary_knowledge_source",
+                    "source_record_urls": null,
+                    "upstream_resource_ids": []
+                  }
+                ],
+                "subject": "a"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "has_primary_not_self",
+      "output": {
+        "message": {
+          "knowledge_graph": {
+            "edges": {
+              "e1": {
+                "object": "b",
+                "sources": [
+                  {
+                    "resource_id": "infores:ctd",
+                    "resource_role": "primary_knowledge_source"
+                  },
+                  {
+                    "resource_id": "infores:aragorn",
+                    "resource_role": "aggregator_knowledge_source",
+                    "source_record_urls": null,
+                    "upstream_resource_ids": []
+                  }
+                ],
+                "subject": "a"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "already_self",
+      "output": {
+        "message": {
+          "knowledge_graph": {
+            "edges": {
+              "e1": {
+                "object": "b",
+                "sources": [
+                  {
+                    "resource_id": "infores:aragorn",
+                    "resource_role": "primary_knowledge_source"
+                  }
+                ],
+                "subject": "a"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "none_inforesid",
+      "output": {
+        "message": {
+          "knowledge_graph": {
+            "edges": {
+              "e1": {
+                "object": "b",
+                "sources": [
+                  {
+                    "resource_id": "infores:unknown",
+                    "resource_role": "primary_knowledge_source",
+                    "source_record_urls": null,
+                    "upstream_resource_ids": []
+                  }
+                ],
+                "subject": "a"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "no_primary_raises",
+      "raises": "UnboundLocalError"
+    }
+  ],
+  "filters": {
+    "hop_3": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "CHEBI:6801"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        },
+        "normalized_score": 90.0
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "UMLS:C0004096"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        }
+      }
+    ],
+    "hop_4": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "CHEBI:6801"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        },
+        "normalized_score": 90.0
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "NCBIGene:5468"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ],
+          "n2": [
+            {
+              "id": "CHEBI:17234"
+            }
+          ]
+        },
+        "normalized_score": 50.0
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "UMLS:C0004096"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        }
+      }
+    ],
+    "node_type_chemical": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "UMLS:C0004096"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        }
+      }
+    ],
+    "node_type_gene": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "CHEBI:6801"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        },
+        "normalized_score": 90.0
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "UMLS:C0004096"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        }
+      }
+    ],
+    "score_20_80": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "NCBIGene:5468"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ],
+          "n2": [
+            {
+              "id": "CHEBI:17234"
+            }
+          ]
+        },
+        "normalized_score": 50.0
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "CHEBI:17234"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ],
+          "n2": [
+            {
+              "id": "NCBIGene:5468"
+            }
+          ],
+          "n3": [
+            {
+              "id": "CHEBI:6801"
+            }
+          ]
+        },
+        "normalized_score": 25.0
+      }
+    ],
+    "spec_node": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "CHEBI:6801"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        },
+        "normalized_score": 90.0
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "UMLS:C0004096"
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0005148"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "get_msg_stats": {
+    "auxiliary_graphs": 2,
+    "knowledge_graph_edges": 4,
+    "knowledge_graph_nodes": 4,
+    "query_graph": 2,
+    "results": 3
+  },
+  "merge_ab": {
+    "message": {
+      "auxiliary_graphs": {
+        "aux1": {
+          "attributes": [],
+          "edges": [
+            "e1",
+            "e3"
+          ]
+        },
+        "aux9": {
+          "attributes": [],
+          "edges": [
+            "e9"
+          ]
+        }
+      },
+      "knowledge_graph": {
+        "edges": {
+          "e1": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:publications",
+                "value": [
+                  "PMID:3",
+                  "PMID:2",
+                  "PMID:1"
+                ]
+              }
+            ],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:treats",
+            "qualifiers": [
+              {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "decreased"
+              }
+            ],
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:arax",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              },
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e2": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:support_graphs",
+                "value": [
+                  "aux1"
+                ]
+              }
+            ],
+            "object": "NCBIGene:5468",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e3": {
+            "attributes": [],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:gene_associated_with_condition",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "NCBIGene:5468"
+          },
+          "e9": {
+            "attributes": [],
+            "object": "CHEBI:17234",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:arax",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          }
+        },
+        "nodes": {
+          "CHEBI:17234": {
+            "attributes": [],
+            "categories": [
+              "biolink:ChemicalEntity"
+            ],
+            "name": "glucose"
+          },
+          "CHEBI:6801": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:xref",
+                "value": [
+                  "MESH:D008687",
+                  "DRUGBANK:DB00331"
+                ]
+              }
+            ],
+            "categories": [
+              "biolink:ChemicalEntity",
+              "biolink:Drug"
+            ],
+            "name": "metformin"
+          },
+          "MONDO:0005148": {
+            "attributes": [],
+            "categories": [
+              "biolink:Disease"
+            ],
+            "name": "type 2 diabetes mellitus"
+          },
+          "NCBIGene:5468": {
+            "attributes": [],
+            "categories": [
+              "biolink:Gene"
+            ],
+            "name": "PPARG"
+          }
+        }
+      },
+      "query_graph": {
+        "edges": {
+          "t_edge": {
+            "knowledge_type": "inferred",
+            "object": "sn",
+            "predicates": [
+              "biolink:treats"
+            ],
+            "subject": "on"
+          }
+        },
+        "nodes": {
+          "on": {
+            "categories": [
+              "biolink:ChemicalEntity"
+            ]
+          },
+          "sn": {
+            "categories": [
+              "biolink:Disease"
+            ],
+            "ids": [
+              "MONDO:0005148"
+            ]
+          }
+        }
+      },
+      "results": [
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax",
+              "score": 0.91
+            },
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.83
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:6801"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e9"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax",
+              "score": null
+            },
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e9"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax-second",
+              "score": 0.2
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:17234"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e3"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.41
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "NCBIGene:5468"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "merge_ba": {
+    "message": {
+      "auxiliary_graphs": {
+        "aux1": {
+          "attributes": [],
+          "edges": [
+            "e1",
+            "e3"
+          ]
+        },
+        "aux9": {
+          "attributes": [],
+          "edges": [
+            "e9"
+          ]
+        }
+      },
+      "knowledge_graph": {
+        "edges": {
+          "e1": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:publications",
+                "value": [
+                  "PMID:3",
+                  "PMID:2",
+                  "PMID:1"
+                ]
+              }
+            ],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:treats",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              },
+              {
+                "resource_id": "infores:arax",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e2": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:support_graphs",
+                "value": [
+                  "aux1"
+                ]
+              }
+            ],
+            "object": "NCBIGene:5468",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e3": {
+            "attributes": [],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:gene_associated_with_condition",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "NCBIGene:5468"
+          },
+          "e9": {
+            "attributes": [],
+            "object": "CHEBI:17234",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:arax",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          }
+        },
+        "nodes": {
+          "CHEBI:17234": {
+            "attributes": [],
+            "categories": [
+              "biolink:ChemicalEntity"
+            ],
+            "name": "glucose"
+          },
+          "CHEBI:6801": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:xref",
+                "value": [
+                  "MESH:D008687",
+                  "DRUGBANK:DB00331"
+                ]
+              }
+            ],
+            "categories": [
+              "biolink:ChemicalEntity",
+              "biolink:Drug"
+            ],
+            "name": "metformin"
+          },
+          "MONDO:0005148": {
+            "attributes": [],
+            "categories": [
+              "biolink:Disease"
+            ],
+            "name": "type 2 diabetes"
+          },
+          "NCBIGene:5468": {
+            "attributes": [],
+            "categories": [
+              "biolink:Gene"
+            ],
+            "name": "PPARG"
+          }
+        }
+      },
+      "query_graph": {
+        "edges": {
+          "t_edge": {
+            "knowledge_type": "inferred",
+            "object": "sn",
+            "predicates": [
+              "biolink:treats"
+            ],
+            "subject": "on"
+          }
+        },
+        "nodes": {
+          "on": {
+            "categories": [
+              "biolink:ChemicalEntity"
+            ]
+          },
+          "sn": {
+            "categories": [
+              "biolink:Disease"
+            ],
+            "ids": [
+              "MONDO:0005148"
+            ]
+          }
+        }
+      },
+      "results": [
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.83
+            },
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax",
+              "score": 0.91
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:6801"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e3"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.41
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "NCBIGene:5468"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e9"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax",
+              "score": null
+            },
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e9"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax-second",
+              "score": 0.2
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:17234"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "merge_pipeline_ab": {
+    "message": {
+      "auxiliary_graphs": {
+        "aux1": {
+          "attributes": [],
+          "edges": [
+            "e1",
+            "e3"
+          ]
+        },
+        "aux9": {
+          "attributes": [],
+          "edges": [
+            "e9"
+          ]
+        }
+      },
+      "knowledge_graph": {
+        "edges": {
+          "e1": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:publications",
+                "value": [
+                  "PMID:3",
+                  "PMID:2",
+                  "PMID:1"
+                ]
+              }
+            ],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:treats",
+            "qualifiers": [
+              {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "decreased"
+              }
+            ],
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:arax",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              },
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e2": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:support_graphs",
+                "value": [
+                  "aux1"
+                ]
+              }
+            ],
+            "object": "NCBIGene:5468",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e3": {
+            "attributes": [],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:gene_associated_with_condition",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "aggregator_knowledge_source",
+                "source_record_urls": null,
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "NCBIGene:5468"
+          },
+          "e9": {
+            "attributes": [],
+            "object": "CHEBI:17234",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:arax",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          }
+        },
+        "nodes": {
+          "CHEBI:17234": {
+            "attributes": [],
+            "categories": [
+              "biolink:ChemicalEntity"
+            ],
+            "name": "glucose"
+          },
+          "CHEBI:6801": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:xref",
+                "value": [
+                  "MESH:D008687",
+                  "DRUGBANK:DB00331"
+                ]
+              }
+            ],
+            "categories": [
+              "biolink:ChemicalEntity",
+              "biolink:Drug"
+            ],
+            "name": "metformin"
+          },
+          "MONDO:0005148": {
+            "attributes": [],
+            "categories": [
+              "biolink:Disease"
+            ],
+            "name": "type 2 diabetes mellitus"
+          },
+          "NCBIGene:5468": {
+            "attributes": [],
+            "categories": [
+              "biolink:Gene"
+            ],
+            "name": "PPARG"
+          }
+        }
+      },
+      "query_graph": {
+        "edges": {
+          "t_edge": {
+            "knowledge_type": "inferred",
+            "object": "sn",
+            "predicates": [
+              "biolink:treats"
+            ],
+            "subject": "on"
+          }
+        },
+        "nodes": {
+          "on": {
+            "categories": [
+              "biolink:ChemicalEntity"
+            ]
+          },
+          "sn": {
+            "categories": [
+              "biolink:Disease"
+            ],
+            "ids": [
+              "MONDO:0005148"
+            ]
+          }
+        }
+      },
+      "results": [
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax",
+              "score": 0.91
+            },
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.83
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:6801"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          },
+          "normalized_score": 100.0
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e9"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax",
+              "score": 0
+            },
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e9"
+                  }
+                ]
+              },
+              "resource_id": "infores:arax-second",
+              "score": 0.2
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:17234"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          },
+          "normalized_score": 50.0
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e3"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.41
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "NCBIGene:5468"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          },
+          "normalized_score": 50.0
+        }
+      ]
+    }
+  },
+  "mergedicts": [
+    {
+      "name": "disjoint",
+      "output": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "name": "equal_scalars",
+      "output": {
+        "a": 1
+      }
+    },
+    {
+      "name": "scalar_conflict",
+      "output": {
+        "a": [
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "name": "none_current",
+      "output": {
+        "a": 1
+      }
+    },
+    {
+      "name": "none_merged",
+      "output": {
+        "a": null
+      }
+    },
+    {
+      "name": "score_conflict",
+      "output": {
+        "scores": [
+          0.7,
+          0.5
+        ]
+      }
+    },
+    {
+      "name": "query_ids",
+      "output": {
+        "query_ids": [
+          "q1",
+          "q2"
+        ]
+      }
+    },
+    {
+      "name": "name_skipped",
+      "output": {
+        "name": "y"
+      }
+    },
+    {
+      "name": "list_plus_scalar",
+      "output": {
+        "a": [
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "name": "hashable_lists",
+      "output": {
+        "a": [
+          "y",
+          "z",
+          "x"
+        ]
+      }
+    },
+    {
+      "name": "nested_dicts",
+      "output": {
+        "a": {
+          "x": 1,
+          "y": 2,
+          "z": 3
+        }
+      }
+    },
+    {
+      "name": "resource_id_lists",
+      "output": {
+        "sources": [
+          {
+            "n": 1,
+            "resource_id": "infores:a"
+          },
+          {
+            "n": 3,
+            "resource_id": "infores:c"
+          },
+          {
+            "n": 2,
+            "resource_id": "infores:b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "qualifier_lists",
+      "output": {
+        "qualifiers": [
+          {
+            "qualifier_type_id": "biolink:object_direction_qualifier",
+            "qualifier_value": "up"
+          }
+        ]
+      }
+    },
+    {
+      "name": "attributes_union_lists",
+      "output": {
+        "attributes": [
+          {
+            "attribute_type_id": "biolink:publications",
+            "value": [
+              "PMID:3",
+              "PMID:2",
+              "PMID:1"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "attributes_scalar_value_appends",
+      "output": {
+        "attributes": [
+          {
+            "attribute_type_id": "biolink:knowledge_level",
+            "value": "assertion"
+          },
+          {
+            "attribute_type_id": "biolink:knowledge_level",
+            "value": "assertion"
+          }
+        ]
+      }
+    },
+    {
+      "name": "attributes_new_type_appends",
+      "output": {
+        "attributes": [
+          {
+            "attribute_type_id": "biolink:publications",
+            "value": [
+              "PMID:1"
+            ]
+          },
+          {
+            "attribute_type_id": "biolink:agent_type",
+            "value": [
+              "a"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "attributes_multiple_existing_appends",
+      "output": {
+        "attributes": [
+          {
+            "attribute_type_id": "t",
+            "value": [
+              "v1"
+            ]
+          },
+          {
+            "attribute_type_id": "t",
+            "value": [
+              "v2"
+            ]
+          },
+          {
+            "attribute_type_id": "t",
+            "value": [
+              "v3"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "analyses_append",
+      "output": {
+        "analyses": [
+          {
+            "score": 2
+          },
+          {
+            "score": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "node_bindings",
+      "output": {
+        "node_bindings": {
+          "n0": [
+            {
+              "attributes": [],
+              "id": "A"
+            }
+          ],
+          "n1": [
+            {
+              "id": "C"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unhashable_lists_concat",
+      "output": {
+        "a": []
+      }
+    }
+  ],
+  "normalize_scores_full": {
+    "logs": [
+      {
+        "level": "INFO",
+        "message": "aragorn did a lookup",
+        "timestamp": "2026-09-01T00:00:00Z"
+      }
+    ],
+    "message": {
+      "auxiliary_graphs": {
+        "aux1": {
+          "attributes": [],
+          "edges": [
+            "e1",
+            "e3"
+          ]
+        }
+      },
+      "knowledge_graph": {
+        "edges": {
+          "e1": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:publications",
+                "value": [
+                  "PMID:1",
+                  "PMID:2"
+                ]
+              }
+            ],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:treats",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e2": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:support_graphs",
+                "value": [
+                  "aux1"
+                ]
+              }
+            ],
+            "object": "NCBIGene:5468",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e3": {
+            "attributes": [],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:gene_associated_with_condition",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "NCBIGene:5468"
+          }
+        },
+        "nodes": {
+          "CHEBI:6801": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:xref",
+                "value": [
+                  "DRUGBANK:DB00331"
+                ]
+              }
+            ],
+            "categories": [
+              "biolink:ChemicalEntity"
+            ],
+            "name": "metformin"
+          },
+          "MONDO:0005148": {
+            "attributes": [],
+            "categories": [
+              "biolink:Disease"
+            ],
+            "name": "type 2 diabetes"
+          },
+          "NCBIGene:5468": {
+            "attributes": [],
+            "categories": [
+              "biolink:Gene"
+            ],
+            "name": "PPARG"
+          }
+        }
+      },
+      "query_graph": {
+        "edges": {
+          "t_edge": {
+            "knowledge_type": "inferred",
+            "object": "sn",
+            "predicates": [
+              "biolink:treats"
+            ],
+            "subject": "on"
+          }
+        },
+        "nodes": {
+          "on": {
+            "categories": [
+              "biolink:ChemicalEntity"
+            ]
+          },
+          "sn": {
+            "categories": [
+              "biolink:Disease"
+            ],
+            "ids": [
+              "MONDO:0005148"
+            ]
+          }
+        }
+      },
+      "results": [
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.83
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:6801"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          },
+          "normalized_score": 100.0
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e3"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.41
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "NCBIGene:5468"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          },
+          "normalized_score": 50.0
+        }
+      ]
+    }
+  },
+  "premerged_inputs": {
+    "aragorn": {
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "aragorn did a lookup",
+          "timestamp": "2026-09-01T00:00:00Z"
+        }
+      ],
+      "message": {
+        "auxiliary_graphs": {
+          "aux1": {
+            "attributes": [],
+            "edges": [
+              "e1",
+              "e3"
+            ]
+          }
+        },
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "attributes": [
+                {
+                  "attribute_type_id": "biolink:publications",
+                  "value": [
+                    "PMID:1",
+                    "PMID:2"
+                  ]
+                }
+              ],
+              "object": "MONDO:0005148",
+              "predicate": "biolink:treats",
+              "sources": [
+                {
+                  "resource_id": "infores:ctd",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                },
+                {
+                  "resource_id": "infores:aragorn",
+                  "resource_role": "aggregator_knowledge_source",
+                  "upstream_resource_ids": [
+                    "infores:ctd"
+                  ]
+                }
+              ],
+              "subject": "CHEBI:6801"
+            },
+            "e2": {
+              "attributes": [
+                {
+                  "attribute_type_id": "biolink:support_graphs",
+                  "value": [
+                    "aux1"
+                  ]
+                }
+              ],
+              "object": "NCBIGene:5468",
+              "predicate": "biolink:affects",
+              "sources": [
+                {
+                  "resource_id": "infores:aragorn",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                }
+              ],
+              "subject": "CHEBI:6801"
+            },
+            "e3": {
+              "attributes": [],
+              "object": "MONDO:0005148",
+              "predicate": "biolink:gene_associated_with_condition",
+              "sources": [
+                {
+                  "resource_id": "infores:ctd",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                },
+                {
+                  "resource_id": "infores:aragorn",
+                  "resource_role": "aggregator_knowledge_source",
+                  "source_record_urls": null,
+                  "upstream_resource_ids": []
+                }
+              ],
+              "subject": "NCBIGene:5468"
+            }
+          },
+          "nodes": {
+            "CHEBI:6801": {
+              "attributes": [
+                {
+                  "attribute_type_id": "biolink:xref",
+                  "value": [
+                    "DRUGBANK:DB00331"
+                  ]
+                }
+              ],
+              "categories": [
+                "biolink:ChemicalEntity"
+              ],
+              "name": "metformin"
+            },
+            "MONDO:0005148": {
+              "attributes": [],
+              "categories": [
+                "biolink:Disease"
+              ],
+              "name": "type 2 diabetes"
+            },
+            "NCBIGene:5468": {
+              "attributes": [],
+              "categories": [
+                "biolink:Gene"
+              ],
+              "name": "PPARG"
+            }
+          }
+        },
+        "query_graph": {
+          "edges": {
+            "t_edge": {
+              "knowledge_type": "inferred",
+              "object": "sn",
+              "predicates": [
+                "biolink:treats"
+              ],
+              "subject": "on"
+            }
+          },
+          "nodes": {
+            "on": {
+              "categories": [
+                "biolink:ChemicalEntity"
+              ]
+            },
+            "sn": {
+              "categories": [
+                "biolink:Disease"
+              ],
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
+          }
+        },
+        "results": [
+          {
+            "analyses": [
+              {
+                "edge_bindings": {
+                  "t_edge": [
+                    {
+                      "attributes": [],
+                      "id": "e1"
+                    }
+                  ]
+                },
+                "resource_id": "infores:aragorn",
+                "score": 0.83
+              }
+            ],
+            "node_bindings": {
+              "on": [
+                {
+                  "attributes": [],
+                  "id": "CHEBI:6801"
+                }
+              ],
+              "sn": [
+                {
+                  "attributes": [],
+                  "id": "MONDO:0005148"
+                }
+              ]
+            },
+            "normalized_score": 100.0
+          },
+          {
+            "analyses": [
+              {
+                "edge_bindings": {
+                  "t_edge": [
+                    {
+                      "attributes": [],
+                      "id": "e3"
+                    }
+                  ]
+                },
+                "resource_id": "infores:aragorn",
+                "score": 0.41
+              }
+            ],
+            "node_bindings": {
+              "on": [
+                {
+                  "attributes": [],
+                  "id": "NCBIGene:5468"
+                }
+              ],
+              "sn": [
+                {
+                  "attributes": [],
+                  "id": "MONDO:0005148"
+                }
+              ]
+            },
+            "normalized_score": 50.0
+          }
+        ]
+      }
+    },
+    "arax": {
+      "logs": [],
+      "message": {
+        "auxiliary_graphs": {
+          "aux9": {
+            "attributes": [],
+            "edges": [
+              "e9"
+            ]
+          }
+        },
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "attributes": [
+                {
+                  "attribute_type_id": "biolink:publications",
+                  "value": [
+                    "PMID:2",
+                    "PMID:3"
+                  ]
+                }
+              ],
+              "object": "MONDO:0005148",
+              "predicate": "biolink:treats",
+              "qualifiers": [
+                {
+                  "qualifier_type_id": "biolink:object_direction_qualifier",
+                  "qualifier_value": "decreased"
+                }
+              ],
+              "sources": [
+                {
+                  "resource_id": "infores:ctd",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                },
+                {
+                  "resource_id": "infores:arax",
+                  "resource_role": "aggregator_knowledge_source",
+                  "upstream_resource_ids": [
+                    "infores:ctd"
+                  ]
+                }
+              ],
+              "subject": "CHEBI:6801"
+            },
+            "e9": {
+              "attributes": [],
+              "object": "CHEBI:17234",
+              "predicate": "biolink:affects",
+              "sources": [
+                {
+                  "resource_id": "infores:arax",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                }
+              ],
+              "subject": "CHEBI:6801"
+            }
+          },
+          "nodes": {
+            "CHEBI:17234": {
+              "attributes": [],
+              "categories": [
+                "biolink:ChemicalEntity"
+              ],
+              "name": "glucose"
+            },
+            "CHEBI:6801": {
+              "attributes": [
+                {
+                  "attribute_type_id": "biolink:xref",
+                  "value": [
+                    "MESH:D008687"
+                  ]
+                }
+              ],
+              "categories": [
+                "biolink:ChemicalEntity",
+                "biolink:Drug"
+              ],
+              "name": "metformin"
+            },
+            "MONDO:0005148": {
+              "attributes": [],
+              "categories": [
+                "biolink:Disease"
+              ],
+              "name": "type 2 diabetes mellitus"
+            }
+          }
+        },
+        "query_graph": {
+          "edges": {
+            "t_edge": {
+              "knowledge_type": "inferred",
+              "object": "sn",
+              "predicates": [
+                "biolink:treats"
+              ],
+              "subject": "on"
+            }
+          },
+          "nodes": {
+            "on": {
+              "categories": [
+                "biolink:ChemicalEntity"
+              ]
+            },
+            "sn": {
+              "categories": [
+                "biolink:Disease"
+              ],
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
+          }
+        },
+        "results": [
+          {
+            "analyses": [
+              {
+                "edge_bindings": {
+                  "t_edge": [
+                    {
+                      "attributes": [],
+                      "id": "e1"
+                    }
+                  ]
+                },
+                "resource_id": "infores:arax",
+                "score": 0.91
+              }
+            ],
+            "node_bindings": {
+              "on": [
+                {
+                  "attributes": [],
+                  "id": "CHEBI:6801"
+                }
+              ],
+              "sn": [
+                {
+                  "attributes": [],
+                  "id": "MONDO:0005148"
+                }
+              ]
+            },
+            "normalized_score": 100.0
+          },
+          {
+            "analyses": [
+              {
+                "edge_bindings": {
+                  "t_edge": [
+                    {
+                      "attributes": [],
+                      "id": "e9"
+                    }
+                  ]
+                },
+                "resource_id": "infores:arax",
+                "score": 0
+              },
+              {
+                "edge_bindings": {
+                  "t_edge": [
+                    {
+                      "attributes": [],
+                      "id": "e9"
+                    }
+                  ]
+                },
+                "resource_id": "infores:arax-second",
+                "score": 0.2
+              }
+            ],
+            "node_bindings": {
+              "on": [
+                {
+                  "attributes": [],
+                  "id": "CHEBI:17234"
+                }
+              ],
+              "sn": [
+                {
+                  "attributes": [],
+                  "id": "MONDO:0005148"
+                }
+              ]
+            },
+            "normalized_score": 50.0
+          }
+        ]
+      }
+    }
+  },
+  "remove_blocked": {
+    "data": {
+      "logs": [
+        {
+          "level": "DEBUG",
+          "message": "Removed the following bad nodes: ['blocked two', 'blocked one']",
+          "timestamp": "02:58:11"
+        },
+        {
+          "level": "DEBUG",
+          "message": "Removed the following counts: {'nodes': 2, 'edges': 3, 'results': 2, 'auxiliary_graphs': 1, 'analyses': 4}",
+          "timestamp": "02:58:11"
+        }
+      ],
+      "message": {
+        "auxiliary_graphs": {
+          "aux_clean": {
+            "attributes": [],
+            "edges": [
+              "clean2"
+            ]
+          },
+          "aux_partial": {
+            "attributes": [],
+            "edges": [
+              "clean1"
+            ]
+          }
+        },
+        "knowledge_graph": {
+          "edges": {
+            "clean1": {
+              "attributes": [],
+              "object": "MONDO:0005148",
+              "predicate": "biolink:treats",
+              "sources": [
+                {
+                  "resource_id": "infores:test-kp",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                }
+              ],
+              "subject": "CHEBI:6801"
+            },
+            "clean2": {
+              "attributes": [],
+              "object": "MONDO:0005148",
+              "predicate": "biolink:affects",
+              "sources": [
+                {
+                  "resource_id": "infores:test-kp",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                }
+              ],
+              "subject": "NCBIGene:5468"
+            },
+            "support_partial": {
+              "attributes": [
+                {
+                  "attribute_type_id": "biolink:support_graphs",
+                  "value": [
+                    "aux_partial"
+                  ]
+                }
+              ],
+              "object": "NCBIGene:5468",
+              "predicate": "biolink:affects",
+              "sources": [
+                {
+                  "resource_id": "infores:test-kp",
+                  "resource_role": "primary_knowledge_source",
+                  "upstream_resource_ids": []
+                }
+              ],
+              "subject": "CHEBI:6801"
+            }
+          },
+          "nodes": {
+            "CHEBI:6801": {
+              "attributes": [],
+              "categories": [
+                "biolink:ChemicalEntity"
+              ],
+              "name": "metformin"
+            },
+            "MONDO:0005148": {
+              "attributes": [],
+              "categories": [
+                "biolink:Disease"
+              ],
+              "name": "t2d"
+            },
+            "NCBIGene:5468": {
+              "attributes": [],
+              "categories": [
+                "biolink:Gene"
+              ],
+              "name": "PPARG"
+            }
+          }
+        },
+        "query_graph": {
+          "edges": {
+            "t_edge": {
+              "knowledge_type": "inferred",
+              "object": "sn",
+              "predicates": [
+                "biolink:treats"
+              ],
+              "subject": "on"
+            }
+          },
+          "nodes": {
+            "on": {
+              "categories": [
+                "biolink:ChemicalEntity"
+              ]
+            },
+            "sn": {
+              "categories": [
+                "biolink:Disease"
+              ],
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
+          }
+        },
+        "results": [
+          {
+            "analyses": [
+              {
+                "edge_bindings": {
+                  "t_edge": [
+                    {
+                      "attributes": [],
+                      "id": "clean1"
+                    }
+                  ]
+                },
+                "resource_id": "infores:x",
+                "score": 0.7
+              }
+            ],
+            "node_bindings": {
+              "on": [
+                {
+                  "attributes": [],
+                  "id": "CHEBI:6801"
+                }
+              ],
+              "sn": [
+                {
+                  "attributes": [],
+                  "id": "MONDO:0005148"
+                }
+              ]
+            }
+          },
+          {
+            "analyses": [
+              {
+                "path_bindings": {
+                  "p0": [
+                    {
+                      "id": "aux_clean"
+                    }
+                  ]
+                },
+                "resource_id": "infores:x",
+                "score": 0.9
+              }
+            ],
+            "node_bindings": {
+              "on": [
+                {
+                  "attributes": [],
+                  "id": "CHEBI:6801"
+                }
+              ],
+              "sn": [
+                {
+                  "attributes": [],
+                  "id": "MONDO:0005148"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "removed_node_names": [
+      "blocked two",
+      "blocked one"
+    ],
+    "removed_result_count": 2,
+    "report_pk": "00000000-0000-0000-0000-00000000abcd"
+  },
+  "remove_phantom": {
+    "logs": [
+      {
+        "level": "INFO",
+        "message": "aragorn did a lookup",
+        "timestamp": "2026-09-01T00:00:00Z"
+      }
+    ],
+    "message": {
+      "auxiliary_graphs": {},
+      "knowledge_graph": {
+        "edges": {
+          "e1": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:publications",
+                "value": [
+                  "PMID:1",
+                  "PMID:2"
+                ]
+              }
+            ],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:treats",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e2": {
+            "attributes": [],
+            "object": "NCBIGene:5468",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e3": {
+            "attributes": [],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:gene_associated_with_condition",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "NCBIGene:5468"
+          }
+        },
+        "nodes": {
+          "CHEBI:6801": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:xref",
+                "value": [
+                  "DRUGBANK:DB00331"
+                ]
+              }
+            ],
+            "categories": [
+              "biolink:ChemicalEntity"
+            ],
+            "name": "metformin"
+          },
+          "MONDO:0005148": {
+            "attributes": [],
+            "categories": [
+              "biolink:Disease"
+            ],
+            "name": "type 2 diabetes"
+          },
+          "NCBIGene:5468": {
+            "attributes": [],
+            "categories": [
+              "biolink:Gene"
+            ],
+            "name": "PPARG"
+          }
+        }
+      },
+      "query_graph": {
+        "edges": {
+          "t_edge": {
+            "knowledge_type": "inferred",
+            "object": "sn",
+            "predicates": [
+              "biolink:treats"
+            ],
+            "subject": "on"
+          }
+        },
+        "nodes": {
+          "on": {
+            "categories": [
+              "biolink:ChemicalEntity"
+            ]
+          },
+          "sn": {
+            "categories": [
+              "biolink:Disease"
+            ],
+            "ids": [
+              "MONDO:0005148"
+            ]
+          }
+        }
+      },
+      "results": [
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.83
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:6801"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e3"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.41
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "NCBIGene:5468"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "remove_phantom_intact": {
+    "logs": [
+      {
+        "level": "INFO",
+        "message": "aragorn did a lookup",
+        "timestamp": "2026-09-01T00:00:00Z"
+      }
+    ],
+    "message": {
+      "auxiliary_graphs": {
+        "aux1": {
+          "attributes": [],
+          "edges": [
+            "e1",
+            "e3"
+          ]
+        }
+      },
+      "knowledge_graph": {
+        "edges": {
+          "e1": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:publications",
+                "value": [
+                  "PMID:1",
+                  "PMID:2"
+                ]
+              }
+            ],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:treats",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:ctd"
+                ]
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e2": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:support_graphs",
+                "value": [
+                  "aux1"
+                ]
+              }
+            ],
+            "object": "NCBIGene:5468",
+            "predicate": "biolink:affects",
+            "sources": [
+              {
+                "resource_id": "infores:aragorn",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "CHEBI:6801"
+          },
+          "e3": {
+            "attributes": [],
+            "object": "MONDO:0005148",
+            "predicate": "biolink:gene_associated_with_condition",
+            "sources": [
+              {
+                "resource_id": "infores:ctd",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              }
+            ],
+            "subject": "NCBIGene:5468"
+          }
+        },
+        "nodes": {
+          "CHEBI:6801": {
+            "attributes": [
+              {
+                "attribute_type_id": "biolink:xref",
+                "value": [
+                  "DRUGBANK:DB00331"
+                ]
+              }
+            ],
+            "categories": [
+              "biolink:ChemicalEntity"
+            ],
+            "name": "metformin"
+          },
+          "MONDO:0005148": {
+            "attributes": [],
+            "categories": [
+              "biolink:Disease"
+            ],
+            "name": "type 2 diabetes"
+          },
+          "NCBIGene:5468": {
+            "attributes": [],
+            "categories": [
+              "biolink:Gene"
+            ],
+            "name": "PPARG"
+          }
+        }
+      },
+      "query_graph": {
+        "edges": {
+          "t_edge": {
+            "knowledge_type": "inferred",
+            "object": "sn",
+            "predicates": [
+              "biolink:treats"
+            ],
+            "subject": "on"
+          }
+        },
+        "nodes": {
+          "on": {
+            "categories": [
+              "biolink:ChemicalEntity"
+            ]
+          },
+          "sn": {
+            "categories": [
+              "biolink:Disease"
+            ],
+            "ids": [
+              "MONDO:0005148"
+            ]
+          }
+        }
+      },
+      "results": [
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e1"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.83
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "CHEBI:6801"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        },
+        {
+          "analyses": [
+            {
+              "edge_bindings": {
+                "t_edge": [
+                  {
+                    "attributes": [],
+                    "id": "e3"
+                  }
+                ]
+              },
+              "resource_id": "infores:aragorn",
+              "score": 0.41
+            }
+          ],
+          "node_bindings": {
+            "on": [
+              {
+                "attributes": [],
+                "id": "NCBIGene:5468"
+              }
+            ],
+            "sn": [
+              {
+                "attributes": [],
+                "id": "MONDO:0005148"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "scores": [
+    {
+      "name": "mixed",
+      "normalized_raises": "IndexError",
+      "stat": {
+        "maximum": 0.9,
+        "mean": 0.625,
+        "median": 0.7,
+        "minimum": 0.2,
+        "stdev": 0.3403429642777023
+      }
+    },
+    {
+      "name": "missing_analyses_key",
+      "normalized": [
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ]
+        },
+        {
+          "node_bindings": {}
+        }
+      ],
+      "stat": {}
+    },
+    {
+      "name": "empty",
+      "normalized": [],
+      "stat": {}
+    },
+    {
+      "name": "single",
+      "normalized": [
+        {
+          "analyses": [
+            {
+              "score": 0.42
+            }
+          ],
+          "normalized_score": 100.0
+        }
+      ],
+      "stat": {}
+    },
+    {
+      "name": "empty_analyses_list",
+      "normalized": [
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ]
+        },
+        {
+          "analyses": []
+        }
+      ],
+      "stat": {}
+    }
+  ],
+  "scrub": {
+    "message": {
+      "auxiliary_graphs": {
+        "a1": {
+          "attributes": [],
+          "edges": [
+            "e1"
+          ]
+        },
+        "a2": {
+          "attributes": [
+            {
+              "attribute_type_id": "k"
+            }
+          ],
+          "edges": [
+            "e1"
+          ]
+        },
+        "a3": {
+          "edges": [
+            "e1"
+          ]
+        }
+      },
+      "knowledge_graph": {
+        "edges": {
+          "e1": {
+            "attributes": [
+              {
+                "attribute_type_id": "y",
+                "attributes": [],
+                "value": 2
+              }
+            ],
+            "object": "n2",
+            "sources": [
+              {
+                "resource_id": "infores:a",
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:b",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": []
+              },
+              {
+                "resource_id": "infores:c",
+                "resource_role": "aggregator_knowledge_source",
+                "upstream_resource_ids": [
+                  "infores:a",
+                  "infores:b"
+                ]
+              }
+            ],
+            "subject": "n1"
+          }
+        },
+        "nodes": {
+          "n1": {
+            "attributes": [
+              {
+                "attribute_type_id": "x",
+                "value": 1
+              }
+            ]
+          },
+          "n2": {
+            "attributes": null
+          },
+          "n3": {}
+        }
+      }
+    }
+  },
+  "sugeno_grid": [
+    {
+      "input": [
+        0.9,
+        0.2,
+        0.3
+      ],
+      "sugeno": 0.9,
+      "weighted_mean": 0.6,
+      "weights": {
+        "weight_confidence": 1.0,
+        "weight_confidence_clinical": 2.0,
+        "weight_confidence_clinical_novelty": 2.0,
+        "weight_confidence_clinical_novelty_blank_factor": 2.0
+      }
+    },
+    {
+      "input": [
+        0.1,
+        0.8,
+        0.0
+      ],
+      "sugeno": 0.1,
+      "weighted_mean": 0.05,
+      "weights": {
+        "weight_novelty": 0.0,
+        "weight_novelty_confidence": 1.0,
+        "weight_novelty_confidence_clinical": 2.0,
+        "weight_novelty_confidence_clinical_blank_factor": 2.0
+      }
+    },
+    {
+      "input": [
+        0.5,
+        0.0,
+        0.0
+      ],
+      "sugeno": 0.5,
+      "weighted_mean": 0.25,
+      "weights": {
+        "weight_confidence": 1.0,
+        "weight_confidence_novelty": 1.0,
+        "weight_confidence_novelty_clinical": 2.0,
+        "weight_confidence_novelty_clinical_blank_factor": 2.0
+      }
+    },
+    {
+      "input": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "sugeno": 0.0,
+      "weighted_mean": 0.0,
+      "weights": {
+        "weight_confidence": 1.0,
+        "weight_confidence_novelty": 1.0,
+        "weight_confidence_novelty_clinical": 2.0,
+        "weight_confidence_novelty_clinical_blank_factor": 2.0
+      }
+    },
+    {
+      "input": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "sugeno": 1.0,
+      "weighted_mean": 1.0,
+      "weights": {
+        "weight_confidence": 1.0,
+        "weight_confidence_novelty": 1.0,
+        "weight_confidence_novelty_clinical": 2.0,
+        "weight_confidence_novelty_clinical_blank_factor": 2.0
+      }
+    },
+    {
+      "input": [
+        0.3,
+        0.3,
+        0.9
+      ],
+      "sugeno": 0.9,
+      "weighted_mean": 0.6,
+      "weights": {
+        "weight_clinical": 1.0,
+        "weight_clinical_confidence": 2.0,
+        "weight_clinical_confidence_novelty": 2.0,
+        "weight_clinical_confidence_novelty_blank_factor": 2.0
+      }
+    }
+  ],
+  "sugeno_rank": [
+    {
+      "rank": [
+        1,
+        2,
+        3
+      ],
+      "scores": [
+        0.5,
+        0.5,
+        0.3
+      ]
+    },
+    {
+      "rank": [
+        4,
+        1,
+        3,
+        2
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.5,
+        0.9
+      ]
+    },
+    {
+      "rank": [
+        1
+      ],
+      "scores": [
+        1.0
+      ]
+    },
+    {
+      "rank": [],
+      "scores": []
+    },
+    {
+      "rank": [
+        1,
+        2,
+        3
+      ],
+      "scores": [
+        0.2,
+        0.2,
+        0.2
+      ]
+    }
+  ],
+  "validate": {
+    "aragorn": true,
+    "arax": true,
+    "binding_missing_id": false,
+    "blocklist": true,
+    "edge_missing_predicate": false,
+    "empty": true,
+    "kg_missing_edges": false,
+    "no_message": false,
+    "qg_categories_not_list": false,
+    "result_missing_node_bindings": false,
+    "results_not_list": false
+  }
+}

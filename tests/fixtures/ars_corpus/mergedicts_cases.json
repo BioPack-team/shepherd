@@ -1,0 +1,325 @@
+[
+  {
+    "name": "disjoint",
+    "dcurrent": {
+      "a": 1
+    },
+    "dmerged": {
+      "b": 2
+    }
+  },
+  {
+    "name": "equal_scalars",
+    "dcurrent": {
+      "a": 1
+    },
+    "dmerged": {
+      "a": 1
+    }
+  },
+  {
+    "name": "scalar_conflict",
+    "dcurrent": {
+      "a": 2
+    },
+    "dmerged": {
+      "a": 1
+    }
+  },
+  {
+    "name": "none_current",
+    "dcurrent": {
+      "a": null
+    },
+    "dmerged": {
+      "a": 1
+    }
+  },
+  {
+    "name": "none_merged",
+    "dcurrent": {
+      "a": 5
+    },
+    "dmerged": {
+      "a": null
+    }
+  },
+  {
+    "name": "score_conflict",
+    "dcurrent": {
+      "score": 0.5
+    },
+    "dmerged": {
+      "score": 0.7
+    }
+  },
+  {
+    "name": "query_ids",
+    "dcurrent": {
+      "query_ids": "q2"
+    },
+    "dmerged": {
+      "query_ids": "q1"
+    }
+  },
+  {
+    "name": "name_skipped",
+    "dcurrent": {
+      "name": "x"
+    },
+    "dmerged": {
+      "name": "y"
+    }
+  },
+  {
+    "name": "list_plus_scalar",
+    "dcurrent": {
+      "a": 3
+    },
+    "dmerged": {
+      "a": [
+        1,
+        2
+      ]
+    }
+  },
+  {
+    "name": "hashable_lists",
+    "dcurrent": {
+      "a": [
+        "x",
+        "y"
+      ]
+    },
+    "dmerged": {
+      "a": [
+        "y",
+        "z"
+      ]
+    }
+  },
+  {
+    "name": "nested_dicts",
+    "dcurrent": {
+      "a": {
+        "x": 1,
+        "y": 2
+      }
+    },
+    "dmerged": {
+      "a": {
+        "y": 2,
+        "z": 3
+      }
+    }
+  },
+  {
+    "name": "resource_id_lists",
+    "dcurrent": {
+      "sources": [
+        {
+          "resource_id": "infores:a",
+          "n": 1
+        },
+        {
+          "resource_id": "infores:b",
+          "n": 2
+        }
+      ]
+    },
+    "dmerged": {
+      "sources": [
+        {
+          "resource_id": "infores:a",
+          "n": 1
+        },
+        {
+          "resource_id": "infores:c",
+          "n": 3
+        }
+      ]
+    }
+  },
+  {
+    "name": "qualifier_lists",
+    "dcurrent": {
+      "qualifiers": [
+        {
+          "qualifier_type_id": "biolink:object_direction_qualifier",
+          "qualifier_value": "up"
+        }
+      ]
+    },
+    "dmerged": {
+      "qualifiers": [
+        {
+          "qualifier_type_id": "biolink:object_direction_qualifier",
+          "qualifier_value": "up"
+        }
+      ]
+    }
+  },
+  {
+    "name": "attributes_union_lists",
+    "dcurrent": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:publications",
+          "value": [
+            "PMID:2",
+            "PMID:3"
+          ]
+        }
+      ]
+    },
+    "dmerged": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:publications",
+          "value": [
+            "PMID:1",
+            "PMID:2"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "attributes_scalar_value_appends",
+    "dcurrent": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:knowledge_level",
+          "value": "assertion"
+        }
+      ]
+    },
+    "dmerged": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:knowledge_level",
+          "value": "assertion"
+        }
+      ]
+    }
+  },
+  {
+    "name": "attributes_new_type_appends",
+    "dcurrent": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:agent_type",
+          "value": [
+            "a"
+          ]
+        }
+      ]
+    },
+    "dmerged": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:publications",
+          "value": [
+            "PMID:1"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "attributes_multiple_existing_appends",
+    "dcurrent": {
+      "attributes": [
+        {
+          "attribute_type_id": "t",
+          "value": [
+            "v3"
+          ]
+        }
+      ]
+    },
+    "dmerged": {
+      "attributes": [
+        {
+          "attribute_type_id": "t",
+          "value": [
+            "v1"
+          ]
+        },
+        {
+          "attribute_type_id": "t",
+          "value": [
+            "v2"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "analyses_append",
+    "dcurrent": {
+      "analyses": [
+        {
+          "score": 1
+        }
+      ]
+    },
+    "dmerged": {
+      "analyses": [
+        {
+          "score": 2
+        }
+      ]
+    }
+  },
+  {
+    "name": "node_bindings",
+    "dcurrent": {
+      "node_bindings": {
+        "n0": [
+          {
+            "id": "A",
+            "attributes": []
+          }
+        ],
+        "n1": [
+          {
+            "id": "B"
+          }
+        ]
+      }
+    },
+    "dmerged": {
+      "node_bindings": {
+        "n0": [
+          {
+            "id": "A",
+            "attributes": []
+          }
+        ],
+        "n1": [
+          {
+            "id": "C"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "unhashable_lists_concat",
+    "dcurrent": {
+      "a": [
+        {
+          "x": 1
+        }
+      ]
+    },
+    "dmerged": {
+      "a": [
+        {
+          "y": 2
+        }
+      ]
+    }
+  }
+]
