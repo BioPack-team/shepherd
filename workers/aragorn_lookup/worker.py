@@ -95,7 +95,7 @@ async def run_async_lookup(
     """Return an async lookup response with callback id."""
     callback_id = str(uuid.uuid4())[:8]
     with tracer.start_as_current_span("aragorn.lookup") as span:
-        span.set_attribute("callback_id", callback_id)
+        span.set_attribute("callback.id", callback_id)
         lookup_carrier = {}
         inject(lookup_carrier)
         # Put callback UID and query ID in postgres
@@ -167,7 +167,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
             f"[{callback_id}] Sending lookup query to {settings.kg_retrieval_url}"
         )
         with tracer.start_as_current_span("aragorn.lookup") as span:
-            span.set_attribute("callback_id", callback_id)
+            span.set_attribute("callback.id", callback_id)
             async with httpx.AsyncClient(timeout=100) as client:
                 await client.post(
                     settings.kg_retrieval_url,

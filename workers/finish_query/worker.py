@@ -130,6 +130,8 @@ async def send_callback(
     payload_size = len(message_bytes)
     delivered = False
     attempts = 0
+    wait = 0.0
+    backoff = 0.0
     for attempt in range(1, CALLBACK_RETRIES + 1):
         attempts = attempt
         attempt_start = time.time()
@@ -142,6 +144,7 @@ async def send_callback(
                 )
                 response.raise_for_status()
                 elapsed = time.time() - attempt_start
+                wait += elapsed
                 logger.info(
                     f"Sent response back to {callback_url} in {elapsed:.3f}s "
                     f"({len(message_bytes)} bytes, "
@@ -151,6 +154,7 @@ async def send_callback(
                 break
         except Exception as e:
             elapsed = time.time() - attempt_start
+            wait += elapsed
             failure = (
                 f"Failed to send callback to {callback_url} after {elapsed:.3f}s "
                 f"(attempt {attempt}/{CALLBACK_RETRIES}, "
@@ -158,15 +162,20 @@ async def send_callback(
             )
             logger.error(failure)
             span.add_event(
-                "callback_attempt_failed",
-                {"attempt": attempt, "duration_ms": int(elapsed * 1000)},
+                "callback.attempt_failed",
+                {
+                    "callback.attempt": attempt,
+                    "callback.attempt_duration_ms": int(elapsed * 1000),
+                },
             )
             if attempt < CALLBACK_RETRIES:
                 if len(message_bytes) <= RETRY_LOG_SPLICE_MAX_BYTES:
                     message_bytes = _append_log_entry(
                         message_bytes, _log_entry(failure)
                     )
-                await asyncio.sleep(1 * (2 ** (attempt - 1)))
+                sleep_for = 1 * (2 ** (attempt - 1))
+                backoff += sleep_for
+                await asyncio.sleep(sleep_for)
 
     total = time.time() - started
     if not delivered:
@@ -183,6 +192,8 @@ async def send_callback(
     # Attributes rather than another log line: same numbers, no per-query log
     # storage, and they're queryable alongside the rest of the trace.
     span.set_attribute("callback.duration_ms", int(total * 1000))
+    span.set_attribute("callback.wait_ms", int(wait * 1000))
+    span.set_attribute("callback.backoff_ms", int(backoff * 1000))
     span.set_attribute("callback.attempts", attempts)
     span.set_attribute("callback.payload_bytes", payload_size)
     span.set_attribute("callback.delivered", delivered)
