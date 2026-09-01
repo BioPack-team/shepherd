@@ -265,6 +265,55 @@ class Settings(BaseSettings):
     # the first N. 0 disables the cap.
     merge_max_callback_logs: int = 1000
 
+    # ------------------------------------------------------------------
+    # Translator ARS (ported from NCATSTranslator/Relay). These mirror the
+    # upstream env vars (TR_ENV, TR_NORMALIZER, ...) so a deployment can move
+    # its existing configuration over unchanged.
+    # ------------------------------------------------------------------
+    # Externally reachable base URL of this Shepherd deployment, used to build
+    # the callback URLs handed to remote ARAs (POST {ars_public_host}/ars/api/
+    # messages/<child_pk>) and the notification payloads. Unlike callback_host
+    # (internal, for the KG retrieval loop) this must be reachable from the
+    # public internet where the ARAs run.
+    ars_public_host: str = "http://localhost:5439"
+    # SmartAPI maturity filter, upstream env TR_ENV: production / development /
+    # staging / testing.
+    tr_env: str = "production"
+    # TRAPI version filter for SmartAPI discovery, upstream env TR_VER.
+    tr_ver: str = "1.5.0"
+    tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
+    tr_annotator: str = "https://biothings.ncats.io/curie"
+    tr_appraise: str = "https://answerappraiser.ci.transltr.io/get_appraisal"
+    # AES key for decrypting stored notification-client secrets (upstream env
+    # AES_MASTER_KEY). Empty disables signed notifications.
+    aes_master_key: str = ""
+    # Timeout (seconds) for each ARA query dispatch, matching upstream
+    # tasks.send_message(timeout=300).
+    ars_query_timeout: int = 300
+    # Timeout sweep (upstream celery beat catch_timeout ran every 180s; the
+    # watchdog loop runs more often -- parity is on the age thresholds, which
+    # are per message kind and match upstream exactly).
+    ars_watchdog_interval_sec: float = 60.0
+    ars_timeout_standard_sec: float = 300.0  # 5 min
+    # NOTE: upstream's log message says 10 minutes, but the code compares
+    # against now-5min (tasks.py catch_timeout_async, max_time_pathfinder).
+    # The code's behavior is what parity is measured against.
+    ars_timeout_pathfinder_sec: float = 300.0  # 5 min
+    ars_timeout_merge_sec: float = 480.0  # 8 min
+    # Only messages updated within this window are examined by the sweep,
+    # matching the upstream 15-minute scan window.
+    ars_timeout_scan_window_sec: float = 900.0
+    # Days after which non-retained message payload blobs are purged from
+    # Postgres (row metadata is kept). Upstream has no purge job of its own --
+    # only the retain flag honored by out-of-band cleanup -- so this is the
+    # Shepherd-native equivalent. 0 disables.
+    ars_data_retention_days: int = 30
+    # SmartAPI registry cache refresh interval (upstream 3600s, 30s retry after
+    # a failed refresh).
+    smartapi_refresh_sec: int = 3600
+    smartapi_retry_sec: int = 30
+    smartapi_url: str = "http://smart-api.info/api/query"
+
     # Monitor (dashboard) worker
     monitor_port: int = 5440
     monitor_poll_interval_sec: float = 3.0
