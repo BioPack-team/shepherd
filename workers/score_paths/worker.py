@@ -147,8 +147,23 @@ def _open_embeddings():
     )
 
 
-def _build_mlp():
-    """Build the scoring MLP and load its trained weights."""
+def _build_mlp(logger):
+    """Build the scoring MLP and load its trained weights.
+
+    The weights are memory-mapped and assigned rather than copied, so the pool's
+    children share one 61 MB mapping instead of each allocating its own copy.
+    ``mmap=True`` hands back file-backed ``MAP_PRIVATE`` tensors; ``assign=True``
+    makes those tensors *be* the module's parameters instead of a destination to
+    copy into (the default would allocate fresh storage per child and undo the
+    sharing). Scoring only ever reads them -- the model is in ``eval`` mode under
+    ``inference_mode`` -- so nothing triggers a copy-on-write fault and the pages
+    stay shared for the life of the pod.
+
+    ``mmap=True`` needs a checkpoint in torch's zipfile format (the default since
+    torch 1.6). A checkpoint re-saved in the legacy format would raise, so fall
+    back to a plain load: that child then pays for its own copy, which is the
+    pre-mmap behaviour and strictly better than failing every task.
+    """
     model = nn.Sequential(
         nn.Linear(11 * 768, 1536),
         nn.GELU(),
@@ -158,8 +173,19 @@ def _build_mlp():
         nn.LayerNorm(1536),
         nn.Linear(1536, 1),
     )
-    ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu")
-    model.load_state_dict({k.removeprefix("net."): v for k, v in ckpt["model"].items()})
+    try:
+        ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu", mmap=True)
+        assign = True
+    except (RuntimeError, ValueError) as e:
+        logger.warning(
+            f"Could not memory-map {MODEL_WEIGHTS} ({e}); loading a private copy "
+            "of the weights instead. Every pool child will hold its own."
+        )
+        ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu")
+        assign = False
+    model.load_state_dict(
+        {k.removeprefix("net."): v for k, v in ckpt["model"].items()}, assign=assign
+    )
     model.eval()
     return model
 
@@ -189,6 +215,13 @@ def _ensure_scoring_state(logger) -> None:
     failure with a traceback, instead of killing the child before it takes any
     work and leaving the pool to rebuild itself in a loop. Each child pays this
     once and amortizes it over ``pool_max_tasks_per_child`` tasks.
+
+    Two of the three are shared across children rather than duplicated: the
+    embeddings LMDB and the model weights are both file-backed mappings, so the
+    OS page cache serves every child from one copy (see ``_open_embeddings`` and
+    ``_build_mlp``). The biolink ``Toolkit`` is live Python objects and so is
+    genuinely per-child -- the one place pool size costs real memory, which is
+    why ``POOL_MAX_WORKERS`` exists for a memory-tight deployment.
     """
     global bmt, embedding_env, mlp
     if mlp is not None:
@@ -200,7 +233,7 @@ def _ensure_scoring_state(logger) -> None:
     torch.set_num_threads(1)
     bmt = Toolkit()
     embedding_env = _open_embeddings()
-    mlp = _build_mlp()
+    mlp = _build_mlp(logger)
     logger.debug(f"score_paths child {os.getpid()} loaded its scoring state.")
 
 
