@@ -158,8 +158,11 @@ async def send_callback(
             )
             logger.error(failure)
             span.add_event(
-                "callback_attempt_failed",
-                {"attempt": attempt, "duration_ms": int(elapsed * 1000)},
+                "callback.attempt_failed",
+                {
+                    "callback.attempt": attempt,
+                    "callback.attempt_duration_ms": int(elapsed * 1000),
+                },
             )
             if attempt < CALLBACK_RETRIES:
                 if len(message_bytes) <= RETRY_LOG_SPLICE_MAX_BYTES:

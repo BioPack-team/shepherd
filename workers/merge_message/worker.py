@@ -894,8 +894,8 @@ async def poll_for_tasks():
         drained = 0
         try:
             with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
-                span.set_attribute("callback_id", callback_id)
-                span.set_attribute("response_id", response_id)
+                span.set_attribute("callback.id", callback_id)
+                span.set_attribute("response.id", response_id)
 
                 # Non-blocking: never wait on the lock. The worker that holds it
                 # drains the whole query, so a loser has nothing useful to add.
@@ -963,7 +963,7 @@ async def poll_for_tasks():
                     logger.error(f"[{callback_id}] Process pool broken; re-enqueuing.")
                     await remove_lock(response_id, CONSUMER, logger)
                     await _reenqueue_wake_task(task, logger)
-                    span.set_attribute("drained_callbacks", drained)
+                    span.set_attribute("merge.drained_callbacks", drained)
                     return
                 except Exception:
                     logger.error(
@@ -972,10 +972,10 @@ async def poll_for_tasks():
                     )
                     await remove_lock(response_id, CONSUMER, logger)
                     await _reenqueue_wake_task(task, logger)
-                    span.set_attribute("drained_callbacks", drained)
+                    span.set_attribute("merge.drained_callbacks", drained)
                     return
 
-                span.set_attribute("drained_callbacks", drained)
+                span.set_attribute("merge.drained_callbacks", drained)
                 logger.info(
                     f"[{callback_id}] Merged {drained} callback(s) in "
                     f"{time.time() - lock_time:.2f}s"
