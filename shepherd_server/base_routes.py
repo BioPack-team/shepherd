@@ -414,7 +414,12 @@ async def callback(
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
     with tracer.start_as_current_span("callback", context=parent_ctx) as span:
+        kgraph = response["message"]["knowledge_graph"]
         span.set_attribute("callback_id", callback_id)
+        span.set_attribute("callback.results", len(response["message"]["results"]))
+        span.set_attribute("callback.kg_nodes", len(kgraph.get("nodes", {})))
+        span.set_attribute("callback.kg_edges", len(kgraph.get("edges", {})))
+        span.set_attribute("callback.payload_bytes", len(raw))
         span_carrier = {}
         inject(span_carrier)
         # add new task to merge callback response into original message
