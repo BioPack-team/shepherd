@@ -177,6 +177,29 @@ _SCHEMA_UPGRADES = (
     ),
 )
 
+
+def _ars_schema_statements():
+    """The ARS table DDL bundled with shepherd_utils (see ars/schema.sql).
+
+    Statements are split on the blank-line-then-CREATE boundary so each
+    executes separately; all are IF NOT EXISTS and safe to re-run. The
+    ``idx_ars_message_ref`` index doubles as the pre-flight marker for
+    whether this block has been applied.
+    """
+    import pathlib
+
+    sql = (
+        pathlib.Path(__file__).resolve().parent / "ars" / "schema.sql"
+    ).read_text()
+    # Drop comment lines FIRST: a ';' inside a comment must not split.
+    sql = "\n".join(
+        line for line in sql.splitlines() if not line.strip().startswith("--")
+    )
+    return [s.strip() for s in sql.split(";") if s.strip()]
+
+
+ARS_SCHEMA_MARKER_INDEX = "idx_ars_message_ref"
+
 # Arbitrary-but-fixed advisory lock id serializing the upgrades across the
 # whole fleet booting at once: IF NOT EXISTS alone still races when two
 # sessions both pass the existence check and try to create the same index.
@@ -195,17 +218,24 @@ async def apply_schema_upgrades() -> None:
         # and logged a PoolTimeout traceback on an otherwise healthy startup.
         # The check is a single indexed catalog read and does not serialize, so
         # the common "already applied" case now costs one query and no lock.
+        marker_names = [name for name, _ in _SCHEMA_UPGRADES] + [
+            ARS_SCHEMA_MARKER_INDEX
+        ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",
-            ([name for name, _ in _SCHEMA_UPGRADES],),
+            (marker_names,),
         )
         row = await cursor.fetchone()
-        if row is not None and row[0] == len(_SCHEMA_UPGRADES):
+        if row is not None and row[0] == len(marker_names):
             return
         await conn.execute(
             "SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_UPGRADE_LOCK_ID,)
         )
         for _, ddl in _SCHEMA_UPGRADES:
+            await conn.execute(ddl)
+        # Bring pre-ARS volumes up to date with the ars_* tables. Everything
+        # in the bundled DDL is IF NOT EXISTS, so this is free once applied.
+        for ddl in _ars_schema_statements():
             await conn.execute(ddl)
         await conn.commit()
 

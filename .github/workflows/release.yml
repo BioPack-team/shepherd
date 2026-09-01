@@ -51,6 +51,11 @@ jobs:
           - arax
           - arax_pathfinder
           - arax_rank
+          - ars_fanout
+          - ars_merge
+          - ars_notify
+          - ars_postprocess
+          - ars_watchdog
           - bte
           - bte_lookup
           - filter_analyses_top_n

@@ -33,7 +33,10 @@ services:
     # even though the comments in this file and shepherd_utils/config.py both
     # say the sum must stay under it. 300 restores the headroom the docs claim.
     # Adding a worker service? Re-do this arithmetic.
-    command: postgres -c max_connections=300
+    # 2026-09: +5 ARS workers (ars_fanout/merge/postprocess/watchdog/notify)
+    # at the default 10-max pool each pushed the worst case to ~290, so the
+    # cap moves to 400 to restore headroom.
+    command: postgres -c max_connections=400
     build:
       context: .
       dockerfile: shepherd_db/Dockerfile
@@ -429,6 +432,81 @@ services:
     build:
       context: .
       dockerfile: workers/sipr/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  ######### Translator ARS (hosted port of NCATSTranslator/Relay)
+  ars_fanout:
+    container_name: ars_fanout
+    build:
+      context: .
+      dockerfile: workers/ars_fanout/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_merge:
+    container_name: ars_merge
+    build:
+      context: .
+      dockerfile: workers/ars_merge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_postprocess:
+    container_name: ars_postprocess
+    build:
+      context: .
+      dockerfile: workers/ars_postprocess/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_watchdog:
+    container_name: ars_watchdog
+    build:
+      context: .
+      dockerfile: workers/ars_watchdog/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_notify:
+    container_name: ars_notify
+    build:
+      context: .
+      dockerfile: workers/ars_notify/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:

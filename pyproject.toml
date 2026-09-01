@@ -43,3 +43,7 @@ include = ["shepherd_utils*", "workers*", "shepherd_server*"]
 
 [tool.setuptools.package-data]
 shepherd_utils = ["*.yml"]
+# The ARS port bundles its upstream config verbatim: the blocklist, the
+# httpclients/inactive map (ars_config.yaml), the legacy URL fallbacks, and
+# the schema DDL applied by startup upgrades on pre-existing volumes.
+"shepherd_utils.ars" = ["blocklist.json", "*.yaml", "*.sql"]

@@ -100,3 +100,18 @@ services:
   sort_results_score:
     cpus: 1
     mem_limit: 5g
+  ars_fanout:
+    cpus: 1
+    mem_limit: 2g
+  ars_merge:
+    cpus: 2
+    mem_limit: 5g
+  ars_postprocess:
+    cpus: 2
+    mem_limit: 5g
+  ars_watchdog:
+    cpus: 0.5
+    mem_limit: 1g
+  ars_notify:
+    cpus: 0.5
+    mem_limit: 1g

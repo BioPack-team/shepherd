@@ -39,6 +39,12 @@ tracer = setup_tracer("shepherd-server")
 async def lifespan(app: FastAPI):
     """Handle db connection."""
     await initialize_db()
+    # Upsert the ARS actor registry (the tr_ara_*/tr_kp_* AppConfig.ready()
+    # equivalent). Mounted sub-apps don't get their own lifespan, so the ARS
+    # seeding runs here.
+    from shepherd_utils.ars.lifecycle import seed_registry
+
+    await seed_registry(logging.getLogger("shepherd.ars"))
     yield
     await shutdown_db()
 

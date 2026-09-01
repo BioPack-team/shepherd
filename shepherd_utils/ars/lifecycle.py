@@ -39,6 +39,33 @@ ARS_ACTOR = {
 MERGE_AGENT_NAME = "ars-ars-agent"
 
 
+async def seed_registry(task_logger: logging.Logger) -> None:
+    """Idempotently upsert the built-in actors + every registered app actor.
+
+    The Shepherd equivalent of the tr_ara_*/tr_kp_* AppConfig.ready() hooks
+    and the lazy DEFAULT/WORKFLOW/ARS actor creation. Run at server startup;
+    everything here is get_or_create, so concurrent boots converge.
+    """
+    from .registry_config import inactive_clients, seed_actor_specs
+
+    try:
+        await ensure_default_actor()
+        await ensure_workflow_actor()
+        await ensure_ars_actor()
+        inactive = inactive_clients()
+        for spec in seed_actor_specs():
+            try:
+                await ars_db.get_or_create_actor(spec, inactive_list=inactive)
+            except Exception as e:
+                task_logger.error(
+                    f"Failed to seed actor {spec['agent']['name']}: {e}"
+                )
+    except Exception as e:
+        # a seeding failure must never keep the server from starting; the
+        # lazy get_or_create paths cover the built-ins on first use
+        task_logger.error(f"ARS registry seeding failed: {e}")
+
+
 async def ensure_default_actor() -> Dict[str, Any]:
     actor, _ = await ars_db.get_or_create_actor(DEFAULT_ACTOR)
     return actor
