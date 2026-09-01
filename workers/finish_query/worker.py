@@ -32,8 +32,18 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
-CALLBACK_RETRIES = 3
+# Retries *after* the first attempt, so the total number of POSTs is
+# CALLBACK_ATTEMPTS. Kept deliberately small: this worker holds the entire
+# (potentially very large) decompressed response in memory for every second a
+# callback is in flight, and each attempt can burn CALLBACK_TIMEOUT seconds
+# before it even fails. A long retry budget therefore multiplies the worker's
+# peak memory residency far more than it improves delivery odds.
+CALLBACK_RETRIES = 1
+CALLBACK_ATTEMPTS = CALLBACK_RETRIES + 1
 CALLBACK_TIMEOUT = 120
+# 4xx codes that describe a *transient* condition and explicitly invite another
+# attempt, unlike the rest of the 4xx range. See ``_is_retryable``.
+RETRYABLE_CLIENT_ERROR_STATUS = frozenset({408, 429})
 # How much of a rejecting server's response body goes into the failure log. The
 # body is already in memory (we don't stream the response), but it can be an
 # arbitrarily large HTML error page, and this string is copied into the query's
@@ -86,6 +96,27 @@ def _describe_callback_failure(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"
 
 
+def _is_retryable(e: Exception) -> bool:
+    """Whether another attempt at this callback could plausibly succeed.
+
+    A 4xx means the receiver understood the request and rejected it, so sending
+    the same bytes again gets the same answer. Retrying is not merely useless
+    here: this worker keeps the whole payload resident for every second of
+    every attempt, so a doomed retry costs real memory on a worker whose peak
+    memory is what gets it OOM-killed. The exceptions are the 4xx codes that
+    signal a transient condition rather than a bad request.
+
+    Everything else -- 5xx, timeouts, connect/protocol failures, and any
+    exception we don't recognize -- stays retryable, so this narrows the retry
+    loop only where a retry is known to be pointless.
+    """
+    if isinstance(e, httpx.HTTPStatusError):
+        status = e.response.status_code
+        if 400 <= status < 500:
+            return status in RETRYABLE_CLIENT_ERROR_STATUS
+    return True
+
+
 def _append_log_entry(payload: bytes, entry: dict) -> bytes:
     """Return ``payload`` with ``entry`` appended to its trailing logs array.
 
@@ -117,6 +148,10 @@ async def send_callback(
     receiver that eventually gets the response can see the attempts that didn't
     make it.
 
+    Retries stop early on a failure ``_is_retryable`` rules out -- a payload the
+    receiver has rejected outright is not worth holding in memory for another
+    round trip.
+
     Returns True if the response was delivered.
     """
     headers = {"Content-Type": "application/json"}
@@ -129,10 +164,11 @@ async def send_callback(
     started = time.time()
     payload_size = len(message_bytes)
     delivered = False
+    retryable = True
     attempts = 0
     wait = 0.0
     backoff = 0.0
-    for attempt in range(1, CALLBACK_RETRIES + 1):
+    for attempt in range(1, CALLBACK_ATTEMPTS + 1):
         attempts = attempt
         attempt_start = time.time()
         try:
@@ -148,17 +184,18 @@ async def send_callback(
                 logger.info(
                     f"Sent response back to {callback_url} in {elapsed:.3f}s "
                     f"({len(message_bytes)} bytes, "
-                    f"attempt {attempt}/{CALLBACK_RETRIES})"
+                    f"attempt {attempt}/{CALLBACK_ATTEMPTS})"
                 )
                 delivered = True
                 break
         except Exception as e:
             elapsed = time.time() - attempt_start
             wait += elapsed
+            reason = _describe_callback_failure(e)
             failure = (
                 f"Failed to send callback to {callback_url} after {elapsed:.3f}s "
-                f"(attempt {attempt}/{CALLBACK_RETRIES}, "
-                f"{len(message_bytes)} bytes): {_describe_callback_failure(e)}"
+                f"(attempt {attempt}/{CALLBACK_ATTEMPTS}, "
+                f"{len(message_bytes)} bytes): {reason}"
             )
             logger.error(failure)
             span.add_event(
@@ -168,7 +205,15 @@ async def send_callback(
                     "callback.attempt_duration_ms": int(elapsed * 1000),
                 },
             )
-            if attempt < CALLBACK_RETRIES:
+            if not _is_retryable(e):
+                retryable = False
+                logger.error(
+                    f"Not retrying the callback to {callback_url}: {reason} is a "
+                    "client error, so an identical retry would be rejected the "
+                    "same way."
+                )
+                break
+            if attempt < CALLBACK_ATTEMPTS:
                 if len(message_bytes) <= RETRY_LOG_SPLICE_MAX_BYTES:
                     message_bytes = _append_log_entry(
                         message_bytes, _log_entry(failure)
@@ -181,7 +226,7 @@ async def send_callback(
     if not delivered:
         logger.error(
             f"Gave up sending callback to {callback_url} after "
-            f"{CALLBACK_RETRIES} attempts and {total:.3f}s. The response was "
+            f"{attempts} attempt(s) and {total:.3f}s. The response was "
             "not delivered."
         )
     elif attempts > 1:
@@ -195,6 +240,9 @@ async def send_callback(
     span.set_attribute("callback.wait_ms", int(wait * 1000))
     span.set_attribute("callback.backoff_ms", int(backoff * 1000))
     span.set_attribute("callback.attempts", attempts)
+    # False means we stopped before spending the budget because the receiver
+    # rejected the payload outright -- distinguishes "gave up" from "ran out".
+    span.set_attribute("callback.retryable", retryable)
     span.set_attribute("callback.payload_bytes", payload_size)
     span.set_attribute("callback.delivered", delivered)
     return delivered
