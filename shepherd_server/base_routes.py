@@ -35,6 +35,7 @@ from shepherd_utils.logger import (
     setup_logging,
 )
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.task_deadline import deadline_field, query_deadline
 
 setup_logging()
 
@@ -147,6 +148,15 @@ async def run_query(
             logger,
             target=target_name,
         )
+        # Stamp the whole-query deadline once, here, and let it ride along with
+        # the task from operation to operation. Workers check it as they pick a
+        # task up and wrap the query up instead of running work whose answer
+        # would land after the caller has stopped waiting.
+        deadline = query_deadline(query)
+        if deadline is not None:
+            logger.debug(
+                f"Query {query_id} has {deadline - time.time():.0f}s to finish."
+            )
         await add_task(
             target,
             {
@@ -156,6 +166,7 @@ async def run_query(
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
                 "metadata": json.dumps({}),
+                **deadline_field(deadline),
             },
             logger,
         )

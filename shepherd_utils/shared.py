@@ -27,6 +27,11 @@ from .db import initialize_db, save_logs
 from .heartbeat import Heartbeat
 from .logger import attach_query_handler, resolve_log_level, setup_logging
 from .reclaim import reclaim_orphaned
+from .task_deadline import (
+    TIMEOUT_STATUS,
+    carry_deadline,
+    seconds_overdue,
+)
 
 # Cap each per-stream duration queue so a stopped monitor can't OOM the broker.
 # 10k entries per stream is well above what we'd accumulate in a 30s drain
@@ -351,15 +356,17 @@ async def _terminate_task(
     ara_task: Tuple[str, dict],
     logger: logging.Logger,
     reason: str,
+    status: str = "ERROR",
 ) -> None:
-    """Terminally clear a message: ack+delete it and end its query with ERROR.
+    """Terminally clear a message: ack+delete it and end its query.
 
     Making a message terminal: ack + delete it (``mark_task_as_complete`` does
     ``XACK`` then ``XDEL``) so it leaves the PEL and the stream, and -- when we
-    can still identify the parent query -- route it to ``finish_query`` with an
-    ERROR status so the query ends cleanly instead of hanging, mirroring
-    ``handle_task_failure``. Shared by the "unprocessable message" and
-    "poison-pill / over-delivered" paths.
+    can still identify the parent query -- route it to ``finish_query`` so the
+    query ends cleanly instead of hanging, mirroring ``handle_task_failure``.
+    Shared by the "unprocessable message", "poison-pill / over-delivered" and
+    "past its deadline" paths; ``status`` is what ``finish_query`` records in
+    ``shepherd_brain`` and is what tells those cases apart afterwards.
     """
     msg_id = ara_task[0]
     fields = ara_task[1] if len(ara_task) > 1 and isinstance(ara_task[1], dict) else {}
@@ -376,8 +383,9 @@ async def _terminate_task(
                     "workflow": "[]",
                     "log_level": fields.get("log_level", 20),
                     "otel": fields.get("otel", "{}"),
-                    "status": "ERROR",
+                    "status": status,
                     "metadata": fields.get("metadata", "{}"),
+                    **carry_deadline(fields),
                 },
                 logger,
             )
@@ -415,6 +423,85 @@ async def _discard_unprocessable_task(
         logger,
         f"unprocessable: {reason}. Payload fields: {sorted(fields.keys())}",
     )
+
+
+# Streams whose tasks are never expired, however old their query is.
+#
+# ``finish_query`` *is* the wrap-up: expiring it would leave unset exactly the
+# state expiring is meant to settle, and a query would never end.
+# ``merge_message`` sits off the workflow chain -- its tasks are enqueued by the
+# /callback endpoint for work an upstream service has already done and paid for,
+# and dropping one would strand that callback in the ready index rather than
+# saving anything.
+_DEADLINE_EXEMPT_STREAMS = frozenset({"finish_query", "merge_message"})
+
+
+async def _expire_task(
+    stream: str,
+    group: str,
+    ara_task: Tuple[str, dict],
+    logger: logging.Logger,
+    overdue: float,
+) -> None:
+    """Wrap a query up instead of running an operation nobody is waiting for.
+
+    The caller stopped waiting when the query passed its budget (see
+    ``shepherd_utils.task_deadline``), so running this operation would spend a
+    worker slot on an answer that can't be delivered -- and every operation
+    after it would do the same. Instead the query finishes the ordinary way:
+    ``finish_query`` sets its terminal state in Postgres, reaps its callback
+    rows, saves its logs and POSTs whatever was gathered to the callback URL, so
+    the databases end up exactly as they do for any completed query, with a
+    ``TIMEOUT`` status recording why the response is partial.
+
+    The explanation is logged and flushed to the query's own log list *before*
+    the wrap-up is enqueued: ``finish_query`` reads those logs into the response
+    it delivers, and it may well pick the task up before this coroutine returns.
+    """
+    fields = ara_task[1] if len(ara_task) > 1 and isinstance(ara_task[1], dict) else {}
+    response_id = fields.get("response_id")
+    reason = (
+        f"query exceeded its time budget {overdue:.1f}s ago; skipping the "
+        f"{stream} operation and returning what has been gathered so far"
+    )
+
+    async def _flush_logs() -> None:
+        if not response_id:
+            return
+        try:
+            await save_logs(response_id, logger)
+        except Exception as e:
+            logger.error(f"Failed to save logs for timed-out query: {e}")
+
+    logger.warning(f"Query timed out: {reason}.")
+    await _flush_logs()
+    await _terminate_task(stream, group, ara_task, logger, reason, TIMEOUT_STATUS)
+    # ``logger`` is this query's own logger, and what _terminate_task logged is
+    # still sitting in its handler. Nothing else will run for this query, so
+    # flush again rather than leaving the entry queued for a flush that never
+    # comes.
+    await _flush_logs()
+
+
+async def _handled_as_expired(
+    stream: str,
+    group: str,
+    ara_task: Tuple[str, dict],
+    logger: logging.Logger,
+) -> bool:
+    """Whether this task's query is past its deadline (and has been wrapped up).
+
+    Tasks with no deadline -- an exempt stream, a payload from a server that
+    predates the field, or a deployment with the budget disabled -- are never
+    expired, so this is a no-op unless a deadline says otherwise.
+    """
+    if stream in _DEADLINE_EXEMPT_STREAMS:
+        return False
+    overdue = seconds_overdue(ara_task[1] if len(ara_task) > 1 else None)
+    if overdue <= 0:
+        return False
+    await _expire_task(stream, group, ara_task, logger, overdue)
+    return True
 
 
 class TaskSlots:
@@ -575,6 +662,12 @@ async def get_tasks(
                     )
                     task_limiter.release_slot()
                     continue
+                # Reclaim can hand back a message that has been sitting in a
+                # dead consumer's PEL for a while, so this is exactly where a
+                # query is most likely to have outlived its budget.
+                if await _handled_as_expired(stream, group, ara_task, task_logger):
+                    task_limiter.release_slot()
+                    continue
                 # Dispatching real work: count it as in-flight until the worker
                 # releases the slot in its finally.
                 task_limiter.dispatch()
@@ -607,6 +700,12 @@ async def get_tasks(
                     worker_logger,
                     f"could not build context for delivered task: {e}",
                 )
+                task_limiter.release_slot()
+                continue
+            # The query may have run out of budget while this task waited its
+            # turn in the stream (or while an earlier operation ran long). Wrap
+            # it up rather than starting work whose answer arrives too late.
+            if await _handled_as_expired(stream, group, ara_task, task_logger):
                 task_limiter.release_slot()
                 continue
             # send the task to a async background task
@@ -647,6 +746,9 @@ async def wrap_up_task(
             "log_level": task[1].get("log_level", 20),
             "otel": task[1]["otel"],
             "metadata": task[1]["metadata"],
+            # The budget is measured from intake, so it travels with the query
+            # rather than restarting at each operation.
+            **carry_deadline(task[1]),
         },
         logger,
     )
@@ -677,6 +779,7 @@ async def handle_task_failure(
             "otel": task[1]["otel"],
             "status": "ERROR",
             "metadata": task[1]["metadata"],
+            **carry_deadline(task[1]),
         },
         logger,
     )
