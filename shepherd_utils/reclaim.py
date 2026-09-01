@@ -52,10 +52,13 @@ PER_STREAM_MIN_IDLE_SEC: Dict[str, int] = {
     # Pathfinding runs in a process pool bounded by pool_task_timeout_sec
     # (300s), so no legitimate task can outlive that; the floor sits just above.
     "arax.pathfinder": 360,
+    # Scoring runs in a process pool bounded by score_paths_task_timeout_sec
+    # (210s), so the floor sits just above that -- same shape as the lookup
+    # workers, whose ceiling is the identical 210s lookup_timeout.
+    "score_paths": 240,
     # Medium-duration workers.
     "arax.rank": 60,
     "merge_message": 60,
-    "score_paths": 60,
     "example.score": 30,
     # finish_query sends the async callback, which retries with backoff and can
     # legitimately run for minutes against a slow callback endpoint (httpx
