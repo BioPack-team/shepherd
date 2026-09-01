@@ -166,6 +166,22 @@ class Settings(BaseSettings):
     reclaim_interval_sec: int = 10
     reclaim_max_batch: int = 50
 
+    # Whole-query wall-clock budget, in seconds. The ARS and the other external
+    # callers stop waiting for a Shepherd query after ~5 minutes, and the
+    # synchronous /query endpoint gives up around the same point, so work done
+    # past this is work nobody receives -- it only takes worker slots (and
+    # process-pool children) away from queries that can still be answered. Each
+    # query is stamped with an absolute deadline at intake and it travels with
+    # the task; a worker that picks up a task whose query is past it skips the
+    # operation and routes the query straight to finish_query, which settles
+    # its state in Postgres, reaps its callbacks, saves its logs and delivers
+    # whatever was gathered. A client asking to wait longer (TRAPI
+    # parameters.timeout) is not cut short -- the larger of the two wins. Set to
+    # 0 to disable the deadline entirely (the previous behavior: tasks run
+    # however old they are, and only the monitor's abandoned-query reaper --
+    # monitor_abandoned_query_sec -- eventually settles the row).
+    query_timeout_sec: float = 300.0
+
     # Poison-pill circuit breaker. A task that keeps killing its worker before it
     # can ack (e.g. a payload so large that decoding/sorting it trips the cgroup
     # OOM killer -- an uncatchable SIGKILL that no in-process try/except can turn
