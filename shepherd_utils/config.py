@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     postgres_pool_timeout: float = 5.0
     # Per-process Postgres pool bounds. Every container (server + each worker)
     # holds its own pool, so the fleet-wide ceiling is (number of containers x
-    # max size) and must stay under Postgres's max_connections (300 in
+    # max size) and must stay under Postgres's max_connections (200 in
     # compose.yml). The server fields all client HTTP traffic (sync-query
     # status polling, /callback lookups) and is the component that exhausts
     # its pool first under load, so compose.yml/Helm give it a larger pool via
