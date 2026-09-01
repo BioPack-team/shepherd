@@ -1,0 +1,75 @@
+---
+# See also existing python-code style configuration files:
+#
+#   deploy/settings.py
+#   tr_sys/tr_sys/settings.py
+#
+httpclients:
+# Maps inforesid to various attributes necessary for making a service call.
+#
+# What is infores id?  It is a registered of identities in Translator for identifying services (and a few other things):
+#     https://docs.google.com/spreadsheets/d/1Ak1hRqlTLr1qa-7O0s5bqeTHukj9gSLQML1-lg6xIHM/edit?pli=1#gid=293462374
+#
+  infores:aragorn:
+    # https://aragorn.renci.org/1.2
+    endpoint: asyncquery 
+    params:
+  infores:arax:
+    endpoint: asyncquery 
+    params:
+  infores:biothings-explorer:
+    endpoint: asyncquery 
+    params:
+  infores:shepherd-aragorn:
+    endpoint: asyncquery
+    params:
+  infores:shepherd-arax:
+    endpoint: asyncquery
+    params:
+  infores:shepherd-bte:
+    endpoint: asyncquery
+    params:
+  infores:improving-agent:
+    endpoint: query 
+    params:
+  infores:unsecret-agent:
+    endpoint: query 
+    params:
+  infores:workflow-runner:
+    endpoint: query 
+    params:
+  infores:cqs:
+    endpoint: asyncquery
+    params:
+  infores:automat-cam-kp:
+    endpoint: query 
+    params: limit=100
+  infores:connections-hypothesis:
+    endpoint: query 
+    params:
+  infores:cohd:
+    endpoint: query 
+    params:
+  infores:genetics-data-provider:
+    endpoint: query 
+    params:
+  infores:multiomics-clinicaltrials:
+    endpoint: query
+    params:
+  infores:multiomics-drugapprovals:
+    endpoint: query
+    params:
+  infores:molepro:
+    endpoint: query 
+    params:
+  infores:openpredict:
+    endpoint: query 
+    params:
+  infores:text-mining-provider-targeted:
+    endpoint: query
+    params:
+
+inactive_clients:
+  - infores:aragorn-ranker-exp
+  - infores:tr_ara_ncats
+  - infores:tr_ara_wfr

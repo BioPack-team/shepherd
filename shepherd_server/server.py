@@ -18,6 +18,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from shepherd_server.aras.aragorn import ARAGORN
 from shepherd_server.aras.arax import ARAX
+from shepherd_server.aras.ars import ARS
 from shepherd_server.aras.bte import BTE
 from shepherd_server.aras.sipr import SIPR
 from shepherd_server.base_routes import base_router
@@ -52,6 +53,8 @@ APP.include_router(base_router, prefix="")
 
 APP.mount("/aragorn", ARAGORN)
 APP.mount("/arax", ARAX)
+# The Translator ARS surface (hosted port of NCATSTranslator/Relay)
+APP.mount("/ars", ARS)
 APP.mount("/bte", BTE)
 APP.mount("/sipr", SIPR)
 
