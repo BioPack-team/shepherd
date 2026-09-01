@@ -625,7 +625,7 @@ async def get_running_messages(window_sec: float) -> List[Dict[str, Any]]:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             """
-            SELECT m.id, m.ts, m.params, g.name
+            SELECT m.id, m.ts, m.params, g.name, m.ref
             FROM ars_message m
             JOIN ars_actor a ON a.id = m.actor
             JOIN ars_agent g ON g.id = a.agent
@@ -636,8 +636,34 @@ async def get_running_messages(window_sec: float) -> List[Dict[str, Any]]:
         )
         rows = await cur.fetchall()
     return [
-        {"id": r[0], "ts": r[1], "params": r[2], "agent_name": r[3]} for r in rows
+        {"id": r[0], "ts": r[1], "params": r[2], "agent_name": r[3], "ref": r[4]}
+        for r in rows
     ]
+
+
+async def purge_old_message_data(retention_days: int) -> int:
+    """Null out payload copies for old, non-retained, terminal messages.
+
+    Upstream has no purge job (the retain flag is honored by out-of-band
+    cleanup); this is Shepherd's equivalent for the durable bytea copies.
+    Row metadata is kept for reports/latest_pk. Returns rows purged.
+    """
+    if retention_days <= 0:
+        return 0
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            UPDATE ars_message SET data = NULL
+            WHERE data IS NOT NULL
+              AND retain = FALSE
+              AND status IN ('D', 'S', 'E', 'U')
+              AND updated_at < NOW() - make_interval(days => %s)
+            """,
+            (retention_days,),
+        )
+        purged = cur.rowcount or 0
+        await conn.commit()
+    return purged
 
 
 # ---------------------------------------------------------------------------

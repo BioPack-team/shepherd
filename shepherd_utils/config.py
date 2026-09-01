@@ -280,7 +280,8 @@ class Settings(BaseSettings):
     # staging / testing.
     tr_env: str = "production"
     # TRAPI version filter for SmartAPI discovery, upstream env TR_VER.
-    tr_ver: str = "1.5.0"
+    # Empty means no version filter (upstream leaves TR_VER unset -> None).
+    tr_ver: str = ""
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
     tr_annotator: str = "https://biothings.ncats.io/curie"
     tr_appraise: str = "https://answerappraiser.ci.transltr.io/get_appraisal"

@@ -205,6 +205,8 @@ async def submit(request: Request) -> Response:
             "ars.fanout",
             {
                 "parent_pk": str(message["id"]),
+                # query_id keys the shared task-context builder + log store
+                "query_id": str(message["id"]),
                 "log_level": resolve_log_level(settings.log_level),
                 "otel": "{}",
             },
@@ -452,6 +454,7 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
                             "parent_pk": str(mesg["ref"]),
                             "child_pk": str(key),
                             "agent_name": agent_name,
+                            "query_id": str(mesg["ref"]),
                             "otel": "{}",
                         },
                         logger,

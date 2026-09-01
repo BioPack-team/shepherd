@@ -64,6 +64,7 @@ async def notify_subscribers(
             "ars.notify",
             {
                 "message_pk": str(message_row["id"]),
+                "query_id": str(message_row["id"]),
                 "code": str(message_row.get("code", 200)),
                 "fields": json.dumps(fields) if fields is not None else "null",
                 "otel": "{}",
