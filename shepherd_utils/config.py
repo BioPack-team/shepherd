@@ -230,6 +230,14 @@ class Settings(BaseSettings):
     # POOL_TASK_TIMEOUT_SEC; 0 disables the timeout.
     pool_task_timeout_sec: float = 300.0
 
+    # score_paths gets a tighter ceiling than the shared default: scoring runs
+    # at the tail of a query whose lookups were already bounded by
+    # lookup_timeout, so a scoring that outlives that budget is past the point
+    # of being useful to the client. Matching the two keeps the worst case for
+    # a single query's scoring stage predictable. Per-Deployment override via
+    # SCORE_PATHS_TASK_TIMEOUT_SEC; 0 disables the timeout.
+    score_paths_task_timeout_sec: float = 210.0
+
     # Recycle each process-pool child after this many tasks. A child that once
     # processed a very large message keeps that peak RSS for its whole life
     # (freed memory isn't fully returned to the OS), so long-lived children

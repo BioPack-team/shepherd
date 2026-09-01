@@ -127,9 +127,9 @@ single large pod. On Kubernetes the memory `limit` (OOMKilled + restart) plus
 regular rollouts already recycle pods, so leaked-resource cleanup comes for free
 — add an RSS-based `livenessProbe` only if the monitor shows OOMKills in
 practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
-`aragorn_score`, `aragorn_omnicorp`) size their process/thread pools from the
-in-code default, so raising `TASK_LIMIT` for those only deepens the intake queue
-rather than adding parallelism.
+`aragorn_score`, `aragorn_omnicorp`) size their process pools from the in-code
+default, so raising `TASK_LIMIT` for those only deepens the intake queue rather
+than adding parallelism.
 
 ### Message Broker Streams
 
