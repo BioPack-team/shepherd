@@ -17,6 +17,7 @@ from shepherd_server.base_routes import (
     QueryIntakeError,
     apply_query_status,
     query_status,
+    query_status_code,
     run_sync_query,
 )
 
@@ -162,14 +163,24 @@ async def test_query_returns_200_for_a_healthy_query(mocker):
     assert "status" not in _body(response)
 
 
-@pytest.mark.parametrize("status", ["ERROR", "TIMEOUT", "Abandoned: no completion"])
+@pytest.mark.parametrize(
+    "status,code",
+    [
+        # An operation failed: a genuine internal error.
+        ("ERROR", 500),
+        # Out of budget, or reaped without ever completing: the work behind
+        # Shepherd didn't finish in time.
+        ("TIMEOUT", 504),
+        ("Abandoned: no completion within budget", 504),
+    ],
+)
 @pytest.mark.asyncio
-async def test_query_returns_an_error_code_for_a_failed_query(mocker, status):
+async def test_query_returns_the_code_for_how_it_failed(mocker, status, code):
     _patch_sync_query(
         mocker, _row(state="COMPLETED", status=status), response={"message": {}}
     )
     response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
-    assert response.status_code == 500
+    assert response.status_code == code
     # The body still says which kind of failure it was.
     assert _body(response)["status"] == "Error"
     assert status in _body(response)["description"]
@@ -190,17 +201,33 @@ async def test_query_returns_an_error_code_when_it_times_out(mocker):
     response = await run_sync_query(
         ARATargetEnum.ARAX, {"message": {}, "parameters": {"timeout": 0}}
     )
-    assert response.status_code == 500
+    assert response.status_code == 504
     assert _body(response)["status"] == "TIMEOUT"
 
 
 @pytest.mark.asyncio
-async def test_query_returns_an_error_code_when_intake_fails(mocker):
+async def test_query_returns_unavailable_when_intake_fails(mocker):
+    """The query was never accepted, so the caller can retry it as-is."""
     mocker.patch(
         "shepherd_server.base_routes.run_query",
         new_callable=mocker.AsyncMock,
         side_effect=QueryIntakeError("datastore unavailable"),
     )
     response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
-    assert response.status_code == 500
+    assert response.status_code == 503
     assert "datastore unavailable" in _body(response)["description"]
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [
+        (None, 200),
+        ("OK", 200),
+        ("ERROR", 500),
+        ("TIMEOUT", 504),
+        ("Abandoned: no completion within budget", 504),
+        ("something nobody writes today", 500),
+    ],
+)
+def test_query_status_code_mapping(status, code):
+    assert query_status_code(status) == code

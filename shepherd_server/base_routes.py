@@ -35,7 +35,11 @@ from shepherd_utils.logger import (
     setup_logging,
 )
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.task_deadline import deadline_field, query_deadline
+from shepherd_utils.task_deadline import (
+    TIMEOUT_STATUS,
+    deadline_field,
+    query_deadline,
+)
 
 setup_logging()
 
@@ -48,13 +52,17 @@ base_router = APIRouter()
 # abandoned, or times out.
 TERMINAL_QUERY_STATES = {"COMPLETED", "ABANDONED"}
 OK_QUERY_STATUS = "OK"
-# What /query answers with once a query it accepted has failed. TRAPI 1.5
-# documents 200, 400, 429, 500 and 501 for this operation, so every
-# post-intake failure -- an operation that errored, a query that ran out of
-# budget, a response that isn't there -- reports the spec's InternalServerError
-# rather than a more precise code (504) the schema doesn't allow. Which of
-# those it was is in the response's own status/description.
+# The status prefix the janitor writes when a query never completed within its
+# budget (see the ABANDONED update in shepherd_utils.db).
+ABANDONED_STATUS_PREFIX = "abandoned"
+# What /query answers with for each way a query can fail. TRAPI 1.5 only
+# documents 200/400/429/500/501 for this operation, but a caller is better
+# served by the code that actually describes what happened: a query that ran
+# out of time is not an internal error, and one that was never accepted because
+# the datastore was unavailable is worth retrying.
 QUERY_ERROR_CODE = 500
+QUERY_TIMEOUT_CODE = 504
+QUERY_UNAVAILABLE_CODE = 503
 
 
 class QueryIntakeError(Exception):
@@ -199,6 +207,21 @@ async def run_query(
     return query_id, response_id, logger
 
 
+def query_status_code(status: Optional[str]) -> int:
+    """The HTTP code describing how a query ended, from its stored status.
+
+    A query that ran out of its budget (``TIMEOUT``) or was reaped without ever
+    completing (``Abandoned: ...``) is a gateway timeout: Shepherd is fine, the
+    work behind it didn't finish in time. Anything else non-OK is an operation
+    that failed, which is a genuine internal error.
+    """
+    if not status or status == OK_QUERY_STATUS:
+        return 200
+    if status == TIMEOUT_STATUS or status.lower().startswith(ABANDONED_STATUS_PREFIX):
+        return QUERY_TIMEOUT_CODE
+    return QUERY_ERROR_CODE
+
+
 def apply_query_status(response: dict, status: Optional[str]) -> None:
     """Stamp a non-OK query status onto the TRAPI response, in place.
 
@@ -231,7 +254,7 @@ async def run_sync_query(
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
-            status_code=QUERY_ERROR_CODE,
+            status_code=QUERY_UNAVAILABLE_CODE,
         )
     start = time.time()
     now = start
@@ -269,12 +292,7 @@ async def run_sync_query(
                 # checks the code (rather than parsing the payload for a status
                 # field) saw every failed query as a successful one.
                 return ORJSONResponse(
-                    content=response,
-                    status_code=(
-                        200
-                        if not status or status == OK_QUERY_STATUS
-                        else QUERY_ERROR_CODE
-                    ),
+                    content=response, status_code=query_status_code(status)
                 )
         else:
             # Debug, not warning: this fires every 0.5s while a query is still
@@ -286,7 +304,7 @@ async def run_sync_query(
     logger.error("Query timed out")
     return ORJSONResponse(
         content={"status": "TIMEOUT", "description": "Query timeout"},
-        status_code=QUERY_ERROR_CODE,
+        status_code=QUERY_TIMEOUT_CODE,
     )
 
 
