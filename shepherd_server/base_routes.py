@@ -43,6 +43,19 @@ tracer = setup_tracer("shepherd-server")
 
 base_router = APIRouter()
 
+# shepherd_brain.state/status (see shepherd_db/init_db.sql). A query is
+# inserted QUEUED/OK and only leaves that state when it finishes, is
+# abandoned, or times out.
+TERMINAL_QUERY_STATES = {"COMPLETED", "ABANDONED"}
+OK_QUERY_STATUS = "OK"
+# What /query answers with once a query it accepted has failed. TRAPI 1.5
+# documents 200, 400, 429, 500 and 501 for this operation, so every
+# post-intake failure -- an operation that errored, a query that ran out of
+# budget, a response that isn't there -- reports the spec's InternalServerError
+# rather than a more precise code (504) the schema doesn't allow. Which of
+# those it was is in the response's own status/description.
+QUERY_ERROR_CODE = 500
+
 
 class QueryIntakeError(Exception):
     """Raised when a query can't be accepted because its initial state could
@@ -195,7 +208,7 @@ def apply_query_status(response: dict, status: Optional[str]) -> None:
     query-level status -- but a body that claims nothing, or claims success for
     a query that failed, is corrected here.
     """
-    if not status or status == "OK":
+    if not status or status == OK_QUERY_STATUS:
         return
     current = response.get("status")
     if isinstance(current, str) and (
@@ -218,7 +231,7 @@ async def run_sync_query(
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
-            status_code=500,
+            status_code=QUERY_ERROR_CODE,
         )
     start = time.time()
     now = start
@@ -240,7 +253,8 @@ async def run_sync_query(
                         content={
                             "status": "ERROR",
                             "description": "Unable to get response",
-                        }
+                        },
+                        status_code=QUERY_ERROR_CODE,
                     )
                 logs = await get_logs(response_id, logger)
                 response["logs"] = logs
@@ -248,8 +262,20 @@ async def run_sync_query(
                 # failed -- a response an operation never got to write looks
                 # exactly like one that legitimately found nothing. Report it
                 # rather than handing back a body that only says "here you go".
-                apply_query_status(response, query_state[10])
-                return ORJSONResponse(content=response)
+                status = query_state[10]
+                apply_query_status(response, status)
+                # The body has said "status": "Error" since apply_query_status
+                # went in, but the HTTP code said 200 -- so a caller that
+                # checks the code (rather than parsing the payload for a status
+                # field) saw every failed query as a successful one.
+                return ORJSONResponse(
+                    content=response,
+                    status_code=(
+                        200
+                        if not status or status == OK_QUERY_STATUS
+                        else QUERY_ERROR_CODE
+                    ),
+                )
         else:
             # Debug, not warning: this fires every 0.5s while a query is still
             # in flight (the row just isn't COMPLETED yet) and would otherwise
@@ -258,7 +284,10 @@ async def run_sync_query(
         await asyncio.sleep(0.5)
 
     logger.error("Query timed out")
-    return ORJSONResponse(content={"status": "TIMEOUT", "description": "Query timeout"})
+    return ORJSONResponse(
+        content={"status": "TIMEOUT", "description": "Query timeout"},
+        status_code=QUERY_ERROR_CODE,
+    )
 
 
 async def run_async_query(
@@ -478,13 +507,6 @@ async def callback(
     # callback/query lookups -- is dropped on return.
     await save_logs(response_id, logger)
     return Response("Callback received.", 200)
-
-
-# shepherd_brain.state/status (see shepherd_db/init_db.sql) mapped onto the
-# TRAPI AsyncQueryStatusResponse vocabulary. A query is inserted QUEUED/OK and
-# only leaves that state when it finishes, is abandoned, or times out.
-TERMINAL_QUERY_STATES = {"COMPLETED", "ABANDONED"}
-OK_QUERY_STATUS = "OK"
 
 
 @base_router.get("/asyncquery_status/{qid}", status_code=200)

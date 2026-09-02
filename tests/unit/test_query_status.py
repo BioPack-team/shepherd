@@ -12,7 +12,13 @@ import logging
 
 import pytest
 
-from shepherd_server.base_routes import apply_query_status, query_status
+from shepherd_server.base_routes import (
+    ARATargetEnum,
+    QueryIntakeError,
+    apply_query_status,
+    query_status,
+    run_sync_query,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,3 +129,78 @@ def test_success_claimed_for_a_failed_query_is_corrected():
     response = {"message": {}, "status": "Success"}
     apply_query_status(response, "TIMEOUT")
     assert response["status"] == "Error"
+
+
+# --- /query ----------------------------------------------------------------
+#
+# The body has carried a TRAPI error status since apply_query_status went in,
+# but the HTTP code stayed 200, so a caller checking the code rather than
+# parsing the payload saw every failed query as a successful one.
+
+
+def _patch_sync_query(mocker, row, response=None):
+    mocker.patch(
+        "shepherd_server.base_routes.run_query",
+        new_callable=mocker.AsyncMock,
+        return_value=("qid", "response_id", logger),
+    )
+    mocker.patch(
+        "shepherd_server.base_routes.get_message",
+        new_callable=mocker.AsyncMock,
+        return_value=response,
+    )
+    _patch_state(mocker, row)
+
+
+@pytest.mark.asyncio
+async def test_query_returns_200_for_a_healthy_query(mocker):
+    _patch_sync_query(
+        mocker, _row(state="COMPLETED", status="OK"), response={"message": {}}
+    )
+    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    assert response.status_code == 200
+    assert "status" not in _body(response)
+
+
+@pytest.mark.parametrize("status", ["ERROR", "TIMEOUT", "Abandoned: no completion"])
+@pytest.mark.asyncio
+async def test_query_returns_an_error_code_for_a_failed_query(mocker, status):
+    _patch_sync_query(
+        mocker, _row(state="COMPLETED", status=status), response={"message": {}}
+    )
+    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    assert response.status_code == 500
+    # The body still says which kind of failure it was.
+    assert _body(response)["status"] == "Error"
+    assert status in _body(response)["description"]
+
+
+@pytest.mark.asyncio
+async def test_query_returns_an_error_code_when_the_response_is_missing(mocker):
+    _patch_sync_query(mocker, _row(state="COMPLETED", status="OK"), response=None)
+    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    assert response.status_code == 500
+    assert _body(response)["description"] == "Unable to get response"
+
+
+@pytest.mark.asyncio
+async def test_query_returns_an_error_code_when_it_times_out(mocker):
+    """The caller's own timeout elapsed with the query still in flight."""
+    _patch_sync_query(mocker, _row(state="QUEUED", status="OK"))
+    response = await run_sync_query(
+        ARATargetEnum.ARAX, {"message": {}, "parameters": {"timeout": 0}}
+    )
+    assert response.status_code == 500
+    assert _body(response)["status"] == "TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_query_returns_an_error_code_when_intake_fails(mocker):
+    mocker.patch(
+        "shepherd_server.base_routes.run_query",
+        new_callable=mocker.AsyncMock,
+        side_effect=QueryIntakeError("datastore unavailable"),
+    )
+    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    assert response.status_code == 500
+    assert "datastore unavailable" in _body(response)["description"]
