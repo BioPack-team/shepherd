@@ -281,6 +281,16 @@ class Settings(BaseSettings):
     # under pathological bursts; leftover ready callbacks are swept by the next
     # drain iteration. 0 disables the cap (fold everything ready in one pass).
     merge_max_fold: int = 25
+    # A merge that fails is retried by re-enqueueing its wake task. Space the
+    # retries out (exponential from merge_retry_backoff, capped at
+    # merge_retry_backoff_max) so a deterministic failure can't spin the worker,
+    # and after merge_max_attempts consecutive failures give up on the batch --
+    # discard those callbacks so the query merges the rest and finishes rather
+    # than retrying an unmergeable payload until it times out. 0 attempts
+    # disables the breaker (unbounded retries).
+    merge_max_attempts: int = 3
+    merge_retry_backoff: float = 1.0
+    merge_retry_backoff_max: float = 10.0
     # Cap on how many log entries are lifted out of a single callback message.
     # Subservices report their retrieval work in the TRAPI ``logs`` list they
     # post back, and those entries are folded into the query's log list. A
