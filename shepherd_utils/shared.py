@@ -893,10 +893,9 @@ def recursive_get_auxgraph_edges(
 
 def is_support_edge(edge) -> bool:
     """Checks if a given edge is a support edge."""
-    if "attributes" not in edge:
-        return False
-    for attribute in edge["attributes"]:
-        if attribute["attribute_type_id"] == "biolink:support_graphs":
+    # ``attributes`` is optional and may be absent or null.
+    for attribute in edge.get("attributes") or []:
+        if attribute.get("attribute_type_id") == "biolink:support_graphs":
             return True
     return False
 
@@ -980,21 +979,28 @@ def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
         if existing is None:
             og_nodes[key] = value
             continue
-        # Overlapping node: merge fields onto the existing entry.
-        if value["name"]:
-            existing["name"] = value["name"]
-        new_categories = value["categories"]
+        # Overlapping node: merge fields onto the existing entry. ``name``,
+        # ``categories`` and ``attributes`` are all optional in TRAPI, and a
+        # subservice is free to omit one entirely or send it as null. Read
+        # every field with .get() so a node that leaves one out merges as an
+        # absent value instead of raising KeyError -- a single such node used
+        # to abort the whole batch merge and, because the failure path
+        # re-enqueues the wake task, wedged the query in a retry loop.
+        new_name = value.get("name")
+        if new_name:
+            existing["name"] = new_name
+        new_categories = value.get("categories")
         if new_categories:
-            existing_categories = existing["categories"]
+            existing_categories = existing.get("categories")
             if existing_categories:
                 existing["categories"] = list(
                     set(existing_categories) | set(new_categories)
                 )
             else:
                 existing["categories"] = new_categories
-        new_attrs = value["attributes"]
+        new_attrs = value.get("attributes")
         if new_attrs:
-            existing_attrs = existing["attributes"]
+            existing_attrs = existing.get("attributes")
             if existing_attrs:
                 existing["attributes"] = combine_unique_dicts(
                     existing_attrs, new_attrs, logger
@@ -1014,10 +1020,11 @@ def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
                 if aggregator_source not in sources:
                     sources.append(aggregator_source)
             continue
-        # Overlapping edge: merge attributes and sources.
-        new_attrs = value["attributes"]
+        # Overlapping edge: merge attributes and sources. Same as for nodes,
+        # read optional fields with .get() rather than subscripting.
+        new_attrs = value.get("attributes")
         if new_attrs:
-            existing_attrs = existing["attributes"]
+            existing_attrs = existing.get("attributes")
             if existing_attrs:
                 existing["attributes"] = combine_unique_dicts(
                     existing_attrs, new_attrs, logger
@@ -1025,9 +1032,9 @@ def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
             else:
                 existing["attributes"] = new_attrs
 
-        new_sources = value["sources"]
+        new_sources = value.get("sources")
         if new_sources:
-            existing_sources = existing["sources"]
+            existing_sources = existing.get("sources")
             if existing_sources:
                 # TODO: there might need to be some sort of upstream resource id merging to do past this?
                 existing["sources"] = combine_unique_dicts(
