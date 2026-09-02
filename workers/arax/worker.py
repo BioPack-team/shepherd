@@ -21,7 +21,7 @@ STREAM = "arax"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
-ARAX_TIMEOUT = 270
+ARAX_TIMEOUT = 300
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 # How much of a failing ARAX response body goes into the error. The body of a
