@@ -90,6 +90,39 @@ async def test_run_async_lookup_returns_500_when_post_raises(redis_mock, mocker)
     assert out.success is False
     assert out.status_code == 500
     assert "boom" in out.error
+    assert out.in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_run_async_lookup_read_timeout_is_in_flight(redis_mock, mocker):
+    """A read timeout means the submission was sent but not ACKed: the service
+    may still deliver the callback, so the response is flagged in_flight."""
+    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+
+    client = mocker.Mock()
+    client.timeout.read = 100.0
+    client.post = mocker.AsyncMock(side_effect=httpx.ReadTimeout(""))
+
+    out = await run_async_lookup(client, {"message": {}}, "qid", logger)
+    assert out.success is False
+    assert out.in_flight is True
+    # httpx timeouts stringify to nothing; the error should still say what happened.
+    assert "ReadTimeout" in out.error
+    assert "100.0s" in out.error
+
+
+@pytest.mark.asyncio
+async def test_run_async_lookup_connect_timeout_is_not_in_flight(redis_mock, mocker):
+    """A connect timeout never reached the service, so nothing is coming back."""
+    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+
+    client = mocker.Mock()
+    client.post = mocker.AsyncMock(side_effect=httpx.ConnectTimeout(""))
+
+    out = await run_async_lookup(client, {"message": {}}, "qid", logger)
+    assert out.success is False
+    assert out.in_flight is False
+    assert "ConnectTimeout" in out.error
 
 
 @pytest.mark.asyncio
@@ -217,6 +250,75 @@ async def test_bte_lookup_inferred_removes_failed_callback_ids(redis_mock, mocke
         return_value=[],
     )
     await bte_lookup(_make_task(), logger)
+    mock_remove.assert_awaited_once_with("failed-cb", logger)
+
+
+@pytest.mark.asyncio
+async def test_bte_lookup_inferred_keeps_in_flight_callback_ids(redis_mock, mocker):
+    """A submission that timed out waiting for the ACK keeps its callback id:
+    the retrieval service may still POST the results, and removing the id
+    would make the callback handler reject them with a 500."""
+    inferred_msg = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "a": {"ids": ["X:1"], "categories": ["biolink:Drug"]},
+                    "b": {"categories": ["biolink:Disease"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "a",
+                        "object": "b",
+                        "knowledge_type": "inferred",
+                        "predicates": ["biolink:treats"],
+                    }
+                },
+            }
+        },
+        "parameters": {"timeout": 5},
+    }
+    mocker.patch.object(
+        btel,
+        "get_message",
+        new_callable=mocker.AsyncMock,
+        return_value=inferred_msg,
+    )
+    mocker.patch.object(
+        btel,
+        "expand_bte_query",
+        return_value=[
+            {"message": {"query_graph": {}}, "parameters": {}, "submitter": "t"},
+            {"message": {"query_graph": {}}, "parameters": {}, "submitter": "t"},
+        ],
+    )
+    mocker.patch.object(
+        btel,
+        "run_async_lookup",
+        new_callable=mocker.AsyncMock,
+        side_effect=[
+            AsyncResponse(
+                status_code=500,
+                success=False,
+                callback_id="slow-ack-cb",
+                error="ReadTimeout",
+                in_flight=True,
+            ),
+            AsyncResponse(
+                status_code=500, success=False, callback_id="failed-cb", error="x"
+            ),
+        ],
+    )
+    mock_remove = mocker.patch.object(
+        btel, "remove_callback_id", new_callable=mocker.AsyncMock
+    )
+    mocker.patch.object(
+        btel,
+        "get_running_callbacks",
+        new_callable=mocker.AsyncMock,
+        return_value=[],
+    )
+    await bte_lookup(_make_task(), logger)
+    # Only the genuinely failed submission is dropped.
     mock_remove.assert_awaited_once_with("failed-cb", logger)
 
 

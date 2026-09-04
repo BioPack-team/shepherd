@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     # byte count; 0 (or unparseable) disables the limit.
     callback_max_request_size: str = "0"
     kg_retrieval_url: str = "http://host.docker.internal:8080/asyncquery"
+    # How long a lookup worker waits for the retrieval service to ACK an
+    # /asyncquery submission. This bounds only the acknowledgement, the
+    # results arrive later via callback.
+    kg_retrieval_submit_timeout: float = 100.0
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
     kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
     default_data_tier: int = 0
