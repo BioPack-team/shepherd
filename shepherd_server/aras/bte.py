@@ -1,4 +1,4 @@
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.openapi.docs import (
     get_swagger_ui_html,
 )
@@ -8,7 +8,7 @@ from shepherd_server.base_routes import (
     ARATargetEnum,
     base_router,
     callback,
-    default_input_query,
+    query_openapi_extra,
     run_async_query,
     run_sync_query,
 )
@@ -17,19 +17,15 @@ from shepherd_server.openapi import set_open_api_schema
 BTE = FastAPI(title="Shepherd BTE")
 
 
-@BTE.post("/query")
-async def sync_query(
-    query: dict = Body(..., examples=[default_input_query]),
-) -> Response:
-    response = await run_sync_query(ARATargetEnum.BTE, query)
+@BTE.post("/query", openapi_extra=query_openapi_extra)
+async def sync_query(request: Request) -> Response:
+    response = await run_sync_query(ARATargetEnum.BTE, request)
     return response
 
 
-@BTE.post("/asyncquery")
-async def async_query(
-    query: dict = Body(..., examples=[default_input_query]),
-) -> Response:
-    response = await run_async_query(ARATargetEnum.BTE, query)
+@BTE.post("/asyncquery", openapi_extra=query_openapi_extra)
+async def async_query(request: Request) -> Response:
+    response = await run_async_query(ARATargetEnum.BTE, request)
     return response
 
 

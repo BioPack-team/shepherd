@@ -1,4 +1,4 @@
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.openapi.docs import (
     get_swagger_ui_html,
 )
@@ -7,7 +7,7 @@ from starlette.responses import HTMLResponse
 from shepherd_server.base_routes import (
     ARATargetEnum,
     base_router,
-    default_input_query,
+    query_openapi_extra,
     run_async_query,
     run_sync_query,
 )
@@ -16,19 +16,15 @@ from shepherd_server.openapi import set_open_api_schema
 SIPR = FastAPI(title="Shepherd SIPR")
 
 
-@SIPR.post("/query")
-async def sync_query(
-    query: dict = Body(..., examples=[default_input_query]),
-) -> Response:
-    response = await run_sync_query(ARATargetEnum.SIPR, query)
+@SIPR.post("/query", openapi_extra=query_openapi_extra)
+async def sync_query(request: Request) -> Response:
+    response = await run_sync_query(ARATargetEnum.SIPR, request)
     return response
 
 
-@SIPR.post("/asyncquery")
-async def async_query(
-    query: dict = Body(..., examples=[default_input_query]),
-) -> Response:
-    response = await run_async_query(ARATargetEnum.SIPR, query)
+@SIPR.post("/asyncquery", openapi_extra=query_openapi_extra)
+async def async_query(request: Request) -> Response:
+    response = await run_async_query(ARATargetEnum.SIPR, request)
     return response
 
 
