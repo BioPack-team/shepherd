@@ -1,10 +1,10 @@
 """Path scoring module"""
 
 import asyncio
+import logging
+import os
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 
 import lmdb
 import numpy as np
@@ -13,10 +13,12 @@ from bmt import Toolkit
 from torch import nn
 
 from shepherd_utils.config import settings
+from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_embeddings
 from shepherd_utils.db import get_message_sync, save_message_sync
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 STREAM = "score_paths"
@@ -24,8 +26,27 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 4
 EMBEDDING_DIR = settings.pathfinder_embeddings_dir
+MODEL_WEIGHTS = "model_weights/squashbert_direct_3hop.pt"
+# 11 embeddings of 768 dims each (4 node names, 4 categories, 3 hop phrases) --
+# the MLP's input width, and the width of every feature row.
+FEATURE_DIM = 11 * 768
+# Analyses scored per forward pass. Peak memory is bounded by this rather than
+# by the message's size: one float32 batch (4096 x 8448 x 4 = 138 MB) plus the
+# float16 rows still pending in the chunk (69 MB), and both are freed at the end
+# of each chunk. Scoring the whole message in one pass instead is what
+# OOM-killed the pod on large messages -- a 387k-analysis message needed the
+# row list, its stacked copy and the float32 cast all live at once, 24 GiB in
+# total. The MLP is row-independent, so chunk size changes only the batching.
+SCORE_CHUNK_SIZE = 4096
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
+
+# Per-child scoring state, built on first use by ``_ensure_scoring_state``.
+# These live in the process-pool children, not the parent: the parent only
+# validates the data at startup and never scores anything itself.
+bmt = None
+embedding_env = None
+mlp = None
 
 
 def convert_path_to_components(source, target, path, knowledge_graph, logger):
@@ -125,8 +146,137 @@ def _probe_cache(env):
         return n, key.decode("utf-8", errors="replace")
 
 
-def score_paths(task, logger):
-    response_id = task[1]["response_id"]
+def _open_embeddings():
+    """Open the embeddings LMDB read-only.
+
+    ``lock=False`` on a read-only env is what lets every pool child map the same
+    database concurrently; the pages are shared through the OS page cache rather
+    than copied per child.
+    """
+    return lmdb.open(
+        EMBEDDING_DIR, readonly=True, lock=False, readahead=False, subdir=True
+    )
+
+
+def _build_mlp(logger):
+    """Build the scoring MLP and load its trained weights.
+
+    The weights are memory-mapped and assigned rather than copied, so the pool's
+    children share one 61 MB mapping instead of each allocating its own copy.
+    ``mmap=True`` hands back file-backed ``MAP_PRIVATE`` tensors; ``assign=True``
+    makes those tensors *be* the module's parameters instead of a destination to
+    copy into (the default would allocate fresh storage per child and undo the
+    sharing). Scoring only ever reads them -- the model is in ``eval`` mode under
+    ``inference_mode`` -- so nothing triggers a copy-on-write fault and the pages
+    stay shared for the life of the pod.
+
+    ``mmap=True`` needs a checkpoint in torch's zipfile format (the default since
+    torch 1.6). A checkpoint re-saved in the legacy format would raise, so fall
+    back to a plain load: that child then pays for its own copy, which is the
+    pre-mmap behaviour and strictly better than failing every task.
+    """
+    model = nn.Sequential(
+        nn.Linear(FEATURE_DIM, 1536),
+        nn.GELU(),
+        nn.LayerNorm(1536),
+        nn.Linear(1536, 1536),
+        nn.GELU(),
+        nn.LayerNorm(1536),
+        nn.Linear(1536, 1),
+    )
+    try:
+        ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu", mmap=True)
+        assign = True
+    except (RuntimeError, ValueError) as e:
+        logger.warning(
+            f"Could not memory-map {MODEL_WEIGHTS} ({e}); loading a private copy "
+            "of the weights instead. Every pool child will hold its own."
+        )
+        ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu")
+        assign = False
+    model.load_state_dict(
+        {k.removeprefix("net."): v for k, v in ckpt["model"].items()}, assign=assign
+    )
+    model.eval()
+    return model
+
+
+def _validate_scoring_data(logger) -> None:
+    """Fail fast at startup if the data the pool children need is missing.
+
+    The children do the actual loading, so without this an empty volume mount or
+    a missing checkpoint would surface only as every task failing individually.
+    The env opened here is closed again immediately -- the parent never scores.
+    """
+    env = _open_embeddings()
+    try:
+        count, sample = _probe_cache(env)
+    finally:
+        env.close()
+    logger.info(f"embeddings cache: {count} entries (sample key: {sample!r})")
+    if not os.path.exists(MODEL_WEIGHTS):
+        raise RuntimeError(f"model weights not found at {MODEL_WEIGHTS}")
+
+
+def _ensure_scoring_state(logger) -> None:
+    """Build this child's scoring state on first use, then reuse it.
+
+    Loaded lazily rather than through the pool's ``initializer`` so a failure
+    here (an unreadable LMDB, a corrupt checkpoint) surfaces as an ordinary task
+    failure with a traceback, instead of killing the child before it takes any
+    work and leaving the pool to rebuild itself in a loop. Each child pays this
+    once and amortizes it over ``pool_max_tasks_per_child`` tasks.
+
+    Two of the three are shared across children rather than duplicated: the
+    embeddings LMDB and the model weights are both file-backed mappings, so the
+    OS page cache serves every child from one copy (see ``_open_embeddings`` and
+    ``_build_mlp``). The biolink ``Toolkit`` is live Python objects and so is
+    genuinely per-child -- the one place pool size costs real memory, which is
+    why ``POOL_MAX_WORKERS`` exists for a memory-tight deployment.
+    """
+    global bmt, embedding_env, mlp
+    if mlp is not None:
+        return
+    # One intra-op thread per child. The pool is already sized to the pod's CPU
+    # allocation, so letting each child spin up a full torch thread pool
+    # oversubscribes that quota several times over and the children mostly end
+    # up contending with each other.
+    torch.set_num_threads(1)
+    bmt = Toolkit()
+    embedding_env = _open_embeddings()
+    mlp = _build_mlp(logger)
+    logger.debug(f"score_paths child {os.getpid()} loaded its scoring state.")
+
+
+def _score_chunk(rows, index, results):
+    """Score one chunk of feature rows and write the scores onto the analyses.
+
+    The rows are copied straight into a float32 batch rather than stacked as
+    float16 and cast afterwards, so only one array of the batch exists at a
+    time. float16 converts to float32 exactly, so this is the same input the
+    stack-then-cast path produced.
+
+    Returns ``(count, minimum, maximum, total)`` for the chunk, letting the
+    caller keep running statistics for the summary log line without holding
+    every score of a large message in a list.
+    """
+    features = np.empty((len(rows), FEATURE_DIM), dtype=np.float32)
+    for i, row in enumerate(rows):
+        features[i] = row
+    with torch.inference_mode():
+        logits = mlp(torch.from_numpy(features)).squeeze(-1)
+        scores = torch.sigmoid(logits).numpy()
+    for (result_ind, analysis_ind), score in zip(index, scores):
+        results[result_ind]["analyses"][analysis_ind]["score"] = float(score)
+    return (
+        len(scores),
+        float(scores.min()),
+        float(scores.max()),
+        float(scores.sum(dtype=np.float64)),
+    )
+
+
+def score_paths(response_id, logger):
     message = get_message_sync(response_id)
     try:
         paths = message["message"]["query_graph"]["paths"]
@@ -141,12 +291,38 @@ def score_paths(task, logger):
             f"Scoring {response_id}: {len(results)} results, "
             f"{total_analyses} analyses, {len(auxiliary_graphs)} aux graphs"
         )
-        feature_rows = []
-        embedding_index = []
+        chunk_rows = []
+        chunk_index = []
         skip_no_binding = 0
         skip_bad_path = 0
         skip_missing_emb = 0
         missing_samples = []
+        # Running totals for the summary lines. Scoring is interleaved with the
+        # feature build now, so the two timings are accumulated separately
+        # rather than measured as consecutive phases.
+        mlp_time = 0.0
+        scored = 0
+        score_min = float("inf")
+        score_max = float("-inf")
+        score_sum = 0.0
+
+        def flush_chunk():
+            """Score the pending rows, write them back, and free the chunk."""
+            nonlocal mlp_time, scored, score_min, score_max, score_sum
+            if not chunk_rows:
+                return
+            started = time.time()
+            count, lowest, highest, total = _score_chunk(
+                chunk_rows, chunk_index, results
+            )
+            mlp_time += time.time() - started
+            scored += count
+            score_min = min(score_min, lowest)
+            score_max = max(score_max, highest)
+            score_sum += total
+            chunk_rows.clear()
+            chunk_index.clear()
+
         t0 = time.time()
         with embedding_env.begin() as txn:
             for result_ind, result in enumerate(results):
@@ -196,11 +372,14 @@ def score_paths(task, logger):
                         analysis["score"] = 0.0
                         skip_missing_emb += 1
                         continue
-                    feature_rows.append(features)
-                    embedding_index.append((result_ind, analysis_ind))
-        build_time = time.time() - t0
+                    chunk_rows.append(features)
+                    chunk_index.append((result_ind, analysis_ind))
+                    if len(chunk_rows) >= SCORE_CHUNK_SIZE:
+                        flush_chunk()
+            flush_chunk()
+        build_time = time.time() - t0 - mlp_time
         skipped = skip_no_binding + skip_bad_path + skip_missing_emb
-        msg = f"Feature build: {len(feature_rows)}/{total_analyses} ready in {build_time:.1f}s"
+        msg = f"Feature build: {scored}/{total_analyses} ready in {build_time:.1f}s"
         if skipped:
             msg += (
                 f"; skipped {skipped} "
@@ -211,24 +390,11 @@ def score_paths(task, logger):
             if missing_samples:
                 msg += f"; missing keys e.g. {missing_samples}"
         logger.info(msg)
-        if feature_rows:
-            features = np.stack(feature_rows).astype(np.float32)
-            t0 = time.time()
-            with torch.inference_mode():
-                logits = mlp(torch.from_numpy(features)).squeeze(-1)
-                all_scores = torch.sigmoid(logits).numpy()
-            mlp_time = time.time() - t0
-
-            scores = []
-            for (r_idx, a_idx), s in zip(embedding_index, all_scores):
-                s = float(s)
-                results[r_idx]["analyses"][a_idx]["score"] = s
-                scores.append(s)
-
+        if scored:
             logger.info(
-                f"Scored {len(scores)} paths in {mlp_time:.1f}s; "
-                f"scores [{min(scores):.3f}, {max(scores):.3f}] "
-                f"mean {sum(scores) / len(scores):.3f}"
+                f"Scored {scored} paths in {mlp_time:.1f}s; "
+                f"scores [{score_min:.3f}, {score_max:.3f}] "
+                f"mean {score_sum / scored:.3f}"
             )
         else:
             logger.info("No paths to score")
@@ -251,46 +417,89 @@ def score_paths(task, logger):
                 logger.error(f"Failed to save a message into redis: {e}")
 
 
-async def process_task(task, parent_ctx, logger, limiter):
+def score_paths_task(response_id: str, log_level: int = logging.INFO) -> list[dict]:
+    """Process-pool entrypoint: load, score, and save entirely in the child.
+
+    Only the small ``response_id`` and the task's log level cross the process
+    boundary; the (potentially very large) message is read from Redis, scored,
+    and written back inside the child. That keeps the payload off the parent's
+    heap and -- more importantly -- keeps the feature build off the parent's
+    event loop. It used to run in a ``ThreadPoolExecutor``, where the path walk
+    is mostly pure Python and so holds the GIL: a few concurrent scorings could
+    starve the heartbeat past ``HEARTBEAT_TTL_SEC`` and get a live worker's
+    tasks reclaimed out from under it (matching the fix already applied to
+    arax_pathfinder / aragorn_score / arax_rank).
+
+    Returns this child's log records, already formatted and oldest-first, for
+    the parent to fold into the query's logs -- the child can't reach the
+    parent's query log handler itself.
+    """
+    # logging.getLogger hands back the same object for the whole life of the
+    # child, so attach a call-scoped handler and remove it in finally --
+    # otherwise handlers accumulate across the child's successive tasks and one
+    # query's logs leak into the next.
+    query_log_handler = QueryLogger().log_handler
+    logger = get_worker_logger(f"{STREAM}.worker.{os.getpid()}")
+    logger.setLevel(log_level)
+    logger.addHandler(query_log_handler)
+    try:
+        _ensure_scoring_state(logger)
+        score_paths(response_id, logger)
+        return query_log_handler.drain()
+    finally:
+        logger.removeHandler(query_log_handler)
+
+
+async def process_task(task, parent_ctx, logger, limiter, loop, pool):
+    """Process a given task and ACK in redis.
+
+    Scoring is CPU-bound, so it is dispatched to a process pool while the span,
+    wrap-up, and error handling stay shared with every other worker. The child's
+    log records come back with the result and are folded into this task's query
+    logger so they still reach the query's log list.
+    """
+
     async def _run(task, logger):
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(executor, partial(score_paths, task, logger))
+        response_id = task[1]["response_id"]
+        entries = await pool.run(
+            loop, score_paths_task, response_id, logger.getEffectiveLevel()
+        )
+        handler = get_query_handler(logger)
+        if handler is not None and entries:
+            handler.ingest(entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
 
 async def poll_for_tasks():
-    global bmt, mlp, embedding_env, executor
-    # Ensure the embeddings LMDB exists before we open it below (a first-run
+    loop = asyncio.get_running_loop()
+    # Ensure the embeddings LMDB exists before any child opens it (a first-run
     # local `docker compose up` starts with the volume-mounted directory empty).
     # No-op once present or when no download URL is configured (e.g. production,
-    # where the data is mounted out of band).
+    # where the data is mounted out of band). Downloading in the parent also
+    # keeps the children from racing each other for the same archive.
     ensure_pathfinder_embeddings(LOGGER)
-    bmt = Toolkit()
-    embedding_env = lmdb.open(
-        EMBEDDING_DIR, readonly=True, lock=False, readahead=False, subdir=True
+    _validate_scoring_data(LOGGER)
+    # Size the pool by the pod's actual CPU allocation (cgroup limit), not
+    # os.cpu_count() -- see aragorn_omnicorp.poll_for_tasks. Each child holds its
+    # own copy of the MLP plus a full message, so this also bounds peak memory.
+    # POOL_MAX_WORKERS overrides.
+    max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
+    LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    pool = ProcessPoolManager(
+        max_workers,
+        max_tasks_per_child=settings.pool_max_tasks_per_child,
+        name="score_paths process pool",
+        task_timeout=settings.score_paths_task_timeout_sec,
     )
-    count, sample = _probe_cache(embedding_env)
-    LOGGER.info(f"embeddings cache: {count} entries (sample key: {sample!r})")
-    mlp = nn.Sequential(
-        nn.Linear(11 * 768, 1536),
-        nn.GELU(),
-        nn.LayerNorm(1536),
-        nn.Linear(1536, 1536),
-        nn.GELU(),
-        nn.LayerNorm(1536),
-        nn.Linear(1536, 1),
-    )
-    ckpt = torch.load("model_weights/squashbert_direct_3hop.pt", map_location="cpu")
-    mlp.load_state_dict({k.removeprefix("net."): v for k, v in ckpt["model"].items()})
-    mlp.eval()
-    executor = ThreadPoolExecutor(max_workers=TASK_LIMIT)
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
+                STREAM, GROUP, CONSUMER, max_workers
             ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
+                asyncio.create_task(
+                    process_task(task, parent_ctx, logger, limiter, loop, pool)
+                )
         except asyncio.CancelledError:
             LOGGER.info("Poll loop cancelled, shutting down.")
         except Exception as e:

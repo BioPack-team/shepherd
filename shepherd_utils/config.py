@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     postgres_pool_timeout: float = 5.0
     # Per-process Postgres pool bounds. Every container (server + each worker)
     # holds its own pool, so the fleet-wide ceiling is (number of containers x
-    # max size) and must stay under Postgres's max_connections (300 in
+    # max size) and must stay under Postgres's max_connections (200 in
     # compose.yml). The server fields all client HTTP traffic (sync-query
     # status polling, /callback lookups) and is the component that exhausts
     # its pool first under load, so compose.yml/Helm give it a larger pool via
@@ -166,6 +166,22 @@ class Settings(BaseSettings):
     reclaim_interval_sec: int = 10
     reclaim_max_batch: int = 50
 
+    # Whole-query wall-clock budget, in seconds. The ARS and the other external
+    # callers stop waiting for a Shepherd query after ~5 minutes, and the
+    # synchronous /query endpoint gives up around the same point, so work done
+    # past this is work nobody receives -- it only takes worker slots (and
+    # process-pool children) away from queries that can still be answered. Each
+    # query is stamped with an absolute deadline at intake and it travels with
+    # the task; a worker that picks up a task whose query is past it skips the
+    # operation and routes the query straight to finish_query, which settles
+    # its state in Postgres, reaps its callbacks, saves its logs and delivers
+    # whatever was gathered. A client asking to wait longer (TRAPI
+    # parameters.timeout) is not cut short -- the larger of the two wins. Set to
+    # 0 to disable the deadline entirely (the previous behavior: tasks run
+    # however old they are, and only the monitor's abandoned-query reaper --
+    # monitor_abandoned_query_sec -- eventually settles the row).
+    query_timeout_sec: float = 300.0
+
     # Poison-pill circuit breaker. A task that keeps killing its worker before it
     # can ack (e.g. a payload so large that decoding/sorting it trips the cgroup
     # OOM killer -- an uncatchable SIGKILL that no in-process try/except can turn
@@ -230,6 +246,14 @@ class Settings(BaseSettings):
     # POOL_TASK_TIMEOUT_SEC; 0 disables the timeout.
     pool_task_timeout_sec: float = 300.0
 
+    # score_paths gets a tighter ceiling than the shared default: scoring runs
+    # at the tail of a query whose lookups were already bounded by
+    # lookup_timeout, so a scoring that outlives that budget is past the point
+    # of being useful to the client. Matching the two keeps the worst case for
+    # a single query's scoring stage predictable. Per-Deployment override via
+    # SCORE_PATHS_TASK_TIMEOUT_SEC; 0 disables the timeout.
+    score_paths_task_timeout_sec: float = 210.0
+
     # Recycle each process-pool child after this many tasks. A child that once
     # processed a very large message keeps that peak RSS for its whole life
     # (freed memory isn't fully returned to the OS), so long-lived children
@@ -257,6 +281,16 @@ class Settings(BaseSettings):
     # under pathological bursts; leftover ready callbacks are swept by the next
     # drain iteration. 0 disables the cap (fold everything ready in one pass).
     merge_max_fold: int = 25
+    # A merge that fails is retried by re-enqueueing its wake task. Space the
+    # retries out (exponential from merge_retry_backoff, capped at
+    # merge_retry_backoff_max) so a deterministic failure can't spin the worker,
+    # and after merge_max_attempts consecutive failures give up on the batch --
+    # discard those callbacks so the query merges the rest and finishes rather
+    # than retrying an unmergeable payload until it times out. 0 attempts
+    # disables the breaker (unbounded retries).
+    merge_max_attempts: int = 3
+    merge_retry_backoff: float = 1.0
+    merge_retry_backoff_max: float = 10.0
     # Cap on how many log entries are lifted out of a single callback message.
     # Subservices report their retrieval work in the TRAPI ``logs`` list they
     # post back, and those entries are folded into the query's log list. A

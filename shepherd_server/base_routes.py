@@ -35,12 +35,34 @@ from shepherd_utils.logger import (
     setup_logging,
 )
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.task_deadline import (
+    TIMEOUT_STATUS,
+    deadline_field,
+    query_deadline,
+)
 
 setup_logging()
 
 tracer = setup_tracer("shepherd-server")
 
 base_router = APIRouter()
+
+# shepherd_brain.state/status (see shepherd_db/init_db.sql). A query is
+# inserted QUEUED/OK and only leaves that state when it finishes, is
+# abandoned, or times out.
+TERMINAL_QUERY_STATES = {"COMPLETED", "ABANDONED"}
+OK_QUERY_STATUS = "OK"
+# The status prefix the janitor writes when a query never completed within its
+# budget (see the ABANDONED update in shepherd_utils.db).
+ABANDONED_STATUS_PREFIX = "abandoned"
+# What /query answers with for each way a query can fail. TRAPI 1.5 only
+# documents 200/400/429/500/501 for this operation, but a caller is better
+# served by the code that actually describes what happened: a query that ran
+# out of time is not an internal error, and one that was never accepted because
+# the datastore was unavailable is worth retrying.
+QUERY_ERROR_CODE = 500
+QUERY_TIMEOUT_CODE = 504
+QUERY_UNAVAILABLE_CODE = 503
 
 
 class QueryIntakeError(Exception):
@@ -147,6 +169,15 @@ async def run_query(
             logger,
             target=target_name,
         )
+        # Stamp the whole-query deadline once, here, and let it ride along with
+        # the task from operation to operation. Workers check it as they pick a
+        # task up and wrap the query up instead of running work whose answer
+        # would land after the caller has stopped waiting.
+        deadline = query_deadline(query)
+        if deadline is not None:
+            logger.debug(
+                f"Query {query_id} has {deadline - time.time():.0f}s to finish."
+            )
         await add_task(
             target,
             {
@@ -156,6 +187,7 @@ async def run_query(
                 "log_level": level_number,
                 "otel": json.dumps(span_carrier),
                 "metadata": json.dumps({}),
+                **deadline_field(deadline),
             },
             logger,
         )
@@ -175,6 +207,41 @@ async def run_query(
     return query_id, response_id, logger
 
 
+def query_status_code(status: Optional[str]) -> int:
+    """The HTTP code describing how a query ended, from its stored status.
+
+    A query that ran out of its budget (``TIMEOUT``) or was reaped without ever
+    completing (``Abandoned: ...``) is a gateway timeout: Shepherd is fine, the
+    work behind it didn't finish in time. Anything else non-OK is an operation
+    that failed, which is a genuine internal error.
+    """
+    if not status or status == OK_QUERY_STATUS:
+        return 200
+    if status == TIMEOUT_STATUS or status.lower().startswith(ABANDONED_STATUS_PREFIX):
+        return QUERY_TIMEOUT_CODE
+    return QUERY_ERROR_CODE
+
+
+def apply_query_status(response: dict, status: Optional[str]) -> None:
+    """Stamp a non-OK query status onto the TRAPI response, in place.
+
+    ``status``/``description`` are TRAPI Response fields, so a caller reading
+    the body it already parses can tell a failed query from an empty one. An
+    error the ARA reported itself is left alone -- it is more specific than the
+    query-level status -- but a body that claims nothing, or claims success for
+    a query that failed, is corrected here.
+    """
+    if not status or status == OK_QUERY_STATUS:
+        return
+    current = response.get("status")
+    if isinstance(current, str) and (
+        "error" in current.lower() or "fail" in current.lower()
+    ):
+        return
+    response["status"] = "Error"
+    response.setdefault("description", f"Query finished with status {status}.")
+
+
 async def run_sync_query(
     target: ARATargetEnum,
     query: dict = Body(..., examples=[default_input_query]),
@@ -187,7 +254,7 @@ async def run_sync_query(
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
-            status_code=500,
+            status_code=QUERY_UNAVAILABLE_CODE,
         )
     start = time.time()
     now = start
@@ -209,11 +276,24 @@ async def run_sync_query(
                         content={
                             "status": "ERROR",
                             "description": "Unable to get response",
-                        }
+                        },
+                        status_code=QUERY_ERROR_CODE,
                     )
                 logs = await get_logs(response_id, logger)
                 response["logs"] = logs
-                return ORJSONResponse(content=response)
+                # The stored status is the one thing that knows the query
+                # failed -- a response an operation never got to write looks
+                # exactly like one that legitimately found nothing. Report it
+                # rather than handing back a body that only says "here you go".
+                status = query_state[10]
+                apply_query_status(response, status)
+                # The body has said "status": "Error" since apply_query_status
+                # went in, but the HTTP code said 200 -- so a caller that
+                # checks the code (rather than parsing the payload for a status
+                # field) saw every failed query as a successful one.
+                return ORJSONResponse(
+                    content=response, status_code=query_status_code(status)
+                )
         else:
             # Debug, not warning: this fires every 0.5s while a query is still
             # in flight (the row just isn't COMPLETED yet) and would otherwise
@@ -222,7 +302,10 @@ async def run_sync_query(
         await asyncio.sleep(0.5)
 
     logger.error("Query timed out")
-    return ORJSONResponse(content={"status": "TIMEOUT", "description": "Query timeout"})
+    return ORJSONResponse(
+        content={"status": "TIMEOUT", "description": "Query timeout"},
+        status_code=QUERY_TIMEOUT_CODE,
+    )
 
 
 async def run_async_query(
@@ -414,7 +497,12 @@ async def callback(
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
     with tracer.start_as_current_span("callback", context=parent_ctx) as span:
-        span.set_attribute("callback_id", callback_id)
+        kgraph = response["message"]["knowledge_graph"]
+        span.set_attribute("callback.id", callback_id)
+        span.set_attribute("callback.results", len(response["message"]["results"]))
+        span.set_attribute("callback.kg_nodes", len(kgraph.get("nodes", {})))
+        span.set_attribute("callback.kg_edges", len(kgraph.get("edges", {})))
+        span.set_attribute("callback.payload_bytes", len(raw))
         span_carrier = {}
         inject(span_carrier)
         # add new task to merge callback response into original message
@@ -442,14 +530,44 @@ async def callback(
 @base_router.get("/asyncquery_status/{qid}", status_code=200)
 async def query_status(
     qid: str,
-) -> dict:
+):
     """Handle query status requests."""
-    # TODO: get query status from db
-    return {
-        "status": "Queued",
-        "description": "Query is currently waiting to be run.",
-        "logs": [],
-    }
+    logger = logging.getLogger("shepherd.query_status")
+    logger.setLevel(logging.INFO)
+    attach_query_handler(logger)
+    query_state = await get_query_state(qid, logger)
+    if query_state is None:
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
+
+    response_id = query_state[7]
+    state = query_state[9]
+    status = query_state[10]
+    description = query_state[11]
+    logs = await get_logs(response_id, logger) if response_id else []
+
+    if state not in TERMINAL_QUERY_STATES:
+        # Shepherd doesn't track a separate running state: a query is in the
+        # pipeline from the moment it is accepted until it finishes.
+        trapi_status = "Running"
+        default_description = "Query is currently running."
+    elif status == OK_QUERY_STATUS:
+        trapi_status = "Completed"
+        default_description = "Query has finished."
+    else:
+        # The query reached the end of the line with something other than OK
+        # (ERROR from a failed operation, TIMEOUT, ABANDONED). Previously this
+        # endpoint answered "Queued" for every query it was ever asked about,
+        # so a failed query and a healthy one looked exactly alike here.
+        trapi_status = "Failed"
+        default_description = f"Query finished with status {status}."
+
+    return ORJSONResponse(
+        content={
+            "status": trapi_status,
+            "description": description or default_description,
+            "logs": logs,
+        }
+    )
 
 
 @base_router.get("/response/{query_id}", status_code=200)

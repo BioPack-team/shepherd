@@ -46,6 +46,9 @@ STREAM = "merge_message"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
+# Task field carrying how many times this wake task's merge has failed in a
+# row. See _reenqueue_wake_task.
+MERGE_ATTEMPT_FIELD = "merge_attempt"
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
@@ -828,15 +831,81 @@ def merge_messages_by_id(
     return bool(merged)
 
 
-async def _reenqueue_wake_task(task, logger):
+async def _clear_batch(response_id, callback_ids, logger):
+    """Drop a processed batch from the ready index and callbacks table.
+
+    Every callback we attempted is removed (not just the ones that merged)
+    so a callback whose payload has vanished can't wedge the drain loop.
+    """
+    await asyncio.gather(
+        *(clear_ready_callback(response_id, cb, logger) for cb in callback_ids)
+    )
+    await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
+
+
+async def _handle_merge_failure(task, response_id, ready, logger):
+    """Back off and retry a failed merge, giving up on a batch that can't merge.
+
+    A merge failure re-enqueues the wake task and leaves the batch in the
+    ready index so nothing is dropped on a transient error. But a batch that
+    fails *deterministically* (a malformed callback the merge chokes on)
+    then fails again on every retry, and because the re-enqueue was
+    immediate and unbounded the query spun in a hot loop -- re-merging,
+    raising, re-enqueueing many times a second for as long as the query
+    lived, burning a pool slot and flooding the logs.
+
+    So: back off exponentially between retries, and once the same wake task
+    has failed ``merge_max_attempts`` times in a row, drop the batch it
+    keeps failing on (clearing it from the ready index and callbacks table)
+    and re-enqueue with the counter reset. The query loses those callbacks
+    -- which it was never going to merge anyway -- and goes on to merge the
+    rest and finish, instead of spinning until it times out.
+    """
+    try:
+        attempt = int(task[1].get(MERGE_ATTEMPT_FIELD, 0) or 0) + 1
+    except (TypeError, ValueError):
+        attempt = 1
+    max_attempts = settings.merge_max_attempts
+    if max_attempts > 0 and attempt >= max_attempts and ready:
+        logger.error(
+            f"Merge failed {attempt} times in a row for {response_id}; "
+            f"discarding {len(ready)} unmergeable callback(s): "
+            f"{', '.join(ready)}"
+        )
+        await _clear_batch(response_id, ready, logger)
+        # Counter reset: the poison batch is gone, so whatever else is
+        # ready deserves a clean run of attempts.
+        await _reenqueue_wake_task(task, logger)
+        return
+    backoff = min(
+        settings.merge_retry_backoff * (2 ** (attempt - 1)),
+        settings.merge_retry_backoff_max,
+    )
+    if backoff > 0:
+        await asyncio.sleep(backoff)
+    await _reenqueue_wake_task(task, logger, attempt)
+
+
+async def _reenqueue_wake_task(task, logger, attempt: int = 0):
     """Put a fresh merge_message wake task back on the stream.
 
     Used when this worker can't make progress on a callback right now (the
     query's lock is held by someone else, or a merge failed). The callback's
     entry in the ready index is left intact; the new wake task simply drives
     another drain attempt later, so callbacks are retried rather than dropped.
+
+    ``attempt`` carries the consecutive-failure count forward on the retry
+    path. Re-enqueueing mints a brand new stream message, so Redis'
+    ``times_delivered`` (what the reclaim poison-pill breaker reads) resets to
+    1 every time and can never trip here -- the count has to ride in the task
+    fields instead. It is dropped when 0 so the normal path enqueues exactly
+    the fields it always did.
     """
     fields = {k: v for k, v in task[1].items() if k != "_started_at"}
+    if attempt:
+        fields[MERGE_ATTEMPT_FIELD] = str(attempt)
+    else:
+        fields.pop(MERGE_ATTEMPT_FIELD, None)
     await add_task(STREAM, fields, logger)
 
 
@@ -859,17 +928,6 @@ async def poll_for_tasks():
         name="merge_message process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )
-
-    async def _clear_batch(response_id, callback_ids, logger):
-        """Drop a processed batch from the ready index and callbacks table.
-
-        Every callback we attempted is removed (not just the ones that merged)
-        so a callback whose payload has vanished can't wedge the drain loop.
-        """
-        await asyncio.gather(
-            *(clear_ready_callback(response_id, cb, logger) for cb in callback_ids)
-        )
-        await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
 
     def _ingest_merge_logs(logger, entries):
         """Fold the merge child's log records into this task's query logger.
@@ -894,8 +952,8 @@ async def poll_for_tasks():
         drained = 0
         try:
             with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
-                span.set_attribute("callback_id", callback_id)
-                span.set_attribute("response_id", response_id)
+                span.set_attribute("callback.id", callback_id)
+                span.set_attribute("response.id", response_id)
 
                 # Non-blocking: never wait on the lock. The worker that holds it
                 # drains the whole query, so a loser has nothing useful to add.
@@ -932,6 +990,9 @@ async def poll_for_tasks():
                     return
 
                 lock_time = time.time()
+                # Bound before the try: the failure handler reports the batch
+                # that failed, and get_ready_callbacks itself can raise.
+                ready: list[str] = []
                 # Drain the query to empty: one load + one save per iteration.
                 # Re-reading the set each pass sweeps up callbacks that arrived
                 # while we were merging, so the holder does all of this query's
@@ -959,11 +1020,14 @@ async def poll_for_tasks():
                         await refresh_lock(response_id, CONSUMER, 45000, logger)
                 except BrokenProcessPool:
                     # pool.run already swapped in a fresh executor; here we just
-                    # release the lock and re-enqueue so the callback is retried.
+                    # release the lock and retry the batch. Counted like any
+                    # other failure: a child that is OOM-killed (or timed out)
+                    # by one particular batch is killed by it again on every
+                    # retry, so that batch has to age out too.
                     logger.error(f"[{callback_id}] Process pool broken; re-enqueuing.")
                     await remove_lock(response_id, CONSUMER, logger)
-                    await _reenqueue_wake_task(task, logger)
-                    span.set_attribute("drained_callbacks", drained)
+                    span.set_attribute("merge.drained_callbacks", drained)
+                    await _handle_merge_failure(task, response_id, ready, logger)
                     return
                 except Exception:
                     logger.error(
@@ -971,11 +1035,11 @@ async def poll_for_tasks():
                         f"{traceback.format_exc()}"
                     )
                     await remove_lock(response_id, CONSUMER, logger)
-                    await _reenqueue_wake_task(task, logger)
-                    span.set_attribute("drained_callbacks", drained)
+                    span.set_attribute("merge.drained_callbacks", drained)
+                    await _handle_merge_failure(task, response_id, ready, logger)
                     return
 
-                span.set_attribute("drained_callbacks", drained)
+                span.set_attribute("merge.drained_callbacks", drained)
                 logger.info(
                     f"[{callback_id}] Merged {drained} callback(s) in "
                     f"{time.time() - lock_time:.2f}s"

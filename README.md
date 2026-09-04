@@ -124,6 +124,42 @@ following behavior applies to all of them:
   Tasks that don't finish in the window are left in the stream for Redis reclaim.
   Set the deployment's `terminationGracePeriodSeconds` comfortably above
   `WORKER_DRAIN_TIMEOUT_SEC`.
+- **Whole-query timeout budget (`QUERY_TIMEOUT_SEC`)** — see below.
+
+##### Query timeout budget
+
+The ARS and the other external callers stop waiting for a Shepherd query after
+about five minutes, and the synchronous `/query` endpoint gives up around the
+same point. Work done past that is work nobody receives — it only takes worker
+slots (and process-pool children) away from queries that can still be answered.
+
+So the server stamps each query with an absolute deadline at intake, and that
+deadline travels with the task from operation to operation. Every worker checks
+it as it picks a task up (in `shepherd_utils.shared.get_tasks`, on both freshly
+delivered and reclaimed messages). If the budget is spent the worker does *not*
+run the operation: it drops the rest of the workflow and routes the query
+straight to `finish_query`, which ends it the way any other query ends — state
+`COMPLETED` in Postgres with a `TIMEOUT` status, callback rows reaped, logs
+saved (including the line explaining why the response is partial), and whatever
+was gathered POSTed to the callback URL. A synchronous caller therefore gets a
+partial response instead of waiting out its own timeout for nothing.
+
+| Setting | Meaning |
+| --- | --- |
+| `QUERY_TIMEOUT_SEC` | The budget, in seconds (default 300). `0` disables deadlines entirely — tasks then run however old they are, as they did before. |
+
+A client that explicitly asks to wait longer (TRAPI `parameters.timeout`) is not
+cut short: the larger of the two wins. Two streams are exempt — `finish_query`,
+which *is* the wrap-up, and `merge_message`, which folds in callbacks an
+upstream service has already done the work for. Tasks with no deadline (a
+payload enqueued before this shipped) are never expired, so a rollout is safe
+mid-flight.
+
+This is a fast path that settles a query at the moment it goes over. The
+monitor's abandoned-query reaper (`MONITOR_ABANDONED_QUERY_SEC`, default 600s)
+remains the backstop for queries that go over *without* any worker picking a
+task up for them — e.g. one whose driving worker died with nothing left in a
+stream.
 
 ##### Kubernetes sizing (Helm)
 
@@ -143,9 +179,9 @@ single large pod. On Kubernetes the memory `limit` (OOMKilled + restart) plus
 regular rollouts already recycle pods, so leaked-resource cleanup comes for free
 — add an RSS-based `livenessProbe` only if the monitor shows OOMKills in
 practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
-`aragorn_score`, `aragorn_omnicorp`) size their process/thread pools from the
-in-code default, so raising `TASK_LIMIT` for those only deepens the intake queue
-rather than adding parallelism.
+`aragorn_score`, `aragorn_omnicorp`) size their process pools from the in-code
+default, so raising `TASK_LIMIT` for those only deepens the intake queue rather
+than adding parallelism.
 
 ### Message Broker Streams
 

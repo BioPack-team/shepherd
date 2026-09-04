@@ -8,7 +8,7 @@ import logging
 import orjson
 import pytest
 
-from workers.finish_query.worker import finish_query
+from workers.finish_query.worker import CALLBACK_ATTEMPTS, finish_query
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +94,10 @@ async def test_finish_query_propagates_status_to_set_query_completed(
 
 @pytest.mark.asyncio
 async def test_finish_async_query_retries_callback_on_failure(redis_mock, mocker):
-    """If the first POST raises, finish_query should retry up to CALLBACK_RETRIES
-    times with backoff before giving up and still mark the query completed."""
+    """A transport-level failure is retried up to the callback budget.
+
+    ``finish_query`` should spend CALLBACK_ATTEMPTS POSTs with backoff before
+    giving up, and still mark the query completed either way."""
     mocker.patch(
         "workers.finish_query.worker.get_query_state",
         new_callable=mocker.AsyncMock,
@@ -136,8 +138,7 @@ async def test_finish_async_query_retries_callback_on_failure(redis_mock, mocker
         ],
         logger,
     )
-    # 3 retries baked into the worker.
-    assert mock_post.call_count == 3
+    assert mock_post.call_count == CALLBACK_ATTEMPTS
     assert mock_set_query_completed.called
 
 
