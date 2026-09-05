@@ -380,3 +380,18 @@ def test_validate_verdict_parity(name):
     assert (
         validate(cases[name]) == GOLDENS["validate"][name]
     ), f"verdict mismatch for {name}"
+
+
+def test_normalized_scores_survive_shepherd_blob_codec():
+    """Regression: rankdata yields numpy.float64; upstream's stdlib-json
+    storage accepts it but Shepherd's orjson blob codec rejects numpy
+    scalars, so pre-merged callbacks silently failed to save and merges
+    KeyError'd. normalized_score must be a plain float."""
+    from shepherd_utils.db import decode_message, encode_message
+
+    results = [{"analyses": [{"score": 0.9}]}, {"analyses": [{"score": 0.1}]}]
+    normalized = ars_premerge.normalizeScores(results)
+    assert all(type(r["normalized_score"]) is float for r in normalized)
+    # the whole premerged payload must round-trip through the blob codec
+    payload = {"message": {"results": normalized}}
+    assert decode_message(encode_message(payload)) == payload

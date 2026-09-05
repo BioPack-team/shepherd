@@ -128,6 +128,11 @@ Behavioral deviations:
     inline).
 12. **Notification delivery retries** run in-process with upstream's backoff
     envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery.
+13. **normalized_score is a plain float**: upstream stores rankdata's
+    numpy.float64 through stdlib json (which accepts it as a float
+    subclass); Shepherd's orjson blob codec rejects numpy scalars, so the
+    port casts via ``.tolist()`` at the production site. Identical numeric
+    values; regression-tested against the blob codec round-trip.
 
 ## Not ported (documented drops)
 

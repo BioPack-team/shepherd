@@ -256,7 +256,12 @@ def normalizeScores(results):
                 logger.error("Results dont have the required fields")
                 return results
 
-        ranked = list(rankdata(scoreList) * 100 / len(scoreList)) if scoreList else []
+        # .tolist() (not list()) so ranks are plain Python floats: rankdata
+        # yields numpy.float64, which upstream's stdlib-json storage accepts
+        # but Shepherd's orjson blob codec rejects. Same numeric values.
+        ranked = (
+            (rankdata(scoreList) * 100 / len(scoreList)).tolist() if scoreList else []
+        )
         if len(ranked) != len(scoreList):
             logger.debug("Score normalization aborted. Score list lengths not equal")
             return results
