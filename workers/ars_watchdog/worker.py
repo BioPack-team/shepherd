@@ -1,6 +1,6 @@
 """ARS watchdog: the timeout sweep + payload retention.
 
-Port of NCATSTranslator/Relay @ dd1e71b tasks.py catch_timeout_async (celery
+Port of NCATSTranslator/Relay @ 3e65975 tasks.py catch_timeout_async (celery
 beat, every 3 minutes) as a self-scheduling loop. Parity is on the age
 thresholds, which match upstream's code exactly: only Running messages
 created within the last 15 minutes are examined; parents are exempt; merge

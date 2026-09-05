@@ -1,6 +1,12 @@
 """Sugeno-integral result scoring.
 
-Ported from NCATSTranslator/Relay @ dd1e71b tr_sys/tr_ars/scoring.py with two
+No longer part of the live post-process pipeline: upstream removed the
+`compute_from_results` call from `post_process` along with the external
+Appraiser (Relay PR #884) in favor of `premerge.appraise_confidence`. The
+module (like upstream's scoring.py) remains, golden-tested, in case it is
+called again.
+
+Ported from NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/scoring.py with two
 output-preserving changes, both verified by the golden parity suite:
   - weight_sets uses an explicit dict instead of writing through locals()
     (the upstream trick stops working under PEP 667 / Python 3.13);

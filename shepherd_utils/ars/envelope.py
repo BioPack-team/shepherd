@@ -7,7 +7,7 @@ seconds truncated to milliseconds, ``+00:00`` spelled ``Z``). The UI and the
 upstream smoke tests depend on this exact shape, so the port reproduces it
 field-for-field, in Django model declaration order.
 
-Ported from NCATSTranslator/Relay @ dd1e71b: tr_sys/tr_ars/models.py.
+Ported from NCATSTranslator/Relay @ 3e65975: tr_sys/tr_ars/models.py.
 """
 
 import datetime

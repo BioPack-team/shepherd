@@ -1,6 +1,6 @@
 """Blocklist-based node/edge/result removal.
 
-Ported from NCATSTranslator/Relay @ dd1e71b tr_sys/tr_ars/utils.py
+Ported from NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/utils.py
 remove_blocked, restructured to operate purely on the data dict (the Django
 Message save side effects are hoisted to the ars_postprocess worker). The
 removal cascade -- nodes, their edges, aux graphs whose edges vanished,

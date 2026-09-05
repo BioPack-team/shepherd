@@ -222,6 +222,22 @@ def test_normalize_scores_full_parity():
     assert_parity(jsonable(data), GOLDENS["normalize_scores_full"])
 
 
+@pytest.mark.parametrize("case", load("scores_cases.json"), ids=lambda c: c["name"])
+def test_appraise_confidence_parity(case):
+    """appraise_confidence/get_confidence replaced the external Appraiser
+    call in post_process (Relay PR #884)."""
+    golden = next(
+        g for g in GOLDENS["appraise_confidence"] if g["name"] == case["name"]
+    )
+    results = copy.deepcopy(case["results"])
+    if "raises" in golden:
+        with pytest.raises(Exception):
+            ars_premerge.appraise_confidence(results)
+    else:
+        ars_premerge.appraise_confidence(results)
+        assert_parity(jsonable(results), golden["output"])
+
+
 def test_remove_phantom_parity():
     data = load("response_aragorn.json")
     del data["message"]["auxiliary_graphs"]["aux1"]

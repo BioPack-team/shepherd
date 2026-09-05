@@ -1,6 +1,6 @@
 """Parity tests for SmartAPI discovery + registry seeding.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b
+Upstream reference: NCATSTranslator/Relay @ 3e65975
 tr_sys/tr_smartapi_client/smart_api_discover.py and tr_sys/utils2.py.
 """
 

@@ -3,7 +3,7 @@
 Carries the upstream config verbatim (ars_config.yaml is Relay's
 config/config.yaml; url-config-legacy.yaml likewise) plus the declarative
 equivalent of the ten tr_ara_* Django apps' AppConfig registrations and the
-tr_kp_* apps, ported from NCATSTranslator/Relay @ dd1e71b.
+tr_kp_* apps, ported from NCATSTranslator/Relay @ 3e65975.
 
 Every app registered: agent name = app_path, agent uri = /<app_path>/api/,
 one actor at path 'runquery' on the listed channels with the listed

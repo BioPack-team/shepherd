@@ -1,6 +1,6 @@
 """SmartAPI service discovery.
 
-Port of NCATSTranslator/Relay @ dd1e71b tr_sys/tr_smartapi_client/
+Port of NCATSTranslator/Relay @ 3e65975 tr_sys/tr_smartapi_client/
 smart_api_discover.py + tr_sys/utils2.py urlRemoteFromInforesid. Resolution
 precedence is upstream's exactly: the smart-api.info registry (filtered by
 maturity settings.tr_env and TRAPI version settings.tr_ver, newest

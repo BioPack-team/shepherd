@@ -1,6 +1,6 @@
 """Parity tests for parent-completion orchestration + notification building.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b
+Upstream reference: NCATSTranslator/Relay @ 3e65975
   - signals.py message_post_save (completion transitions, empty-merge
     synthesis, unsubscribe timing)
   - models.py Message.notify_subscribers (status-override rules, stats)

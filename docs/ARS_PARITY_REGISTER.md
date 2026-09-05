@@ -3,10 +3,27 @@
 The behavior contract for Shepherd's hosted port of the Translator ARS
 ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)).
 
-**Pinned upstream commit:** `dd1e71b8284de746f9d11e4fc823bf57861e081f`
-(master, cloned 2026-09-01; byte-exact reference copies under
-`/home/user/ncatstranslator/relay` during development, key files mirrored in
-the golden-generation tooling).
+**Pinned upstream commit:** `3e65975db287a73afa4388b7dbaf3c64d0d218c4`
+(master, re-pinned 2026-09-05 from the original 2026-09-01 pin at
+`dd1e71b8284de746f9d11e4fc823bf57861e081f`; byte-exact reference copies
+under `/home/user/ncatstranslator/relay` during development, key files
+mirrored in the golden-generation tooling).
+
+Behavioral changes accepted with the 2026-09-05 re-pin (everything else in
+the range was OpenTelemetry/gunicorn/celery tuning):
+
+- **Relay PR #884 (removeAppraiser)**: `post_process` no longer calls the
+  external Appraiser or the Sugeno `compute_from_results` pass. When the
+  merged message has results, `appraise_confidence` computes
+  `ordering_components` locally (`confidence = 1 - prod(1 - score)` over
+  each result's scored analyses; novelty/clinical_evidence 0.0), and its
+  failures are logged and swallowed. `result_count`/`ScoreStatCalc` moved
+  inside the results-non-empty guard, keeping the E/444 early return. The
+  final-save block always runs (202 flips to D/200; save failure E/422).
+- **Relay PR #883 (key-error fix)**: `mergeDicts` keys qualifier dicts by
+  `qualifier_type_id`, so qualifier lists actually merge instead of the
+  old swallowed-KeyError no-op.
+- **Relay PR #882**: `Symptom` (NCIT:C4876) added to the blocklist.
 
 **Golden regeneration:** goldens are produced by *running the upstream code*
 over the corpus, never hand-written:
@@ -16,7 +33,10 @@ $ python3.11 -m venv .venv-relay && .venv-relay/bin/pip install \
     django==4.2.23 celery==5.5.3 scipy==1.10.1 sympy==1.13.3 "numpy<2" \
     zstandard==0.23.0 objsize requests pyyaml pycryptodome pymysql \
     reasoner-pydantic==5.1.1 pydantic==1.10.22 opentelemetry-api \
-    opentelemetry-sdk opentelemetry-instrumentation-celery "redis>=5,<6"
+    opentelemetry-sdk opentelemetry-instrumentation-celery \
+    opentelemetry-instrumentation-django opentelemetry-instrumentation-httpx \
+    opentelemetry-instrumentation-requests \
+    opentelemetry-exporter-otlp-proto-grpc "redis>=5,<6"
 $ python scripts/ars_parity/build_corpus.py
 $ PYTHONHASHSEED=0 .venv-relay/bin/python scripts/ars_parity/generate_goldens.py \
     --relay /path/to/relay-checkout
@@ -67,8 +87,7 @@ accept each behavioral change.
   merge child, then 500), `timeoutTest`/`post_process` debug (500).
 - **Upstream error-behavior parity** — `decorate_edges_with_infores` raises
   (UnboundLocalError) on non-empty sources with no primary;
-  `normalizeScores` raises IndexError on mixed scored/unscored results;
-  `mergeDicts` qualifier lists never merge (swallowed KeyError); the
+  `normalizeScores` raises IndexError on mixed scored/unscored results; the
   `node_bindings` for/else; the `attributes`/`analyses` early returns; a
   failed merge fold leaves the shell merge child Running for the watchdog.
 

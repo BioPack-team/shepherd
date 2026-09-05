@@ -1,6 +1,6 @@
 """Layer-3 API contract parity for the /ars sub-app.
 
-Every assertion cites upstream NCATSTranslator/Relay @ dd1e71b
+Every assertion cites upstream NCATSTranslator/Relay @ 3e65975
 tr_sys/tr_ars/api.py behavior: exact paths, methods, status codes, error
 bodies, and response envelope shapes.
 """

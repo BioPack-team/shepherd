@@ -111,11 +111,9 @@ SCENARIOS = {
             "infores:aragorn": happy("infores:aragorn", "response_blocklist.json"),
         },
     },
-    "appraiser_down": {
-        "query": STANDARD_QUERY,
-        "appraiser": {"mode": "error"},
-        "aras": {"infores:aragorn": happy("infores:aragorn", "response_aragorn.json")},
-    },
+    # appraiser_down was retired when upstream removed the external
+    # Appraiser call (Relay PR #884): neither stack contacts the appraiser
+    # anymore, and the journal comparison would flag a stray call.
     "annotator_down": {
         "query": STANDARD_QUERY,
         "annotator": {"mode": "error"},

@@ -1,7 +1,7 @@
 # Differential parity harness (Layer 4)
 
 Runs the pinned original ARS (NCATSTranslator/Relay @
-`dd1e71b8284de746f9d11e4fc823bf57861e081f`) and Shepherd's port side by
+`3e65975db287a73afa4388b7dbaf3c64d0d218c4`) and Shepherd's port side by
 side against one mocked world, and diffs everything observable. This is
 the release gate described in `docs/ARS_PARITY_REGISTER.md`; layers 1-3
 run in per-PR CI, this layer runs on demand where Docker and the Relay

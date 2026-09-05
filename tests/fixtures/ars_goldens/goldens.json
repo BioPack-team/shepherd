@@ -1,5 +1,147 @@
 {
-  "_relay_commit": "dd1e71b8284de746f9d11e4fc823bf57861e081f",
+  "_relay_commit": "3e65975db287a73afa4388b7dbaf3c64d0d218c4",
+  "appraise_confidence": [
+    {
+      "name": "mixed",
+      "output": [
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.9,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.1
+            },
+            {
+              "score": 0.3
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.37,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": null
+            },
+            {
+              "score": 0.5
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.5,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.9,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {}
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0,
+            "novelty": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing_analyses_key",
+      "output": [
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.9,
+            "novelty": 0.0
+          }
+        },
+        {
+          "node_bindings": {},
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0,
+            "novelty": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "empty",
+      "output": []
+    },
+    {
+      "name": "single",
+      "output": [
+        {
+          "analyses": [
+            {
+              "score": 0.42
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.41999999999999993,
+            "novelty": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "empty_analyses_list",
+      "output": [
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.9,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0,
+            "novelty": 0.0
+          }
+        }
+      ]
+    }
+  ],
   "compute_from_results": [
     {
       "name": "standard",
@@ -1446,6 +1588,38 @@
       }
     },
     {
+      "name": "qualifier_lists_disjoint_types",
+      "output": {
+        "qualifiers": [
+          {
+            "qualifier_type_id": "biolink:object_direction_qualifier",
+            "qualifier_value": [
+              "down",
+              "up"
+            ]
+          },
+          {
+            "qualifier_type_id": "biolink:object_aspect_qualifier",
+            "qualifier_value": "activity"
+          }
+        ]
+      }
+    },
+    {
+      "name": "qualifier_lists_conflicting_values",
+      "output": {
+        "qualifiers": [
+          {
+            "qualifier_type_id": "biolink:object_direction_qualifier",
+            "qualifier_value": [
+              "down",
+              "up"
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "attributes_union_lists",
       "output": {
         "attributes": [
@@ -2181,12 +2355,12 @@
         {
           "level": "DEBUG",
           "message": "Removed the following bad nodes: ['blocked two', 'blocked one']",
-          "timestamp": "02:58:11"
+          "timestamp": "20:15:20"
         },
         {
           "level": "DEBUG",
           "message": "Removed the following counts: {'nodes': 2, 'edges': 3, 'results': 2, 'auxiliary_graphs': 1, 'analyses': 4}",
-          "timestamp": "02:58:11"
+          "timestamp": "20:15:20"
         }
       ],
       "message": {

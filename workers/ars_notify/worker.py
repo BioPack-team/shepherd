@@ -1,7 +1,7 @@
 """ARS notification worker.
 
 Delivers event notifications to subscribed clients. Port of
-NCATSTranslator/Relay @ dd1e71b tasks.py notify_subscribers_task +
+NCATSTranslator/Relay @ 3e65975 tasks.py notify_subscribers_task +
 notify_one_client_task: the payload base is {pk, timestamp, code} plus the
 event fields (built upstream in Message.notify_subscribers, here by
 shepherd_utils.ars.notify before the task was enqueued);

@@ -1,6 +1,6 @@
 """Client-secret crypto + notification signing.
 
-Ported from NCATSTranslator/Relay @ dd1e71b:
+Ported from NCATSTranslator/Relay @ 3e65975:
   - api.py decrypt_secret (AES-CBC, IV-prefixed, PKCS7-unpadded, base64)
   - api.py canonize_url (GET-signature canonical string)
   - tasks.py notify_one_client_task (HMAC-SHA256 over compact sorted JSON)

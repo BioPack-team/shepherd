@@ -1,6 +1,6 @@
 """Subscriber notifications.
 
-Ported from NCATSTranslator/Relay @ dd1e71b:
+Ported from NCATSTranslator/Relay @ 3e65975:
   - models.py Message.notify_subscribers: 'D'/'E' parents override any custom
     event fields with admin/ars_error, and stats attach when the message has
     a result_count.

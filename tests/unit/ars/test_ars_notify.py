@@ -1,6 +1,6 @@
 """Parity tests for the ars_notify worker.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b tasks.py
+Upstream reference: NCATSTranslator/Relay @ 3e65975 tasks.py
 notify_subscribers_task + notify_one_client_task: payload base
 {pk, timestamp, code} + event fields, last_merged_completed forces code 200,
 one POST per subscribed client with an HMAC-SHA256 x-event-signature over

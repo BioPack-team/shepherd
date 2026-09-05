@@ -1,6 +1,6 @@
 """ARS message status semantics.
 
-Ported from NCATSTranslator/Relay @ dd1e71b:
+Ported from NCATSTranslator/Relay @ 3e65975:
   - tr_sys/tr_ars/models.py   (Message.STATUS, Message.create, Message.to_dict)
   - tr_sys/tr_ars/signals.py  (message_post_save code coercion)
 """

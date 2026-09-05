@@ -83,7 +83,7 @@ flowchart LR
 | `signals.message_post_save` fan-out + `pubsub.send_messages` + `tasks.send_message` | `workers/ars_fanout` (stream `ars.fanout`) | one task per submitted parent; worker creates children + dispatches concurrently |
 | `POST /ars/api/messages/<pk>` callback handling + `pre_merge_process` + `validate` | thin server handler (persist + enqueue) + `workers/ars_premerge` (stream `ars.premerge`) | server does the synchronous guards (404/409/400); CPU work moves off the request thread |
 | `merge_and_post_process` / `merge_received` / `merge_semaphore` + `expensive_gate` | `workers/ars_merge` (stream `ars.merge`) | `broker.try_lock` on parent pk replaces `merge_semaphore` + `select_for_update` + Celery retry; `ProcessPoolManager` + `TASK_LIMIT` replace the 12-token Redis gate |
-| `post_process` (blocklist, annotate, appraise, scoring) | `workers/ars_postprocess` (stream `ars.postprocess`) | httpx calls to Annotator/Appraiser; ported `scoring.py` |
+| `post_process` (blocklist, annotate, confidence, stats) | `workers/ars_postprocess` (stream `ars.postprocess`) | httpx call to the Annotator; local `appraise_confidence` (the external Appraiser + Sugeno pass were removed upstream by Relay PR #884) |
 | Celery beat `catch_timeout` (3 min) | `workers/ars_watchdog` (self-scheduling asyncio loop, no stream consumption) | same age thresholds: 5 min standard / 10 min pathfinder / 8 min merge → `code=598, status='E'` |
 | `notify_subscribers_task` / `notify_one_client_task` | `workers/ars_notify` (stream `ars.notify`) | HMAC-SHA256 signing, retry w/ backoff+jitter, max 8 retries — ported constants |
 | `tr_smartapi_client/smart_api_discover.py` | `shepherd_utils/smartapi.py` (ported) with shared Redis cache `ars:smartapi:cache` (3600 s refresh, 30 s failure retry) | all fan-out replicas share one registry view |
@@ -130,8 +130,8 @@ Reuses the `merge_message` worker's proven shape (`try_lock` → drain → pool 
 
 Port of `utils.post_process`, same order, same failure codes:
 
-1. `remove_blocked` (blocklist.json, pathfinder-aware) → 2. `scrub_null_attributes` → 3. `annotate_nodes` → 4. `appraise` (zstd request body, `Accept-Encoding: zstd`, 600 s timeout, zeroed `ordering_components` fallback on failure) → 5. `scoring.compute_from_results` (Sugeno + weighted mean, weights confidence 1.0 / novelty 0.0 / clinical_evidence 1.0) → 6. `ScoreStatCalc` → 7. save.
-   - Steps 1–3 or stat failure ⇒ merge-child `'E'/444`; steps 4–6/save failure ⇒ `'E'/422`; success ⇒ `'D'/200` + `merged_version_available` notification.
+1. `remove_blocked` (blocklist.json, pathfinder-aware) → 2. `scrub_null_attributes` → 3. `annotate_nodes` → 4. `appraise_confidence` (local `ordering_components`; replaced the external Appraiser + Sugeno pass, Relay PR #884) → 5. `ScoreStatCalc` + `result_count` (only when results are non-empty) → 6. save.
+   - Steps 1–3 or stat failure ⇒ merge-child `'E'/444`; confidence failures are logged and swallowed; final-save failure ⇒ `'E'/422`; success ⇒ `'D'/200` + `merged_version_available` notification.
 2. Run the **parent-completion check** (§6) after the merge-child reaches a terminal status — this replaces the Django post-save signal's completion arithmetic.
    - Annotation: default to the biothings `Annotator` package if dependency-compatible, else the `TR_ANNOTATOR` HTTP API — parity is on the resulting `biothings_annotations` attributes, not the transport (§9 R2).
 
@@ -354,7 +354,7 @@ Each phase lands as a PR with its parity tests; layer-4 harness pieces are built
 | 1 | Schema + `shepherd_utils/ars/` DB layer + envelope renderer; server sub-app read-only endpoints (index, messages GET, trace, get_status, agents/actors/channels, health, latest_pk, reports, filters doc) | `shepherd_db/init_db.sql`, `shepherd_utils/ars/{db,envelope,completion}.py`, `shepherd_server/aras/ars.py` | L |
 | 2 | Ported pure logic (`merge.py`, `filters.py`, `scoring.py`, `pre_merge.py`) passing layer-1 goldens; SmartAPI discovery port with Redis cache | `shepherd_utils/ars/`, `shepherd_utils/smartapi.py` | L |
 | 3 | `submit` + `ars_fanout` + actor seeding + stub-ARA integration tests; callback endpoint + `ars_premerge` | `workers/ars_fanout/`, `workers/ars_premerge/` | L |
-| 4 | `ars_merge` (lock + pool) + `ars_postprocess` (blocklist/annotate/appraise/scoring) + completion machine wiring | `workers/ars_merge/`, `workers/ars_postprocess/` | L |
+| 4 | `ars_merge` (lock + pool) + `ars_postprocess` (blocklist/annotate/confidence/stats) + completion machine wiring | `workers/ars_merge/`, `workers/ars_postprocess/` | L |
 | 5 | `ars_watchdog` (timeouts, retention) + `ars_notify` (HMAC, subscriptions) + retain/block/filter/subscribe endpoints | `workers/ars_watchdog/`, `workers/ars_notify/` | M |
 | 6 | Layer-4 harness complete; full scenario corpus green; compose + `compose.test.yml` resource entries; release workflow matrix additions (remember: new workers must be added to `.github/workflows/release.yml` explicitly); connection-budget arithmetic redo (6 new workers × pool 5/10 against `max_connections=300`) | `tests/parity_e2e/`, `compose.yml`, workflows | M |
 | 7 | Cutover runbook: deploy dark, mirror a sample of production submissions through the differential normalizer, then DNS/ingress swap; decommission checklist for the Relay deployment | `docs/` | S |
@@ -380,7 +380,7 @@ Each phase lands as a PR with its parity tests; layer-4 harness pieces are built
 - Server: `shepherd_server/aras/ars.py` (+ mount in `server.py`), `shepherd_utils/ars/{db,envelope,completion,merge,filters,scoring,pre_merge,post_process}.py`, `shepherd_utils/smartapi.py`.
 - Workers (6 new containers): `ars_fanout`, `ars_premerge`, `ars_merge`, `ars_postprocess`, `ars_watchdog`, `ars_notify` — each with the standard Dockerfile pattern, `requirements.txt` extras (`scipy`, `sympy`, validator dep, `biothings_annotator` or none), compose + release-matrix entries.
 - Schema: `ars_agent`, `ars_channel`, `ars_actor`, `ars_message`, `ars_client`, `ars_subscription`.
-- Settings: `ars_public_host`, `tr_env`, `tr_ver`, `tr_normalizer`, `tr_annotator`, `tr_appraise`, `aes_master_key`, `ars_data_retention_days`, `ars_watchdog_interval_sec`, timeout thresholds.
+- Settings: `ars_public_host`, `tr_env`, `tr_ver`, `tr_normalizer`, `tr_annotator`, `aes_master_key`, `ars_data_retention_days`, `ars_watchdog_interval_sec`, timeout thresholds.
 - Tests: `tests/unit/ars/` (layers 1–3), `tests/fixtures/ars_{goldens,corpus,api_contract}`, `tests/parity_e2e/` (layer 4), `scripts/ars_parity/`, `docs/ARS_PARITY_REGISTER.md`.
 
 

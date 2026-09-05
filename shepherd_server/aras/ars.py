@@ -1,6 +1,6 @@
 """Translator ARS API surface, served by Shepherd.
 
-A port of NCATSTranslator/Relay @ dd1e71b tr_sys/tr_ars/api.py + urls.py onto
+A port of NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/api.py + urls.py onto
 FastAPI. Paths, methods, status codes, error bodies, and the Django
 serializer envelope are reproduced exactly (parity: tests/unit/ars/
 test_ars_api_contract.py and the differential harness). Known-broken

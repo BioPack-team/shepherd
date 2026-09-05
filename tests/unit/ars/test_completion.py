@@ -1,6 +1,6 @@
 """Parity tests for the parent-completion arithmetic.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b
+Upstream reference: NCATSTranslator/Relay @ 3e65975
   - tr_sys/tr_ars/signals.py  message_post_save lines 47-124
 
 The upstream rules, verbatim from the signal:

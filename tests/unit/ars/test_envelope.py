@@ -1,6 +1,6 @@
 """Parity tests for the Django-serializer wire envelope.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b
+Upstream reference: NCATSTranslator/Relay @ 3e65975
   - tr_sys/tr_ars/models.py  ARSModel.to_dict (django serializers.serialize),
     Message.to_dict (status long name + inline-decompressed data),
     Actor.to_dict (adds fields.url)

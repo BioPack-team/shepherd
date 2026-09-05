@@ -1,6 +1,6 @@
 """Parity tests for the ars_watchdog timeout sweep.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b tasks.py
+Upstream reference: NCATSTranslator/Relay @ 3e65975 tasks.py
 catch_timeout_async: scan Running messages created within the last 15
 minutes; exempt parents; merge messages (ars-ars-agent) time out after 8
 minutes; everything else after 5 (the pathfinder log line says 10 but the

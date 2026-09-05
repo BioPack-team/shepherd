@@ -1,6 +1,6 @@
 """Parity tests for the ars_merge worker.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b utils.py
+Upstream reference: NCATSTranslator/Relay @ 3e65975 utils.py
 merge_and_post_process + merge_received: lock, merge-child creation, fold
 into the running merged_version, parent bookkeeping (merged_version,
 merged_versions_list append, params.stats), the merged_version_begun

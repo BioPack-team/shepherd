@@ -1,6 +1,6 @@
 """Parity tests for the ars_fanout worker.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b
+Upstream reference: NCATSTranslator/Relay @ 3e65975
   - signals.py message_post_save (actor matching on channel intersection)
   - pubsub.py send_messages (skip rules)
   - tasks.py send_message (child creation, callback injection, the response

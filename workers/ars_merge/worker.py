@@ -1,7 +1,7 @@
 """ARS merge worker.
 
 Folds a validated ARA result into the query's cumulative merged message.
-Port of NCATSTranslator/Relay @ dd1e71b utils.py merge_and_post_process
+Port of NCATSTranslator/Relay @ 3e65975 utils.py merge_and_post_process
 (lock + bookkeeping) and merge_received (the fold): one merge at a time per
 parent, a fresh merge-child row per fold, parent.merged_version /
 merged_versions_list / params.stats advanced, a merged_version_begun

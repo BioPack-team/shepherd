@@ -1,14 +1,16 @@
 """ARS post-process worker.
 
 Runs the post-merge pipeline on a freshly merged message: blocklist removal,
-null-attribute scrubbing, node annotation, the Appraiser call, Sugeno
-scoring, and score stats. Port of NCATSTranslator/Relay @ dd1e71b utils.py
-post_process + the tail of merge_and_post_process, with the exact
-stage-failure codes: cleanup stages (blocklist / scrub / annotate / stats)
-mark the merged child 'E'/444 but keep going (and the 444 sticks to the
-end); appraise or scoring failures mark it 'E'/422 and stop. On success the
-202 shell flips to 'D'/200. The merged_version_available notification and
-the parent completion check run regardless of outcome, as upstream does.
+null-attribute scrubbing, node annotation, local confidence calculation, and
+score stats. Port of NCATSTranslator/Relay @ 3e65975 utils.py post_process +
+the tail of merge_and_post_process, with the exact stage-failure codes:
+cleanup stages (blocklist / scrub / annotate) and the stat calc mark the
+merged child 'E'/444 (and the 444 sticks to the end); appraise_confidence
+failures are logged and swallowed. On success the 202 shell flips to 'D'/200.
+The external Appraiser call and the Sugeno scoring pass were removed
+upstream (Relay PRs #884/#883) -- ordering_components now come from
+appraise_confidence. The merged_version_available notification and the
+parent completion check run regardless of outcome, as upstream does.
 
 Node annotation calls the annotator's HTTP API (settings.tr_annotator)
 instead of importing the biothings_annotator package -- same service, same
@@ -20,19 +22,19 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime
 
 import httpx
-import zstandard
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
-import shepherd_utils.ars.scoring as scoring
 from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
 from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
     add_attribute,
     add_log_entry,
+    appraise_confidence,
     get_safe,
     scrub_null_attributes,
     timestamp_hms,
@@ -123,33 +125,17 @@ async def annotate_nodes(data, agent_name, logger):
         data["message"]["knowledge_graph"]["nodes"].update(invalid_nodes)
 
 
-async def appraise(merged_pk, data, agent_name, logger):
-    """utils.appraise: zstd request/response, 600s budget; raises on any
-    failure (the caller applies the default-ordering fallback)."""
-    copy_for_max = json.loads(json.dumps(data, default=str))
-    copy_for_max["pk"] = str(merged_pk)
-    headers = {"Accept-Encoding": "zstd", "Content-Encoding": "zstd"}
-    payload = zstandard.ZstdCompressor().compress(
-        json.dumps(copy_for_max, default=str).encode("utf-8")
+def _post_processing_error(merged_row, data, text):
+    """utils.post_processing_error's visible effect: the extra log entry
+    stamped with the row's updated_at (its in-memory E/206 is always
+    overwritten by the calling handler before anything is saved)."""
+    updated_at = merged_row.get("updated_at")
+    stamp = (
+        updated_at.strftime("%H:%M:%S")
+        if isinstance(updated_at, datetime)
+        else timestamp_hms()
     )
-    logger.info(
-        f"sending data for agent: {agent_name} to APPRAISER URL: "
-        f"{settings.tr_appraise}"
-    )
-    async with httpx.AsyncClient(timeout=600) as client:
-        r = await client.post(settings.tr_appraise, content=payload, headers=headers)
-    if r.status_code != 200:
-        logger.error(
-            f"Received Error state from appraiser for agent {agent_name} and "
-            f"pk {merged_pk}. Code {r.status_code}"
-        )
-        raise Exception(f"appraiser status {r.status_code}")
-    content = r.content
-    if content[:4] == b"\x28\xb5\x2f\xfd":
-        rj = json.loads(zstandard.ZstdDecompressor().decompress(content))
-    else:
-        rj = json.loads(content)
-    data["message"]["results"] = rj["message"]["results"]
+    add_log_entry(data, [text, stamp, "DEBUG"])
 
 
 async def ars_postprocess(task, logger: logging.Logger):
@@ -174,7 +160,7 @@ async def ars_postprocess(task, logger: logging.Logger):
     status = None
     row_code = merged["code"]
 
-    # 1. blocklist
+    # 1. blocklist (upstream remove_blocked saves the scrubbed data itself)
     try:
         await asyncio.to_thread(remove_blocked, data, load_blocklist(), str(merged_pk))
         await ars_db.save_message_data(merged_pk, data, logger)
@@ -197,6 +183,9 @@ async def ars_postprocess(task, logger: logging.Logger):
         logger.exception(
             f"Problem with the second scrubbing of null attributes for agent: "
             f"{agent_name} pk: {merged_pk}"
+        )
+        _post_processing_error(
+            merged, data, "Error in second scrubbing of null attributes"
         )
         add_log_entry(
             data,
@@ -232,89 +221,58 @@ async def ars_postprocess(task, logger: logging.Logger):
         await ars_db.update_message(merged_pk, status="E", code=444)
         row_code = 444
 
-    # 4. appraise
-    try:
-        await appraise(merged_pk, data, agent_name, logger)
-    except Exception as e:
-        logger.error(
-            f"Problem with appraiser for agent {agent_name} and pk {merged_pk} "
-            f"of type {type(e).__name__}"
-        )
-        logger.error(
-            f"Adding default ordering_components for agent {agent_name} and "
-            f"pk {merged_pk}"
-        )
-        results = get_safe(data, "message", "results")
-        default_ordering_component = {
-            "novelty": 0,
-            "confidence": 0,
-            "clinical_evidence": 0,
-        }
-        if results is not None:
-            for result in results:
-                if "ordering_components" not in result.keys():
-                    result["ordering_components"] = default_ordering_component
-        add_log_entry(data, ["Error in Appraiser " + str(e), timestamp_hms(), "ERROR"])
-        await ars_db.save_message_data(merged_pk, data, logger)
-        await ars_db.update_message(merged_pk, status="E", code=422)
-        row_code = 422
-        code = 422
-        status = "E"
-
+    # 4. confidence + stats (only when there are results)
     result_count = None
     result_stat = None
-    if row_code == 422:
-        # appraise failure: return early with E/422 (upstream post_process)
-        pass
-    else:
+    stat_calc_failed = False
+    results = get_safe(data, "message", "results")
+    if results is not None and len(results) > 0:
+        logger.info(f"calculating Confidence for agent {agent_name} and pk {merged_pk}")
         try:
-            results = get_safe(data, "message", "results")
-            if results is not None:
-                new_res = await asyncio.to_thread(scoring.compute_from_results, results)
-                data["message"]["results"] = new_res
-            else:
-                logger.error("results from appraiser returns None, cant do the scoring")
-                new_res = []
-        except Exception as e:
-            status = "E"
-            code = 422
+            appraise_confidence(results)
+        except Exception:
+            # upstream only logs; the pipeline keeps going
+            logger.exception(
+                f"confidence calculations failed mesg for agent {agent_name} "
+                f"is {row_code}"
+            )
+        try:
+            result_count = len(results)
+            result_stat = ScoreStatCalc(results)
+            logger.info(
+                f"scoring stat calculation succeeded for agent {agent_name} "
+                f"and pk {merged_pk}"
+            )
+        except Exception:
+            logger.exception("Error in ScoreStatCalculation or result count")
+            _post_processing_error(merged, data, "Error in score stat calculation")
             add_log_entry(
                 data,
-                ["Error in f-score calculation: " + str(e), timestamp_hms(), "ERROR"],
+                ["Error in score stat calculation", timestamp_hms(), "DEBUG"],
             )
-            logger.exception("Error in f-score calculation")
+            status = "E"
+            code = 444
+            stat_calc_failed = True
             await ars_db.save_message_data(merged_pk, data, logger)
-            await ars_db.update_message(
-                merged_pk, skip_coercion=True, status="E", code=422
-            )
-            row_code = 422
 
-        if row_code != 422:
-            try:
-                result_count = len(new_res)
-                result_stat = ScoreStatCalc(new_res)
-            except Exception:
-                logger.exception("Error in ScoreStatCalculation or result count")
-                add_log_entry(
-                    data,
-                    ["Error in score stat calculation", timestamp_hms(), "DEBUG"],
-                )
-                status = "E"
-                code = 444
-                await ars_db.save_message_data(merged_pk, data, logger)
-                await ars_db.update_message(merged_pk, status="E", code=444)
-                row_code = 444
-
-            if row_code not in (422, 444) and code is None:
-                # clean run: the 202 shell flips to Done/200
+    # 5. final save (skipped after a stat-calc failure, which returned early
+    # upstream); a save failure is upstream's DatabaseError -> E/422
+    if not stat_calc_failed:
+        try:
+            await ars_db.save_message_data(merged_pk, data, logger)
+            if row_code == 202:
                 code = 200
                 status = "D"
-            await ars_db.save_message_data(merged_pk, data, logger)
+        except Exception:
+            status = "E"
+            code = 422
+            logger.exception("Final save failed")
 
     # final state + notification + completion, regardless of outcome
     final_updates = {"status": status or "E", "code": code or row_code}
     if result_count is not None:
         final_updates["result_count"] = result_count
+    if result_stat is not None:
         final_updates["result_stat"] = result_stat
     await ars_db.update_message(merged_pk, skip_coercion=False, **final_updates)
     await ars_db.persist_data_copy(merged_pk, logger)

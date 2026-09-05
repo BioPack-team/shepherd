@@ -1,6 +1,6 @@
 """Result filters for the /ars/api/filter endpoint.
 
-Ported verbatim from NCATSTranslator/Relay @ dd1e71b tr_sys/tr_ars/utils.py:
+Ported verbatim from NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/utils.py:
 hop_level_filter, score_filter, node_type_filter, specific_node_filter.
 node_type_filter and specific_node_filter mutate ``results`` in place and
 return it, exactly like upstream.

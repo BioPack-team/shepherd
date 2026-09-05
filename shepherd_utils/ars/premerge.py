@@ -1,9 +1,10 @@
 """Pre-merge processing of arriving ARA responses.
 
-Ported from NCATSTranslator/Relay @ dd1e71b tr_sys/tr_ars/utils.py:
+Ported from NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/utils.py:
 get_safe, add_attribute, add_log_entry, scrub_null_attributes,
 decorate_edges_with_infores, normalizeScores, ScoreStatCalc,
-normalize_scores, remove_phantom_support_graphs, pre_merge_process.
+normalize_scores, remove_phantom_support_graphs, pre_merge_process,
+appraise_confidence, get_confidence.
 
 Faithful port -- upstream quirks (the UnboundLocalError when an edge has
 non-empty sources but no primary_knowledge_source, the IndexError when only
@@ -80,6 +81,7 @@ def scrub_null_attributes(data):
             nodeAttributes = get_safe(nodeStuff, "attributes")
             if nodeAttributes is not None:
                 while None in nodeAttributes:
+                    logger.info("scrubnull: Found node attributes of None value")
                     nodeAttributes.remove(None)
 
     if edges is not None:
@@ -93,6 +95,9 @@ def scrub_null_attributes(data):
                     if "attributes" in edgeAttribute.keys():
                         edgeAttributeAttributes = get_safe(edgeAttribute, "attributes")
                         if edgeAttributeAttributes is None:
+                            logger.info(
+                                "scrubnull: Found edge attributes of None value"
+                            )
                             edgeAttribute["attributes"] = []
 
             edgeSources = get_safe(edgeStuff, "sources")
@@ -119,6 +124,9 @@ def scrub_null_attributes(data):
                         edge_source["upstream_resource_ids"].remove(None)
 
             if len(sources_to_remove) > 0:
+                logger.info(
+                    "scrubnull: Found bad sources " + str(len(sources_to_remove))
+                )
                 bad_sources.append(sources_to_remove)
             for key, sources in sources_to_remove.items():
                 for source in sources:
@@ -127,6 +135,7 @@ def scrub_null_attributes(data):
         for aux_graph_id, aux_graph in aux_graphs.items():
             if "attributes" in aux_graph.keys() and aux_graph["attributes"] is None:
                 aux_graph["attributes"] = []
+                logger.info("scrubnull: Found bad attributes in aux graphs")
 
 
 def decorate_edges_with_infores(data, inforesid):
@@ -158,6 +167,7 @@ def decorate_edges_with_infores(data, inforesid):
                     if source["resource_role"] == "primary_knowledge_source":
                         has_primary = True
                 if not has_self:
+                    logger.info("decorateEdges: found lacking self")
                     # upstream: has_primary is only ever assigned above, so a
                     # non-empty sources list with no primary raises
                     # UnboundLocalError here -- kept for parity.
@@ -335,6 +345,28 @@ def pre_merge_process(data, key, agent_name, inforesid):
     except Exception as e:
         logger.exception("Error in ARS score normalization")
         raise e
+
+
+def appraise_confidence(results):
+    """Compute ordering_components locally; replaced the external Appraiser
+    call in post_process (Relay PR #884)."""
+    for result in results:
+        confidence = get_confidence(result)
+        result["ordering_components"] = {
+            "confidence": confidence,
+            "clinical_evidence": 0.0,
+            "novelty": 0.0,
+        }
+
+
+def get_confidence(result):
+    """1 - prod(1 - score) over the result's scored analyses."""
+    score_product = 1
+    for analysis in result.get("analyses") or []:
+        if analysis.get("score") is not None:
+            score_product = score_product * (1 - analysis["score"])
+    confidence_score = 1 - score_product
+    return confidence_score
 
 
 def timestamp_hms() -> str:

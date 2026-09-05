@@ -1,6 +1,6 @@
 """Postgres persistence for the ARS message tree and registry.
 
-Ported from NCATSTranslator/Relay @ dd1e71b (tr_sys/tr_ars/models.py,
+Ported from NCATSTranslator/Relay @ 3e65975 (tr_sys/tr_ars/models.py,
 api.py get_or_create_agent/get_or_create_actor, apps.py seeding). Uses the
 shared Shepherd Postgres pool; payload blobs ride Shepherd's Redis data store
 (keyed by ``str(message_pk)``) with a durable zstd copy in

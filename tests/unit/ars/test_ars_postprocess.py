@@ -1,10 +1,12 @@
 """Parity tests for the ars_postprocess worker.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b utils.py post_process +
+Upstream reference: NCATSTranslator/Relay @ 3e65975 utils.py post_process +
 the tail of merge_and_post_process: blocklist -> scrub -> annotate ->
-appraise -> sugeno scoring -> stats, with the exact failure codes (444 for
-cleanup stages, 422 for appraise/scoring) and the merged_version_available
-notification + parent completion check afterwards.
+appraise_confidence -> stats, with the exact failure codes (444 for the
+cleanup stages and the stat calc; confidence failures are only logged) and
+the merged_version_available notification + parent completion check
+afterwards. The external Appraiser call and the Sugeno scoring pass were
+removed upstream (Relay PRs #884/#883).
 """
 
 import json
@@ -15,7 +17,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-import zstandard
 
 import shepherd_utils.ars.db as ars_db
 from workers.ars_postprocess import worker as pp
@@ -25,18 +26,6 @@ LOGGER = logging.getLogger(__name__)
 
 def load_corpus(name):
     return json.loads(pathlib.Path(f"tests/fixtures/ars_corpus/{name}").read_text())
-
-
-def appraised(data):
-    """What the appraiser would return: results with ordering_components."""
-    out = json.loads(json.dumps(data))
-    for result in out["message"]["results"]:
-        result["ordering_components"] = {
-            "novelty": 0.5,
-            "confidence": 0.8,
-            "clinical_evidence": 0.2,
-        }
-    return out
 
 
 @pytest.fixture
@@ -105,15 +94,6 @@ def _task(env, stats=None):
     ]
 
 
-def _appraiser_response(env):
-    payload = zstandard.compress(json.dumps(appraised(env["data"])).encode("utf-8"))
-    return httpx.Response(
-        status_code=200,
-        content=payload,
-        request=httpx.Request("POST", "https://appraiser.example/get_appraisal"),
-    )
-
-
 def _annotator_response():
     return httpx.Response(
         status_code=200,
@@ -128,18 +108,34 @@ def _annotator_response():
 
 @pytest.fixture
 def http(mocker, env):
-    def _route(url, **kwargs):
-        if "appraise" in str(url) or "get_appraisal" in str(url):
-            return _appraiser_response(env)
-        return _annotator_response()
-
     return mocker.patch(
-        "httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
+        side_effect=lambda url, **kwargs: _annotator_response(),
     )
 
 
+def _expected_confidence(result):
+    product = 1
+    for analysis in result.get("analyses") or []:
+        if analysis.get("score") is not None:
+            product = product * (1 - analysis["score"])
+    return 1 - product
+
+
 async def test_postprocess_happy_path(env, http, redis_mock):
+    expected_confidences = [
+        _expected_confidence(r) for r in env["data"]["message"]["results"]
+    ]
+
     await pp.ars_postprocess(_task(env), LOGGER)
+
+    # the annotator is the ONLY http call: the Appraiser is no longer called
+    from shepherd_utils.config import settings
+
+    for call in http.await_args_list:
+        url = str(call.args[0] if call.args else call.kwargs.get("url"))
+        assert url == settings.tr_annotator
 
     # merged child -> D/200 with result_count + result_stat
     final = next(
@@ -152,11 +148,17 @@ async def test_postprocess_happy_path(env, http, redis_mock):
     assert final["result_count"] == 2
     assert "result_stat" in final
 
-    # saved payload got annotations, appraiser results, and sugeno ranks
+    # ordering_components computed locally by appraise_confidence; no sugeno
     saved = env["save_message_data"].await_args_list[-1].args[1]
     results = saved["message"]["results"]
-    assert all("ordering_components" in r for r in results)
-    assert all("sugeno" in r and "rank" in r for r in results)
+    for result, confidence in zip(results, expected_confidences):
+        assert result["ordering_components"] == {
+            "confidence": confidence,
+            "clinical_evidence": 0.0,
+            "novelty": 0.0,
+        }
+        assert "sugeno" not in result
+        assert "rank" not in result
     nodes = saved["message"]["knowledge_graph"]["nodes"]
     annotated = [
         a
@@ -178,42 +180,74 @@ async def test_postprocess_happy_path(env, http, redis_mock):
     env["completion"].assert_awaited_once()
 
 
-async def test_postprocess_appraiser_failure_is_422(env, mocker, redis_mock):
-    def _route(url, **kwargs):
-        if "appraise" in str(url) or "get_appraisal" in str(url):
-            return httpx.Response(
-                status_code=500,
-                text="appraiser down",
-                request=httpx.Request("POST", "https://appraiser.example/x"),
-            )
-        return _annotator_response()
-
-    mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route)
+async def test_postprocess_confidence_failure_only_logged(
+    env, http, mocker, redis_mock
+):
+    """appraise_confidence failures are logged and swallowed: the message
+    still completes D/200 (upstream post_process @ 3e65975)."""
+    mocker.patch.object(
+        pp, "appraise_confidence", side_effect=RuntimeError("confidence boom")
+    )
     await pp.ars_postprocess(_task(env), LOGGER)
 
     final = next(
         c.kwargs
         for c in env["update_message"].await_args_list
-        if str(c.args[0]) == str(env["merged_pk"]) and c.kwargs.get("code") == 422
+        if str(c.args[0]) == str(env["merged_pk"]) and "status" in c.kwargs
+    )
+    assert final["status"] == "D"
+    assert final["code"] == 200
+    assert final["result_count"] == 2
+    env["notify"].assert_awaited()
+    env["completion"].assert_awaited()
+
+
+async def test_postprocess_stat_calc_failure_is_444(env, http, mocker, redis_mock):
+    """A ScoreStatCalc/result-count failure marks the merged child E/444 and
+    skips the 202->200 flip, but the data (with its error log entries),
+    notification, and completion check still go out."""
+    mocker.patch.object(pp, "ScoreStatCalc", side_effect=RuntimeError("stat boom"))
+    await pp.ars_postprocess(_task(env), LOGGER)
+
+    final = next(
+        c.kwargs
+        for c in env["update_message"].await_args_list
+        if str(c.args[0]) == str(env["merged_pk"]) and "status" in c.kwargs
     )
     assert final["status"] == "E"
-    # default zeroed ordering_components were substituted
+    assert final["code"] == 444
+    # len(results) was assigned before the stat calc raised, as upstream
+    assert final["result_count"] == 2
     saved = env["save_message_data"].await_args_list[-1].args[1]
-    for result in saved["message"]["results"]:
-        assert result["ordering_components"] == {
-            "novelty": 0,
-            "confidence": 0,
-            "clinical_evidence": 0,
-        }
-    # notification + completion still happen (upstream notifies regardless)
+    assert any(
+        entry["message"] == "Error in score stat calculation"
+        for entry in saved.get("logs", [])
+    )
     env["notify"].assert_awaited()
+    env["completion"].assert_awaited()
+
+
+async def test_postprocess_empty_results_still_completes(env, http, redis_mock):
+    """No results: the count/stat/confidence block is skipped entirely and
+    the 202 shell still flips to D/200."""
+    env["data"]["message"]["results"] = []
+    env["load_message_data"].return_value = env["data"]
+
+    await pp.ars_postprocess(_task(env), LOGGER)
+
+    final = next(
+        c.kwargs
+        for c in env["update_message"].await_args_list
+        if str(c.args[0]) == str(env["merged_pk"]) and "status" in c.kwargs
+    )
+    assert final["status"] == "D"
+    assert final["code"] == 200
+    assert "result_count" not in final
     env["completion"].assert_awaited()
 
 
 async def test_postprocess_annotator_failure_is_444(env, mocker, redis_mock):
     def _route(url, **kwargs):
-        if "appraise" in str(url) or "get_appraisal" in str(url):
-            return _appraiser_response(env)
         raise httpx.ConnectError("annotator down")
 
     mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route)

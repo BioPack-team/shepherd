@@ -2,7 +2,7 @@
 
 Broadcasts a submitted query to every actor whose channels intersect the
 parent's, creating one child message per actor and dispatching the query to
-the remote ARA/KP. Port of NCATSTranslator/Relay @ dd1e71b:
+the remote ARA/KP. Port of NCATSTranslator/Relay @ 3e65975:
   - signals.py message_post_save (actor matching)
   - pubsub.py send_messages (skip rules: self, empty path, empty agent uri,
     inactive)

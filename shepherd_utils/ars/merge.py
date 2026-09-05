@@ -1,4 +1,4 @@
-"""TRAPI message merging, ported from NCATSTranslator/Relay @ dd1e71b
+"""TRAPI message merging, ported from NCATSTranslator/Relay @ 3e65975
 tr_sys/tr_ars/utils.py (TranslatorMessage & co, mergeMessages,
 mergeMessagesRecursive, mergeDicts, get_msg_stats).
 
@@ -369,12 +369,8 @@ def mergeDicts(dcurrent, dmerged):
                         for md in mv:
                             if "resource_id" in md.keys():
                                 mmap[md["resource_id"]] = md
-                            # upstream bug kept verbatim: qualifier dicts are
-                            # keyed by md["resource_id"], which KeyErrors and
-                            # is swallowed below -- so qualifier lists never
-                            # actually merge (mv is left as-is).
                             elif "qualifier_type_id" in md.keys():
-                                mmap[md["resource_id"]] = md
+                                mmap[md["qualifier_type_id"]] = md
                             else:
                                 pass
 

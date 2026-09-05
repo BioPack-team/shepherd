@@ -318,7 +318,6 @@ class Settings(BaseSettings):
     tr_ver: str = ""
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
     tr_annotator: str = "https://biothings.ncats.io/curie"
-    tr_appraise: str = "https://answerappraiser.ci.transltr.io/get_appraisal"
     # AES key for decrypting stored notification-client secrets (upstream env
     # AES_MASTER_KEY). Empty disables signed notifications.
     aes_master_key: str = ""

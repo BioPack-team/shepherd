@@ -160,6 +160,48 @@
     }
   },
   {
+    "name": "qualifier_lists_disjoint_types",
+    "dcurrent": {
+      "qualifiers": [
+        {
+          "qualifier_type_id": "biolink:object_direction_qualifier",
+          "qualifier_value": "up"
+        },
+        {
+          "qualifier_type_id": "biolink:object_aspect_qualifier",
+          "qualifier_value": "activity"
+        }
+      ]
+    },
+    "dmerged": {
+      "qualifiers": [
+        {
+          "qualifier_type_id": "biolink:object_direction_qualifier",
+          "qualifier_value": "down"
+        }
+      ]
+    }
+  },
+  {
+    "name": "qualifier_lists_conflicting_values",
+    "dcurrent": {
+      "qualifiers": [
+        {
+          "qualifier_type_id": "biolink:object_direction_qualifier",
+          "qualifier_value": "up"
+        }
+      ]
+    },
+    "dmerged": {
+      "qualifiers": [
+        {
+          "qualifier_type_id": "biolink:object_direction_qualifier",
+          "qualifier_value": "down"
+        }
+      ]
+    }
+  },
+  {
     "name": "attributes_union_lists",
     "dcurrent": {
       "attributes": [

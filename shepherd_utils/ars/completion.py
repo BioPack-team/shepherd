@@ -1,6 +1,6 @@
 """Parent-completion arithmetic.
 
-Ported verbatim from NCATSTranslator/Relay @ dd1e71b,
+Ported verbatim from NCATSTranslator/Relay @ 3e65975,
 tr_sys/tr_ars/signals.py ``message_post_save`` (lines 47-124). This module
 holds the pure decision; the DB/notification orchestration around it lives in
 ``shepherd_utils.ars.db`` and the workers so this part stays exhaustively

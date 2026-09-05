@@ -1,6 +1,6 @@
 """Parity tests for ARS status-letter semantics.
 
-Upstream reference: NCATSTranslator/Relay @ dd1e71b
+Upstream reference: NCATSTranslator/Relay @ 3e65975
   - tr_sys/tr_ars/models.py  Message.STATUS, Message.create, Message.to_dict
   - tr_sys/tr_ars/signals.py message_post_save (code coercion)
 Behavior register rows: P-ST-1 .. P-ST-4.
