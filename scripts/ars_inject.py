@@ -16,15 +16,24 @@ The straightest possible parity test, through the real running stack:
            payloads; captured errored agents (and any local-only agents)
            are closed out with the tr_ars.message.status: E header so the
            parent completes without waiting on the watchdog.
-  COMPARE  the local merged message vs the captured one, deep-diffed with
-           the harness normalizer. Node annotations and logs are always
-           stripped: annotations come from each stack's annotator source
-           and are the one pipeline stage that cannot be replayed from
-           captured inputs.
+  COMPARE  the local merged message vs the captured one, ANNOTATIONS
+           INCLUDED, deep-diffed with the harness normalizer. Only the
+           logs arrays are excluded (their text is wall-clock/instance
+           noise by construction).
+
+Annotations match because they too are replayed from the capture: the
+sink doubles as the local stack's annotator. Every biothings_annotations
+value in the captured merged message is indexed by node id, and when the
+local ars_postprocess worker POSTs {"ids": [...]} to the sink, it answers
+with exactly the values production attached (and {} -- "skip" -- for
+nodes production left unannotated). The local annotate machinery still
+runs for real; its input is pinned.
 
 Local stack prerequisites:
   - the ARA URL overrides point every actor at this script's sink,
     e.g. http://host.docker.internal:8210/<agent> (any path; it 200s all)
+  - TR_ANNOTATOR on the ars_postprocess worker points at the sink too,
+    e.g. TR_ANNOTATOR=http://host.docker.internal:8210/curie
   - the local registry uses the STANDARD actor inforesids (the default
     ars_config seed), so re-running decorate_edges_with_infores over the
     captured (already-decorated) payloads is a no-op. The script warns and
@@ -69,14 +78,21 @@ CHILDREN_WAIT_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
-# sink: the "ARA" every local actor is pointed at; 200s everything, never
-# calls back, so fanout leaves every child Running for us to inject into
+# sink: the "ARA" every local actor is pointed at (200s queries, never calls
+# back, so fanout leaves every child Running for us to inject into) AND the
+# local stack's annotator (serves the captured annotations, keyed by node id,
+# so the annotate stage reproduces production byte-for-byte)
 # ---------------------------------------------------------------------------
+
+# node id -> captured biothings_annotations value; {} means "production left
+# this node unannotated" (the worker skips empty-dict values). Reloaded at
+# the start of each curie's injection.
+ANNOTATION_MAP: dict = {}
 
 
 class _SinkHandler(BaseHTTPRequestHandler):
-    def _ok(self):
-        body = b"{}"
+    def _respond(self, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -85,13 +101,29 @@ class _SinkHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            body = None
+        # the annotator contract is POST {"ids": [...]}; anything else is an
+        # ARA query to swallow
+        if isinstance(body, dict) and isinstance(body.get("ids"), list):
+            ids = body["ids"]
+            unknown = [i for i in ids if i not in ANNOTATION_MAP]
+            if unknown:
+                print(
+                    f"  [sink] annotator asked for {len(unknown)} node(s) not "
+                    f"in the capture (serving {{}}): {unknown[:5]}"
+                )
+            print(f"  [sink] served {len(ids)} captured annotations {self.path}")
+            self._respond({i: ANNOTATION_MAP.get(i, {}) for i in ids})
+            return
         print(f"  [sink] swallowed POST {self.path}")
-        self._ok()
+        self._respond({})
 
     def do_GET(self):
-        self._ok()
+        self._respond({})
 
     def log_message(self, *args):
         pass
@@ -167,6 +199,35 @@ async def wait_for_merge_count(client, base, parent_pk, count) -> None:
         await asyncio.sleep(2)
 
 
+def build_annotation_map(captured_merged: dict) -> dict:
+    """node id -> the biothings_annotations value production attached, {}
+    for nodes production left unannotated (the worker skips {})."""
+    out = {}
+    nodes = (
+        ((captured_merged or {}).get("message") or {}).get("knowledge_graph") or {}
+    ).get("nodes") or {}
+    annotated = 0
+    for node_id, node in nodes.items():
+        value = {}
+        hits = [
+            a
+            for a in (node.get("attributes") or [])
+            if isinstance(a, dict)
+            and a.get("attribute_type_id") == "biothings_annotations"
+        ]
+        if hits:
+            value = hits[0].get("value")
+            annotated += 1
+            if len(hits) > 1:
+                print(
+                    f"  WARNING: node {node_id} carries {len(hits)} "
+                    "biothings_annotations attributes; serving the first"
+                )
+        out[node_id] = value
+    print(f"  annotation map: {annotated}/{len(nodes)} captured nodes annotated")
+    return out
+
+
 def strip_alien_self_sources(merged: dict, alien_inforesids: set) -> dict:
     """When a local actor's inforesid differs from the captured one,
     re-running decorate_edges_with_infores appends the LOCAL inforesid as an
@@ -232,6 +293,11 @@ async def run_injection(curie: str, args) -> str:
         f"  captured: {len(mergers)} merging agents {mergers}, "
         f"{len(empties)} empty, {len(errored)} errored/other"
     )
+
+    # arm the sink's annotator with production's annotations BEFORE any
+    # local merge can trigger the annotate stage
+    ANNOTATION_MAP.clear()
+    ANNOTATION_MAP.update(build_annotation_map(captured["merged"]))
 
     # ---- inject into the local ARS
     base = test_ars.target_urls[args.local]
@@ -326,10 +392,14 @@ async def run_injection(curie: str, args) -> str:
         json.dumps(local_merged, indent=2, default=str)
     )
 
-    # ---- compare (annotations + logs always stripped: the annotator is the
-    # one stage that can't be replayed from captured inputs)
-    captured_cmp = ars_compare.strip_for_comparison(captured["merged"], True, False)
-    local_cmp = ars_compare.strip_for_comparison(local_merged, True, False)
+    # ---- compare, annotations included (the sink replayed production's
+    # annotations, so they must match too); only logs are excluded
+    captured_cmp = ars_compare.strip_for_comparison(
+        captured["merged"], args.ignore_annotations, False
+    )
+    local_cmp = ars_compare.strip_for_comparison(
+        local_merged, args.ignore_annotations, False
+    )
     local_cmp = strip_alien_self_sources(local_cmp, alien)
     diffs = normalize_mod.diff(local_cmp, captured_cmp)
     report = {
@@ -348,6 +418,11 @@ async def run_injection(curie: str, args) -> str:
         print(f"    {d}")
     if len(diffs) > 15:
         print(f"    ... {len(diffs) - 15} more (see {out_dir / 'diff.json'})")
+    if diffs and all("biothings_annotations" in d for d in diffs):
+        print(
+            "    (every diff is a node annotation -- is the ars_postprocess "
+            "worker's TR_ANNOTATOR pointed at this script's sink?)"
+        )
     return report["verdict"]
 
 
@@ -364,8 +439,14 @@ async def main():
         "--sink-port",
         type=int,
         default=8210,
-        help="port for the sink ARA server (0 to not start one, if you run "
-        "your own sink)",
+        help="port for the sink server (ARA sink + captured-annotation "
+        "annotator; 0 to not start one, if you run your own)",
+    )
+    parser.add_argument(
+        "--ignore-annotations",
+        action="store_true",
+        help="strip biothings_annotations before diffing (only needed when "
+        "TR_ANNOTATOR cannot be pointed at the sink)",
     )
     args = parser.parse_args()
 
@@ -373,7 +454,9 @@ async def main():
         start_sink(args.sink_port)
         print(
             "point every local ARA URL override at this sink "
-            f"(e.g. http://host.docker.internal:{args.sink_port}/<agent>) "
+            f"(e.g. http://host.docker.internal:{args.sink_port}/<agent>) AND "
+            "set the ars_postprocess worker's TR_ANNOTATOR to "
+            f"http://host.docker.internal:{args.sink_port}/curie "
             "before submitting.\n"
         )
 
