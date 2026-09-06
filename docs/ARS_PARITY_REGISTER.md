@@ -110,8 +110,19 @@ Behavioral deviations:
    requirements were dumped from the installed upstream package and verdict
    parity is golden-tested over valid + broken corpora.
 2. **Annotator transport**: HTTP API (`TR_ANNOTATOR`) instead of the
-   `biothings_annotator` package (a git dependency pinning conflicting
-   libs). Same service, same resulting `biothings_annotations` attributes.
+   `biothings_annotator` package. The package is not a thin client -- it is
+   the full annotator web service (hard-pins `sanic[ext]==24.12.0`,
+   `sentry-sdk[sanic]`, OTel exporters) and Relay installs it as an
+   *unpinned* git dependency off master, so its behavior shifts under
+   upstream without a Relay commit. The port instead POSTs to a deployed
+   annotator. Both response shapes are handled: the annotator service's
+   `{curie: annotation}` dict (what the package's `annotate_curie_list`
+   returns -- its `/curie/` endpoint is that same call), and the raw
+   BioThings querymany flat list of `"query"`-tagged hits (what
+   `https://biothings.ncats.io/curie` returns), which the port regroups by
+   `"query"` exactly like the package's `group_by_subfield` before the
+   ported consumption loop. Same resulting `biothings_annotations`
+   attributes.
 3. **Watchdog intent fixes**: upstream indexes the Agent table with the
    *actor's* pk (outcome depends on row-id coincidence) — the port joins
    actor→agent properly; and `ars-workflow-agent` parents are exempted

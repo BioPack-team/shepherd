@@ -105,6 +105,19 @@ async def annotate_nodes(data, agent_name, logger):
         )
     r.raise_for_status()
     rj = r.json()
+    if isinstance(rj, list):
+        # Raw BioThings querymany shape: a flat list of hits, each tagged
+        # with "query": <curie> ({"query": ..., "notfound": true} for
+        # misses). Upstream never sees this -- its in-process
+        # biothings_annotator package regroups hits by "query"
+        # (group_by_subfield) before the ARS consumption loop runs --
+        # so the HTTP transport regroups the same way, into the
+        # {curie: [hits]} dict the loop below expects.
+        grouped = {}
+        for hit in rj:
+            if isinstance(hit, dict) and "query" in hit:
+                grouped.setdefault(hit["query"], []).append(hit)
+        rj = grouped
     for key, value in rj.items():
         if (
             isinstance(value, list)
