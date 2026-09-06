@@ -14,6 +14,16 @@ both to completion, then compares three layers:
   3. merged answer  -- the merged_version TRAPI message, deep-diffed after
                        masking volatile identifiers (pks, timestamps,
                        hostnames) with order-insensitive list fallback.
+  4. replay         -- input drift does NOT blind the parity test: for each
+                       stack independently, the ported (golden-tested)
+                       pipeline re-folds that stack's own captured inputs in
+                       its recorded merge order (merged_versions_list) --
+                       blocklist, scrub, confidence, the lot, minus the
+                       external annotator -- and the result is diffed
+                       against what that ARS actually stored. If the port
+                       cannot reproduce the DEPLOYED ARS's answer from the
+                       deployed ARS's own inputs, that is ARS divergence no
+                       matter how much the ARAs drifted between stacks.
 
 Determinism notes: given identical inputs the merge/premerge pipeline is
 deterministic, but a live run has three legitimate noise sources the report
@@ -33,7 +43,9 @@ Usage:
 """
 
 import argparse
+import ast
 import asyncio
+import copy
 import importlib.util
 import json
 import re
@@ -59,6 +71,19 @@ def _load(name: str, path: Path):
 # single-ARS driver, and the masking/diff rules from the layer-4 harness.
 test_ars = _load("test_ars", SCRIPTS_DIR / "test_ars.py")
 normalize_mod = _load("ars_normalize", REPO / "tests/parity_e2e/normalize.py")
+
+# The ported pipeline itself, for the replay layer. Needs the repo's deps
+# (scipy et al.); replay is skipped with a warning if they're missing.
+sys.path.insert(0, str(REPO))
+try:
+    from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
+    from shepherd_utils.ars.merge import TranslatorMessage, mergeMessages
+    from shepherd_utils.ars.premerge import appraise_confidence, scrub_null_attributes
+
+    REPLAY_AVAILABLE = True
+except ImportError as _replay_err:  # pragma: no cover
+    REPLAY_AVAILABLE = False
+    _REPLAY_IMPORT_ERROR = _replay_err
 
 OUT_DIR = "ars_compare"
 REPORT_FILE = "ars_compare_report.json"
@@ -98,6 +123,60 @@ def strip_for_comparison(payload, ignore_annotations: bool, include_logs: bool):
                     )
                 ]
     return out
+
+
+def merge_order(trace: dict) -> list | None:
+    """Canonical agent names in the order the parent actually merged them,
+    from the trace's merged_versions_list ([pk, agent] pairs)."""
+    mvl = (trace or {}).get("merged_versions_list")
+    if isinstance(mvl, str):
+        try:
+            mvl = ast.literal_eval(mvl)
+        except (ValueError, SyntaxError):
+            return None
+    if not isinstance(mvl, list):
+        return None
+    order = []
+    for entry in mvl:
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            order.append(canonical_agent(entry[1]))
+        else:
+            return None
+    return order
+
+
+def replay_side(side: dict) -> tuple:
+    """Re-run the ported pipeline over this stack's own captured inputs, in
+    its own recorded merge order: fold -> blocklist -> scrub -> confidence
+    per step, exactly like merge_received + post_process minus the external
+    annotator. Returns (replayed_payload, error)."""
+    if not REPLAY_AVAILABLE:
+        return None, f"pipeline import failed: {_REPLAY_IMPORT_ERROR}"
+    order = merge_order(side.get("trace"))
+    if not order:
+        return None, "no merged_versions_list on the trace"
+    current = None
+    try:
+        for agent in order:
+            child = side["children"].get(agent)
+            if not isinstance(child, dict) or "message" not in child:
+                return None, f"no captured input payload for {agent}"
+            newcomer = TranslatorMessage(copy.deepcopy(child["message"]))
+            if current is None:
+                # first merge: the newcomer IS the merged message
+                merged_dict = newcomer.to_dict()
+            else:
+                t_current = TranslatorMessage(copy.deepcopy(current["message"]))
+                merged_dict = mergeMessages([t_current, newcomer], "replay").to_dict()
+            remove_blocked(merged_dict, load_blocklist(), "replay")
+            scrub_null_attributes(merged_dict)
+            results = (merged_dict.get("message") or {}).get("results")
+            if results is not None and len(results) > 0:
+                appraise_confidence(results)
+            current = merged_dict
+    except Exception as e:
+        return None, f"replay raised {type(e).__name__}: {e}"
+    return current, None
 
 
 async def run_side(client: httpx.AsyncClient, target: str, query: dict) -> dict:
@@ -217,15 +296,54 @@ def compare_sides(left: dict, right: dict, args) -> dict:
         merged_diffs = normalize_mod.diff(lm, rm)
     report["merged"] = {"equal": not merged_diffs, "diffs": merged_diffs}
 
+    # 4. replay: each stack's merged output vs the ported pipeline re-run on
+    # that stack's OWN inputs -- the drift-immune parity check. Annotations
+    # and logs are always stripped here (replay never calls the annotator).
+    report["replay"] = {}
+    replays = {}
+    if not args.no_replay:
+        for name, side in (("left", left), ("right", right)):
+            entry = {"equal": None, "diffs": [], "error": None}
+            if side["merged"] is None:
+                entry["error"] = "no merged payload to compare against"
+            else:
+                replayed, err = replay_side(side)
+                replays[name] = replayed
+                if err:
+                    entry["error"] = err
+                else:
+                    actual = strip_for_comparison(side["merged"], True, False)
+                    expected = strip_for_comparison(replayed, True, False)
+                    diffs = normalize_mod.diff(actual, expected)
+                    entry["equal"] = not diffs
+                    entry["diffs"] = diffs
+            report["replay"][name] = entry
+
+    replay_l = report["replay"].get("left", {})
+    replay_r = report["replay"].get("right", {})
     if left["error"] or right["error"]:
         report["verdict"] = "ERROR"
     elif report["merged"]["equal"] and report["state_tree"]["equal"]:
         report["verdict"] = "MATCH"
+    elif replay_r.get("equal") is False:
+        # the ported pipeline cannot reproduce the deployed ARS's answer
+        # from the deployed ARS's own inputs: divergence, drift or not
+        report["verdict"] = "ARS_DIVERGENCE"
+    elif replay_l.get("equal") is False:
+        # our own stack's answer isn't reproduced by our own pipeline code:
+        # capture problem or nondeterminism in the port -- investigate
+        report["verdict"] = "LOCAL_REPLAY_MISMATCH"
+    elif replay_l.get("equal") and replay_r.get("equal"):
+        # both stacks' answers are exactly what the ported pipeline produces
+        # from their own inputs; the direct diff is input/arrival-order
+        # drift, not ARS behavior
+        report["verdict"] = "PIPELINE_PARITY"
     elif inputs_drifted:
-        # the two stacks merged different ARA data: not an ARS parity signal
+        # replay unavailable and the stacks merged different ARA data
         report["verdict"] = "INPUT_DRIFT"
     else:
         report["verdict"] = "ARS_DIVERGENCE"
+    report["_replays"] = replays  # stripped before saving; used for artifacts
     return report
 
 
@@ -251,6 +369,16 @@ def print_report(curie: str, report: dict) -> None:
                 "      (all merged diffs are node annotations -- rerun with "
                 "--ignore-annotations to compare past annotator-source skew)"
             )
+    for name, entry in (report.get("replay") or {}).items():
+        if entry.get("error"):
+            status = f"skipped ({entry['error']})"
+        elif entry.get("equal"):
+            status = "reproduced"
+        else:
+            status = f"NOT REPRODUCED ({len(entry['diffs'])})"
+        print(f"  replay {name:<5}: {status}")
+        for d in entry.get("diffs", [])[:MAX_DIFFS_SHOWN]:
+            print(f"      {d}")
 
 
 async def compare_curie(curie: str, args) -> dict:
@@ -279,6 +407,13 @@ async def compare_curie(curie: str, args) -> dict:
             )
 
     report = compare_sides(left, right, args)
+    replays = report.pop("_replays", {}) or {}
+    for name, side in (("left", left), ("right", right)):
+        replayed = replays.get(name)
+        if replayed is not None:
+            (out_dir / f"{side['target']}_replayed.json").write_text(
+                json.dumps(replayed, indent=2, default=str)
+            )
     (out_dir / "diff.json").write_text(json.dumps(report, indent=2, default=str))
     print_report(curie, report)
     return report
@@ -305,6 +440,12 @@ def parse_args():
         help="compare the payloads' logs arrays too (timestamp-masked); "
         "off by default since ARA log text is rarely deterministic",
     )
+    parser.add_argument(
+        "--no-replay",
+        action="store_true",
+        help="skip the replay layer (re-running the ported pipeline over "
+        "each stack's own inputs, the drift-immune parity check)",
+    )
     return parser.parse_args()
 
 
@@ -320,7 +461,14 @@ async def main():
 
     Path(REPORT_FILE).write_text(json.dumps(verdicts, indent=2, sort_keys=True))
     print(f"\n{'=' * 70}\nSweep finished in {time.time() - start:.0f}s")
-    for verdict in ("MATCH", "INPUT_DRIFT", "ARS_DIVERGENCE", "ERROR"):
+    for verdict in (
+        "MATCH",
+        "PIPELINE_PARITY",
+        "INPUT_DRIFT",
+        "LOCAL_REPLAY_MISMATCH",
+        "ARS_DIVERGENCE",
+        "ERROR",
+    ):
         hits = [c for c, v in verdicts.items() if v == verdict]
         if hits:
             print(f"  {verdict:<15} {len(hits):>3}: {', '.join(hits)}")
