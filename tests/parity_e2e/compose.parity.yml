@@ -6,10 +6,15 @@
 #
 # This overlay only adds the mockworld and repoints Shepherd's external
 # service URLs at it; the Relay stack runs from the pinned checkout with the
-# matching env (TR_NORMALIZER/TR_ANNOTATOR pointing at the same mockworld,
-# and its smart-api URL patched to the stub registry). The mockworld still
-# serves /get_appraisal so a stray appraiser call from either stack shows up
-# in the journals, but neither stack calls it since Relay PR #884.
+# matching env (TR_NORMALIZER pointing at the same mockworld, and its
+# smart-api URL patched to the stub registry). The mockworld still serves
+# /get_appraisal and /curie so a stray appraiser or annotator-API call from
+# either stack shows up in the journals, but neither stack makes one: the
+# appraiser call was removed upstream (Relay PR #884) and BOTH stacks now
+# annotate in-process via the biothings_annotator package, which talks to
+# the live BioThings APIs (identically on both sides, but not hermetic --
+# pin the backend with the package's SERVICE_PROVIDER_API_HOST env on both
+# stacks if that ever matters for a scenario).
 
 services:
   mockworld:
@@ -28,14 +33,9 @@ services:
     environment:
       ARS_PUBLIC_HOST: http://shepherd_server:5439
       SMARTAPI_URL: http://mockworld:8099/api/query
-      TR_ANNOTATOR: http://mockworld:8099/curie
       TR_NORMALIZER: http://mockworld:8099/get_normalized_nodes
 
   ars_fanout:
     environment:
       ARS_PUBLIC_HOST: http://shepherd_server:5439
       SMARTAPI_URL: http://mockworld:8099/api/query
-
-  ars_postprocess:
-    environment:
-      TR_ANNOTATOR: http://mockworld:8099/curie

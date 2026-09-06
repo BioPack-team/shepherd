@@ -317,7 +317,9 @@ class Settings(BaseSettings):
     # Empty means no version filter (upstream leaves TR_VER unset -> None).
     tr_ver: str = ""
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
-    tr_annotator: str = "https://biothings.ncats.io/curie"
+    # Node annotation runs the biothings_annotator package in-process (as
+    # upstream); its backend host is overridable via the package's own
+    # SERVICE_PROVIDER_API_HOST env var, not a Shepherd setting.
     # AES key for decrypting stored notification-client secrets (upstream env
     # AES_MASTER_KEY). Empty disables signed notifications.
     aes_master_key: str = ""

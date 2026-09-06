@@ -1,2 +1,5 @@
 scipy
 sympy
+# In-process node annotation, as upstream ARS (which installs it UNPINNED
+# from master); pinned here for reproducible builds -- bump deliberately.
+biothings_annotator @ git+https://github.com/biothings/biothings_annotator@82d3accf6c219860583d3b9b91029538b6a434a1

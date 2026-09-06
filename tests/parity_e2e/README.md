@@ -17,7 +17,7 @@ checkout are available.
 - **Shepherd stack**: `compose.yml` + this directory's overlay
   (`compose.parity.yml`) repointing external URLs at the mockworld.
 - **Relay stack**: the pinned checkout's own `docker-compose.yml`, with env
-  `TR_ANNOTATOR/TR_APPRAISE/TR_NORMALIZER` pointed at the mockworld and its
+  `TR_NORMALIZER` pointed at the mockworld and its
   `tr_smartapi_client.smart_api_discover.urlSmartapi` patched to the stub
   registry (a one-line settings override in the pinned checkout; both
   stacks must resolve ARAs to the same mockworld URLs).

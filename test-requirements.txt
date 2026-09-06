@@ -10,4 +10,4 @@ pytest-mock
 scipy
 sympy
 tox
-tox-venv
+tox-venvbiothings_annotator @ git+https://github.com/biothings/biothings_annotator@82d3accf6c219860583d3b9b91029538b6a434a1

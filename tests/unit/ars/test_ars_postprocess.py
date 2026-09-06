@@ -15,7 +15,6 @@ import pathlib
 import uuid
 from unittest.mock import AsyncMock
 
-import httpx
 import pytest
 
 import shepherd_utils.ars.db as ars_db
@@ -94,25 +93,28 @@ def _task(env, stats=None):
     ]
 
 
-def _annotator_response():
-    return httpx.Response(
-        status_code=200,
-        json={
-            "MONDO:0005148": {"disease_info": {"mondo": "0005148"}},
-            "CHEBI:6801": [{"notfound": True}],
-            "NCBIGene:5468": {"gene_info": {"symbol": "PPARG"}},
-        },
-        request=httpx.Request("POST", "https://annotator.example/curie"),
-    )
+ANNOTATIONS = {
+    "MONDO:0005148": {"disease_info": {"mondo": "0005148"}},
+    "CHEBI:6801": [{"notfound": True}],
+    "NCBIGene:5468": {"gene_info": {"symbol": "PPARG"}},
+}
 
 
 @pytest.fixture
-def http(mocker, env):
-    return mocker.patch(
+def bt_annotator(mocker, env):
+    """The in-process biothings_annotator package, mocked at the Annotator
+    class (upstream uses the same package; no HTTP is involved)."""
+    inst = mocker.MagicMock()
+    inst.annotate_curie_list = AsyncMock(return_value=ANNOTATIONS)
+    mocker.patch.object(pp.annotator, "Annotator", return_value=inst)
+    # any HTTP during postprocess is a regression: the Appraiser and the
+    # annotator API transport are both gone
+    mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=AsyncMock,
-        side_effect=lambda url, **kwargs: _annotator_response(),
+        side_effect=AssertionError("postprocess made an HTTP call"),
     )
+    return inst
 
 
 def _expected_confidence(result):
@@ -123,19 +125,16 @@ def _expected_confidence(result):
     return 1 - product
 
 
-async def test_postprocess_happy_path(env, http, redis_mock):
+async def test_postprocess_happy_path(env, bt_annotator, redis_mock):
     expected_confidences = [
         _expected_confidence(r) for r in env["data"]["message"]["results"]
     ]
 
     await pp.ars_postprocess(_task(env), LOGGER)
 
-    # the annotator is the ONLY http call: the Appraiser is no longer called
-    from shepherd_utils.config import settings
-
-    for call in http.await_args_list:
-        url = str(call.args[0] if call.args else call.kwargs.get("url"))
-        assert url == settings.tr_annotator
+    # the package was asked to annotate exactly the unannotated valid curies
+    (curie_list,) = bt_annotator.annotate_curie_list.await_args.args
+    assert sorted(curie_list) == ["CHEBI:6801", "MONDO:0005148", "NCBIGene:5468"]
 
     # merged child -> D/200 with result_count + result_stat
     final = next(
@@ -166,7 +165,8 @@ async def test_postprocess_happy_path(env, http, redis_mock):
         if a.get("attribute_type_id") == "biothings_annotations"
     ]
     assert len(annotated) == 1
-    # notfound entries are skipped
+    assert annotated[0]["value"] == ANNOTATIONS["MONDO:0005148"]
+    # notfound entries ([{"notfound": true}]) are skipped
     assert not any(
         a.get("attribute_type_id") == "biothings_annotations"
         for a in nodes["CHEBI:6801"]["attributes"]
@@ -181,7 +181,7 @@ async def test_postprocess_happy_path(env, http, redis_mock):
 
 
 async def test_postprocess_confidence_failure_only_logged(
-    env, http, mocker, redis_mock
+    env, bt_annotator, mocker, redis_mock
 ):
     """appraise_confidence failures are logged and swallowed: the message
     still completes D/200 (upstream post_process @ 3e65975)."""
@@ -202,7 +202,9 @@ async def test_postprocess_confidence_failure_only_logged(
     env["completion"].assert_awaited()
 
 
-async def test_postprocess_stat_calc_failure_is_444(env, http, mocker, redis_mock):
+async def test_postprocess_stat_calc_failure_is_444(
+    env, bt_annotator, mocker, redis_mock
+):
     """A ScoreStatCalc/result-count failure marks the merged child E/444 and
     skips the 202->200 flip, but the data (with its error log entries),
     notification, and completion check still go out."""
@@ -227,7 +229,7 @@ async def test_postprocess_stat_calc_failure_is_444(env, http, mocker, redis_moc
     env["completion"].assert_awaited()
 
 
-async def test_postprocess_empty_results_still_completes(env, http, redis_mock):
+async def test_postprocess_empty_results_still_completes(env, bt_annotator, redis_mock):
     """No results: the count/stat/confidence block is skipped entirely and
     the 202 shell still flips to D/200."""
     env["data"]["message"]["results"] = []
@@ -246,83 +248,20 @@ async def test_postprocess_empty_results_still_completes(env, http, redis_mock):
     env["completion"].assert_awaited()
 
 
-async def test_postprocess_annotator_list_response(env, mocker, redis_mock):
-    """The annotator HTTP API can return the raw BioThings querymany shape:
-    a flat LIST of hits tagged with "query" (and {"query": ..., "notfound":
-    true} for misses). Upstream never sees it (the biothings_annotator
-    package regroups hits by "query" via group_by_subfield before the ARS
-    loop runs); the port's HTTP transport must do the same regrouping,
-    producing the {curie: [hits]} dict the consumption loop expects."""
-    list_response = httpx.Response(
-        status_code=200,
-        json=[
-            {"query": "MONDO:0005148", "_id": "0005148", "_score": 1.5, "d": 1},
-            {"query": "MONDO:0005148", "_id": "0005148-b", "_score": 1.1, "d": 2},
-            {"query": "CHEBI:6801", "notfound": True},
-            {"query": "NCBIGene:5468", "_id": "5468", "symbol": "PPARG"},
-        ],
-        request=httpx.Request("POST", "https://annotator.example/curie"),
-    )
-    mocker.patch(
-        "httpx.AsyncClient.post",
-        new_callable=AsyncMock,
-        side_effect=lambda url, **kwargs: list_response,
-    )
-    await pp.ars_postprocess(_task(env), LOGGER)
-
-    # completes D/200: the list shape must not error the annotate stage
-    final = next(
-        c.kwargs
-        for c in env["update_message"].await_args_list
-        if str(c.args[0]) == str(env["merged_pk"]) and "status" in c.kwargs
-    )
-    assert final["status"] == "D"
-    assert final["code"] == 200
-
-    saved = env["save_message_data"].await_args_list[-1].args[1]
-    nodes = saved["message"]["knowledge_graph"]["nodes"]
-    # annotated hits are grouped per curie, hits kept verbatim in a list
-    annotated = [
-        a
-        for a in nodes["MONDO:0005148"]["attributes"]
-        if a.get("attribute_type_id") == "biothings_annotations"
-    ]
-    assert len(annotated) == 1
-    assert annotated[0]["value"] == [
-        {"query": "MONDO:0005148", "_id": "0005148", "_score": 1.5, "d": 1},
-        {"query": "MONDO:0005148", "_id": "0005148-b", "_score": 1.1, "d": 2},
-    ]
-    gene = [
-        a
-        for a in nodes["NCBIGene:5468"]["attributes"]
-        if a.get("attribute_type_id") == "biothings_annotations"
-    ]
-    assert len(gene) == 1
-    assert gene[0]["value"] == [
-        {"query": "NCBIGene:5468", "_id": "5468", "symbol": "PPARG"}
-    ]
-    # notfound entries are skipped, same as the dict shape
-    assert not any(
-        a.get("attribute_type_id") == "biothings_annotations"
-        for a in nodes["CHEBI:6801"]["attributes"]
-    )
-
-
 async def test_postprocess_annotator_failure_is_444(env, mocker, redis_mock):
-    def _route(url, **kwargs):
-        raise httpx.ConnectError("annotator down")
-
-    mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_route)
+    """A package-level annotation failure marks the merged child E/444 and
+    the 444 sticks through the successful later stages, as upstream."""
+    inst = mocker.MagicMock()
+    inst.annotate_curie_list = AsyncMock(side_effect=RuntimeError("annotator down"))
+    mocker.patch.object(pp.annotator, "Annotator", return_value=inst)
     await pp.ars_postprocess(_task(env), LOGGER)
-    # the 444 was recorded when annotation failed...
+
     saw_444 = any(
         c.kwargs.get("code") == 444
         for c in env["update_message"].await_args_list
         if str(c.args[0]) == str(env["merged_pk"])
     )
     assert saw_444
-    # ...and it sticks through to the end (upstream's sticky code/status
-    # locals survive the successful later stages)
     final = env["update_message"].await_args_list[-1].kwargs
     assert final.get("status") == "E"
     assert final.get("code") == 444

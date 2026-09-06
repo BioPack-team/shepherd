@@ -109,20 +109,20 @@ Behavioral deviations:
    (`shepherd_utils/ars/trapi.py`), per project direction. Field
    requirements were dumped from the installed upstream package and verdict
    parity is golden-tested over valid + broken corpora.
-2. **Annotator transport**: HTTP API (`TR_ANNOTATOR`) instead of the
-   `biothings_annotator` package. The package is not a thin client -- it is
-   the full annotator web service (hard-pins `sanic[ext]==24.12.0`,
-   `sentry-sdk[sanic]`, OTel exporters) and Relay installs it as an
-   *unpinned* git dependency off master, so its behavior shifts under
-   upstream without a Relay commit. The port instead POSTs to a deployed
-   annotator. Both response shapes are handled: the annotator service's
-   `{curie: annotation}` dict (what the package's `annotate_curie_list`
-   returns -- its `/curie/` endpoint is that same call), and the raw
-   BioThings querymany flat list of `"query"`-tagged hits (what
-   `https://biothings.ncats.io/curie` returns), which the port regroups by
-   `"query"` exactly like the package's `group_by_subfield` before the
-   ported consumption loop. Same resulting `biothings_annotations`
-   attributes.
+2. **Annotator**: the in-process `biothings_annotator` package, as
+   upstream, with two deltas. (a) *Version pinning*: Relay installs the
+   package as an unpinned git dependency off master, so its annotation
+   logic shifts per image build; the port pins commit `82d3acc` in
+   `workers/ars_postprocess/requirements.txt` and `test-requirements.txt`
+   -- bump deliberately when re-pinning. (b) *Invocation*: the async
+   worker awaits `annotate_curie_list` directly. Upstream's event-loop
+   dance has two branches: celery's sync workers always take
+   `run_until_complete` (to which the direct await is equivalent), while
+   the `loop.is_running()` branch would hand back a Future and crash the
+   consumption loop -- a branch a sync celery worker never takes, not
+   reproduced. The consumption loop itself is verbatim (notfound-list
+   skip, empty-dict skip, direct node indexing, quirky crash modes ->
+   E/444).
 3. **Watchdog intent fixes**: upstream indexes the Agent table with the
    *actor's* pk (outcome depends on row-id coincidence) — the port joins
    actor→agent properly; and `ars-workflow-agent` parents are exempted

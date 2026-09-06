@@ -133,7 +133,7 @@ Port of `utils.post_process`, same order, same failure codes:
 1. `remove_blocked` (blocklist.json, pathfinder-aware) → 2. `scrub_null_attributes` → 3. `annotate_nodes` → 4. `appraise_confidence` (local `ordering_components`; replaced the external Appraiser + Sugeno pass, Relay PR #884) → 5. `ScoreStatCalc` + `result_count` (only when results are non-empty) → 6. save.
    - Steps 1–3 or stat failure ⇒ merge-child `'E'/444`; confidence failures are logged and swallowed; final-save failure ⇒ `'E'/422`; success ⇒ `'D'/200` + `merged_version_available` notification.
 2. Run the **parent-completion check** (§6) after the merge-child reaches a terminal status — this replaces the Django post-save signal's completion arithmetic.
-   - Annotation: default to the biothings `Annotator` package if dependency-compatible, else the `TR_ANNOTATOR` HTTP API — parity is on the resulting `biothings_annotations` attributes, not the transport (§9 R2).
+   - Annotation: the biothings `Annotator` package in-process, as upstream (pinned to a specific commit where Relay floats master; §9 R2).
 
 #### `workers/ars_watchdog` — no stream; timer loop
 
@@ -380,7 +380,7 @@ Each phase lands as a PR with its parity tests; layer-4 harness pieces are built
 - Server: `shepherd_server/aras/ars.py` (+ mount in `server.py`), `shepherd_utils/ars/{db,envelope,completion,merge,filters,scoring,pre_merge,post_process}.py`, `shepherd_utils/smartapi.py`.
 - Workers (6 new containers): `ars_fanout`, `ars_premerge`, `ars_merge`, `ars_postprocess`, `ars_watchdog`, `ars_notify` — each with the standard Dockerfile pattern, `requirements.txt` extras (`scipy`, `sympy`, validator dep, `biothings_annotator` or none), compose + release-matrix entries.
 - Schema: `ars_agent`, `ars_channel`, `ars_actor`, `ars_message`, `ars_client`, `ars_subscription`.
-- Settings: `ars_public_host`, `tr_env`, `tr_ver`, `tr_normalizer`, `tr_annotator`, `aes_master_key`, `ars_data_retention_days`, `ars_watchdog_interval_sec`, timeout thresholds.
+- Settings: `ars_public_host`, `tr_env`, `tr_ver`, `tr_normalizer`, `aes_master_key`, `ars_data_retention_days`, `ars_watchdog_interval_sec`, timeout thresholds.
 - Tests: `tests/unit/ars/` (layers 1–3), `tests/fixtures/ars_{goldens,corpus,api_contract}`, `tests/parity_e2e/` (layer 4), `scripts/ars_parity/`, `docs/ARS_PARITY_REGISTER.md`.
 
 

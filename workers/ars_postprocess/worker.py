@@ -12,9 +12,10 @@ upstream (Relay PRs #884/#883) -- ordering_components now come from
 appraise_confidence. The merged_version_available notification and the
 parent completion check run regardless of outcome, as upstream does.
 
-Node annotation calls the annotator's HTTP API (settings.tr_annotator)
-instead of importing the biothings_annotator package -- same service, same
-resulting biothings_annotations attributes (parity register R2).
+Node annotation runs the biothings_annotator package in-process, exactly as
+upstream does (the async worker awaits annotate_curie_list directly, the
+equivalent of upstream's run_until_complete path; parity register R2 pins
+the package to a specific commit where Relay installs it unpinned).
 """
 
 import asyncio
@@ -24,7 +25,7 @@ import re
 import uuid
 from datetime import datetime
 
-import httpx
+from biothings_annotator import annotator
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
@@ -40,7 +41,6 @@ from shepherd_utils.ars.premerge import (
     timestamp_hms,
 )
 from shepherd_utils.broker import mark_task_as_complete
-from shepherd_utils.config import settings
 from shepherd_utils.db import save_logs
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -80,7 +80,10 @@ def _separate_annotated_nodes(nodes):
 
 
 async def annotate_nodes(data, agent_name, logger):
-    """utils.annotate_nodes via the annotator HTTP API."""
+    """utils.annotate_nodes via the in-process biothings_annotator package,
+    as upstream. The consumption loop is verbatim, quirks included: a
+    non-dict or empty-list value crashes the notfound check (-> the caller's
+    E/444), and annotated values index the node dict directly."""
     nodes = get_safe(data, "message", "knowledge_graph", "nodes")
     if nodes is None:
         return
@@ -93,42 +96,19 @@ async def annotate_nodes(data, agent_name, logger):
         curie_list.remove(key)
     if not curie_list:
         return
-    logger.info(
-        f"sending {len(curie_list)} curie ids to the annotator "
-        f"{settings.tr_annotator}"
-    )
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(
-            settings.tr_annotator,
-            json={"ids": curie_list},
-            headers={"Content-type": "application/json"},
-        )
-    r.raise_for_status()
-    rj = r.json()
-    if isinstance(rj, list):
-        # Raw BioThings querymany shape: a flat list of hits, each tagged
-        # with "query": <curie> ({"query": ..., "notfound": true} for
-        # misses). Upstream never sees this -- its in-process
-        # biothings_annotator package regroups hits by "query"
-        # (group_by_subfield) before the ARS consumption loop runs --
-        # so the HTTP transport regroups the same way, into the
-        # {curie: [hits]} dict the loop below expects.
-        grouped = {}
-        for hit in rj:
-            if isinstance(hit, dict) and "query" in hit:
-                grouped.setdefault(hit["query"], []).append(hit)
-        rj = grouped
+    logger.info(f"annotating {len(curie_list)} curie ids in-process")
+    atr = annotator.Annotator()
+    rj = await atr.annotate_curie_list(curie_list)
     for key, value in rj.items():
         if (
             isinstance(value, list)
-            and value
-            and isinstance(value[0], dict)
-            and value[0].get("notfound") is True
+            and "notfound" in value[0].keys()
+            and value[0]["notfound"] == True  # noqa: E712 -- upstream verbatim
         ):
             pass
         elif isinstance(value, dict) and value == {}:
             pass
-        elif key in data["message"]["knowledge_graph"]["nodes"]:
+        else:
             attribute = {
                 "attribute_type_id": "biothings_annotations",
                 "value": value,

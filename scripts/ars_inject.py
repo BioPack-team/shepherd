@@ -21,24 +21,18 @@ The straightest possible parity test, through the real running stack:
            logs arrays are excluded (their text is wall-clock/instance
            noise by construction).
 
-Annotations are NOT mocked: the local annotate stage runs for real
-against a live annotator, because reproducing production's annotations
-is part of the parity being tested. For the values to match, TR_ANNOTATOR
-must point at the annotator SERVICE of the same maturity as --source
-(see ANNOTATOR_BY_SOURCE below): the live ARS annotates in-process via
-biothings_annotator's annotate_curie_list(), and the deployed annotator
-service's POST /curie/ handler is that exact call with the same defaults,
-so with matching deployments the values come out identical. Residual
-annotation diffs then mean version skew between the ARS's baked-in
-package and the annotator deployment, or backend data movement between
-the capture and the injection -- rerun to check stability before treating
-one as a pipeline bug.
+Annotations are NOT mocked: reproducing production's annotations is part
+of the parity being tested. Both stacks annotate the same way -- the
+in-process biothings_annotator package against the live BioThings APIs
+(the port pins the package commit; the live ARS installs it unpinned from
+master at its image build). Residual annotation diffs therefore mean
+package version skew between the two builds (stable across reruns) or
+BioThings backend data movement between the capture and the injection
+(unstable) -- rerun to classify before treating one as a pipeline bug.
 
 Local stack prerequisites:
   - the ARA URL overrides point every actor at this script's sink,
     e.g. http://host.docker.internal:8210/<agent> (any path; it 200s all)
-  - TR_ANNOTATOR on the ars_postprocess worker points at the annotator
-    service matching --source (the script prints the recommendation)
   - the local registry uses the STANDARD actor inforesids (the default
     ars_config seed), so re-running decorate_edges_with_infores over the
     captured (already-decorated) payloads is a no-op. The script warns and
@@ -85,19 +79,9 @@ CHILDREN_WAIT_SECONDS = 60.0
 # ---------------------------------------------------------------------------
 # sink: the "ARA" every local actor is pointed at; 200s everything, never
 # calls back, so fanout leaves every child Running for us to inject into.
-# (Deliberately NOT an annotator mock -- the annotate stage must hit a real
-# annotator so annotation parity is tested, not assumed.)
+# (Deliberately NOT an annotator mock -- both stacks annotate in-process via
+# the biothings_annotator package, so annotation parity is tested for real.)
 # ---------------------------------------------------------------------------
-
-# The annotator service running the same code the live ARS annotates with
-# in-process (its POST /curie/ handler is annotate_curie_list with the same
-# defaults), per --source maturity.
-ANNOTATOR_BY_SOURCE = {
-    "ars-prod": "https://annotator.transltr.io/curie/",
-    "ars-test": "https://annotator.test.transltr.io/curie/",
-    "ars-ci": "https://annotator.ci.transltr.io/curie/",
-    "ars-dev": "https://annotator.ci.transltr.io/curie/",
-}
 
 
 class _SinkHandler(BaseHTTPRequestHandler):
@@ -379,13 +363,12 @@ async def run_injection(curie: str, args) -> str:
     if len(diffs) > 15:
         print(f"    ... {len(diffs) - 15} more (see {out_dir / 'diff.json'})")
     if diffs and all("biothings_annotations" in d for d in diffs):
-        recommended = ANNOTATOR_BY_SOURCE.get(args.source)
         print(
-            "    (every diff is a node annotation -- check that the "
-            f"ars_postprocess worker's TR_ANNOTATOR is {recommended}; if it "
-            "already is, rerun: a stable annotation diff means version skew "
-            "between the ARS's baked-in annotator package and that "
-            "deployment, an unstable one means backend data moved)"
+            "    (every diff is a node annotation -- rerun to classify: a "
+            "stable diff means biothings_annotator version skew between the "
+            "live ARS's unpinned build and the port's pinned one, an "
+            "unstable diff means BioThings backend data moved between "
+            "capture and injection)"
         )
     return report["verdict"]
 
@@ -419,15 +402,7 @@ async def main():
         print(
             "point every local ARA URL override at this sink "
             f"(e.g. http://host.docker.internal:{args.sink_port}/<agent>) "
-            "before submitting."
-        )
-    recommended = ANNOTATOR_BY_SOURCE.get(args.source)
-    if recommended:
-        print(
-            "for annotation parity, the ars_postprocess worker's "
-            f"TR_ANNOTATOR must be {recommended} (the annotator deployment "
-            f"matching {args.source} -- same code the live ARS annotates "
-            "with in-process).\n"
+            "before submitting.\n"
         )
 
     curies = args.curies.split(",") if args.curies else test_ars.curie_list
