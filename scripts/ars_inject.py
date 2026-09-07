@@ -136,10 +136,17 @@ def classify_captured_children(trace: dict) -> dict:
     return out
 
 
-async def local_children(client, base, parent_pk) -> dict:
-    """canonical agent -> {pk, inforesid} for the local run, waiting for the
-    fanout to create them."""
+async def local_children(client, base, parent_pk, required=()) -> dict:
+    """canonical agent -> {pk, inforesid} for the local run.
+
+    The fanout creates children one actor at a time, so an early trace poll
+    can catch a PARTIAL roster; returning at first sight of any child made
+    the script falsely report not-yet-created actors as missing. Wait until
+    every required agent's child exists (or the deadline passes, at which
+    point whatever is absent is genuinely missing from the registry)."""
     deadline = time.perf_counter() + CHILDREN_WAIT_SECONDS
+    required = set(required)
+    kids: dict = {}
     while True:
         tr = await client.get(f"{base}/api/messages/{parent_pk}?trace=y")
         tr.raise_for_status()
@@ -154,10 +161,12 @@ async def local_children(client, base, parent_pk) -> dict:
                 "pk": child.get("message"),
                 "inforesid": actor.get("inforesid"),
             }
-        if kids:
+        if kids and required <= set(kids):
             return kids
         if time.perf_counter() > deadline:
-            raise TimeoutError("local fanout never created any children")
+            if not kids:
+                raise TimeoutError("local fanout never created any children")
+            return kids
         await asyncio.sleep(2)
 
 
@@ -252,12 +261,13 @@ async def run_injection(curie: str, args) -> str:
         parent_pk = r.json().get("pk")
         print(f"  local parent {parent_pk}")
 
-        kids = await local_children(client, base, parent_pk)
+        kids = await local_children(client, base, parent_pk, required=mergers + empties)
         missing = [a for a in mergers + empties if a not in kids]
         if missing:
             print(
-                f"  ERROR: local registry has no active actor for captured "
-                f"agents {missing} -- activate them and rerun"
+                f"  ERROR: after {CHILDREN_WAIT_SECONDS:.0f}s the local "
+                f"registry produced no child for captured agents {missing} "
+                "-- no active actor; activate them and rerun"
             )
             return "MISSING_ACTORS"
 
