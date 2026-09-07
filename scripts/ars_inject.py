@@ -362,13 +362,15 @@ async def run_injection(curie: str, args) -> str:
         print(f"    {d}")
     if len(diffs) > 15:
         print(f"    ... {len(diffs) - 15} more (see {out_dir / 'diff.json'})")
-    if diffs and all("biothings_annotations" in d for d in diffs):
+    if diffs and all(
+        ".knowledge_graph.nodes." in d and ".attributes[" in d for d in diffs
+    ):
         print(
-            "    (every diff is a node annotation -- rerun to classify: a "
-            "stable diff means biothings_annotator version skew between the "
-            "live ARS's unpinned build and the port's pinned one, an "
-            "unstable diff means BioThings backend data moved between "
-            "capture and injection)"
+            "    (every diff sits under node attributes, i.e. annotations -- "
+            "rerun to classify: a stable diff means biothings_annotator "
+            "version skew between the live ARS's unpinned build and the "
+            "port's pinned one, an unstable diff means BioThings backend "
+            "data moved between capture and injection)"
         )
     return report["verdict"]
 

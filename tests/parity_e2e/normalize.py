@@ -19,6 +19,12 @@ HMS_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 
 VOLATILE_KEYS = {"timestamp", "updated_at", "created_at", "time_elapsed"}
 
+# Elasticsearch per-request relevance bookkeeping inside biothings
+# annotation hits: varies across replicas/shards/batches even for identical
+# queries, so two runs of the SAME stack differ in it. Masked only when
+# numeric (the ES field is always a number).
+VOLATILE_NUMERIC_KEYS = {"_score"}
+
 
 def mask_scalars(value: Any) -> Any:
     if isinstance(value, str):
@@ -39,6 +45,12 @@ def normalize(obj: Any) -> Any:
             key = mask_scalars(k) if isinstance(k, str) else k
             if key in VOLATILE_KEYS and isinstance(v, str):
                 out[key] = "<ts>"
+            elif (
+                key in VOLATILE_NUMERIC_KEYS
+                and isinstance(v, (int, float))
+                and not isinstance(v, bool)
+            ):
+                out[key] = "<volatile>"
             else:
                 out[key] = normalize(v)
         return out

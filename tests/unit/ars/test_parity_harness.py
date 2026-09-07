@@ -41,6 +41,21 @@ def test_diff_equal_after_masking():
     assert diff(a, b) == []
 
 
+def test_normalize_masks_elasticsearch_score():
+    """The _score inside biothings annotation hits is Elasticsearch
+    per-request relevance bookkeeping: it varies across replicas/batches
+    even for identical queries, so two runs of the SAME stack differ in it.
+    Masked; the annotation content itself still compares."""
+    a = {"attributes": [{"value": [{"_id": "1017", "_score": 26.858898, "d": 1}]}]}
+    b = {"attributes": [{"value": [{"_id": "1017", "_score": 26.859509, "d": 1}]}]}
+    assert diff(a, b) == []
+    # content differences under the same hit still surface
+    c = {"attributes": [{"value": [{"_id": "1017", "_score": 26.859509, "d": 2}]}]}
+    assert diff(a, c) != []
+    # a "_score" that isn't numeric is not masked (not the ES field)
+    assert diff({"_score": "high"}, {"_score": "low"}) != []
+
+
 def test_diff_reports_field_level_difference():
     problems = diff({"status": "Done", "code": 200}, {"status": "Error", "code": 200})
     assert problems == ["$.status: 'Done' != 'Error'"]
