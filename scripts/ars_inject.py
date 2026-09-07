@@ -41,6 +41,12 @@ Local stack prerequisites:
 Usage:
   python scripts/ars_inject.py --curies MONDO:0005148
   python scripts/ars_inject.py --source ars-ci --local ars-local --sink-port 8210
+  # MVP2 (chemicals that increased/decreased activity or abundance of a gene)
+  python scripts/ars_inject.py --query-type mvp2-increased --curies NCBIGene:3845
+  python scripts/ars_inject.py --query-type mvp2-decreased --curies NCBIGene:1017
+  # pathfinder (paths between two pinned nodes; spec is SUBJECT~OBJECT)
+  python scripts/ars_inject.py --query-type pathfinder \
+      --curies "MONDO:0005148~CHEBI:6801"
 """
 
 import argparse
@@ -209,8 +215,11 @@ def strip_alien_self_sources(merged: dict, alien_inforesids: set) -> dict:
 
 
 async def run_injection(curie: str, args) -> str:
-    query = test_ars.generate_query(curie)
-    out_dir = Path(OUT_DIR) / curie.replace(":", "_")
+    query = test_ars.build_query(args.query_type, curie)
+    dir_name = curie.replace(":", "_").replace("~", "__")
+    if args.query_type != "treats":
+        dir_name = f"{args.query_type}_{dir_name}"
+    out_dir = Path(OUT_DIR) / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- capture from the live ARS
@@ -390,9 +399,20 @@ async def main():
     parser.add_argument("--source", default="ars-ci", choices=test_ars.target_urls)
     parser.add_argument("--local", default="ars-local", choices=test_ars.target_urls)
     parser.add_argument(
+        "--query-type",
+        default="treats",
+        choices=test_ars.QUERY_TYPES,
+        help="TRAPI template: treats (default), mvp2-increased/mvp2-decreased "
+        "(chemicals that increased/decreased activity or abundance of a "
+        "gene; curies are gene ids), or pathfinder (curie specs are "
+        "SUBJECT~OBJECT pairs)",
+    )
+    parser.add_argument(
         "--curies",
         default=None,
-        help="comma-separated curie subset (default: the full test_ars sweep)",
+        help="comma-separated curie specs (default for treats: the full "
+        "test_ars sweep; required for mvp2/pathfinder). Pathfinder specs "
+        "are SUBJECT~OBJECT pairs",
     )
     parser.add_argument(
         "--sink-port",
@@ -417,7 +437,16 @@ async def main():
             "before submitting.\n"
         )
 
-    curies = args.curies.split(",") if args.curies else test_ars.curie_list
+    if args.curies:
+        curies = args.curies.split(",")
+    elif args.query_type == "treats":
+        curies = test_ars.curie_list
+    else:
+        print(
+            f"--curies is required for --query-type {args.query_type} "
+            "(the default sweep is disease curies for treats queries)"
+        )
+        return
     verdicts = {}
     for curie in curies:
         try:

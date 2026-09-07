@@ -75,6 +75,89 @@ def generate_query(curie: str) -> dict:
     }
 
 
+def generate_mvp2_query(curie: str, direction: str) -> dict:
+    """MVP2 creative-mode template: what chemicals <increased|decreased>
+    activity or abundance of the given gene."""
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "ON": {"categories": ["biolink:Gene"], "ids": [curie]},
+                    "SN": {"categories": ["biolink:ChemicalEntity"]},
+                },
+                "edges": {
+                    "t_edge": {
+                        "subject": "SN",
+                        "object": "ON",
+                        "predicates": ["biolink:affects"],
+                        "knowledge_type": "inferred",
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": "activity_or_abundance",
+                                    },
+                                    {
+                                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                                        "qualifier_value": direction,
+                                    },
+                                ]
+                            }
+                        ],
+                    }
+                },
+            },
+        },
+    }
+
+
+def generate_pathfinder_query(subject_curie: str, object_curie: str) -> dict:
+    """Pathfinder template: paths (not edges) between two pinned nodes.
+    The ARS classifies any query graph carrying "paths" as query_type
+    pathfinder at submit."""
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": [subject_curie]},
+                    "n1": {"ids": [object_curie]},
+                },
+                "edges": {},
+                "paths": {
+                    "p0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:related_to"],
+                    }
+                },
+            },
+        },
+    }
+
+
+QUERY_TYPES = ("treats", "mvp2-increased", "mvp2-decreased", "pathfinder")
+
+
+def build_query(query_type: str, curie_spec: str) -> dict:
+    """Build the TRAPI query for a curie spec: a single curie, or
+    'SUBJECT~OBJECT' for pathfinder."""
+    if query_type == "treats":
+        return generate_query(curie_spec)
+    if query_type == "mvp2-increased":
+        return generate_mvp2_query(curie_spec, "increased")
+    if query_type == "mvp2-decreased":
+        return generate_mvp2_query(curie_spec, "decreased")
+    if query_type == "pathfinder":
+        parts = [p.strip() for p in curie_spec.split("~")]
+        if len(parts) != 2 or not all(parts):
+            raise ValueError(
+                f"pathfinder curie spec must be 'SUBJECT~OBJECT', got {curie_spec!r}"
+            )
+        return generate_pathfinder_query(parts[0], parts[1])
+    raise ValueError(f"unknown query type {query_type!r}")
+
+
 def extract_response_stats(response_json: dict) -> dict:
     """Pull counts of interest out of a TRAPI response payload."""
     message = response_json.get("message") or {}
