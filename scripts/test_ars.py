@@ -75,15 +75,25 @@ def generate_query(curie: str) -> dict:
     }
 
 
-def generate_mvp2_query(curie: str, direction: str) -> dict:
-    """MVP2 creative-mode template: what chemicals <increased|decreased>
-    activity or abundance of the given gene."""
+def generate_mvp2_query(curie: str, direction: str, pinned: str = "gene") -> dict:
+    """MVP2 creative-mode template. pinned="gene": what chemicals
+    <increased|decreased> activity or abundance of the given gene.
+    pinned="chemical": the flipped input -- which genes' activity or
+    abundance the given chemical <increased|decreased>. The edge is the
+    same either way (chemical affects gene, qualifiers on the gene
+    object); only the pinned node changes."""
+    gene_node = {"categories": ["biolink:Gene"]}
+    chemical_node = {"categories": ["biolink:ChemicalEntity"]}
+    if pinned == "gene":
+        gene_node["ids"] = [curie]
+    else:
+        chemical_node["ids"] = [curie]
     return {
         "message": {
             "query_graph": {
                 "nodes": {
-                    "ON": {"categories": ["biolink:Gene"], "ids": [curie]},
-                    "SN": {"categories": ["biolink:ChemicalEntity"]},
+                    "ON": gene_node,
+                    "SN": chemical_node,
                 },
                 "edges": {
                     "t_edge": {
@@ -136,7 +146,14 @@ def generate_pathfinder_query(subject_curie: str, object_curie: str) -> dict:
     }
 
 
-QUERY_TYPES = ("treats", "mvp2-increased", "mvp2-decreased", "pathfinder")
+QUERY_TYPES = (
+    "treats",
+    "mvp2-increased",
+    "mvp2-decreased",
+    "mvp2-chem-increased",
+    "mvp2-chem-decreased",
+    "pathfinder",
+)
 
 
 def build_query(query_type: str, curie_spec: str) -> dict:
@@ -145,9 +162,13 @@ def build_query(query_type: str, curie_spec: str) -> dict:
     if query_type == "treats":
         return generate_query(curie_spec)
     if query_type == "mvp2-increased":
-        return generate_mvp2_query(curie_spec, "increased")
+        return generate_mvp2_query(curie_spec, "increased", pinned="gene")
     if query_type == "mvp2-decreased":
-        return generate_mvp2_query(curie_spec, "decreased")
+        return generate_mvp2_query(curie_spec, "decreased", pinned="gene")
+    if query_type == "mvp2-chem-increased":
+        return generate_mvp2_query(curie_spec, "increased", pinned="chemical")
+    if query_type == "mvp2-chem-decreased":
+        return generate_mvp2_query(curie_spec, "decreased", pinned="chemical")
     if query_type == "pathfinder":
         parts = [p.strip() for p in curie_spec.split("~")]
         if len(parts) != 2 or not all(parts):

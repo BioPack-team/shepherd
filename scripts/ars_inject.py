@@ -44,6 +44,8 @@ Usage:
   # MVP2 (chemicals that increased/decreased activity or abundance of a gene)
   python scripts/ars_inject.py --query-type mvp2-increased --curies NCBIGene:3845
   python scripts/ars_inject.py --query-type mvp2-decreased --curies NCBIGene:1017
+  # MVP2 flipped input (pin the chemical, genes are the answers)
+  python scripts/ars_inject.py --query-type mvp2-chem-increased --curies CHEBI:85078
   # pathfinder (paths between two pinned nodes; spec is SUBJECT~OBJECT)
   python scripts/ars_inject.py --query-type pathfinder \
       --curies "MONDO:0005148~CHEBI:6801"
@@ -402,10 +404,11 @@ async def main():
         "--query-type",
         default="treats",
         choices=test_ars.QUERY_TYPES,
-        help="TRAPI template: treats (default), mvp2-increased/mvp2-decreased "
+        help="TRAPI template: treats (default); mvp2-increased/mvp2-decreased "
         "(chemicals that increased/decreased activity or abundance of a "
-        "gene; curies are gene ids), or pathfinder (curie specs are "
-        "SUBJECT~OBJECT pairs)",
+        "gene; curies are gene ids); mvp2-chem-increased/mvp2-chem-decreased "
+        "(flipped input: pin the chemical, genes are the answers; curies are "
+        "chemical ids); or pathfinder (curie specs are SUBJECT~OBJECT pairs)",
     )
     parser.add_argument(
         "--curies",
