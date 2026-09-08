@@ -879,6 +879,30 @@ def mergedicts_cases():
             },
         },
         {
+            # dict-valued attribute lists are unhashable: upstream's
+            # list(set(...)) union raises TypeError, which the attributes
+            # branch swallows -- the incoming attribute is silently DROPPED
+            # (upstream's own TODO: "check for attributes with values which
+            # are dicts")
+            "name": "attributes_unhashable_dict_values",
+            "dcurrent": {
+                "attributes": [
+                    {
+                        "attribute_type_id": "biolink:has_evidence",
+                        "value": [{"pub": "PMID:9", "sentence": "b"}],
+                    }
+                ]
+            },
+            "dmerged": {
+                "attributes": [
+                    {
+                        "attribute_type_id": "biolink:has_evidence",
+                        "value": [{"pub": "PMID:1", "sentence": "a"}],
+                    }
+                ]
+            },
+        },
+        {
             "name": "attributes_scalar_value_appends",
             "dcurrent": {
                 "attributes": [

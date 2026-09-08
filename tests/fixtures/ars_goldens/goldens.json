@@ -1635,6 +1635,22 @@
       }
     },
     {
+      "name": "attributes_unhashable_dict_values",
+      "output": {
+        "attributes": [
+          {
+            "attribute_type_id": "biolink:has_evidence",
+            "value": [
+              {
+                "pub": "PMID:1",
+                "sentence": "a"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "attributes_scalar_value_appends",
       "output": {
         "attributes": [
@@ -2355,12 +2371,12 @@
         {
           "level": "DEBUG",
           "message": "Removed the following bad nodes: ['blocked two', 'blocked one']",
-          "timestamp": "13:41:46"
+          "timestamp": "14:17:17"
         },
         {
           "level": "DEBUG",
           "message": "Removed the following counts: {'nodes': 2, 'edges': 3, 'results': 2, 'auxiliary_graphs': 1, 'analyses': 4}",
-          "timestamp": "13:41:46"
+          "timestamp": "14:17:17"
         }
       ],
       "message": {

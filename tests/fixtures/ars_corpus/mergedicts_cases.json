@@ -227,6 +227,35 @@
     }
   },
   {
+    "name": "attributes_unhashable_dict_values",
+    "dcurrent": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:has_evidence",
+          "value": [
+            {
+              "pub": "PMID:9",
+              "sentence": "b"
+            }
+          ]
+        }
+      ]
+    },
+    "dmerged": {
+      "attributes": [
+        {
+          "attribute_type_id": "biolink:has_evidence",
+          "value": [
+            {
+              "pub": "PMID:1",
+              "sentence": "a"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
     "name": "attributes_scalar_value_appends",
     "dcurrent": {
       "attributes": [
