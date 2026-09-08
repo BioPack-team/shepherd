@@ -387,6 +387,23 @@ def _validate_cases():
     results_not_list = copy.deepcopy(aragorn)
     results_not_list["message"]["results"] = {"a": 1}
     cases["results_not_list"] = results_not_list
+
+    # pathfinder: query_graph is nodes + paths (no edges) -- accepted via
+    # the PathfinderQueryGraph arm of Message.query_graph's union
+    pathfinder = load("response_pathfinder.json")
+    cases["pathfinder"] = pathfinder
+
+    pf_edges = copy.deepcopy(pathfinder)
+    pf_edges["message"]["query_graph"]["edges"] = {}
+    cases["pathfinder_qg_with_edges"] = pf_edges
+
+    pf_broken_path = copy.deepcopy(pathfinder)
+    del pf_broken_path["message"]["query_graph"]["paths"]["p0"]["object"]
+    cases["pathfinder_path_missing_object"] = pf_broken_path
+
+    pf_broken_analysis = copy.deepcopy(pathfinder)
+    del pf_broken_analysis["message"]["results"][0]["analyses"][0]["path_bindings"]
+    cases["pathfinder_analysis_missing_path_bindings"] = pf_broken_analysis
     return cases
 
 

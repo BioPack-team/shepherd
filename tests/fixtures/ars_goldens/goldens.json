@@ -2355,12 +2355,12 @@
         {
           "level": "DEBUG",
           "message": "Removed the following bad nodes: ['blocked two', 'blocked one']",
-          "timestamp": "20:15:20"
+          "timestamp": "13:41:46"
         },
         {
           "level": "DEBUG",
           "message": "Removed the following counts: {'nodes': 2, 'edges': 3, 'results': 2, 'auxiliary_graphs': 1, 'analyses': 4}",
-          "timestamp": "20:15:20"
+          "timestamp": "13:41:46"
         }
       ],
       "message": {
@@ -3234,6 +3234,10 @@
     "empty": true,
     "kg_missing_edges": false,
     "no_message": false,
+    "pathfinder": true,
+    "pathfinder_analysis_missing_path_bindings": false,
+    "pathfinder_path_missing_object": false,
+    "pathfinder_qg_with_edges": true,
     "qg_categories_not_list": false,
     "result_missing_node_bindings": false,
     "results_not_list": false

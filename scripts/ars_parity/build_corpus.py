@@ -14,7 +14,9 @@ import pathlib
 OUT = pathlib.Path(__file__).resolve().parents[2] / "tests/fixtures/ars_corpus"
 
 
-def edge(subject, obj, predicate="biolink:affects", sources=None, attributes=None, **extra):
+def edge(
+    subject, obj, predicate="biolink:affects", sources=None, attributes=None, **extra
+):
     """A TRAPI-1.5-valid KG edge: reasoner-pydantic 5.1.1 requires both
     ``attributes`` and ``sources`` on every knowledge-graph edge, so the
     defaults keep corpus responses upstream-valid."""
@@ -90,7 +92,10 @@ def response_aragorn():
                         "CHEBI:6801",
                         "MONDO:0005148",
                         "biolink:treats",
-                        sources=[primary("infores:ctd"), aggregator("infores:aragorn", ["infores:ctd"])],
+                        sources=[
+                            primary("infores:ctd"),
+                            aggregator("infores:aragorn", ["infores:ctd"]),
+                        ],
                         attributes=[
                             {
                                 "attribute_type_id": "biolink:publications",
@@ -154,7 +159,13 @@ def response_aragorn():
                 },
             ],
         },
-        "logs": [{"message": "aragorn did a lookup", "level": "INFO", "timestamp": "2026-09-01T00:00:00Z"}],
+        "logs": [
+            {
+                "message": "aragorn did a lookup",
+                "level": "INFO",
+                "timestamp": "2026-09-01T00:00:00Z",
+            }
+        ],
     }
 
 
@@ -193,7 +204,10 @@ def response_arax():
                         "CHEBI:6801",
                         "MONDO:0005148",
                         "biolink:treats",
-                        sources=[primary("infores:ctd"), aggregator("infores:arax", ["infores:ctd"])],
+                        sources=[
+                            primary("infores:ctd"),
+                            aggregator("infores:arax", ["infores:ctd"]),
+                        ],
                         attributes=[
                             {
                                 "attribute_type_id": "biolink:publications",
@@ -270,11 +284,31 @@ def response_blocklist():
             "query_graph": QUERY_GRAPH,
             "knowledge_graph": {
                 "nodes": {
-                    "LOINC:LP231631-5": {"name": "blocked one", "categories": ["biolink:NamedThing"], "attributes": []},
-                    "PSY:25450": {"name": "blocked two", "categories": ["biolink:NamedThing"], "attributes": []},
-                    "CHEBI:6801": {"name": "metformin", "categories": ["biolink:ChemicalEntity"], "attributes": []},
-                    "MONDO:0005148": {"name": "t2d", "categories": ["biolink:Disease"], "attributes": []},
-                    "NCBIGene:5468": {"name": "PPARG", "categories": ["biolink:Gene"], "attributes": []},
+                    "LOINC:LP231631-5": {
+                        "name": "blocked one",
+                        "categories": ["biolink:NamedThing"],
+                        "attributes": [],
+                    },
+                    "PSY:25450": {
+                        "name": "blocked two",
+                        "categories": ["biolink:NamedThing"],
+                        "attributes": [],
+                    },
+                    "CHEBI:6801": {
+                        "name": "metformin",
+                        "categories": ["biolink:ChemicalEntity"],
+                        "attributes": [],
+                    },
+                    "MONDO:0005148": {
+                        "name": "t2d",
+                        "categories": ["biolink:Disease"],
+                        "attributes": [],
+                    },
+                    "NCBIGene:5468": {
+                        "name": "PPARG",
+                        "categories": ["biolink:Gene"],
+                        "attributes": [],
+                    },
                 },
                 "edges": {
                     "bad_subj": edge("LOINC:LP231631-5", "MONDO:0005148"),
@@ -286,7 +320,10 @@ def response_blocklist():
                         "CHEBI:6801",
                         "MONDO:0005148",
                         attributes=[
-                            {"attribute_type_id": "biolink:support_graphs", "value": ["aux_all_bad"]}
+                            {
+                                "attribute_type_id": "biolink:support_graphs",
+                                "value": ["aux_all_bad"],
+                            }
                         ],
                     ),
                     # one of two support graphs removed -> edge survives
@@ -294,7 +331,10 @@ def response_blocklist():
                         "CHEBI:6801",
                         "NCBIGene:5468",
                         attributes=[
-                            {"attribute_type_id": "biolink:support_graphs", "value": ["aux_all_bad", "aux_partial"]}
+                            {
+                                "attribute_type_id": "biolink:support_graphs",
+                                "value": ["aux_all_bad", "aux_partial"],
+                            }
                         ],
                     ),
                 },
@@ -312,7 +352,13 @@ def response_blocklist():
                         "on": [{"id": "LOINC:LP231631-5", "attributes": []}],
                     },
                     "analyses": [
-                        {"resource_id": "infores:x", "edge_bindings": {"t_edge": [{"id": "bad_subj", "attributes": []}]}, "score": 0.5}
+                        {
+                            "resource_id": "infores:x",
+                            "edge_bindings": {
+                                "t_edge": [{"id": "bad_subj", "attributes": []}]
+                            },
+                            "score": 0.5,
+                        }
                     ],
                 },
                 {
@@ -335,7 +381,9 @@ def response_blocklist():
                         {
                             # single binding to a removed edge -> analysis removed
                             "resource_id": "infores:y",
-                            "edge_bindings": {"t_edge": [{"id": "bad_obj", "attributes": []}]},
+                            "edge_bindings": {
+                                "t_edge": [{"id": "bad_obj", "attributes": []}]
+                            },
                             # support_graphs on the analysis referencing a removed EDGE id
                             # (upstream checks membership against edges_to_remove)
                             "support_graphs": ["bad_subj", "aux_clean"],
@@ -350,7 +398,13 @@ def response_blocklist():
                         "on": [{"id": "NCBIGene:5468", "attributes": []}],
                     },
                     "analyses": [
-                        {"resource_id": "infores:x", "edge_bindings": {"t_edge": [{"id": "bad_subj", "attributes": []}]}, "score": 0.3}
+                        {
+                            "resource_id": "infores:x",
+                            "edge_bindings": {
+                                "t_edge": [{"id": "bad_subj", "attributes": []}]
+                            },
+                            "score": 0.3,
+                        }
                     ],
                 },
                 {
@@ -387,7 +441,13 @@ def scrub_input():
         "message": {
             "knowledge_graph": {
                 "nodes": {
-                    "n1": {"attributes": [None, {"attribute_type_id": "x", "value": 1}, None]},
+                    "n1": {
+                        "attributes": [
+                            None,
+                            {"attribute_type_id": "x", "value": 1},
+                            None,
+                        ]
+                    },
                     "n2": {"attributes": None},
                     "n3": {},
                 },
@@ -400,11 +460,29 @@ def scrub_input():
                             {"attribute_type_id": "y", "value": 2, "attributes": None},
                         ],
                         "sources": [
-                            {"resource_id": "infores:a", "resource_role": "primary_knowledge_source"},
+                            {
+                                "resource_id": "infores:a",
+                                "resource_role": "primary_knowledge_source",
+                            },
                             {"resource_role": "aggregator_knowledge_source"},
-                            {"resource_id": None, "resource_role": "aggregator_knowledge_source"},
-                            {"resource_id": "infores:b", "resource_role": "aggregator_knowledge_source", "upstream_resource_ids": None},
-                            {"resource_id": "infores:c", "resource_role": "aggregator_knowledge_source", "upstream_resource_ids": ["infores:a", None, "infores:b"]},
+                            {
+                                "resource_id": None,
+                                "resource_role": "aggregator_knowledge_source",
+                            },
+                            {
+                                "resource_id": "infores:b",
+                                "resource_role": "aggregator_knowledge_source",
+                                "upstream_resource_ids": None,
+                            },
+                            {
+                                "resource_id": "infores:c",
+                                "resource_role": "aggregator_knowledge_source",
+                                "upstream_resource_ids": [
+                                    "infores:a",
+                                    None,
+                                    "infores:b",
+                                ],
+                            },
                         ],
                     },
                 },
@@ -423,12 +501,24 @@ def decorate_cases():
         {
             "name": "no_sources_key",
             "inforesid": "infores:aragorn",
-            "data": {"message": {"knowledge_graph": {"edges": {"e1": {"subject": "a", "object": "b"}}}}},
+            "data": {
+                "message": {
+                    "knowledge_graph": {
+                        "edges": {"e1": {"subject": "a", "object": "b"}}
+                    }
+                }
+            },
         },
         {
             "name": "empty_sources",
             "inforesid": "infores:aragorn",
-            "data": {"message": {"knowledge_graph": {"edges": {"e1": {"subject": "a", "object": "b", "sources": []}}}}},
+            "data": {
+                "message": {
+                    "knowledge_graph": {
+                        "edges": {"e1": {"subject": "a", "object": "b", "sources": []}}
+                    }
+                }
+            },
         },
         {
             "name": "has_primary_not_self",
@@ -441,7 +531,10 @@ def decorate_cases():
                                 "subject": "a",
                                 "object": "b",
                                 "sources": [
-                                    {"resource_id": "infores:ctd", "resource_role": "primary_knowledge_source"}
+                                    {
+                                        "resource_id": "infores:ctd",
+                                        "resource_role": "primary_knowledge_source",
+                                    }
                                 ],
                             }
                         }
@@ -460,7 +553,10 @@ def decorate_cases():
                                 "subject": "a",
                                 "object": "b",
                                 "sources": [
-                                    {"resource_id": "infores:aragorn", "resource_role": "primary_knowledge_source"}
+                                    {
+                                        "resource_id": "infores:aragorn",
+                                        "resource_role": "primary_knowledge_source",
+                                    }
                                 ],
                             }
                         }
@@ -471,7 +567,13 @@ def decorate_cases():
         {
             "name": "none_inforesid",
             "inforesid": None,
-            "data": {"message": {"knowledge_graph": {"edges": {"e1": {"subject": "a", "object": "b", "sources": []}}}}},
+            "data": {
+                "message": {
+                    "knowledge_graph": {
+                        "edges": {"e1": {"subject": "a", "object": "b", "sources": []}}
+                    }
+                }
+            },
         },
         {
             # sources present, none primary, not self: upstream hits an
@@ -486,7 +588,10 @@ def decorate_cases():
                                 "subject": "a",
                                 "object": "b",
                                 "sources": [
-                                    {"resource_id": "infores:x", "resource_role": "aggregator_knowledge_source"}
+                                    {
+                                        "resource_id": "infores:x",
+                                        "resource_role": "aggregator_knowledge_source",
+                                    }
                                 ],
                             }
                         }
@@ -536,23 +641,68 @@ def ordering_cases():
         {
             "name": "standard",
             "results": [
-                {"ordering_components": {"novelty": 0.2, "confidence": 0.9, "clinical_evidence": 0.3}},
-                {"ordering_components": {"novelty": 0.8, "confidence": 0.1, "clinical_evidence": 0.0}},
+                {
+                    "ordering_components": {
+                        "novelty": 0.2,
+                        "confidence": 0.9,
+                        "clinical_evidence": 0.3,
+                    }
+                },
+                {
+                    "ordering_components": {
+                        "novelty": 0.8,
+                        "confidence": 0.1,
+                        "clinical_evidence": 0.0,
+                    }
+                },
                 {"ordering_components": {"confidence": 0.5}},
                 {},
-                {"ordering_components": {"novelty": 0.2, "confidence": 0.9, "clinical_evidence": 0.3}},
+                {
+                    "ordering_components": {
+                        "novelty": 0.2,
+                        "confidence": 0.9,
+                        "clinical_evidence": 0.3,
+                    }
+                },
             ],
         },
         {
             "name": "all_zero",
-            "results": [{"ordering_components": {"novelty": 0, "confidence": 0, "clinical_evidence": 0}}, {}],
+            "results": [
+                {
+                    "ordering_components": {
+                        "novelty": 0,
+                        "confidence": 0,
+                        "clinical_evidence": 0,
+                    }
+                },
+                {},
+            ],
         },
         {
             "name": "extremes",
             "results": [
-                {"ordering_components": {"novelty": 1.0, "confidence": 1.0, "clinical_evidence": 1.0}},
-                {"ordering_components": {"novelty": 0.0, "confidence": 1.0, "clinical_evidence": 0.0}},
-                {"ordering_components": {"novelty": 1.0, "confidence": 0.0, "clinical_evidence": 1.0}},
+                {
+                    "ordering_components": {
+                        "novelty": 1.0,
+                        "confidence": 1.0,
+                        "clinical_evidence": 1.0,
+                    }
+                },
+                {
+                    "ordering_components": {
+                        "novelty": 0.0,
+                        "confidence": 1.0,
+                        "clinical_evidence": 0.0,
+                    }
+                },
+                {
+                    "ordering_components": {
+                        "novelty": 1.0,
+                        "confidence": 0.0,
+                        "clinical_evidence": 1.0,
+                    }
+                },
             ],
         },
     ]
@@ -609,21 +759,61 @@ def mergedicts_cases():
         {"name": "scalar_conflict", "dcurrent": {"a": 2}, "dmerged": {"a": 1}},
         {"name": "none_current", "dcurrent": {"a": None}, "dmerged": {"a": 1}},
         {"name": "none_merged", "dcurrent": {"a": 5}, "dmerged": {"a": None}},
-        {"name": "score_conflict", "dcurrent": {"score": 0.5}, "dmerged": {"score": 0.7}},
-        {"name": "query_ids", "dcurrent": {"query_ids": "q2"}, "dmerged": {"query_ids": "q1"}},
+        {
+            "name": "score_conflict",
+            "dcurrent": {"score": 0.5},
+            "dmerged": {"score": 0.7},
+        },
+        {
+            "name": "query_ids",
+            "dcurrent": {"query_ids": "q2"},
+            "dmerged": {"query_ids": "q1"},
+        },
         {"name": "name_skipped", "dcurrent": {"name": "x"}, "dmerged": {"name": "y"}},
         {"name": "list_plus_scalar", "dcurrent": {"a": 3}, "dmerged": {"a": [1, 2]}},
-        {"name": "hashable_lists", "dcurrent": {"a": ["x", "y"]}, "dmerged": {"a": ["y", "z"]}},
-        {"name": "nested_dicts", "dcurrent": {"a": {"x": 1, "y": 2}}, "dmerged": {"a": {"y": 2, "z": 3}}},
+        {
+            "name": "hashable_lists",
+            "dcurrent": {"a": ["x", "y"]},
+            "dmerged": {"a": ["y", "z"]},
+        },
+        {
+            "name": "nested_dicts",
+            "dcurrent": {"a": {"x": 1, "y": 2}},
+            "dmerged": {"a": {"y": 2, "z": 3}},
+        },
         {
             "name": "resource_id_lists",
-            "dcurrent": {"sources": [{"resource_id": "infores:a", "n": 1}, {"resource_id": "infores:b", "n": 2}]},
-            "dmerged": {"sources": [{"resource_id": "infores:a", "n": 1}, {"resource_id": "infores:c", "n": 3}]},
+            "dcurrent": {
+                "sources": [
+                    {"resource_id": "infores:a", "n": 1},
+                    {"resource_id": "infores:b", "n": 2},
+                ]
+            },
+            "dmerged": {
+                "sources": [
+                    {"resource_id": "infores:a", "n": 1},
+                    {"resource_id": "infores:c", "n": 3},
+                ]
+            },
         },
         {
             "name": "qualifier_lists",
-            "dcurrent": {"qualifiers": [{"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "up"}]},
-            "dmerged": {"qualifiers": [{"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "up"}]},
+            "dcurrent": {
+                "qualifiers": [
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "up",
+                    }
+                ]
+            },
+            "dmerged": {
+                "qualifiers": [
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "up",
+                    }
+                ]
+            },
         },
         {
             # distinguishes the Relay #883 fix (qualifiers keyed by
@@ -631,40 +821,104 @@ def mergedicts_cases():
             "name": "qualifier_lists_disjoint_types",
             "dcurrent": {
                 "qualifiers": [
-                    {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "up"},
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "up",
+                    },
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    },
                 ]
             },
             "dmerged": {
                 "qualifiers": [
-                    {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "down"}
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "down",
+                    }
                 ]
             },
         },
         {
             "name": "qualifier_lists_conflicting_values",
-            "dcurrent": {"qualifiers": [{"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "up"}]},
-            "dmerged": {"qualifiers": [{"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "down"}]},
+            "dcurrent": {
+                "qualifiers": [
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "up",
+                    }
+                ]
+            },
+            "dmerged": {
+                "qualifiers": [
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "down",
+                    }
+                ]
+            },
         },
         {
             "name": "attributes_union_lists",
-            "dcurrent": {"attributes": [{"attribute_type_id": "biolink:publications", "value": ["PMID:2", "PMID:3"]}]},
-            "dmerged": {"attributes": [{"attribute_type_id": "biolink:publications", "value": ["PMID:1", "PMID:2"]}]},
+            "dcurrent": {
+                "attributes": [
+                    {
+                        "attribute_type_id": "biolink:publications",
+                        "value": ["PMID:2", "PMID:3"],
+                    }
+                ]
+            },
+            "dmerged": {
+                "attributes": [
+                    {
+                        "attribute_type_id": "biolink:publications",
+                        "value": ["PMID:1", "PMID:2"],
+                    }
+                ]
+            },
         },
         {
             "name": "attributes_scalar_value_appends",
-            "dcurrent": {"attributes": [{"attribute_type_id": "biolink:knowledge_level", "value": "assertion"}]},
-            "dmerged": {"attributes": [{"attribute_type_id": "biolink:knowledge_level", "value": "assertion"}]},
+            "dcurrent": {
+                "attributes": [
+                    {
+                        "attribute_type_id": "biolink:knowledge_level",
+                        "value": "assertion",
+                    }
+                ]
+            },
+            "dmerged": {
+                "attributes": [
+                    {
+                        "attribute_type_id": "biolink:knowledge_level",
+                        "value": "assertion",
+                    }
+                ]
+            },
         },
         {
             "name": "attributes_new_type_appends",
-            "dcurrent": {"attributes": [{"attribute_type_id": "biolink:agent_type", "value": ["a"]}]},
-            "dmerged": {"attributes": [{"attribute_type_id": "biolink:publications", "value": ["PMID:1"]}]},
+            "dcurrent": {
+                "attributes": [
+                    {"attribute_type_id": "biolink:agent_type", "value": ["a"]}
+                ]
+            },
+            "dmerged": {
+                "attributes": [
+                    {"attribute_type_id": "biolink:publications", "value": ["PMID:1"]}
+                ]
+            },
         },
         {
             "name": "attributes_multiple_existing_appends",
             "dcurrent": {"attributes": [{"attribute_type_id": "t", "value": ["v3"]}]},
-            "dmerged": {"attributes": [{"attribute_type_id": "t", "value": ["v1"]}, {"attribute_type_id": "t", "value": ["v2"]}]},
+            "dmerged": {
+                "attributes": [
+                    {"attribute_type_id": "t", "value": ["v1"]},
+                    {"attribute_type_id": "t", "value": ["v2"]},
+                ]
+            },
         },
         {
             "name": "analyses_append",
@@ -673,8 +927,18 @@ def mergedicts_cases():
         },
         {
             "name": "node_bindings",
-            "dcurrent": {"node_bindings": {"n0": [{"id": "A", "attributes": []}], "n1": [{"id": "B"}]}},
-            "dmerged": {"node_bindings": {"n0": [{"id": "A", "attributes": []}], "n1": [{"id": "C"}]}},
+            "dcurrent": {
+                "node_bindings": {
+                    "n0": [{"id": "A", "attributes": []}],
+                    "n1": [{"id": "B"}],
+                }
+            },
+            "dmerged": {
+                "node_bindings": {
+                    "n0": [{"id": "A", "attributes": []}],
+                    "n1": [{"id": "C"}],
+                }
+            },
         },
         {
             "name": "unhashable_lists_concat",
@@ -684,10 +948,97 @@ def mergedicts_cases():
     ]
 
 
+def response_pathfinder():
+    """A pathfinder-shaped response: the echoed query graph carries nodes +
+    paths and NO edges key (reasoner-pydantic accepts it via the
+    PathfinderQueryGraph arm of Message.query_graph's union), results carry
+    PathfinderAnalysis with path_bindings into an auxiliary graph."""
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["CHEBI:45783"]},
+                    "n1": {"ids": ["MONDO:0004979"]},
+                },
+                "paths": {
+                    "p0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:related_to"],
+                    }
+                },
+            },
+            "knowledge_graph": {
+                "nodes": {
+                    "CHEBI:45783": {
+                        "name": "imatinib",
+                        "categories": ["biolink:SmallMolecule"],
+                        "attributes": [],
+                    },
+                    "MONDO:0004979": {
+                        "name": "asthma",
+                        "categories": ["biolink:Disease"],
+                        "attributes": [],
+                    },
+                    "NCBIGene:3815": {
+                        "name": "KIT",
+                        "categories": ["biolink:Gene"],
+                        "attributes": [],
+                    },
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "CHEBI:45783",
+                        "object": "NCBIGene:3815",
+                        "predicate": "biolink:affects",
+                        "sources": [
+                            {
+                                "resource_id": "infores:arax",
+                                "resource_role": "primary_knowledge_source",
+                            }
+                        ],
+                        "attributes": [],
+                    },
+                    "e1": {
+                        "subject": "NCBIGene:3815",
+                        "object": "MONDO:0004979",
+                        "predicate": "biolink:gene_associated_with_condition",
+                        "sources": [
+                            {
+                                "resource_id": "infores:arax",
+                                "resource_role": "primary_knowledge_source",
+                            }
+                        ],
+                        "attributes": [],
+                    },
+                },
+            },
+            "auxiliary_graphs": {"ag0": {"edges": ["e0", "e1"], "attributes": []}},
+            "results": [
+                {
+                    "node_bindings": {
+                        "n0": [{"id": "CHEBI:45783", "attributes": []}],
+                        "n1": [{"id": "MONDO:0004979", "attributes": []}],
+                    },
+                    "analyses": [
+                        {
+                            "resource_id": "infores:arax",
+                            "path_bindings": {"p0": [{"id": "ag0"}]},
+                            "score": 0.7,
+                        }
+                    ],
+                }
+            ],
+        },
+        "logs": [],
+    }
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     fixtures = {
         "response_aragorn.json": response_aragorn(),
+        "response_pathfinder.json": response_pathfinder(),
         "response_arax.json": response_arax(),
         "response_empty.json": {
             "message": {

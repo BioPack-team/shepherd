@@ -14,6 +14,9 @@ Notable upstream semantics reproduced here:
   - RetrievalSource.resource_role is a closed enum of the three roles.
   - Result.analyses is a homogeneous union: all edge-bound Analysis or all
     path-bound PathfinderAnalysis.
+  - Message.query_graph is a union of QueryGraph and PathfinderQueryGraph
+    (nodes + paths, no edges key), so pathfinder responses that echo their
+    paths-based query graph validate.
 """
 
 import logging
@@ -107,6 +110,18 @@ class QueryGraph(_Allow):
     edges: Dict[str, QEdge]
 
 
+class QPath(_Allow):
+    subject: str
+    object: str
+    predicates: Optional[List[str]] = None
+    constraints: Optional[List[Dict[str, Any]]] = None
+
+
+class PathfinderQueryGraph(_Allow):
+    nodes: Dict[str, QNode]
+    paths: Dict[str, QPath]
+
+
 class NodeBinding(_Allow):
     id: str
     query_id: Optional[str] = None
@@ -151,7 +166,10 @@ class AuxiliaryGraph(_Allow):
 
 
 class Message(_Forbid):
-    query_graph: Optional[QueryGraph] = None
+    # upstream: Union[QueryGraph, PathfinderQueryGraph, None] -- a pathfinder
+    # response's echoed query graph (nodes + paths, no edges key) validates
+    # via the second arm
+    query_graph: Optional[Union[QueryGraph, PathfinderQueryGraph]] = None
     knowledge_graph: Optional[KnowledgeGraph] = None
     results: Optional[List[Result]] = None
     auxiliary_graphs: Optional[Dict[str, AuxiliaryGraph]] = None

@@ -184,7 +184,9 @@ def main():
             # ranked the results that had scores -- a mixed corpus crashes.
             entry["normalized_raises"] = type(e).__name__
         try:
-            entry["stat"] = jsonable(utils.ScoreStatCalc(copy.deepcopy(case["results"])))
+            entry["stat"] = jsonable(
+                utils.ScoreStatCalc(copy.deepcopy(case["results"]))
+            )
         except Exception as e:
             entry["stat_raises"] = type(e).__name__
         ns_cases.append(entry)
@@ -274,12 +276,8 @@ def main():
     # ---------------- filters ----------------
     fin = load("filters_input.json")
     out["filters"] = {
-        "hop_3": jsonable(
-            utils.hop_level_filter(copy.deepcopy(fin["results"]), 3)
-        ),
-        "hop_4": jsonable(
-            utils.hop_level_filter(copy.deepcopy(fin["results"]), 4)
-        ),
+        "hop_3": jsonable(utils.hop_level_filter(copy.deepcopy(fin["results"]), 3)),
+        "hop_4": jsonable(utils.hop_level_filter(copy.deepcopy(fin["results"]), 4)),
         "score_20_80": jsonable(
             utils.score_filter(copy.deepcopy(fin["results"]), [20, 80])
         ),
@@ -298,9 +296,7 @@ def main():
             )
         ),
         "spec_node": jsonable(
-            utils.specific_node_filter(
-                copy.deepcopy(fin["results"]), ["NCBIGene:5468"]
-            )
+            utils.specific_node_filter(copy.deepcopy(fin["results"]), ["NCBIGene:5468"])
         ),
     }
 
@@ -337,6 +333,25 @@ def main():
     results_not_list = copy.deepcopy(aragorn)
     results_not_list["message"]["results"] = {"a": 1}
     verdicts["results_not_list"] = utils.validate(results_not_list)
+
+    # pathfinder: reasoner-pydantic's Message.query_graph is a union of
+    # QueryGraph and PathfinderQueryGraph (nodes + paths, no edges)
+    pathfinder = load("response_pathfinder.json")
+    verdicts["pathfinder"] = utils.validate(copy.deepcopy(pathfinder))
+
+    pf_edges = copy.deepcopy(pathfinder)
+    pf_edges["message"]["query_graph"]["edges"] = {}
+    verdicts["pathfinder_qg_with_edges"] = utils.validate(pf_edges)
+
+    pf_broken_path = copy.deepcopy(pathfinder)
+    del pf_broken_path["message"]["query_graph"]["paths"]["p0"]["object"]
+    verdicts["pathfinder_path_missing_object"] = utils.validate(pf_broken_path)
+
+    pf_broken_analysis = copy.deepcopy(pathfinder)
+    del pf_broken_analysis["message"]["results"][0]["analyses"][0]["path_bindings"]
+    verdicts["pathfinder_analysis_missing_path_bindings"] = utils.validate(
+        pf_broken_analysis
+    )
 
     out["validate"] = verdicts
 
