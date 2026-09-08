@@ -24,6 +24,12 @@ import numpy as np
 import numpy.typing as npt
 import scipy.stats
 
+from shepherd_utils.statistical_significance_qualifier import (
+    SIGNIFICANCE_BAND_SCORES,
+    SIGNIFICANCE_SOURCE_WEIGHT,
+    get_statistical_significance,
+)
+
 # Default confidence for manual agent edges (matches ARAX_ranker.py line 24)
 EDGE_CONFIDENCE_MANUAL_AGENT = 0.90
 
@@ -293,6 +299,17 @@ class ARAXRanker:
                 ):
                     if normalized_score > 0:
                         edge_attribute_score_list.append(normalized_score)
+
+        # Statistical significance qualifier is carried in edge["qualifiers"]
+        # (not attributes). Looked up separately (categorical bypass) so the
+        # enum string never hits the numeric attribute normalizer. Mirrors RTX
+        # _get_significance_qualifier_value + _significance_trust_weight
+        # (RTXteam/RTX#2859).
+        sig_value = get_statistical_significance(edge)
+        if sig_value is not None:
+            sig_score = SIGNIFICANCE_BAND_SCORES.get(sig_value, 0.0)
+            if sig_score > 0:
+                edge_attribute_score_list.append(sig_score * SIGNIFICANCE_SOURCE_WEIGHT)
 
         # If no attributes scored, return base score (ARAX_ranker.py lines 379-384)
         if len(edge_attribute_score_list) == 0:
