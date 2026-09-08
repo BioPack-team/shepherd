@@ -324,6 +324,7 @@ async def save_message(
     response: dict[str, Any],
     logger: logging.Logger,
     num_tries: int = 0,
+    raise_on_failure: bool = False,
 ):
     """
     Add a callback response to the db.
@@ -331,6 +332,9 @@ async def save_message(
     Args:
         callback_id (str): UID for a callback response
         response (dict[str, Any]): A TRAPI message
+        raise_on_failure: re-raise after the retries are exhausted, for
+            callers whose success response promises the payload is stored
+            (e.g. ARS submit); default keeps the historical swallow-and-log.
     """
     start = time.time()
     try:
@@ -349,11 +353,13 @@ async def save_message(
             num_tries += 1
             logger.warning(f"Failed to save message {num_tries} times. Trying again...")
             await asyncio.sleep(0.5)
-            await save_message(callback_id, response, logger, num_tries)
+            await save_message(
+                callback_id, response, logger, num_tries, raise_on_failure
+            )
         else:
-            # TODO: do something more severe
             logger.error(f"Failed to save a message into redis: {e}")
-            pass
+            if raise_on_failure:
+                raise
 
 
 class ResponseTooLargeError(Exception):

@@ -786,8 +786,11 @@ async def save_message_data(
     message_id: Union[str, uuid.UUID],
     payload: Any,
     logger: logging.Logger,
+    raise_on_failure: bool = False,
 ) -> None:
-    await shepherd_db.save_message(str(message_id), payload, logger)
+    await shepherd_db.save_message(
+        str(message_id), payload, logger, raise_on_failure=raise_on_failure
+    )
 
 
 # The query's root OTel trace context, stored at submit so callback-side

@@ -91,6 +91,26 @@ def route(path: str, methods: List[str]):
     return decorator
 
 
+async def _retry_transient_pg(coro_factory, logger_, what: str, attempts: int = 3):
+    """Retry a Postgres operation through transient pool pressure
+    (acquisition timeouts, dropped connections). Anything else -- and the
+    final failure -- propagates to submit's catch-all, which answers 400
+    exactly as upstream's submit does on any internal error."""
+    from psycopg import OperationalError
+    from psycopg_pool import PoolTimeout
+
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(0.1 * (2**attempt))
+        try:
+            return await coro_factory()
+        except (OperationalError, PoolTimeout) as e:
+            last_error = e
+            logger_.warning(f"{what} failed (attempt {attempt}): {e}")
+    raise last_error
+
+
 def _parse_uuid(key: str) -> Optional[uuid.UUID]:
     try:
         return uuid.UUID(str(key))
@@ -180,29 +200,47 @@ async def submit(request: Request) -> Response:
             wf = data["workflow"]
             if isinstance(wf, list):
                 if len(wf) > 0:
-                    actor = await lifecycle.ensure_workflow_actor()
-                    message = await ars_db.create_message(
-                        actor_id=actor["id"],
-                        status="Running",
-                        code=202,
-                        params=params,
-                        name=data.get("name", ""),
+                    actor = await _retry_transient_pg(
+                        lifecycle.ensure_workflow_actor, logger, "submit actor lookup"
+                    )
+                    message = await _retry_transient_pg(
+                        lambda: ars_db.create_message(
+                            actor_id=actor["id"],
+                            status="Running",
+                            code=202,
+                            params=params,
+                            name=data.get("name", ""),
+                        ),
+                        logger,
+                        "submit message insert",
                     )
         else:
-            actor = await lifecycle.ensure_default_actor()
-            message = await ars_db.create_message(
-                actor_id=actor["id"],
-                status="Running",
-                code=202,
-                params=params,
-                name=data.get("name", ""),
+            actor = await _retry_transient_pg(
+                lifecycle.ensure_default_actor, logger, "submit actor lookup"
+            )
+            message = await _retry_transient_pg(
+                lambda: ars_db.create_message(
+                    actor_id=actor["id"],
+                    status="Running",
+                    code=202,
+                    params=params,
+                    name=data.get("name", ""),
+                ),
+                logger,
+                "submit message insert",
             )
         if message is None:
             # upstream: `message` was never assigned -> UnboundLocalError
             raise UnboundLocalError(
                 "local variable 'message' referenced before assignment"
             )
-        await ars_db.save_message_data(message["id"], data, logger)
+        # STRICT save + enqueue: our 201 promises a stored query and a
+        # queued fanout. A swallowed failure on either would return success
+        # for a query that then sits Running forever (parents are
+        # watchdog-exempt) -- raise into the catch-all's honest 400 instead.
+        await ars_db.save_message_data(
+            message["id"], data, logger, raise_on_failure=True
+        )
         # Root the query's trace here and remember the carrier: every later
         # stage (fanout now; merge/postprocess/notify from the callback side)
         # rejoins this trace, giving one end-to-end trace per query even when
@@ -221,6 +259,7 @@ async def submit(request: Request) -> Response:
                 "otel": json.dumps(carrier),
             },
             logger,
+            raise_on_failure=True,
         )
         return dj_json(message_envelope(message, data=data), 201)
     except Exception as e:
@@ -454,7 +493,14 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
                 valid = await asyncio.to_thread(validate, message_to_merge)
             if valid:
                 if agent_name.startswith("ara-"):
-                    await ars_db.save_message_data(key, message_to_merge, logger)
+                    # STRICT: the 201 below promises this payload is stored
+                    # and a merge is queued; a swallowed failure would merge
+                    # nothing (or never merge) while telling the ARA all is
+                    # well. A raise lands in the generic handler's honest
+                    # 500, upstream's contract for internal callback errors.
+                    await ars_db.save_message_data(
+                        key, message_to_merge, logger, raise_on_failure=True
+                    )
                     await broker.add_task(
                         "ars.merge",
                         {
@@ -466,6 +512,7 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
                             "otel": await ars_db.load_otel_carrier(mesg["ref"], logger),
                         },
                         logger,
+                        raise_on_failure=True,
                     )
             else:
                 logger.debug(

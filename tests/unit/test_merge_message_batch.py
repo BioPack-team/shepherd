@@ -461,3 +461,38 @@ async def test_add_ready_callback_raises_after_retries(redis_mock, mocker):
     mocker.patch("asyncio.sleep")
     with pytest.raises(TimeoutError):
         await add_ready_callback("rid-dead", "cb1", logger)
+
+
+@pytest.mark.asyncio
+async def test_add_task_strict_raises_and_default_swallows(redis_mock, mocker):
+    import shepherd_utils.broker as broker_mod
+
+    mocker.patch.object(
+        broker_mod.broker_client,
+        "xadd",
+        side_effect=TimeoutError("Timeout reading from shepherd_broker:6379"),
+    )
+    # fire-and-forget default keeps the historical swallow
+    await broker_mod.add_task("q", {"a": "1"}, logger)
+    # promise-making callers get the failure back
+    with pytest.raises(TimeoutError):
+        await broker_mod.add_task("q", {"a": "1"}, logger, raise_on_failure=True)
+
+
+@pytest.mark.asyncio
+async def test_save_message_strict_raises_after_retries(redis_mock, mocker):
+    import shepherd_utils.db as db_module
+
+    mocker.patch.object(
+        db_module.data_db_client,
+        "set",
+        side_effect=TimeoutError("Timeout reading from shepherd_broker:6379"),
+    )
+    mocker.patch("asyncio.sleep")
+    # default: swallow after retries (historical behavior)
+    await db_module.save_message("cb-x", {"message": {}}, logger)
+    # strict: the caller's success response depends on this save
+    with pytest.raises(TimeoutError):
+        await db_module.save_message(
+            "cb-x", {"message": {}}, logger, raise_on_failure=True
+        )

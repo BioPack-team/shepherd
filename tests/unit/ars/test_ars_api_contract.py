@@ -784,3 +784,50 @@ async def test_report_shape(client, db, redis_mock):
     assert entry["status_code"] == 200
     assert entry["result_count"] == 4
     assert entry["time_elapsed"] == "0:01:30"
+
+
+async def test_submit_retries_transient_pg_failure(client, db, mocker, redis_mock):
+    """A transient Postgres pool timeout on the actor lookup is retried;
+    the submit still lands 201."""
+    from psycopg_pool import PoolTimeout
+
+    import shepherd_utils.ars.lifecycle as lifecycle_mod
+
+    actor = db["ensure_default_actor"].return_value
+    db["ensure_default_actor"].side_effect = [
+        PoolTimeout("couldn't get a connection after 5.00 sec"),
+        actor,
+    ]
+    mocker.patch("asyncio.sleep")
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert db["ensure_default_actor"].await_count == 2
+
+
+async def test_submit_enqueue_failure_is_honest_400(client, db, mocker, redis_mock):
+    """If the fanout task can't be enqueued, submit must NOT return 201 --
+    a success response for a query no worker will ever pick up leaves it
+    Running forever (parents are watchdog-exempt)."""
+    import shepherd_utils.broker as broker_mod
+
+    mocker.patch.object(
+        broker_mod.broker_client,
+        "xadd",
+        side_effect=TimeoutError("Timeout reading from shepherd_broker:6379"),
+    )
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 400
+    assert "failing due to" in resp.text
+
+
+async def test_submit_payload_save_failure_is_honest_400(
+    client, db, mocker, redis_mock
+):
+    """If the query payload can't be stored after retries, submit answers
+    400 instead of a phantom 201 for a query with no stored payload."""
+    db["save_message_data"].side_effect = TimeoutError(
+        "Timeout reading from shepherd_broker:6379"
+    )
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 400
+    assert "failing due to" in resp.text
