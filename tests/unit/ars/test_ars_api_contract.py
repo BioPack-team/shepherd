@@ -475,6 +475,13 @@ async def test_callback_with_results_premerges_and_enqueues_merge(
     valid = json.loads(
         pathlib.Path("tests/fixtures/ars_corpus/response_aragorn.json").read_text()
     )
+    import logging
+
+    import shepherd_utils.ars.db as ars_db_mod
+
+    await ars_db_mod.save_otel_carrier(
+        db["parent_pk"], {"traceparent": "00-sub"}, logging.getLogger()
+    )
     resp = await client.post(f"/api/messages/{db['child_pk']}", json=valid)
     assert resp.status_code == 201
     body = resp.json()
@@ -494,6 +501,9 @@ async def test_callback_with_results_premerges_and_enqueues_merge(
     assert task[1]["parent_pk"] == str(db["parent_pk"])
     assert task[1]["child_pk"] == str(db["child_pk"])
     assert task[1]["agent_name"] == "ara-aragorn"
+    # the merge task rejoins the query's submit-time trace via the stored
+    # carrier (the ARA callback itself carries no traceparent)
+    assert task[1]["otel"] == '{"traceparent": "00-sub"}'
     # result_count / result_stat recorded on the child
     update = db["update_message"].await_args_list[-1]
     assert update.kwargs.get("result_count") == 2

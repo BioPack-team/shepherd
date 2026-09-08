@@ -14,6 +14,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+import shepherd_utils.ars.db as ars_db
 from shepherd_utils.broker import add_task
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,9 @@ async def notify_subscribers(
     """Build the notification fields and wake the ars_notify worker."""
     fields = build_notification(message_row, additional_fields, data=data)
     try:
+        # rejoin the query's submit-time trace (the row is normally the
+        # query parent; fall back through ref for a child row)
+        query_pk = message_row.get("ref") or message_row["id"]
         await add_task(
             "ars.notify",
             {
@@ -67,7 +71,7 @@ async def notify_subscribers(
                 "query_id": str(message_row["id"]),
                 "code": str(message_row.get("code", 200)),
                 "fields": json.dumps(fields) if fields is not None else "null",
-                "otel": "{}",
+                "otel": await ars_db.load_otel_carrier(query_pk, logger),
             },
             logger,
         )

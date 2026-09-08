@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
+from opentelemetry.propagate import inject
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
@@ -202,6 +203,13 @@ async def submit(request: Request) -> Response:
                 "local variable 'message' referenced before assignment"
             )
         await ars_db.save_message_data(message["id"], data, logger)
+        # Root the query's trace here and remember the carrier: every later
+        # stage (fanout now; merge/postprocess/notify from the callback side)
+        # rejoins this trace, giving one end-to-end trace per query even when
+        # an ARA doesn't propagate traceparent into its callback.
+        carrier: Dict[str, str] = {}
+        inject(carrier)
+        await ars_db.save_otel_carrier(message["id"], carrier, logger)
         # post_save broadcast -> the ars_fanout worker
         await broker.add_task(
             "ars.fanout",
@@ -210,7 +218,7 @@ async def submit(request: Request) -> Response:
                 # query_id keys the shared task-context builder + log store
                 "query_id": str(message["id"]),
                 "log_level": resolve_log_level(settings.log_level),
-                "otel": "{}",
+                "otel": json.dumps(carrier),
             },
             logger,
         )
@@ -454,7 +462,8 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
                             "child_pk": str(key),
                             "agent_name": agent_name,
                             "query_id": str(mesg["ref"]),
-                            "otel": "{}",
+                            # rejoin the query's submit-time trace
+                            "otel": await ars_db.load_otel_carrier(mesg["ref"], logger),
                         },
                         logger,
                     )

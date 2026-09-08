@@ -789,6 +789,43 @@ async def save_message_data(
     await shepherd_db.save_message(str(message_id), payload, logger)
 
 
+# The query's root OTel trace context, stored at submit so callback-side
+# stages (merge/postprocess/notify) can rejoin the submit trace even when
+# an ARA doesn't propagate traceparent into its async callback POST.
+# Telemetry only: failures are logged at debug and never break the pipeline.
+OTEL_CARRIER_TTL_SECONDS = 7 * 24 * 3600
+
+
+async def save_otel_carrier(
+    message_id: Union[str, uuid.UUID],
+    carrier: Dict[str, str],
+    logger: logging.Logger,
+) -> None:
+    try:
+        await shepherd_db.data_db_client.set(
+            f"ars:otel:{message_id}",
+            json.dumps(carrier),
+            ex=OTEL_CARRIER_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to save otel carrier for {message_id}: {e}")
+
+
+async def load_otel_carrier(
+    message_id: Union[str, uuid.UUID],
+    logger: logging.Logger,
+) -> str:
+    """The stored carrier as a JSON string for a task's "otel" field; "{}"
+    when absent."""
+    try:
+        raw = await shepherd_db.data_db_client.get(f"ars:otel:{message_id}")
+        if raw:
+            return raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+    except Exception as e:
+        logger.debug(f"Failed to load otel carrier for {message_id}: {e}")
+    return "{}"
+
+
 def _decompress_payload(blob: bytes) -> Any:
     """Message.decompress_dict codec: zstd magic, gzip fallback, {} on error."""
     try:

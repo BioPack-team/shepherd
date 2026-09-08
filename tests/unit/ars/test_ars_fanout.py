@@ -148,7 +148,11 @@ def env(mocker):
 def _task(parent_pk):
     return [
         "tid",
-        {"parent_pk": str(parent_pk), "log_level": "20", "otel": "{}"},
+        {
+            "parent_pk": str(parent_pk),
+            "log_level": "20",
+            "otel": '{"traceparent": "00-fan"}',
+        },
     ]
 
 
@@ -246,6 +250,9 @@ async def test_fanout_sync_endpoint_processes_inline(env, mocker, redis_mock):
     # only the two ara- agents enqueue merges; the KP result does not
     agents = {t[1]["agent_name"] for t in merge_tasks}
     assert agents == {"ara-aragorn", "ara-improving"}
+    # the fanout task's otel context is forwarded so the merge stays in the
+    # query's trace
+    assert all(t[1]["otel"] == '{"traceparent": "00-fan"}' for t in merge_tasks)
 
 
 async def test_fanout_sync_empty_results_done_without_merge(env, mocker, redis_mock):

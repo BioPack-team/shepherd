@@ -136,3 +136,18 @@ def test_serialize_channels_matches_django_serializer_shape():
             "fields": {"name": "workflow", "description": None},
         },
     ]
+
+
+async def test_otel_carrier_roundtrip(redis_mock):
+    """The query's submit-time trace context is stored per parent pk so
+    callback-side stages rejoin the same trace; absent -> '{}'."""
+    import logging
+    import uuid
+
+    import shepherd_utils.ars.db as ars_db
+
+    logger = logging.getLogger(__name__)
+    pk = uuid.uuid4()
+    assert await ars_db.load_otel_carrier(pk, logger) == "{}"
+    await ars_db.save_otel_carrier(pk, {"traceparent": "00-abc"}, logger)
+    assert await ars_db.load_otel_carrier(pk, logger) == '{"traceparent": "00-abc"}'

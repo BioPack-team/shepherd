@@ -84,7 +84,7 @@ async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
         await lifecycle.check_parent_completion(parent_pk, logger)
 
 
-async def send_to_actor(actor, parent, parent_data, logger):
+async def send_to_actor(actor, parent, parent_data, logger, otel="{}"):
     """tasks.send_message, one actor."""
     child = await ars_db.create_message(
         actor_id=actor["id"],
@@ -163,7 +163,7 @@ async def send_to_actor(actor, parent, parent_data, logger):
                                 "child_pk": str(child_pk),
                                 "agent_name": agent_name,
                                 "query_id": str(parent["id"]),
-                                "otel": "{}",
+                                "otel": otel,
                             },
                             logger,
                         )
@@ -237,7 +237,12 @@ async def ars_fanout(task, logger: logging.Logger):
         f"{[a['agent_name'] for a in targets]}"
     )
     await asyncio.gather(
-        *(send_to_actor(actor, parent, parent_data, logger) for actor in targets)
+        *(
+            send_to_actor(
+                actor, parent, parent_data, logger, otel=task[1].get("otel", "{}")
+            )
+            for actor in targets
+        )
     )
 
 
