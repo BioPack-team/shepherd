@@ -469,6 +469,21 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env
 
+  ars_premerge:
+    container_name: ars_premerge
+    build:
+      context: .
+      dockerfile: workers/ars_premerge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
   ars_merge:
     container_name: ars_merge
     build:

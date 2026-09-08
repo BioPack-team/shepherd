@@ -485,33 +485,43 @@ async def test_callback_with_results_premerges_and_enqueues_merge(
     resp = await client.post(f"/api/messages/{db['child_pk']}", json=valid)
     assert resp.status_code == 201
     body = resp.json()
-    assert body["fields"]["status"] == "Done"
-    # premerged blob saved under the child pk
+    # DEVIATION: pre-merge processing + validation run in the ars_premerge
+    # worker now (the CPU work saturated the server; see the parity
+    # register), so the child is still Running here -- upstream's Done/200
+    # flip happens asynchronously in the worker -- and the echoed payload
+    # is the RAW response, not the premerged one.
+    assert body["fields"]["status"] == "Running"
     save = db["save_message_data"].await_args
     assert str(save.args[0]) == str(db["child_pk"])
-    saved_payload = save.args[1]
-    # normalize_scores ran (pre-merge processing happened inline)
-    assert "normalized_score" in saved_payload["message"]["results"][0]
-    # merge wake task enqueued for the ara- agent
+    assert "normalized_score" not in save.args[1]["message"]["results"][0]
+    # a premerge wake task is enqueued (which enqueues ars.merge on success)
     from shepherd_utils.broker import get_task
     import logging
 
-    task = await get_task("ars.merge", "consumer", "t", logging.getLogger())
+    task = await get_task("ars.premerge", "consumer", "t", logging.getLogger())
     assert task is not None
     assert task[1]["parent_pk"] == str(db["parent_pk"])
     assert task[1]["child_pk"] == str(db["child_pk"])
     assert task[1]["agent_name"] == "ara-aragorn"
-    # the merge task rejoins the query's submit-time trace via the stored
+    assert task[1]["status"] == "D"
+    # the task rejoins the query's submit-time trace via the stored
     # carrier (the ARA callback itself carries no traceparent)
     assert task[1]["otel"] == '{"traceparent": "00-sub"}'
-    # result_count / result_stat recorded on the child
+    # result_count / result_stat recorded on the child synchronously (the
+    # repeated-results 409 guard depends on them)
     update = db["update_message"].await_args_list[-1]
     assert update.kwargs.get("result_count") == 2
+    assert "status" not in update.kwargs
 
 
-async def test_callback_invalid_trapi_422(client, db, redis_mock):
-    """A payload that survives pre-merge processing but fails TRAPI
-    validation (result missing node_bindings) -> 422, child E/422."""
+async def test_callback_invalid_trapi_answers_201_worker_flags_422(
+    client, db, redis_mock
+):
+    """DEVIATION: upstream validates inline and answers HTTP 422; the port
+    validates in the ars_premerge worker, so an invalid payload gets the
+    same 201 as a valid one and the child goes E/422 asynchronously (see
+    test_ars_premerge.py::test_premerge_validation_failure_is_422 for the
+    terminal-state parity)."""
     import pathlib
 
     invalid = json.loads(
@@ -519,13 +529,12 @@ async def test_callback_invalid_trapi_422(client, db, redis_mock):
     )
     del invalid["message"]["results"][0]["node_bindings"]
     resp = await client.post(f"/api/messages/{db['child_pk']}", json=invalid)
-    assert resp.status_code == 422
-    assert resp.text == "Problem with TRAPI Validation"
-    update = db["update_message"].await_args_list[-1]
-    assert update.kwargs.get("status") == "E"
-    assert update.kwargs.get("code") == 422
-    # validation failure is terminal -> completion check runs
-    db["check_parent_completion"].assert_awaited()
+    assert resp.status_code == 201
+    from shepherd_utils.broker import get_task
+    import logging
+
+    task = await get_task("ars.premerge", "consumer", "t", logging.getLogger())
+    assert task is not None
 
 
 async def test_callback_header_status_override(client, db, redis_mock):

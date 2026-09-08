@@ -97,7 +97,7 @@ Infrastructure substitutions (behavior-preserving by definition):
 
 | Upstream | Port |
 |---|---|
-| Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.merge`, `ars.postprocess`, `ars.notify`) + the `ars_watchdog` loop |
+| Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.postprocess`, `ars.notify`) + the `ars_watchdog` loop |
 | MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + `ars_message.data` bytea (durable, written at terminal status) |
 | `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent (semaphore column still maintained for envelope parity) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
@@ -163,6 +163,21 @@ Behavioral deviations:
     subclass); Shepherd's orjson blob codec rejects numpy scalars, so the
     port casts via ``.tolist()`` at the production site. Identical numeric
     values; regression-tested against the blob codec round-trip.
+14. **Pre-merge processing is asynchronous** (post-parity change, accepted
+    2026-09-08 after load testing): upstream runs pre_merge_process +
+    phantom removal + TRAPI validation inline in its callback view; the
+    port runs them in the `ars_premerge` worker because the inline CPU work
+    saturated the server at 40 concurrent queries. Consequences for the
+    callback response: a result-bearing POST always answers 201 with the
+    RAW payload echoed and the child still Running (result_count/
+    result_stat are set synchronously so the repeated-results 409 guard
+    still holds); upstream's inline HTTP 422 on validation failure becomes
+    an async child E/422 with the same ara_failed_validation notification;
+    upstream's inline-crash HTTP 500 becomes an async child E/500 with the
+    same "Internal ARS Server Error" log entry. Terminal child states,
+    notifications, merge inputs, and completion arithmetic are unchanged
+    (`tests/unit/ars/test_ars_premerge.py`); a child stuck in premerge is
+    covered by the watchdog's standard 5-minute 598.
 
 ## Not ported (documented drops)
 

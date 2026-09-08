@@ -53,6 +53,7 @@ jobs:
           - arax_rank
           - ars_fanout
           - ars_merge
+          - ars_premerge
           - ars_notify
           - ars_postprocess
           - ars_watchdog

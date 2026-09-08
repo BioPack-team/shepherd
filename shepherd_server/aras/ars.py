@@ -9,9 +9,10 @@ timeoutTest) reproduce their observable failures, including side effects
 that happen before the upstream crash.
 
 Background work rides Shepherd's Redis Streams instead of Celery: submit
-enqueues ``ars.fanout``; a validated result callback enqueues ``ars.merge``.
-Pre-merge processing + TRAPI validation run inline in the callback request
-(as upstream does in its Django view) via a worker thread.
+enqueues ``ars.fanout``; a result-bearing callback enqueues ``ars.premerge``
+(pre-merge processing + TRAPI validation, run there instead of inline as
+upstream does -- documented deviation, the CPU work saturated the server),
+which enqueues ``ars.merge`` on success.
 """
 
 import ast
@@ -43,14 +44,8 @@ from shepherd_utils.ars.filters import (
     specific_node_filter,
 )
 from shepherd_utils.ars.notify import notify_subscribers
-from shepherd_utils.ars.premerge import (
-    ScoreStatCalc,
-    get_safe,
-    pre_merge_process,
-    remove_phantom_support_graphs,
-)
+from shepherd_utils.ars.premerge import ScoreStatCalc, get_safe
 from shepherd_utils.ars.statuses import to_name
-from shepherd_utils.ars.trapi import validate
 from shepherd_utils.config import settings
 from shepherd_utils.logger import resolve_log_level
 
@@ -478,78 +473,43 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
         if res is not None and result_length > 0:
             result_count = result_length
             result_stat = ScoreStatCalc(res)
-            message_to_merge = data
-            # pre-merge processing + validation run inline (upstream does
-            # this in the Django request); offloaded to a thread so the CPU
-            # work doesn't stall the event loop.
-            params = mesg.get("params") or {}
-            await asyncio.to_thread(
-                pre_merge_process, message_to_merge, str(key), agent_name, inforesid
+            # Pre-merge processing (scrub/decorate/normalize), phantom
+            # removal, and TRAPI validation run in the ars_premerge worker
+            # instead of inline here (documented deviation: the CPU work
+            # saturated the server under load; upstream runs it in its
+            # Django request). The child stays R/202 with its counts until
+            # the worker validates and flips it -- or E/422s it, sending the
+            # ara_failed_validation notification upstream sent with its
+            # inline HTTP 422.
+            # STRICT save + enqueue: the 201 below promises the pipeline
+            # owns this response now; a swallowed failure would strand it.
+            await ars_db.save_message_data(key, data, logger, raise_on_failure=True)
+            updated = await ars_db.update_message(
+                key, result_count=result_count, result_stat=result_stat
             )
-            if "validate" in params.keys() and not params["validate"]:
-                valid = True
-            else:
-                await asyncio.to_thread(remove_phantom_support_graphs, message_to_merge)
-                valid = await asyncio.to_thread(validate, message_to_merge)
-            if valid:
-                if agent_name.startswith("ara-"):
-                    # STRICT: the 201 below promises this payload is stored
-                    # and a merge is queued; a swallowed failure would merge
-                    # nothing (or never merge) while telling the ARA all is
-                    # well. A raise lands in the generic handler's honest
-                    # 500, upstream's contract for internal callback errors.
-                    await ars_db.save_message_data(
-                        key, message_to_merge, logger, raise_on_failure=True
-                    )
-                    await broker.add_task(
-                        "ars.merge",
-                        {
-                            "parent_pk": str(mesg["ref"]),
-                            "child_pk": str(key),
-                            "agent_name": agent_name,
-                            "query_id": str(mesg["ref"]),
-                            # rejoin the query's submit-time trace
-                            "otel": await ars_db.load_otel_carrier(mesg["ref"], logger),
-                        },
-                        logger,
-                        raise_on_failure=True,
-                    )
-            else:
-                logger.debug(
-                    f"Validation problem found for agent {agent_name} with pk "
-                    f"{mesg['ref']}"
-                )
-                await ars_db.save_message_data(key, data, logger)
-                updated = await ars_db.update_message(
-                    key,
-                    status="E",
-                    code=422,
-                    result_count=result_count,
-                    result_stat=result_stat,
-                )
-                await ars_db.persist_data_copy(key, logger)
-                await notify_subscribers(
-                    parent,
-                    {
-                        "event_type": "ara_failed_validation",
-                        "ara_name": inforesid,
-                        "child_uuid": str(mesg["id"]),
-                        "ara_response_status": "E",
-                        "ara_n_results": result_length,
-                    },
-                    logger,
-                )
-                await lifecycle.check_parent_completion(mesg["ref"], logger)
-                return text("Problem with TRAPI Validation", 422)
+            await broker.add_task(
+                "ars.premerge",
+                {
+                    "parent_pk": str(mesg["ref"]),
+                    "child_pk": str(key),
+                    "agent_name": agent_name,
+                    "inforesid": str(inforesid or ""),
+                    # the tr_ars.message.status header override rides along
+                    "status": status,
+                    "query_id": str(mesg["ref"]),
+                    # rejoin the query's submit-time trace
+                    "otel": await ars_db.load_otel_carrier(mesg["ref"], logger),
+                },
+                logger,
+                raise_on_failure=True,
+            )
+            env = message_envelope(updated or mesg, data=data)
+            return dj_json(env, 201)
 
-        if result_count is None:
-            # save the raw payload for children without results
-            await ars_db.save_message_data(key, data, logger)
+        # no results: terminal inline, nothing to premerge or validate
+        await ars_db.save_message_data(key, data, logger)
         updates: Dict[str, Any] = {"status": status, "code": code}
-        if result_count is not None:
-            updates["result_count"] = result_count
-            updates["result_stat"] = result_stat
-        elif res is None:
+        if res is None:
             # design choice upstream (06-09-2026): None results means 0
             updates["result_count"] = 0
         updated = await ars_db.update_message(key, **updates)
