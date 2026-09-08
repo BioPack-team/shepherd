@@ -97,25 +97,38 @@ async def annotate_nodes(data, agent_name, logger):
     if not curie_list:
         return
     logger.info(f"annotating {len(curie_list)} curie ids in-process")
-    atr = annotator.Annotator()
-    rj = await atr.annotate_curie_list(curie_list)
-    for key, value in rj.items():
-        if (
-            isinstance(value, list)
-            and "notfound" in value[0].keys()
-            and value[0]["notfound"] == True  # noqa: E712 -- upstream verbatim
-        ):
-            pass
-        elif isinstance(value, dict) and value == {}:
-            pass
-        else:
-            attribute = {
-                "attribute_type_id": "biothings_annotations",
-                "value": value,
-            }
-            add_attribute(data["message"]["knowledge_graph"]["nodes"][key], attribute)
-    if len(invalid_nodes) > 0:
-        data["message"]["knowledge_graph"]["nodes"].update(invalid_nodes)
+    # A named span, as upstream's annotate_nodes wraps its package call: the
+    # annotator is in-process (no separate Jaeger service), so this is what
+    # makes the stage findable -- the package's outbound BioThings requests
+    # appear as httpx client POST spans nested underneath.
+    with tracer.start_as_current_span("annotator") as span:
+        span.set_attribute("annotator.curie_count", len(curie_list))
+        span.set_attribute("agent", agent_name)
+        atr = annotator.Annotator()
+        span.set_attribute("annotator.api_host", str(atr.api_host))
+        rj = await atr.annotate_curie_list(curie_list)
+        annotated = 0
+        for key, value in rj.items():
+            if (
+                isinstance(value, list)
+                and "notfound" in value[0].keys()
+                and value[0]["notfound"] == True  # noqa: E712 -- upstream verbatim
+            ):
+                pass
+            elif isinstance(value, dict) and value == {}:
+                pass
+            else:
+                attribute = {
+                    "attribute_type_id": "biothings_annotations",
+                    "value": value,
+                }
+                add_attribute(
+                    data["message"]["knowledge_graph"]["nodes"][key], attribute
+                )
+                annotated += 1
+        span.set_attribute("annotator.annotated_count", annotated)
+        if len(invalid_nodes) > 0:
+            data["message"]["knowledge_graph"]["nodes"].update(invalid_nodes)
 
 
 def _post_processing_error(merged_row, data, text):
