@@ -57,9 +57,10 @@ class Settings(BaseSettings):
     # holds its own pool, so the fleet-wide ceiling is (number of containers x
     # max size) and must stay under Postgres's max_connections (400 in
     # compose.yml). The server fields all client HTTP traffic (sync-query
-    # status polling, /callback lookups) and is the component that exhausts
-    # its pool first under load, so compose.yml/Helm give it a larger pool via
-    # these env vars while the workers keep the small default.
+    # status polling, /callback lookups) and the lookup workers fan one query
+    # out into many concurrent DB ops, so compose.yml/Helm give those
+    # containers larger pools via these env vars while the remaining workers
+    # keep the small default.
     postgres_pool_min_size: int = 5
     postgres_pool_max_size: int = 10
     # Size of the Postgres data volume, set from the SAME Helm value that sizes

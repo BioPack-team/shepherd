@@ -425,3 +425,39 @@ async def test_ready_callback_index_is_per_query(redis_mock):
     await add_ready_callback("rid-b", "cb2", logger)
     assert await get_ready_callbacks("rid-a", logger) == ["cb1"]
     assert await get_ready_callbacks("rid-b", logger) == ["cb2"]
+
+
+@pytest.mark.asyncio
+async def test_add_ready_callback_retries_transient_failure(redis_mock, mocker):
+    """A Redis blip on the ready-set write is retried (SADD is idempotent);
+    the callback still lands in the set."""
+    import shepherd_utils.db as db_module
+
+    real_pipeline = db_module.data_db_client.pipeline
+    calls = {"n": 0}
+
+    def flaky_pipeline(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("Timeout reading from shepherd_broker:6379")
+        return real_pipeline(*args, **kwargs)
+
+    mocker.patch.object(db_module.data_db_client, "pipeline", flaky_pipeline)
+    mocker.patch("asyncio.sleep")  # no real backoff in tests
+    await add_ready_callback("rid-retry", "cb1", logger)
+    assert await get_ready_callbacks("rid-retry", logger) == ["cb1"]
+
+
+@pytest.mark.asyncio
+async def test_add_ready_callback_raises_after_retries(redis_mock, mocker):
+    """If the ready-set write cannot land at all, the caller must find out:
+    a swallowed failure means the callback's results silently never merge."""
+    import shepherd_utils.db as db_module
+
+    def dead_pipeline(*args, **kwargs):
+        raise TimeoutError("Timeout reading from shepherd_broker:6379")
+
+    mocker.patch.object(db_module.data_db_client, "pipeline", dead_pipeline)
+    mocker.patch("asyncio.sleep")
+    with pytest.raises(TimeoutError):
+        await add_ready_callback("rid-dead", "cb1", logger)

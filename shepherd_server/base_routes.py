@@ -492,8 +492,20 @@ async def callback(
     # Record this callback in the per-query ready index *before* enqueuing the
     # wake task, so that whichever merge_message worker picks up the wake signal
     # can drain every arrived callback for this query under one lock. Set
-    # membership implies the payload above is already saved.
-    await add_ready_callback(response_id, callback_id, logger)
+    # membership implies the payload above is already saved. If the record
+    # can't land even after retries, tell the sender delivery failed (a 200
+    # here would silently drop their results: merge workers only ever drain
+    # the ready set). The payload save above is idempotent, so a redelivery
+    # simply overwrites and re-records.
+    try:
+        await add_ready_callback(response_id, callback_id, logger)
+    except Exception:
+        logger.error(
+            f"[{callback_id}] could not record callback as ready after "
+            "retries; asking the sender to retry delivery"
+        )
+        await save_logs(response_id, logger)
+        return Response("Failed to record callback.", 500)
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
     with tracer.start_as_current_span("callback", context=parent_ctx) as span:

@@ -151,3 +151,49 @@ async def test_otel_carrier_roundtrip(redis_mock):
     assert await ars_db.load_otel_carrier(pk, logger) == "{}"
     await ars_db.save_otel_carrier(pk, {"traceparent": "00-abc"}, logger)
     assert await ars_db.load_otel_carrier(pk, logger) == '{"traceparent": "00-abc"}'
+
+
+async def test_persist_data_copy_retries_transient_redis_failure(redis_mock, mocker):
+    """A Redis timeout reading the blob is retried; the durable copy still
+    lands in Postgres."""
+    import logging
+
+    import shepherd_utils.ars.db as ars_db
+    import shepherd_utils.db as shepherd_db
+
+    logger = logging.getLogger(__name__)
+    pk = uuid.uuid4()
+    blob = b"\x28\xb5\x2f\xfd fake-zstd"
+
+    real_get = shepherd_db.data_db_client.get
+    calls = {"n": 0}
+
+    async def flaky_get(key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("Timeout reading from shepherd_broker:6379")
+        return blob
+
+    mocker.patch.object(shepherd_db.data_db_client, "get", side_effect=flaky_get)
+    mocker.patch("asyncio.sleep")
+
+    executed = []
+
+    class _Conn:
+        async def execute(self, sql, params):
+            executed.append((sql, params))
+
+        async def commit(self):
+            pass
+
+    class _ConnCM:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    mocker.patch.object(shepherd_db.pool, "connection", lambda timeout: _ConnCM())
+    await ars_db.persist_data_copy(pk, logger)
+    assert calls["n"] == 2
+    assert executed and executed[0][1] == (blob, pk)

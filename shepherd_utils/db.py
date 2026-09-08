@@ -4,7 +4,7 @@ import asyncio
 import io
 import logging
 import time
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import orjson
 import redis
@@ -17,6 +17,10 @@ from .config import settings
 from .logger import get_query_handler, resolve_log_level
 
 PG_RETRIES = 5
+# Retries for the handful of Redis writes that are correctness-critical
+# (e.g. the ready-callback index): 3 attempts with 0.1s/0.2s backoff rides
+# out a slow-command blip without stalling an HTTP handler for long.
+REDIS_RETRIES = 3
 
 # Postgres SQLSTATE 53100 is ``disk_full``. A full data volume surfaces as
 # psycopg.errors.DiskFull, which subclasses OperationalError -- so it lands in
@@ -523,15 +527,33 @@ async def add_ready_callback(
     callback_id: str,
     logger: logging.Logger,
 ) -> None:
-    """Record an arrived callback as ready to merge into ``response_id``."""
+    """Record an arrived callback as ready to merge into ``response_id``.
+
+    The ready set is the merge workers' only source of work: a callback
+    missing from it is never merged and its results silently vanish from
+    the final answer. So this write retries through transient Redis
+    pressure (SADD is idempotent, retrying is always safe) and, if it still
+    cannot land, RAISES so the HTTP callback handler can tell the sender
+    delivery failed instead of acknowledging results it will drop.
+    """
     key = _ready_callbacks_key(response_id)
-    try:
-        async with data_db_client.pipeline(transaction=True) as pipe:
-            pipe.sadd(key, callback_id)
-            pipe.expire(key, settings.redis_ttl)
-            await pipe.execute()
-    except Exception as e:
-        logger.error(f"Failed to record ready callback {callback_id}: {e}")
+    last_error: Optional[Exception] = None
+    for attempt in range(REDIS_RETRIES):
+        if attempt:
+            await asyncio.sleep(0.1 * (2**attempt))
+        try:
+            async with data_db_client.pipeline(transaction=True) as pipe:
+                pipe.sadd(key, callback_id)
+                pipe.expire(key, settings.redis_ttl)
+                await pipe.execute()
+            return
+        except Exception as e:
+            last_error = e
+            logger.error(
+                f"Failed to record ready callback {callback_id} "
+                f"(attempt {attempt}): {e}"
+            )
+    raise last_error
 
 
 async def get_ready_callbacks(

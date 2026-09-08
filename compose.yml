@@ -284,6 +284,14 @@ services:
       context: .
       dockerfile: workers/aragorn_lookup/Dockerfile
     restart: unless-stopped
+    environment:
+      # Lookup fan-out issues far more concurrent DB ops than the default
+      # 10-connection pool: at 40 concurrent queries the pool queued ~4k
+      # requests (2,620s cumulative wait vs 739s of actual DB work) and
+      # acquisitions timed out. Postgres allows 400 connections fleet-wide,
+      # so the hot lookup workers get server-sized pools.
+      POSTGRES_POOL_MIN_SIZE: 10
+      POSTGRES_POOL_MAX_SIZE: 30
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -417,6 +425,10 @@ services:
       context: .
       dockerfile: workers/bte_lookup/Dockerfile
     restart: unless-stopped
+    environment:
+      # same lookup fan-out profile as aragorn_lookup (see its note)
+      POSTGRES_POOL_MIN_SIZE: 10
+      POSTGRES_POOL_MAX_SIZE: 30
     depends_on:
       shepherd_db:
         condition: service_healthy

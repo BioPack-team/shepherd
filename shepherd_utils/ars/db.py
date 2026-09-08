@@ -8,6 +8,7 @@ shared Shepherd Postgres pool; payload blobs ride Shepherd's Redis data store
 merged results long after the Redis TTL.
 """
 
+import asyncio
 import gzip
 import json
 import logging
@@ -844,23 +845,46 @@ async def persist_data_copy(
     message_id: Union[str, uuid.UUID],
     logger: logging.Logger,
 ) -> None:
-    """Copy the Redis blob into ars_message.data for durability."""
-    try:
-        blob = await shepherd_db.data_db_client.get(str(message_id))
-    except Exception as e:
-        logger.error(f"Failed to read blob for durable copy {message_id}: {e}")
-        return
-    if blob is None:
-        return
-    try:
-        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-            await conn.execute(
-                "UPDATE ars_message SET data = %s WHERE id = %s",
-                (blob, uuid.UUID(str(message_id))),
+    """Copy the Redis blob into ars_message.data for durability.
+
+    Retries through transient Redis/Postgres pressure (both operations are
+    idempotent); after that it stays best-effort -- the blob is still live
+    in Redis and any later terminal update re-attempts the copy."""
+    last_error: Optional[Exception] = None
+    for attempt in range(3):
+        if attempt:
+            await asyncio.sleep(0.1 * (2**attempt))
+        try:
+            blob = await shepherd_db.data_db_client.get(str(message_id))
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"Failed to read blob for durable copy {message_id} "
+                f"(attempt {attempt}): {e}"
             )
-            await conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to persist durable copy for {message_id}: {e}")
+            continue
+        if blob is None:
+            return
+        try:
+            async with shepherd_db.pool.connection(
+                settings.postgres_pool_timeout
+            ) as conn:
+                await conn.execute(
+                    "UPDATE ars_message SET data = %s WHERE id = %s",
+                    (blob, uuid.UUID(str(message_id))),
+                )
+                await conn.commit()
+            return
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"Failed to persist durable copy for {message_id} "
+                f"(attempt {attempt}): {e}"
+            )
+    logger.error(
+        f"Failed to persist durable copy for {message_id} after retries: "
+        f"{last_error}"
+    )
 
 
 async def load_message_data(
