@@ -339,7 +339,9 @@ async def save_message(
     start = time.time()
     try:
         start_comp = time.time()
-        compressed = encode_message(response)
+        # a thread: orjson+zstd over a multi-MB message is pure CPU, and the
+        # server's callback path runs this on its event loop
+        compressed = await asyncio.to_thread(encode_message, response)
         logger.info(f"Compression took {time.time() - start_comp}")
         await data_db_client.set(
             callback_id,

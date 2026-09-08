@@ -169,15 +169,29 @@ Behavioral deviations:
     port runs them in the `ars_premerge` worker because the inline CPU work
     saturated the server at 40 concurrent queries. Consequences for the
     callback response: a result-bearing POST always answers 201 with the
-    RAW payload echoed and the child still Running (result_count/
-    result_stat are set synchronously so the repeated-results 409 guard
-    still holds); upstream's inline HTTP 422 on validation failure becomes
+    child still Running (result_count/result_stat are set synchronously so
+    the repeated-results 409 guard still holds); upstream's inline HTTP 422
+    on validation failure becomes
     an async child E/422 with the same ara_failed_validation notification;
     upstream's inline-crash HTTP 500 becomes an async child E/500 with the
     same "Internal ARS Server Error" log entry. Terminal child states,
     notifications, merge inputs, and completion arithmetic are unchanged
     (`tests/unit/ars/test_ars_premerge.py`); a child stuck in premerge is
     covered by the watchdog's standard 5-minute 598.
+15. **Callback responses do not echo the payload** (post-parity change,
+    accepted 2026-09-08 with the same load testing): upstream's callback
+    view answers with the full stored message inline in `fields.data`; the
+    port answers both callback branches (result-bearing and no-results)
+    with `fields.data: null`. Serializing the multi-MB payload back at the
+    ARA -- which never reads the response body -- was the largest
+    per-callback CPU cost on the server's event loop. Envelope shape,
+    status codes, and every other field are unchanged; `GET` on the message
+    still returns the payload. Alongside this, the remaining synchronous
+    CPU on the callback path (request-body `json.loads`, `ScoreStatCalc`,
+    the zstd blob encode in `save_message`) moved to threads, and the
+    server runs 4 uvicorn worker processes (`WEB_CONCURRENCY` in
+    `shepherd_server/Dockerfile`) vs. upstream's 8 gunicorn workers x 4
+    threads.
 
 ## Not ported (documented drops)
 

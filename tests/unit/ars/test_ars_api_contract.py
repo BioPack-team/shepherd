@@ -451,6 +451,8 @@ async def test_callback_empty_results_completes_child(client, db, redis_mock):
     zeroes it when results is literally absent)."""
     resp = await client.post(f"/api/messages/{db['child_pk']}", json=RESPONSE)
     assert resp.status_code == 201
+    # no-echo deviation applies to the no-results branch too
+    assert resp.json()["fields"]["data"] is None
     update = db["update_message"].await_args_list[-1]
     assert update.kwargs.get("status") == "D"
     assert "result_count" not in update.kwargs
@@ -488,9 +490,11 @@ async def test_callback_with_results_premerges_and_enqueues_merge(
     # DEVIATION: pre-merge processing + validation run in the ars_premerge
     # worker now (the CPU work saturated the server; see the parity
     # register), so the child is still Running here -- upstream's Done/200
-    # flip happens asynchronously in the worker -- and the echoed payload
-    # is the RAW response, not the premerged one.
+    # flip happens asynchronously in the worker -- and the payload is NOT
+    # echoed back (fields.data null): serializing the multi-MB body at a
+    # caller that never reads it starved the event loop under load.
     assert body["fields"]["status"] == "Running"
+    assert body["fields"]["data"] is None
     save = db["save_message_data"].await_args
     assert str(save.args[0]) == str(db["child_pk"])
     assert "normalized_score" not in save.args[1]["message"]["results"][0]

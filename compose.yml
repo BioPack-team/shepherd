@@ -4,11 +4,14 @@ services:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
       # The server handles every client request (sync-query status polling,
-      # /callback lookups) so it needs a bigger Postgres pool than the
-      # workers' default of 10. Budget: each container has its own pool, so
-      # keep (sum of pool max sizes) under Postgres max_connections below.
-      POSTGRES_POOL_MIN_SIZE: 10
-      POSTGRES_POOL_MAX_SIZE: 30
+      # /callback lookups) so it needs more aggregate Postgres capacity than
+      # the workers' default of 10. These sizes are PER PROCESS and the
+      # server runs WEB_CONCURRENCY=4 uvicorn workers (see its Dockerfile),
+      # so the container's worst case is 4 x 10 = 40 connections. Budget:
+      # each process has its own pool, so keep (sum of pool max sizes) under
+      # Postgres max_connections below.
+      POSTGRES_POOL_MIN_SIZE: 3
+      POSTGRES_POOL_MAX_SIZE: 10
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile
@@ -36,6 +39,10 @@ services:
     # 2026-09: +5 ARS workers (ars_fanout/merge/postprocess/watchdog/notify)
     # at the default 10-max pool each pushed the worst case to ~290, so the
     # cap moves to 400 to restore headroom.
+    # 2026-09 (later): shepherd_server now runs 4 uvicorn worker processes,
+    # each with its own pool (4 x 10 = 40, was 1 x 30), aragorn_lookup and
+    # bte_lookup moved to 30-max pools, and ars_premerge joined at the
+    # default 10 -- worst case ~350, still under 400.
     command: postgres -c max_connections=400
     build:
       context: .

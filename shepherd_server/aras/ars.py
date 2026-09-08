@@ -415,7 +415,9 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
     if mesg is None:
         return text(f"Unknown state reference {key}", 404)
     try:
-        data = json.loads(body)
+        # a thread: ARA responses run to tens of MB, and parsing one on the
+        # event loop stalls every other in-flight request on this process
+        data = await asyncio.to_thread(json.loads, body)
     except json.decoder.JSONDecodeError:
         return text(
             "Can not decode json:<br>\n%s for the pk: %s"
@@ -472,7 +474,8 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
         result_stat = None
         if res is not None and result_length > 0:
             result_count = result_length
-            result_stat = ScoreStatCalc(res)
+            # a thread: numpy over every result's scores, sized by the payload
+            result_stat = await asyncio.to_thread(ScoreStatCalc, res)
             # Pre-merge processing (scrub/decorate/normalize), phantom
             # removal, and TRAPI validation run in the ars_premerge worker
             # instead of inline here (documented deviation: the CPU work
@@ -503,7 +506,11 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
                 logger,
                 raise_on_failure=True,
             )
-            env = message_envelope(updated or mesg, data=data)
+            # No payload echo (deviation from upstream, which returns the
+            # whole stored message): serializing a multi-MB body back at the
+            # ARA -- which never reads it -- was the single largest CPU cost
+            # of the callback and starved the event loop under load.
+            env = message_envelope(updated or mesg, data=None)
             return dj_json(env, 201)
 
         # no results: terminal inline, nothing to premerge or validate
@@ -516,9 +523,8 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
         await ars_db.persist_data_copy(key, logger)
         if updated and updated["status"] in ("D", "S", "E", "U"):
             await lifecycle.check_parent_completion(mesg["ref"], logger)
-        env = message_envelope(
-            updated or mesg, data=await ars_db.load_message_data(key, logger)
-        )
+        # same no-echo deviation as the result-bearing branch above
+        env = message_envelope(updated or mesg, data=None)
         return dj_json(env, 201)
     except Exception as e:
         logger.error(f"callback failed for {key}: {e}", exc_info=True)
