@@ -209,3 +209,174 @@ async def test_premerge_non_ara_agent_no_merge(env, redis_mock):
     )
     assert final["status"] == "D"
     assert await _merge_tasks() == []
+
+
+# ---------------------------------------------------------------------------
+# internal intake: finish_query hands a Shepherd-hosted ARA's response over
+# via the queue instead of POSTing it to the callback endpoint. The intake
+# reproduces the server callback's state machine (guards, counts, the
+# ara_response_complete notification), then falls straight into premerge.
+# ---------------------------------------------------------------------------
+
+
+def _intake_task(env, response_id="resp1"):
+    return [
+        "tid",
+        {
+            "intake_child_pk": str(env["child_pk"]),
+            "response_id": response_id,
+            "query_id": "q1",
+            "log_level": "20",
+            "otel": '{"traceparent": "00-fin"}',
+        },
+    ]
+
+
+@pytest.fixture
+def intake(env, mocker):
+    """Arm the blob-store and actor mocks for an internal delivery."""
+    env["child_row"]["result_count"] = None
+    mocker.patch.object(
+        ars_db,
+        "get_actor",
+        new_callable=AsyncMock,
+        return_value={"inforesid": "infores:aragorn", "agent_name": "ara-aragorn"},
+    )
+    logs = [{"message": "ara log line", "level": "INFO"}]
+    return {
+        "get_message": mocker.patch.object(
+            pm, "get_message", new_callable=AsyncMock, return_value=env["data"]
+        ),
+        "get_logs": mocker.patch.object(
+            pm, "get_logs", new_callable=AsyncMock, return_value=logs
+        ),
+        "logs": logs,
+    }
+
+
+async def test_intake_happy_path_premerges_and_merges(env, intake, redis_mock):
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+
+    # ara_response_complete went out, as the callback endpoint sends it
+    notified = env["notify"].await_args_list[0].args[1]
+    assert notified["event_type"] == "ara_response_complete"
+    assert notified["child_uuid"] == str(env["child_pk"])
+    assert notified["ara_n_results"] == 2
+
+    # the raw payload was saved with the query's logs spliced in, and the
+    # counts recorded before premerge -- exactly the server intake's order
+    first_save = env["save_message_data"].await_args_list[0].args[1]
+    assert first_save["logs"][-len(intake["logs"]) :] == intake["logs"]
+    counts = next(
+        c.kwargs
+        for c in env["update_message"].await_args_list
+        if "result_count" in c.kwargs
+    )
+    assert counts["result_count"] == 2
+    assert counts["result_stat"]
+
+    # then premerge ran in the same task: normalized payload, D/200, merge
+    last_save = env["save_message_data"].await_args_list[-1].args[1]
+    assert "normalized_score" in last_save["message"]["results"][0]
+    final = next(
+        c.kwargs for c in env["update_message"].await_args_list if "status" in c.kwargs
+    )
+    assert final["status"] == "D"
+    assert final["code"] == 200
+    env["completion"].assert_awaited_once()
+
+    tasks = await _merge_tasks()
+    assert len(tasks) == 1
+    assert tasks[0][1]["parent_pk"] == str(env["parent_pk"])
+    assert tasks[0][1]["agent_name"] == "ara-aragorn"
+    assert tasks[0][1]["otel"] == '{"traceparent": "00-fin"}'
+
+
+async def test_intake_empty_results_terminal_without_merge(env, intake, redis_mock):
+    """results=[] completes the child D/200 with no count recorded and no
+    premerge/merge, matching the callback endpoint's no-results branch."""
+    env["data"]["message"]["results"] = []
+    intake["get_message"].return_value = env["data"]
+
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    final = next(
+        c.kwargs for c in env["update_message"].await_args_list if "status" in c.kwargs
+    )
+    assert final["status"] == "D"
+    assert final["code"] == 200
+    assert "result_count" not in final
+    env["completion"].assert_awaited_once()
+    assert await _merge_tasks() == []
+
+
+async def test_intake_missing_results_zeroes_count(env, intake, redis_mock):
+    del env["data"]["message"]["results"]
+    intake["get_message"].return_value = env["data"]
+
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    final = next(
+        c.kwargs for c in env["update_message"].await_args_list if "status" in c.kwargs
+    )
+    assert final["status"] == "D"
+    assert final["result_count"] == 0
+    assert await _merge_tasks() == []
+
+
+async def test_intake_duplicate_done_child_skips(env, intake, redis_mock):
+    """A child already Done is left alone (the endpoint's dup-200 guard);
+    the notification still goes out first, as it does upstream."""
+    env["child_row"]["status"] = "D"
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    assert env["notify"].await_args_list[0].args[1]["event_type"] == (
+        "ara_response_complete"
+    )
+    env["update_message"].assert_not_awaited()
+    env["save_message_data"].assert_not_awaited()
+    assert await _merge_tasks() == []
+
+
+async def test_intake_repeated_results_skips(env, intake, redis_mock):
+    """A child that already has results rejects the update (the 409 guard)."""
+    env["child_row"]["result_count"] = 5
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    env["update_message"].assert_not_awaited()
+    assert await _merge_tasks() == []
+
+
+async def test_intake_errored_child_skips(env, intake, redis_mock):
+    """A child already errored rejects the response (the 400 guard)."""
+    env["child_row"]["status"] = "E"
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    env["update_message"].assert_not_awaited()
+    assert await _merge_tasks() == []
+
+
+async def test_intake_missing_blob_leaves_child_running(env, intake, redis_mock):
+    """No stored response = the callback never arrived: the child stays R
+    for the watchdog, and nothing is notified or saved."""
+    intake["get_message"].side_effect = KeyError("gone")
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    env["notify"].assert_not_awaited()
+    env["update_message"].assert_not_awaited()
+    env["completion"].assert_not_awaited()
+
+
+async def test_intake_crash_is_500_with_log_entry(env, intake, mocker, redis_mock):
+    """An intake failure reproduces the endpoint's generic handler: E/500
+    with the 'Internal ARS Server Error' log entry."""
+    mocker.patch.object(
+        ars_db, "get_actor", new_callable=AsyncMock, side_effect=RuntimeError("boom")
+    )
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    final = next(
+        c.kwargs for c in env["update_message"].await_args_list if "status" in c.kwargs
+    )
+    assert final["status"] == "E"
+    assert final["code"] == 500
+    saved = env["save_message_data"].await_args_list[-1].args[1]
+    assert any(
+        entry["message"] == "Internal ARS Server Error"
+        for entry in saved.get("logs", [])
+    )
+    env["completion"].assert_awaited_once()
+    assert await _merge_tasks() == []

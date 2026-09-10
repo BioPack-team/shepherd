@@ -14,6 +14,11 @@ register): the query is POSTed directly to the remote resolved via SmartAPI
 instead of bouncing through the ARS's own /ara-*/api/runquery proxy view
 (the remote sees the same body), and the async-200 self-GET race check is
 dropped (upstream persists nothing on that path either way).
+
+Shepherd-hosted ARAs (infores:shepherd-*) skip HTTP entirely: their worker
+task is enqueued directly with an internal sentinel callback, so the query
+and its response never cross the network (documented deviation; gated by
+settings.ars_internal_dispatch).
 """
 
 import asyncio
@@ -24,10 +29,13 @@ import logging
 import uuid
 
 import httpx
+from opentelemetry.propagate import inject
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
+import shepherd_utils.db as shepherd_db
 import shepherd_utils.smartapi as smartapi
+from shepherd_utils.ars.internal import internal_callback_url, internal_target
 from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
     get_safe,
@@ -38,7 +46,8 @@ from shepherd_utils.ars.trapi import validate
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
 from shepherd_utils.db import save_logs
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import get_worker_logger, resolve_log_level
+from shepherd_utils.task_deadline import deadline_field, query_deadline
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks
 
@@ -84,6 +93,55 @@ async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
         await lifecycle.check_parent_completion(parent_pk, logger)
 
 
+async def dispatch_internal(target, child_pk, parent, data, logger):
+    """Dispatch a query to a Shepherd-hosted ARA without the HTTP hop.
+
+    Does what POSTing to /{target}/asyncquery would have done -- persist the
+    query record and enqueue the ARA's worker task -- with the callback set
+    to the internal sentinel so finish_query hands the response straight to
+    ars.premerge (documented deviation in the parity register). The child
+    stays R/202 exactly like an async accept; a dispatch failure is the same
+    E/500 shape as a failed POST.
+    """
+    callback = internal_callback_url(child_pk)
+    data["callback"] = callback
+    query_id = str(uuid.uuid4())[:8]
+    response_id = str(uuid.uuid4())[:8]
+    level_number = resolve_log_level(
+        data.get("log_level"), resolve_log_level(settings.log_level)
+    )
+    carrier = {}
+    inject(carrier)
+    try:
+        await shepherd_db.add_query(
+            query_id, response_id, data, callback, logger, target=target
+        )
+        deadline = query_deadline(data)
+        await add_task(
+            target,
+            {
+                "query_id": query_id,
+                "response_id": response_id,
+                "workflow": json.dumps(data.get("workflow")),
+                "log_level": level_number,
+                "otel": json.dumps(carrier),
+                "metadata": json.dumps({}),
+                **deadline_field(deadline),
+            },
+            logger,
+            raise_on_failure=True,
+        )
+        logger.info(f"[{child_pk}] dispatched internally to {target} as {query_id}")
+    except Exception as e:
+        logger.error(
+            f"Internal dispatch to {target} failed for pk: {child_pk}: {e}",
+            exc_info=True,
+        )
+        await _finalize_child(
+            child_pk, parent["id"], data, {"status": "E", "code": 500}, logger
+        )
+
+
 async def send_to_actor(actor, parent, parent_data, logger, otel="{}"):
     """tasks.send_message, one actor."""
     child = await ars_db.create_message(
@@ -103,6 +161,11 @@ async def send_to_actor(actor, parent, parent_data, logger, otel="{}"):
     if not actor_url.startswith("/ara-explanatory/api/runquery"):
         callback = f"{settings.ars_public_host}/ars/api/messages/{child_pk}"
         data["callback"] = callback
+
+    target = internal_target(inforesid)
+    if target is not None:
+        await dispatch_internal(target, child_pk, parent, data, logger)
+        return
 
     endpoint = smartapi.endpoint(inforesid)
     url = smartapi.url_remote_from_inforesid(inforesid)

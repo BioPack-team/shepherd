@@ -311,6 +311,13 @@ class Settings(BaseSettings):
     # (internal, for the KG retrieval loop) this must be reachable from the
     # public internet where the ARAs run.
     ars_public_host: str = "http://localhost:5439"
+    # Dispatch queries to Shepherd's own ARAs (infores:shepherd-*) by
+    # enqueueing their worker tasks directly, and deliver their responses
+    # straight onto the ars.premerge queue, instead of POSTing multi-MB
+    # bodies through the server's HTTP endpoints. The public endpoints stay
+    # up either way; this only short-circuits the in-cluster hops. Disable
+    # to force every actor through HTTP like an external ARA.
+    ars_internal_dispatch: bool = True
     # SmartAPI maturity filter, upstream env TR_ENV: production / development /
     # staging / testing.
     tr_env: str = "production"

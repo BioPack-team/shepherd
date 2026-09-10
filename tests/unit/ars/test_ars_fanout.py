@@ -357,6 +357,98 @@ async def test_fanout_connect_error_is_e500(env, mocker, redis_mock):
     env["completion"].assert_awaited()
 
 
+# ---------------------------------------------------------------------------
+# internal dispatch (Shepherd-hosted ARAs; documented deviation)
+# ---------------------------------------------------------------------------
+
+
+def _internal_only(env, mocker):
+    """Point the registry at one Shepherd-hosted ARA and arm the intake mocks."""
+    env["list_actors"].return_value = [
+        env["actors"][0],  # parent/self
+        actor_row(12, "ara-shepherd-arax", "infores:shepherd-arax", ("general",)),
+    ]
+    return {
+        "add_query": mocker.patch.object(
+            fanout.shepherd_db, "add_query", new_callable=AsyncMock
+        ),
+        "post": mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock),
+    }
+
+
+async def _stream_tasks(stream):
+    from shepherd_utils.broker import get_task
+
+    tasks = []
+    while True:
+        t = await get_task(stream, "consumer", "t", LOGGER)
+        if t is None:
+            return tasks
+        tasks.append(t)
+
+
+async def test_fanout_internal_actor_enqueues_ara_task(env, mocker, redis_mock):
+    """A Shepherd-hosted ARA gets its worker task enqueued directly -- no
+    HTTP POST -- with the same query record the /asyncquery endpoint would
+    have created, and a sentinel callback that routes the response back
+    through ars.premerge. The child stays R/202 exactly like an async
+    accept."""
+    from shepherd_utils.ars.internal import internal_callback_url
+
+    mocks = _internal_only(env, mocker)
+    await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
+
+    mocks["post"].assert_not_awaited()
+    child = env["children"][12]
+    sentinel = internal_callback_url(child["id"])
+
+    mocks["add_query"].assert_awaited_once()
+    call = mocks["add_query"].await_args
+    query_id, response_id, saved_query, callback_url = call.args[:4]
+    assert call.kwargs["target"] == "arax"
+    assert callback_url == sentinel
+    assert saved_query["callback"] == sentinel
+    assert saved_query["message"] == QUERY["message"]
+
+    tasks = await _stream_tasks("arax")
+    assert len(tasks) == 1
+    fields = tasks[0][1]
+    assert fields["query_id"] == query_id
+    assert fields["response_id"] == response_id
+    assert json.loads(fields["workflow"]) is None
+    assert "otel" in fields
+
+    # async dispatch: nothing saved, child stays R/202 from creation
+    env["update_message"].assert_not_awaited()
+    env["completion"].assert_not_awaited()
+
+
+async def test_fanout_internal_enqueue_failure_is_e500(env, mocker, redis_mock):
+    """A failed internal dispatch is the same shape as a failed POST: the
+    child goes E/500 and the completion check runs."""
+    mocks = _internal_only(env, mocker)
+    mocks["add_query"].side_effect = RuntimeError("datastore down")
+    await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
+    call = env["update_message"].await_args
+    assert call.kwargs["status"] == "E"
+    assert call.kwargs["code"] == 500
+    env["completion"].assert_awaited()
+    assert await _stream_tasks("arax") == []
+
+
+async def test_fanout_internal_dispatch_disabled_uses_http(env, mocker, redis_mock):
+    """With ars_internal_dispatch off, Shepherd-hosted ARAs go over HTTP
+    like any external actor."""
+    from shepherd_utils.config import settings
+
+    mocks = _internal_only(env, mocker)
+    mocker.patch.object(settings, "ars_internal_dispatch", False)
+    mocks["post"].return_value = _accepted()
+    await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
+    mocks["post"].assert_awaited_once()
+    mocks["add_query"].assert_not_awaited()
+
+
 async def test_fanout_workflow_parent_matches_workflow_channel(env, mocker, redis_mock):
     env["get_actor"].return_value = actor_row(
         2, "ars-workflow-agent", "", ("workflow",), path="", uri=""

@@ -192,6 +192,30 @@ Behavioral deviations:
     server runs 4 uvicorn worker processes (`WEB_CONCURRENCY` in
     `shepherd_server/Dockerfile`) vs. upstream's 8 gunicorn workers x 4
     threads.
+16. **Shepherd-hosted ARAs are dispatched internally** (post-parity change,
+    accepted 2026-09-10): for actors in
+    `shepherd_utils/ars/internal.INTERNAL_ARA_TARGETS` (infores:shepherd-*),
+    ars_fanout enqueues the ARA's worker task directly -- persisting the
+    same query record `POST /{ara}/asyncquery` would have -- with a
+    `shepherd-ars://callback/<child_pk>` sentinel callback, and
+    finish_query recognizes the sentinel and enqueues
+    `{intake_child_pk, response_id}` on `ars.premerge` instead of POSTing
+    the response to `/ars/api/messages/<child_pk>`. The premerge worker's
+    `intake_internal_response` then runs the callback endpoint's exact
+    state machine (guard order, result_count/result_stat, the
+    `ara_response_complete` notification, the no-results terminal rules,
+    the generic-failure E/500 with its log entry) before premerging in the
+    same task, so no multi-MB body crosses the network in either
+    direction. Differences in kind: HTTP-level answers nobody read (the
+    dup-200 text, the 409, the 400) become logged skips; a dispatch
+    failure is the same child E/500 as a failed POST; an intake whose
+    response blob is missing leaves the child Running for the watchdog
+    (the shape of a callback that never arrived); and a `get_logs` failure
+    delivers the response without spliced logs instead of failing
+    delivery. External actors, external callers, and both public endpoint
+    surfaces are unchanged; `settings.ars_internal_dispatch=false`
+    restores HTTP dispatch for everything (already-issued sentinels still
+    deliver internally, since they are not POSTable).
 
 ## Not ported (documented drops)
 
