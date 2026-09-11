@@ -310,7 +310,7 @@ class Settings(BaseSettings):
     # messages/<child_pk>) and the notification payloads. Unlike callback_host
     # (internal, for the KG retrieval loop) this must be reachable from the
     # public internet where the ARAs run.
-    ars_public_host: str = "http://localhost:5439"
+    ars_public_host: str = "http://shepherd_server:5439"
     # Dispatch queries to Shepherd's own ARAs (infores:shepherd-*) by
     # enqueueing their worker tasks directly, and deliver their responses
     # straight onto the ars.premerge queue, instead of POSTing multi-MB

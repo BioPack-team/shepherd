@@ -133,7 +133,6 @@ def generate_pathfinder_query(subject_curie: str, object_curie: str) -> dict:
                     "n0": {"ids": [subject_curie]},
                     "n1": {"ids": [object_curie]},
                 },
-                "edges": {},
                 "paths": {
                     "p0": {
                         "subject": "n0",
@@ -394,7 +393,7 @@ curie_list = [
     "MONDO:0005100",  # systemic sclerosis
     "MONDO:0019293",  # skin vascular disease
     "MONDO:0005015",  # Diabetes Mellitus
-    "CHEBI:85078",  # MVP2
+    # "CHEBI:85078",  # MVP2
 ]
 
 

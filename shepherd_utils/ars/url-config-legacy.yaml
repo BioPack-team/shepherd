@@ -7,7 +7,13 @@
 
 # url-config-legacy.yaml is not a way for the ARS to avoid a successful request to smart-api.info in order
 # to be ready to serve requests.
-infores:shepherd-aragorn: https://aragorn.ci.transltr.io/aragorn
+infores:shepherd-aragorn: http://shepherd_server:5439/aragorn
+infores:shepherd-arax:    http://shepherd_server:5439/arax
+infores:shepherd-bte:     http://shepherd_server:5439/bte
+# urls for parity tests
+# infores:shepherd-aragorn: http://host.docker.internal:8210/aragorn
+# infores:shepherd-arax:    http://host.docker.internal:8210/arax
+# infores:shepherd-bte:     http://host.docker.internal:8210/bte
 infores:aragorn: https://aragorn.ci.transltr.io/aragorn
 infores:arax: https://arax.ci.transltr.io/api/arax/v1.4
 infores:biothings-explorer: https://bte.ci.transltr.io/v1

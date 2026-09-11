@@ -73,3 +73,19 @@ inactive_clients:
   - infores:aragorn-ranker-exp
   - infores:tr_ara_ncats
   - infores:tr_ara_wfr
+  - infores:aragorn
+  - infores:arax
+  - infores:biothings-explorer
+  - infores:improving-agent
+  - infores:unsecret-agent
+  - infores:workflow-runner
+  - infores:cqs
+  - infores:automat-cam-kp
+  - infores:connections-hypothesis
+  - infores:cohd
+  - infores:genetics-data-provider
+  - infores:multiomics-clinicaltrials
+  - infores:multiomics-drugapprovals
+  - infores:molepro
+  - infores:openpredict
+  - infores:text-mining-provider-targeted

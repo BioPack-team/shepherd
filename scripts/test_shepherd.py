@@ -8,7 +8,9 @@ import httpx
 
 target_urls = {
     "aragorn-prod": "https://aragorn.transltr.io/aragorn/query",
-    "aragorn-test": "https://aragorn.test.transltr.io/aragorn/query",
+    "aragorn-test": "https://shepherd.test.transltr.io/aragorn/query",
+    "arax-test": "https://shepherd.test.transltr.io/arax/query",
+    "bte-test": "https://shepherd.test.transltr.io/bte/query",
     "ars-test": "https://ars.test.transltr.io/ars/api/submit",
     "aragorn-ci": "https://shepherd.ci.transltr.io/aragorn/query",
     "arax-ci": "https://shepherd.ci.transltr.io/arax/query",
@@ -21,7 +23,7 @@ target_urls = {
     "aragorn-local": "http://localhost:5439/aragorn/query",
     "arax-local": "http://localhost:5439/arax/query",
     "bte-local": "http://localhost:5439/bte/query",
-    "ars-local": "http://localhost:5439/ars/query",
+    "ars-local": "http://localhost:5439/ars/api/submit",
 }
 
 METRICS_FILE = "benchmark_metrics.json"
@@ -34,6 +36,41 @@ _metrics_lock = asyncio.Lock()
 
 def generate_query(curie: str) -> dict:
     """Build a TRAPI 'what chemicals treat <disease>' inferred query for a curie."""
+    # return {
+    #     "message": {
+    #         "query_graph": {
+    #             "nodes": {
+    #                 "ON": {"categories": ["biolink:Gene"]},
+    #                 "SN": {
+    #                     "categories": ["biolink:ChemicalEntity"],
+    #                     "ids": [curie],
+    #                 },
+    #             },
+    #             "edges": {
+    #                 "t_edge": {
+    #                     "object": "ON",
+    #                     "subject": "SN",
+    #                     "predicates": ["biolink:affects"],
+    #                     "qualifier_constraints": [
+    #                         {
+    #                             "qualifier_set": [
+    #                                 {
+    #                                     "qualifier_type_id": "biolink:object_aspect_qualifier",
+    #                                     "qualifier_value": "activity_or_abundance",
+    #                                 },
+    #                                 {
+    #                                     "qualifier_type_id": "biolink:object_direction_qualifier",
+    #                                     "qualifier_value": "decreased",
+    #                                 },
+    #                             ]
+    #                         }
+    #                     ],
+    #                     "knowledge_type": "inferred",
+    #                 }
+    #             },
+    #         }
+    #     }
+    # }
     return {
         "message": {
             "query_graph": {
@@ -53,6 +90,8 @@ def generate_query(curie: str) -> dict:
         },
         "parameters": {},
         "log_level": "DEBUG",
+        # "bypass_cache": True,
+        "submitter": "Max"
     }
 
 
@@ -230,7 +269,13 @@ curie_list = [
     "MONDO:0005100",  # systemic sclerosis
     "MONDO:0019293",  # skin vascular disease
     "MONDO:0005015",  # Diabetes Mellitus
-    "CHEBI:85078",  # MVP2
+    "MONDO:0005180",  # Parkinsons
+    "MONDO:0007739",  # Huntington disease
+    "MONDO:0002103",
+    # "CHEBI:85078",  # MVP2
+    # "CHEBI:167574",
+    # "NCBIGene:1636",
+    # "CHEBI:41879",
 ]
 
 
