@@ -24,7 +24,7 @@ from shepherd_utils.shared import get_tasks, run_task_lifecycle
 STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
-TASK_LIMIT = 4
+TASK_LIMIT = 6
 EMBEDDING_DIR = settings.pathfinder_embeddings_dir
 MODEL_WEIGHTS = "model_weights/squashbert_direct_3hop.pt"
 # 11 embeddings of 768 dims each (4 node names, 4 categories, 3 hop phrases) --
