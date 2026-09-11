@@ -1,6 +1,7 @@
 services:
   shepherd_server:
     container_name: shepherd_server
+    platform: linux/amd64
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
       # The server handles every client request (sync-query status polling,
@@ -21,6 +22,7 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./shepherd_server/debug:/app/shepherd_server/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
     ports:
@@ -86,7 +88,7 @@ services:
       - ./data:/data
   shepherd_broker_insight:
     image: redislabs/redisinsight:latest
-    container_name: redis-insight
+    container_name: shepherd_broker_insight
     restart: unless-stopped
     ports:
       - '5540:5540'
@@ -124,6 +126,7 @@ services:
   ########## Shared Workers
   merge_message:
     container_name: merge_message
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/merge_message/Dockerfile
@@ -134,10 +137,12 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/merge_message/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   sort_results_score:
     container_name: sort_results_score
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/sort_results_score/Dockerfile
@@ -152,6 +157,7 @@ services:
       - ./.env:/app/.env
   filter_results_top_n:
     container_name: filter_results_top_n
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/filter_results_top_n/Dockerfile
@@ -166,6 +172,7 @@ services:
       - ./.env:/app/.env
   filter_kgraph_orphans:
     container_name: filter_kgraph_orphans
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/filter_kgraph_orphans/Dockerfile
@@ -176,10 +183,12 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/filter_kgraph_orphans/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   finish_query:
     container_name: finish_query
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/finish_query/Dockerfile
@@ -224,10 +233,12 @@ services:
       # the worker downloads + extracts the embeddings LMDB into this mount on
       # startup (see README "Worker data (LMDB / sqlite) downloads").
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
+      - ./workers/score_paths/debug:/app/debug
 
   ######### Example ARA
   example_ara:
     container_name: example_ara
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_ara/Dockerfile
@@ -242,6 +253,7 @@ services:
       - ./.env:/app/.env
   example_lookup:
     container_name: example_lookup
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_lookup/Dockerfile
@@ -256,6 +268,7 @@ services:
       - ./.env:/app/.env
   example_score:
     container_name: example_score
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_score/Dockerfile
@@ -273,6 +286,7 @@ services:
   ######### ARAGORN
   aragorn:
     container_name: aragorn
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn/Dockerfile
@@ -287,6 +301,7 @@ services:
       - ./.env:/app/.env
   aragorn_lookup:
     container_name: aragorn_lookup
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_lookup/Dockerfile
@@ -305,10 +320,12 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/aragorn_lookup/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_pathfinder/Dockerfile
@@ -319,10 +336,12 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/aragorn_pathfinder/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_omnicorp/Dockerfile
@@ -333,6 +352,7 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/aragorn_omnicorp/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
       # First run? Set OMNICORP_LMDB_URL in your .env to a .tar.gz and the worker
@@ -341,6 +361,7 @@ services:
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_score/Dockerfile
@@ -358,6 +379,7 @@ services:
   ######### ARAX
   arax:
     container_name: arax
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/arax/Dockerfile
@@ -413,6 +435,7 @@ services:
 ######### BTE
   bte:
     container_name: bte
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/bte/Dockerfile
@@ -428,6 +451,7 @@ services:
   
   bte_lookup:
     container_name: bte_lookup
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/bte_lookup/Dockerfile
@@ -442,12 +466,14 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/bte_lookup/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   
   ######### SIPR
   sipr:
     container_name: sipr
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/sipr/Dockerfile
@@ -458,6 +484,7 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/sipr/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   ######### Translator ARS (hosted port of NCATSTranslator/Relay)
