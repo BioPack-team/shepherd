@@ -1,14 +1,18 @@
 services:
   shepherd_server:
     container_name: shepherd_server
+    platform: linux/amd64
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
       # The server handles every client request (sync-query status polling,
-      # /callback lookups) so it needs a bigger Postgres pool than the
-      # workers' default of 10. Budget: each container has its own pool, so
-      # keep (sum of pool max sizes) under Postgres max_connections below.
-      POSTGRES_POOL_MIN_SIZE: 10
-      POSTGRES_POOL_MAX_SIZE: 30
+      # /callback lookups) so it needs more aggregate Postgres capacity than
+      # the workers' default of 10. These sizes are PER PROCESS and the
+      # server runs WEB_CONCURRENCY=4 uvicorn workers (see its Dockerfile),
+      # so the container's worst case is 4 x 10 = 40 connections. Budget:
+      # each process has its own pool, so keep (sum of pool max sizes) under
+      # Postgres max_connections below.
+      POSTGRES_POOL_MIN_SIZE: 3
+      POSTGRES_POOL_MAX_SIZE: 10
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile
@@ -18,6 +22,7 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./shepherd_server/debug:/app/shepherd_server/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
     ports:
@@ -33,7 +38,14 @@ services:
     # even though the comments in this file and shepherd_utils/config.py both
     # say the sum must stay under it. 300 restores the headroom the docs claim.
     # Adding a worker service? Re-do this arithmetic.
-    command: postgres -c max_connections=300
+    # 2026-09: +5 ARS workers (ars_fanout/merge/postprocess/watchdog/notify)
+    # at the default 10-max pool each pushed the worst case to ~290, so the
+    # cap moves to 400 to restore headroom.
+    # 2026-09 (later): shepherd_server now runs 4 uvicorn worker processes,
+    # each with its own pool (4 x 10 = 40, was 1 x 30), aragorn_lookup and
+    # bte_lookup moved to 30-max pools, and ars_premerge joined at the
+    # default 10 -- worst case ~350, still under 400.
+    command: postgres -c max_connections=400
     build:
       context: .
       dockerfile: shepherd_db/Dockerfile
@@ -76,7 +88,7 @@ services:
       - ./data:/data
   shepherd_broker_insight:
     image: redislabs/redisinsight:latest
-    container_name: redis-insight
+    container_name: shepherd_broker_insight
     restart: unless-stopped
     ports:
       - '5540:5540'
@@ -114,6 +126,7 @@ services:
   ########## Shared Workers
   merge_message:
     container_name: merge_message
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/merge_message/Dockerfile
@@ -124,10 +137,12 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/merge_message/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   sort_results_score:
     container_name: sort_results_score
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/sort_results_score/Dockerfile
@@ -142,6 +157,7 @@ services:
       - ./.env:/app/.env
   filter_results_top_n:
     container_name: filter_results_top_n
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/filter_results_top_n/Dockerfile
@@ -156,6 +172,7 @@ services:
       - ./.env:/app/.env
   filter_kgraph_orphans:
     container_name: filter_kgraph_orphans
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/filter_kgraph_orphans/Dockerfile
@@ -166,10 +183,12 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/filter_kgraph_orphans/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   finish_query:
     container_name: finish_query
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/finish_query/Dockerfile
@@ -214,10 +233,12 @@ services:
       # the worker downloads + extracts the embeddings LMDB into this mount on
       # startup (see README "Worker data (LMDB / sqlite) downloads").
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
+      - ./workers/score_paths/debug:/app/debug
 
   ######### Example ARA
   example_ara:
     container_name: example_ara
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_ara/Dockerfile
@@ -232,6 +253,7 @@ services:
       - ./.env:/app/.env
   example_lookup:
     container_name: example_lookup
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_lookup/Dockerfile
@@ -246,6 +268,7 @@ services:
       - ./.env:/app/.env
   example_score:
     container_name: example_score
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_score/Dockerfile
@@ -263,6 +286,7 @@ services:
   ######### ARAGORN
   aragorn:
     container_name: aragorn
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn/Dockerfile
@@ -277,20 +301,31 @@ services:
       - ./.env:/app/.env
   aragorn_lookup:
     container_name: aragorn_lookup
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_lookup/Dockerfile
     restart: unless-stopped
+    environment:
+      # Lookup fan-out issues far more concurrent DB ops than the default
+      # 10-connection pool: at 40 concurrent queries the pool queued ~4k
+      # requests (2,620s cumulative wait vs 739s of actual DB work) and
+      # acquisitions timed out. Postgres allows 400 connections fleet-wide,
+      # so the hot lookup workers get server-sized pools.
+      POSTGRES_POOL_MIN_SIZE: 10
+      POSTGRES_POOL_MAX_SIZE: 30
     depends_on:
       shepherd_db:
         condition: service_healthy
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/aragorn_lookup/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_pathfinder/Dockerfile
@@ -301,10 +336,12 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/aragorn_pathfinder/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_omnicorp/Dockerfile
@@ -315,6 +352,7 @@ services:
       shepherd_broker:
         condition: service_healthy
     volumes:
+      - ./workers/aragorn_omnicorp/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
       # First run? Set OMNICORP_LMDB_URL in your .env to a .tar.gz and the worker
@@ -323,6 +361,7 @@ services:
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_score/Dockerfile
@@ -340,6 +379,7 @@ services:
   ######### ARAX
   arax:
     container_name: arax
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/arax/Dockerfile
@@ -395,6 +435,7 @@ services:
 ######### BTE
   bte:
     container_name: bte
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/bte/Dockerfile
@@ -410,9 +451,48 @@ services:
   
   bte_lookup:
     container_name: bte_lookup
+    platform: linux/amd64
     build:
       context: .
       dockerfile: workers/bte_lookup/Dockerfile
+    restart: unless-stopped
+    environment:
+      # same lookup fan-out profile as aragorn_lookup (see its note)
+      POSTGRES_POOL_MIN_SIZE: 10
+      POSTGRES_POOL_MAX_SIZE: 30
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./workers/bte_lookup/debug:/app/debug
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  
+  ######### SIPR
+  sipr:
+    container_name: sipr
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: workers/sipr/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./workers/sipr/debug:/app/debug
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  ######### Translator ARS (hosted port of NCATSTranslator/Relay)
+  ars_fanout:
+    container_name: ars_fanout
+    build:
+      context: .
+      dockerfile: workers/ars_fanout/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -422,13 +502,72 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-  
-  ######### SIPR
-  sipr:
-    container_name: sipr
+
+  ars_premerge:
+    container_name: ars_premerge
     build:
       context: .
-      dockerfile: workers/sipr/Dockerfile
+      dockerfile: workers/ars_premerge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_merge:
+    container_name: ars_merge
+    build:
+      context: .
+      dockerfile: workers/ars_merge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_postprocess:
+    container_name: ars_postprocess
+    build:
+      context: .
+      dockerfile: workers/ars_postprocess/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_watchdog:
+    container_name: ars_watchdog
+    build:
+      context: .
+      dockerfile: workers/ars_watchdog/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_notify:
+    container_name: ars_notify
+    build:
+      context: .
+      dockerfile: workers/ars_notify/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:

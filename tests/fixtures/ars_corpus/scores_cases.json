@@ -1,0 +1,92 @@
+[
+  {
+    "name": "mixed",
+    "results": [
+      {
+        "analyses": [
+          {
+            "score": 0.9
+          }
+        ]
+      },
+      {
+        "analyses": [
+          {
+            "score": 0.1
+          },
+          {
+            "score": 0.3
+          }
+        ]
+      },
+      {
+        "analyses": [
+          {
+            "score": null
+          },
+          {
+            "score": 0.5
+          }
+        ]
+      },
+      {
+        "analyses": [
+          {
+            "score": 0.9
+          }
+        ]
+      },
+      {
+        "analyses": [
+          {}
+        ]
+      }
+    ]
+  },
+  {
+    "name": "missing_analyses_key",
+    "results": [
+      {
+        "analyses": [
+          {
+            "score": 0.9
+          }
+        ]
+      },
+      {
+        "node_bindings": {}
+      }
+    ]
+  },
+  {
+    "name": "empty",
+    "results": []
+  },
+  {
+    "name": "single",
+    "results": [
+      {
+        "analyses": [
+          {
+            "score": 0.42
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "empty_analyses_list",
+    "results": [
+      {
+        "analyses": [
+          {
+            "score": 0.9
+          }
+        ]
+      },
+      {
+        "analyses": []
+      }
+    ]
+  }
+]

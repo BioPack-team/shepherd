@@ -4,7 +4,7 @@ import asyncio
 import io
 import logging
 import time
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import orjson
 import redis
@@ -17,6 +17,10 @@ from .config import settings
 from .logger import get_query_handler, resolve_log_level
 
 PG_RETRIES = 5
+# Retries for the handful of Redis writes that are correctness-critical
+# (e.g. the ready-callback index): 3 attempts with 0.1s/0.2s backoff rides
+# out a slow-command blip without stalling an HTTP handler for long.
+REDIS_RETRIES = 3
 
 # Postgres SQLSTATE 53100 is ``disk_full``. A full data volume surfaces as
 # psycopg.errors.DiskFull, which subclasses OperationalError -- so it lands in
@@ -177,6 +181,27 @@ _SCHEMA_UPGRADES = (
     ),
 )
 
+
+def _ars_schema_statements():
+    """The ARS table DDL bundled with shepherd_utils (see ars/schema.sql).
+
+    Statements are split on the blank-line-then-CREATE boundary so each
+    executes separately; all are IF NOT EXISTS and safe to re-run. The
+    ``idx_ars_message_ref`` index doubles as the pre-flight marker for
+    whether this block has been applied.
+    """
+    import pathlib
+
+    sql = (pathlib.Path(__file__).resolve().parent / "ars" / "schema.sql").read_text()
+    # Drop comment lines FIRST: a ';' inside a comment must not split.
+    sql = "\n".join(
+        line for line in sql.splitlines() if not line.strip().startswith("--")
+    )
+    return [s.strip() for s in sql.split(";") if s.strip()]
+
+
+ARS_SCHEMA_MARKER_INDEX = "idx_ars_message_ref"
+
 # Arbitrary-but-fixed advisory lock id serializing the upgrades across the
 # whole fleet booting at once: IF NOT EXISTS alone still races when two
 # sessions both pass the existence check and try to create the same index.
@@ -195,17 +220,24 @@ async def apply_schema_upgrades() -> None:
         # and logged a PoolTimeout traceback on an otherwise healthy startup.
         # The check is a single indexed catalog read and does not serialize, so
         # the common "already applied" case now costs one query and no lock.
+        marker_names = [name for name, _ in _SCHEMA_UPGRADES] + [
+            ARS_SCHEMA_MARKER_INDEX
+        ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",
-            ([name for name, _ in _SCHEMA_UPGRADES],),
+            (marker_names,),
         )
         row = await cursor.fetchone()
-        if row is not None and row[0] == len(_SCHEMA_UPGRADES):
+        if row is not None and row[0] == len(marker_names):
             return
         await conn.execute(
             "SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_UPGRADE_LOCK_ID,)
         )
         for _, ddl in _SCHEMA_UPGRADES:
+            await conn.execute(ddl)
+        # Bring pre-ARS volumes up to date with the ars_* tables. Everything
+        # in the bundled DDL is IF NOT EXISTS, so this is free once applied.
+        for ddl in _ars_schema_statements():
             await conn.execute(ddl)
         await conn.commit()
 
@@ -292,6 +324,7 @@ async def save_message(
     response: dict[str, Any],
     logger: logging.Logger,
     num_tries: int = 0,
+    raise_on_failure: bool = False,
 ):
     """
     Add a callback response to the db.
@@ -299,11 +332,16 @@ async def save_message(
     Args:
         callback_id (str): UID for a callback response
         response (dict[str, Any]): A TRAPI message
+        raise_on_failure: re-raise after the retries are exhausted, for
+            callers whose success response promises the payload is stored
+            (e.g. ARS submit); default keeps the historical swallow-and-log.
     """
     start = time.time()
     try:
         start_comp = time.time()
-        compressed = encode_message(response)
+        # a thread: orjson+zstd over a multi-MB message is pure CPU, and the
+        # server's callback path runs this on its event loop
+        compressed = await asyncio.to_thread(encode_message, response)
         logger.info(f"Compression took {time.time() - start_comp}")
         await data_db_client.set(
             callback_id,
@@ -317,11 +355,13 @@ async def save_message(
             num_tries += 1
             logger.warning(f"Failed to save message {num_tries} times. Trying again...")
             await asyncio.sleep(0.5)
-            await save_message(callback_id, response, logger, num_tries)
+            await save_message(
+                callback_id, response, logger, num_tries, raise_on_failure
+            )
         else:
-            # TODO: do something more severe
             logger.error(f"Failed to save a message into redis: {e}")
-            pass
+            if raise_on_failure:
+                raise
 
 
 class ResponseTooLargeError(Exception):
@@ -495,15 +535,33 @@ async def add_ready_callback(
     callback_id: str,
     logger: logging.Logger,
 ) -> None:
-    """Record an arrived callback as ready to merge into ``response_id``."""
+    """Record an arrived callback as ready to merge into ``response_id``.
+
+    The ready set is the merge workers' only source of work: a callback
+    missing from it is never merged and its results silently vanish from
+    the final answer. So this write retries through transient Redis
+    pressure (SADD is idempotent, retrying is always safe) and, if it still
+    cannot land, RAISES so the HTTP callback handler can tell the sender
+    delivery failed instead of acknowledging results it will drop.
+    """
     key = _ready_callbacks_key(response_id)
-    try:
-        async with data_db_client.pipeline(transaction=True) as pipe:
-            pipe.sadd(key, callback_id)
-            pipe.expire(key, settings.redis_ttl)
-            await pipe.execute()
-    except Exception as e:
-        logger.error(f"Failed to record ready callback {callback_id}: {e}")
+    last_error: Optional[Exception] = None
+    for attempt in range(REDIS_RETRIES):
+        if attempt:
+            await asyncio.sleep(0.1 * (2**attempt))
+        try:
+            async with data_db_client.pipeline(transaction=True) as pipe:
+                pipe.sadd(key, callback_id)
+                pipe.expire(key, settings.redis_ttl)
+                await pipe.execute()
+            return
+        except Exception as e:
+            last_error = e
+            logger.error(
+                f"Failed to record ready callback {callback_id} "
+                f"(attempt {attempt}): {e}"
+            )
+    raise last_error
 
 
 async def get_ready_callbacks(

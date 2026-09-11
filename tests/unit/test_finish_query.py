@@ -60,6 +60,56 @@ async def test_finish_sync_query(redis_mock, mocker):
 
 
 @pytest.mark.asyncio
+async def test_finish_internal_ars_query_enqueues_premerge(redis_mock, mocker):
+    """A query whose callback is the internal ARS sentinel is not POSTed
+    anywhere: finish_query enqueues an intake task on ars.premerge (which
+    loads the response from the blob store itself) and completes the query.
+    """
+    import uuid
+
+    from shepherd_utils.ars.internal import internal_callback_url
+    from shepherd_utils.broker import get_task
+
+    child_pk = str(uuid.uuid4())
+    response_id = "test_response"
+    mock_query_state = mocker.patch("workers.finish_query.worker.get_query_state")
+    mock_query_state.return_value = [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        response_id,
+        internal_callback_url(child_pk),
+    ]
+    mock_set_query_completed = mocker.patch(
+        "workers.finish_query.worker.set_query_completed"
+    )
+    mock_get_message = mocker.patch("workers.finish_query.worker.get_message")
+    mock_post = mocker.patch("httpx.AsyncClient.post")
+
+    logger = logging.getLogger(__name__)
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}],
+        logger,
+    )
+
+    mock_post.assert_not_called()
+    # the payload is not even loaded here -- the intake worker pulls it from
+    # the blob store by response_id
+    mock_get_message.assert_not_called()
+    task = await get_task("ars.premerge", "consumer", "t", logger)
+    assert task is not None
+    assert task[1]["intake_child_pk"] == child_pk
+    assert task[1]["response_id"] == response_id
+    assert task[1]["query_id"] == "test"
+    assert "otel" in task[1]
+    mock_set_query_completed.assert_called_once_with("test", "OK", logger)
+
+
+@pytest.mark.asyncio
 async def test_finish_async_query(redis_mock, mocker):
     """Test that a synchronous query is finished correctly."""
     mock_query_state = mocker.patch("workers.finish_query.worker.get_query_state")

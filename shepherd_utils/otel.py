@@ -1,4 +1,4 @@
-import multiprocessing
+import os
 
 from opentelemetry import trace
 
@@ -7,15 +7,17 @@ from .config import settings
 # enforce only one tracer provider with this instance
 _TRACER_PROVIDER = None
 
+# Set in the parent by ProcessPoolManager before it spawns children; spawn
+# copies os.environ into the child before the worker module is re-imported,
+# so this is reliable even at module-import time inside a freshly spawned
+# child. (Process *name* is not a usable signal here: uvicorn --workers
+# children and pool children are both plain "SpawnProcess-N".)
+POOL_CHILD_ENV = "SHEPHERD_PROCESS_POOL_CHILD"
 
-def _is_main_process() -> bool:
-    """True in the main process, False in a spawned process-pool child.
 
-    ``current_process().name`` is set during multiprocessing's spawn ``prepare()``
-    step -- before the worker module is re-imported -- so this is reliable even
-    at module-import time inside a freshly spawned child.
-    """
-    return multiprocessing.current_process().name == "MainProcess"
+def _is_pool_child() -> bool:
+    """True in a spawned process-pool child."""
+    return bool(os.environ.get(POOL_CHILD_ENV))
 
 
 def setup_tracer(service_name: str):
@@ -30,9 +32,11 @@ def setup_tracer(service_name: str):
     re-running the OTLP/grpc init and httpx instrumentation on every child --
     which the spawn re-import of the worker module would otherwise do -- only
     adds latency and a network dependency to each child's cold start for nothing.
+    Server processes spawned by ``uvicorn --workers`` are NOT pool children:
+    each one initializes its own provider here, exactly like a worker container.
     """
     global _TRACER_PROVIDER
-    if not settings.otel_enabled or not _is_main_process():
+    if not settings.otel_enabled or _is_pool_child():
         return trace.get_tracer(__name__)
     if _TRACER_PROVIDER is None:
         # Import the heavy OTLP/grpc stack lazily so a process that never sets up
