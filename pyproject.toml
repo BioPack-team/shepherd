@@ -1,6 +1,6 @@
 [project]
 name = "shepherd"
-version = "1.1.2"
+version = "1.2.0"
 description = "A shared platform for Translator ARAs"
 authors = [{ name = "Max Wang", email = "max@covar.com" }]
 readme = "README.md"
@@ -17,11 +17,13 @@ dependencies = [
   "orjson~=3.10",
   "psycopg[binary]~=3.1",
   "psycopg_pool~=3.2",
+  "pycryptodome~=3.20",
   "pydantic~=2.11",
   "pydantic-settings~=2.9",
   "python-dotenv~=1.0",
   "pyyaml~=6.0",
   "redis~=5.2",
+  "scipy",
   "uvicorn[standard]~=0.29",
   "zstandard~=0.23"
 ]
@@ -42,3 +44,7 @@ include = ["shepherd_utils*", "workers*", "shepherd_server*"]
 
 [tool.setuptools.package-data]
 shepherd_utils = ["*.yml"]
+# The ARS port bundles its upstream config verbatim: the blocklist, the
+# httpclients/inactive map (ars_config.yaml), the legacy URL fallbacks, and
+# the schema DDL applied by startup upgrades on pre-existing volumes.
+"shepherd_utils.ars" = ["blocklist.json", "*.yaml", "*.sql"]

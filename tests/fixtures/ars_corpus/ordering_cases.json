@@ -1,0 +1,73 @@
+[
+  {
+    "name": "standard",
+    "results": [
+      {
+        "ordering_components": {
+          "novelty": 0.2,
+          "confidence": 0.9,
+          "clinical_evidence": 0.3
+        }
+      },
+      {
+        "ordering_components": {
+          "novelty": 0.8,
+          "confidence": 0.1,
+          "clinical_evidence": 0.0
+        }
+      },
+      {
+        "ordering_components": {
+          "confidence": 0.5
+        }
+      },
+      {},
+      {
+        "ordering_components": {
+          "novelty": 0.2,
+          "confidence": 0.9,
+          "clinical_evidence": 0.3
+        }
+      }
+    ]
+  },
+  {
+    "name": "all_zero",
+    "results": [
+      {
+        "ordering_components": {
+          "novelty": 0,
+          "confidence": 0,
+          "clinical_evidence": 0
+        }
+      },
+      {}
+    ]
+  },
+  {
+    "name": "extremes",
+    "results": [
+      {
+        "ordering_components": {
+          "novelty": 1.0,
+          "confidence": 1.0,
+          "clinical_evidence": 1.0
+        }
+      },
+      {
+        "ordering_components": {
+          "novelty": 0.0,
+          "confidence": 1.0,
+          "clinical_evidence": 0.0
+        }
+      },
+      {
+        "ordering_components": {
+          "novelty": 1.0,
+          "confidence": 0.0,
+          "clinical_evidence": 1.0
+        }
+      }
+    ]
+  }
+]

@@ -16,6 +16,7 @@ from unittest.mock import MagicMock  # noqa: E402
 
 _otel_stub = types.ModuleType("shepherd_utils.otel")
 _otel_stub.setup_tracer = lambda service_name: MagicMock()
+_otel_stub.POOL_CHILD_ENV = "SHEPHERD_PROCESS_POOL_CHILD"
 sys.modules["shepherd_utils.otel"] = _otel_stub
 
 import fakeredis.aioredis as fakeredis  # noqa: E402

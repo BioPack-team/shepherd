@@ -84,6 +84,11 @@ class AsyncResponse:
     success: bool
     callback_id: str
     error: Optional[str] = None
+    # True when the submission was sent but we never heard the ACK. The
+    # retrieval service may well be running the lookup and will POST the
+    # callback later, so the callback id must be kept or the results will be
+    # rejected on arrival. False means the request never reached the service.
+    in_flight: bool = False
 
 
 async def run_async_lookup(
@@ -119,13 +124,25 @@ async def run_async_lookup(
                 success=response.status_code == 200,
                 callback_id=callback_id,
             )
+        except httpx.ReadTimeout as e:
+            # The request went out and the service just didn't ACK in time.
+            # It has the query and the callback URL, so treat it as still
+            # running rather than failed.
+            span.record_exception(e)
+            return AsyncResponse(
+                status_code=500,
+                success=False,
+                callback_id=callback_id,
+                error=f"{type(e).__name__}: no ACK within {client.timeout.read}s",
+                in_flight=True,
+            )
         except Exception as e:
             span.record_exception(e)
             return AsyncResponse(
                 status_code=500,
                 success=False,
                 callback_id=callback_id,
-                error=str(e),
+                error=f"{type(e).__name__}: {e}",
             )
 
 
@@ -168,7 +185,9 @@ async def aragorn_lookup(task, logger: logging.Logger):
         )
         with tracer.start_as_current_span("aragorn.lookup") as span:
             span.set_attribute("callback.id", callback_id)
-            async with httpx.AsyncClient(timeout=100) as client:
+            async with httpx.AsyncClient(
+                timeout=settings.kg_retrieval_submit_timeout
+            ) as client:
                 await client.post(
                     settings.kg_retrieval_url,
                     json=message,
@@ -180,7 +199,9 @@ async def aragorn_lookup(task, logger: logging.Logger):
 
         requests = []
         # send all messages to lookup service
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(
+            timeout=settings.kg_retrieval_submit_timeout
+        ) as client:
             for expanded_message in expanded_messages:
                 requests.append(
                     run_async_lookup(client, expanded_message, query_id, logger)
@@ -196,12 +217,20 @@ async def aragorn_lookup(task, logger: logging.Logger):
                         f"Failed to do lookup and unable to remove callback id: {response}"
                     )
                 elif isinstance(response, AsyncResponse):
-                    if not response.success:
-                        logger.error(
-                            f"[{response.callback_id}] Failed to do lookup, "
-                            f"removing callback id: {response.error}"
+                    if response.success:
+                        continue
+                    if response.in_flight:
+                        logger.warning(
+                            f"[{response.callback_id}] Lookup submitted but not "
+                            f"acknowledged, waiting for its callback anyway: "
+                            f"{response.error}"
                         )
-                        await remove_callback_id(response.callback_id, logger)
+                        continue
+                    logger.error(
+                        f"[{response.callback_id}] Failed to do lookup, "
+                        f"removing callback id: {response.error}"
+                    )
+                    await remove_callback_id(response.callback_id, logger)
                 else:
                     logger.error(
                         f"Failed to do lookup and unable to remove callback id: {response}"

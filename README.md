@@ -83,6 +83,22 @@ first startup that fetches it — or the file can be preloaded alongside the sql
 which the worker only ever reads it. A read-only mount with no preloaded copy fails at startup with a
 permission error rather than silently continuing.
 
+### Translator ARS
+
+Shepherd also hosts a full port of the NCATS Translator ARS
+([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)) at
+`/ars/...` -- the same `/ars/api/submit` / `messages/<pk>?trace=y` /
+`get_status` surface the Translator UI uses, backed by five workers
+(`ars_fanout`, `ars_merge`, `ars_postprocess`, `ars_watchdog`, `ars_notify`)
+on the shared Redis Streams fabric instead of Celery/RabbitMQ, and `ars_*`
+Postgres tables instead of MySQL. Behavior is pinned against the upstream
+codebase by a four-layer parity suite; see `docs/ARS_PARITY_REGISTER.md`
+for the invariants, the golden-regeneration procedure, and every documented
+deviation, and `tests/parity_e2e/README.md` for the side-by-side
+differential harness. Deployment knobs live in `shepherd_utils/config.py`
+under the "Translator ARS" block (`ARS_PUBLIC_HOST` must be reachable by
+remote ARAs for their result callbacks).
+
 ### Worker
 
 Each worker is it's own separate docker container. It spins up and begins to watch a central message broker for tasks to work on. Once it gets a task, it
@@ -108,6 +124,42 @@ following behavior applies to all of them:
   Tasks that don't finish in the window are left in the stream for Redis reclaim.
   Set the deployment's `terminationGracePeriodSeconds` comfortably above
   `WORKER_DRAIN_TIMEOUT_SEC`.
+- **Whole-query timeout budget (`QUERY_TIMEOUT_SEC`)** — see below.
+
+##### Query timeout budget
+
+The ARS and the other external callers stop waiting for a Shepherd query after
+about five minutes, and the synchronous `/query` endpoint gives up around the
+same point. Work done past that is work nobody receives — it only takes worker
+slots (and process-pool children) away from queries that can still be answered.
+
+So the server stamps each query with an absolute deadline at intake, and that
+deadline travels with the task from operation to operation. Every worker checks
+it as it picks a task up (in `shepherd_utils.shared.get_tasks`, on both freshly
+delivered and reclaimed messages). If the budget is spent the worker does *not*
+run the operation: it drops the rest of the workflow and routes the query
+straight to `finish_query`, which ends it the way any other query ends — state
+`COMPLETED` in Postgres with a `TIMEOUT` status, callback rows reaped, logs
+saved (including the line explaining why the response is partial), and whatever
+was gathered POSTed to the callback URL. A synchronous caller therefore gets a
+partial response instead of waiting out its own timeout for nothing.
+
+| Setting | Meaning |
+| --- | --- |
+| `QUERY_TIMEOUT_SEC` | The budget, in seconds (default 300). `0` disables deadlines entirely — tasks then run however old they are, as they did before. |
+
+A client that explicitly asks to wait longer (TRAPI `parameters.timeout`) is not
+cut short: the larger of the two wins. Two streams are exempt — `finish_query`,
+which *is* the wrap-up, and `merge_message`, which folds in callbacks an
+upstream service has already done the work for. Tasks with no deadline (a
+payload enqueued before this shipped) are never expired, so a rollout is safe
+mid-flight.
+
+This is a fast path that settles a query at the moment it goes over. The
+monitor's abandoned-query reaper (`MONITOR_ABANDONED_QUERY_SEC`, default 600s)
+remains the backstop for queries that go over *without* any worker picking a
+task up for them — e.g. one whose driving worker died with nothing left in a
+stream.
 
 ##### Kubernetes sizing (Helm)
 

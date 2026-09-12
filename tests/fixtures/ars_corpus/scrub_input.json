@@ -1,0 +1,86 @@
+{
+  "message": {
+    "knowledge_graph": {
+      "nodes": {
+        "n1": {
+          "attributes": [
+            null,
+            {
+              "attribute_type_id": "x",
+              "value": 1
+            },
+            null
+          ]
+        },
+        "n2": {
+          "attributes": null
+        },
+        "n3": {}
+      },
+      "edges": {
+        "e1": {
+          "subject": "n1",
+          "object": "n2",
+          "attributes": [
+            null,
+            {
+              "attribute_type_id": "y",
+              "value": 2,
+              "attributes": null
+            }
+          ],
+          "sources": [
+            {
+              "resource_id": "infores:a",
+              "resource_role": "primary_knowledge_source"
+            },
+            {
+              "resource_role": "aggregator_knowledge_source"
+            },
+            {
+              "resource_id": null,
+              "resource_role": "aggregator_knowledge_source"
+            },
+            {
+              "resource_id": "infores:b",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": null
+            },
+            {
+              "resource_id": "infores:c",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": [
+                "infores:a",
+                null,
+                "infores:b"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "auxiliary_graphs": {
+      "a1": {
+        "edges": [
+          "e1"
+        ],
+        "attributes": null
+      },
+      "a2": {
+        "edges": [
+          "e1"
+        ],
+        "attributes": [
+          {
+            "attribute_type_id": "k"
+          }
+        ]
+      },
+      "a3": {
+        "edges": [
+          "e1"
+        ]
+      }
+    }
+  }
+}

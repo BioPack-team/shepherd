@@ -55,11 +55,12 @@ class Settings(BaseSettings):
     postgres_pool_timeout: float = 5.0
     # Per-process Postgres pool bounds. Every container (server + each worker)
     # holds its own pool, so the fleet-wide ceiling is (number of containers x
-    # max size) and must stay under Postgres's max_connections (200 in
+    # max size) and must stay under Postgres's max_connections (400 in
     # compose.yml). The server fields all client HTTP traffic (sync-query
-    # status polling, /callback lookups) and is the component that exhausts
-    # its pool first under load, so compose.yml/Helm give it a larger pool via
-    # these env vars while the workers keep the small default.
+    # status polling, /callback lookups) and the lookup workers fan one query
+    # out into many concurrent DB ops, so compose.yml/Helm give those
+    # containers larger pools via these env vars while the remaining workers
+    # keep the small default.
     postgres_pool_min_size: int = 5
     postgres_pool_max_size: int = 10
     # Size of the Postgres data volume, set from the SAME Helm value that sizes
@@ -81,6 +82,10 @@ class Settings(BaseSettings):
     # byte count; 0 (or unparseable) disables the limit.
     callback_max_request_size: str = "0"
     kg_retrieval_url: str = "http://host.docker.internal:8080/asyncquery"
+    # How long a lookup worker waits for the retrieval service to ACK an
+    # /asyncquery submission. This bounds only the acknowledgement, the
+    # results arrive later via callback.
+    kg_retrieval_submit_timeout: float = 100.0
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
     kg_rehydrate_url: str = "http://host.docker.internal:8080/rehydrate"
     default_data_tier: int = 0
@@ -165,6 +170,22 @@ class Settings(BaseSettings):
     reclaim_min_idle_sec: int = 30
     reclaim_interval_sec: int = 10
     reclaim_max_batch: int = 50
+
+    # Whole-query wall-clock budget, in seconds. The ARS and the other external
+    # callers stop waiting for a Shepherd query after ~5 minutes, and the
+    # synchronous /query endpoint gives up around the same point, so work done
+    # past this is work nobody receives -- it only takes worker slots (and
+    # process-pool children) away from queries that can still be answered. Each
+    # query is stamped with an absolute deadline at intake and it travels with
+    # the task; a worker that picks up a task whose query is past it skips the
+    # operation and routes the query straight to finish_query, which settles
+    # its state in Postgres, reaps its callbacks, saves its logs and delivers
+    # whatever was gathered. A client asking to wait longer (TRAPI
+    # parameters.timeout) is not cut short -- the larger of the two wins. Set to
+    # 0 to disable the deadline entirely (the previous behavior: tasks run
+    # however old they are, and only the monitor's abandoned-query reaper --
+    # monitor_abandoned_query_sec -- eventually settles the row).
+    query_timeout_sec: float = 300.0
 
     # Poison-pill circuit breaker. A task that keeps killing its worker before it
     # can ack (e.g. a payload so large that decoding/sorting it trips the cgroup
@@ -265,6 +286,16 @@ class Settings(BaseSettings):
     # under pathological bursts; leftover ready callbacks are swept by the next
     # drain iteration. 0 disables the cap (fold everything ready in one pass).
     merge_max_fold: int = 25
+    # A merge that fails is retried by re-enqueueing its wake task. Space the
+    # retries out (exponential from merge_retry_backoff, capped at
+    # merge_retry_backoff_max) so a deterministic failure can't spin the worker,
+    # and after merge_max_attempts consecutive failures give up on the batch --
+    # discard those callbacks so the query merges the rest and finishes rather
+    # than retrying an unmergeable payload until it times out. 0 attempts
+    # disables the breaker (unbounded retries).
+    merge_max_attempts: int = 3
+    merge_retry_backoff: float = 1.0
+    merge_retry_backoff_max: float = 10.0
     # Cap on how many log entries are lifted out of a single callback message.
     # Subservices report their retrieval work in the TRAPI ``logs`` list they
     # post back, and those entries are folded into the query's log list. A
@@ -272,6 +303,64 @@ class Settings(BaseSettings):
     # then be stored per query and echoed in the final response, so keep only
     # the first N. 0 disables the cap.
     merge_max_callback_logs: int = 1000
+
+    # ------------------------------------------------------------------
+    # Translator ARS (ported from NCATSTranslator/Relay). These mirror the
+    # upstream env vars (TR_ENV, TR_NORMALIZER, ...) so a deployment can move
+    # its existing configuration over unchanged.
+    # ------------------------------------------------------------------
+    # Externally reachable base URL of this Shepherd deployment, used to build
+    # the callback URLs handed to remote ARAs (POST {ars_public_host}/ars/api/
+    # messages/<child_pk>) and the notification payloads. Unlike callback_host
+    # (internal, for the KG retrieval loop) this must be reachable from the
+    # public internet where the ARAs run.
+    ars_public_host: str = "http://shepherd_server:5439"
+    # Dispatch queries to Shepherd's own ARAs (infores:shepherd-*) by
+    # enqueueing their worker tasks directly, and deliver their responses
+    # straight onto the ars.premerge queue, instead of POSTing multi-MB
+    # bodies through the server's HTTP endpoints. The public endpoints stay
+    # up either way; this only short-circuits the in-cluster hops. Disable
+    # to force every actor through HTTP like an external ARA.
+    ars_internal_dispatch: bool = True
+    # SmartAPI maturity filter, upstream env TR_ENV: production / development /
+    # staging / testing.
+    tr_env: str = "production"
+    # TRAPI version filter for SmartAPI discovery, upstream env TR_VER.
+    # Empty means no version filter (upstream leaves TR_VER unset -> None).
+    tr_ver: str = ""
+    tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
+    # Node annotation runs the biothings_annotator package in-process (as
+    # upstream); its backend host is overridable via the package's own
+    # SERVICE_PROVIDER_API_HOST env var, not a Shepherd setting.
+    # AES key for decrypting stored notification-client secrets (upstream env
+    # AES_MASTER_KEY). Empty disables signed notifications.
+    aes_master_key: str = ""
+    # Timeout (seconds) for each ARA query dispatch, matching upstream
+    # tasks.send_message(timeout=300).
+    ars_query_timeout: int = 300
+    # Timeout sweep (upstream celery beat catch_timeout ran every 180s; the
+    # watchdog loop runs more often -- parity is on the age thresholds, which
+    # are per message kind and match upstream exactly).
+    ars_watchdog_interval_sec: float = 60.0
+    ars_timeout_standard_sec: float = 300.0  # 5 min
+    # NOTE: upstream's log message says 10 minutes, but the code compares
+    # against now-5min (tasks.py catch_timeout_async, max_time_pathfinder).
+    # The code's behavior is what parity is measured against.
+    ars_timeout_pathfinder_sec: float = 300.0  # 5 min
+    ars_timeout_merge_sec: float = 480.0  # 8 min
+    # Only messages updated within this window are examined by the sweep,
+    # matching the upstream 15-minute scan window.
+    ars_timeout_scan_window_sec: float = 900.0
+    # Days after which non-retained message payload blobs are purged from
+    # Postgres (row metadata is kept). Upstream has no purge job of its own --
+    # only the retain flag honored by out-of-band cleanup -- so this is the
+    # Shepherd-native equivalent. 0 disables.
+    ars_data_retention_days: int = 30
+    # SmartAPI registry cache refresh interval (upstream 3600s, 30s retry after
+    # a failed refresh).
+    smartapi_refresh_sec: int = 3600
+    smartapi_retry_sec: int = 30
+    smartapi_url: str = "http://smart-api.info/api/query"
 
     # Monitor (dashboard) worker
     monitor_port: int = 5440

@@ -1,0 +1,196 @@
+{
+  "message": {
+    "query_graph": {
+      "nodes": {
+        "sn": {
+          "ids": [
+            "MONDO:0005148"
+          ],
+          "categories": [
+            "biolink:Disease"
+          ]
+        },
+        "on": {
+          "categories": [
+            "biolink:ChemicalEntity"
+          ]
+        }
+      },
+      "edges": {
+        "t_edge": {
+          "subject": "on",
+          "object": "sn",
+          "predicates": [
+            "biolink:treats"
+          ],
+          "knowledge_type": "inferred"
+        }
+      }
+    },
+    "knowledge_graph": {
+      "nodes": {
+        "MONDO:0005148": {
+          "name": "type 2 diabetes mellitus",
+          "categories": [
+            "biolink:Disease"
+          ],
+          "attributes": []
+        },
+        "CHEBI:6801": {
+          "name": "metformin",
+          "categories": [
+            "biolink:ChemicalEntity",
+            "biolink:Drug"
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:xref",
+              "value": [
+                "MESH:D008687"
+              ]
+            }
+          ]
+        },
+        "CHEBI:17234": {
+          "name": "glucose",
+          "categories": [
+            "biolink:ChemicalEntity"
+          ],
+          "attributes": []
+        }
+      },
+      "edges": {
+        "e1": {
+          "subject": "CHEBI:6801",
+          "object": "MONDO:0005148",
+          "predicate": "biolink:treats",
+          "sources": [
+            {
+              "resource_id": "infores:ctd",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            },
+            {
+              "resource_id": "infores:arax",
+              "resource_role": "aggregator_knowledge_source",
+              "upstream_resource_ids": [
+                "infores:ctd"
+              ]
+            }
+          ],
+          "attributes": [
+            {
+              "attribute_type_id": "biolink:publications",
+              "value": [
+                "PMID:2",
+                "PMID:3"
+              ]
+            }
+          ],
+          "qualifiers": [
+            {
+              "qualifier_type_id": "biolink:object_direction_qualifier",
+              "qualifier_value": "decreased"
+            }
+          ]
+        },
+        "e9": {
+          "subject": "CHEBI:6801",
+          "object": "CHEBI:17234",
+          "predicate": "biolink:affects",
+          "sources": [
+            {
+              "resource_id": "infores:arax",
+              "resource_role": "primary_knowledge_source",
+              "upstream_resource_ids": []
+            }
+          ],
+          "attributes": []
+        }
+      }
+    },
+    "auxiliary_graphs": {
+      "aux9": {
+        "edges": [
+          "e9"
+        ],
+        "attributes": []
+      }
+    },
+    "results": [
+      {
+        "node_bindings": {
+          "sn": [
+            {
+              "id": "MONDO:0005148",
+              "attributes": []
+            }
+          ],
+          "on": [
+            {
+              "id": "CHEBI:6801",
+              "attributes": []
+            }
+          ]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:arax",
+            "edge_bindings": {
+              "t_edge": [
+                {
+                  "id": "e1",
+                  "attributes": []
+                }
+              ]
+            },
+            "score": 0.91
+          }
+        ]
+      },
+      {
+        "node_bindings": {
+          "sn": [
+            {
+              "id": "MONDO:0005148",
+              "attributes": []
+            }
+          ],
+          "on": [
+            {
+              "id": "CHEBI:17234",
+              "attributes": []
+            }
+          ]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:arax",
+            "edge_bindings": {
+              "t_edge": [
+                {
+                  "id": "e9",
+                  "attributes": []
+                }
+              ]
+            },
+            "score": null
+          },
+          {
+            "resource_id": "infores:arax-second",
+            "edge_bindings": {
+              "t_edge": [
+                {
+                  "id": "e9",
+                  "attributes": []
+                }
+              ]
+            },
+            "score": 0.2
+          }
+        ]
+      }
+    ]
+  },
+  "logs": []
+}

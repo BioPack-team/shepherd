@@ -691,3 +691,74 @@ async def test_tasks_for_one_query_do_not_duplicate_each_others_logs(redis_mock)
         "callback two retrieval log",
     ]
     first_logger.handlers.clear()
+
+
+def test_merge_kgraph_tolerates_nodes_missing_optional_fields():
+    """A node that omits ``name`` (or ``categories``/``attributes``) must merge.
+
+    ``name``, ``categories`` and ``attributes`` are all optional in TRAPI, and
+    subservices do leave them out. merge_kgraph used to subscript them, so a
+    single such node on an id already in the accumulator raised
+    ``KeyError: 'name'`` out of the process-pool child and aborted the whole
+    batch merge -- which the worker then retried forever.
+    """
+    og = {
+        "nodes": {
+            "MONDO:1": {"name": "Original", "categories": ["biolink:Disease"]},
+            "MONDO:2": {},
+        },
+        "edges": {},
+    }
+    new = {
+        # No 'name', no 'attributes' -- and 'categories' present on only one.
+        "nodes": {
+            "MONDO:1": {"categories": ["biolink:NamedThing"]},
+            "MONDO:2": {"name": "Filled in", "attributes": [{"a": 1}]},
+        },
+        "edges": {},
+    }
+    merged = merge_kgraph(og, new, "infores:test", logger)
+    # The existing name survives a new node that simply doesn't carry one.
+    assert merged["nodes"]["MONDO:1"]["name"] == "Original"
+    assert set(merged["nodes"]["MONDO:1"]["categories"]) == {
+        "biolink:Disease",
+        "biolink:NamedThing",
+    }
+    # ...and fields absent from the existing entry are adopted from the new one.
+    assert merged["nodes"]["MONDO:2"]["name"] == "Filled in"
+    assert merged["nodes"]["MONDO:2"]["attributes"] == [{"a": 1}]
+
+
+def test_merge_kgraph_tolerates_edges_missing_optional_fields():
+    """Same for overlapping edges: absent ``attributes``/``sources`` merge."""
+    og = {
+        "nodes": {},
+        "edges": {
+            "e1": {"subject": "A", "object": "B"},
+            "e2": {
+                "subject": "A",
+                "object": "B",
+                "sources": [{"resource_id": "infores:one"}],
+            },
+        },
+    }
+    new = {
+        "nodes": {},
+        "edges": {
+            "e1": {
+                "subject": "A",
+                "object": "B",
+                "sources": [{"resource_id": "infores:two"}],
+            },
+            # Nothing optional at all on this one.
+            "e2": {"subject": "A", "object": "B"},
+        },
+    }
+    merged = merge_kgraph(og, new, "infores:test", logger)
+    assert merged["edges"]["e1"]["sources"] == [{"resource_id": "infores:two"}]
+    assert merged["edges"]["e2"]["sources"] == [{"resource_id": "infores:one"}]
+
+
+def test_is_support_edge_handles_missing_and_null_attributes():
+    assert is_support_edge({"subject": "A", "object": "B"}) is False
+    assert is_support_edge({"attributes": None}) is False

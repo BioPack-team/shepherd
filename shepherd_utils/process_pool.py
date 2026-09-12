@@ -38,6 +38,8 @@ from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from typing import Optional
 
+from .otel import POOL_CHILD_ENV
+
 # Grace between SIGABRT (which makes the child's faulthandler dump its stack)
 # and the SIGKILL fallback, so the traceback has time to reach stderr.
 _ABORT_GRACE_SEC = 0.5
@@ -103,6 +105,12 @@ class ProcessPoolManager:
         # Spawn: see module docstring -- fork would risk deadlocking the event
         # loop thread when the pool is rebuilt after a child death.
         self._ctx = multiprocessing.get_context("spawn")
+        # Children inherit os.environ at spawn, so this marks every child this
+        # pool ever creates as a pool child -- setup_tracer() sees it during
+        # the child's module re-import and skips OTLP init there. The parent's
+        # own tracer was configured at module import, long before any pool
+        # exists, so setting it here cannot suppress the parent's tracing.
+        os.environ[POOL_CHILD_ENV] = "1"
         self._executor = self._new_executor()
 
     def _new_executor(self) -> ProcessPoolExecutor:

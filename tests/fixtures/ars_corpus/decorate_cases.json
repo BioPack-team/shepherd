@@ -1,0 +1,118 @@
+[
+  {
+    "name": "no_sources_key",
+    "inforesid": "infores:aragorn",
+    "data": {
+      "message": {
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "subject": "a",
+              "object": "b"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "empty_sources",
+    "inforesid": "infores:aragorn",
+    "data": {
+      "message": {
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "subject": "a",
+              "object": "b",
+              "sources": []
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "has_primary_not_self",
+    "inforesid": "infores:aragorn",
+    "data": {
+      "message": {
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "subject": "a",
+              "object": "b",
+              "sources": [
+                {
+                  "resource_id": "infores:ctd",
+                  "resource_role": "primary_knowledge_source"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "already_self",
+    "inforesid": "infores:aragorn",
+    "data": {
+      "message": {
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "subject": "a",
+              "object": "b",
+              "sources": [
+                {
+                  "resource_id": "infores:aragorn",
+                  "resource_role": "primary_knowledge_source"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "none_inforesid",
+    "inforesid": null,
+    "data": {
+      "message": {
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "subject": "a",
+              "object": "b",
+              "sources": []
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "no_primary_raises",
+    "inforesid": "infores:aragorn",
+    "data": {
+      "message": {
+        "knowledge_graph": {
+          "edges": {
+            "e1": {
+              "subject": "a",
+              "object": "b",
+              "sources": [
+                {
+                  "resource_id": "infores:x",
+                  "resource_role": "aggregator_knowledge_source"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+]

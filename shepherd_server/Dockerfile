@@ -6,6 +6,12 @@ LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
 
+# uvicorn worker-process count (overridable at deploy time). One process
+# cannot keep up with concurrent multi-MB ARA callbacks; each worker
+# initializes its own tracer provider, lifespan seeding is idempotent, and
+# schema upgrades take a Postgres advisory lock, so workers are independent.
+ENV WEB_CONCURRENCY=4
+
 # set up requirements
 WORKDIR /app
 

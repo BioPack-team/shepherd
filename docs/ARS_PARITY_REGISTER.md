@@ -1,0 +1,226 @@
+# ARS Parity Register
+
+The behavior contract for Shepherd's hosted port of the Translator ARS
+([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)).
+
+**Pinned upstream commit:** `3e65975db287a73afa4388b7dbaf3c64d0d218c4`
+(master, re-pinned 2026-09-05 from the original 2026-09-01 pin at
+`dd1e71b8284de746f9d11e4fc823bf57861e081f`; byte-exact reference copies
+under `/home/user/ncatstranslator/relay` during development, key files
+mirrored in the golden-generation tooling).
+
+Behavioral changes accepted with the 2026-09-05 re-pin (everything else in
+the range was OpenTelemetry/gunicorn/celery tuning):
+
+- **Relay PR #884 (removeAppraiser)**: `post_process` no longer calls the
+  external Appraiser or the Sugeno `compute_from_results` pass. When the
+  merged message has results, `appraise_confidence` computes
+  `ordering_components` locally (`confidence = 1 - prod(1 - score)` over
+  each result's scored analyses; novelty/clinical_evidence 0.0), and its
+  failures are logged and swallowed. `result_count`/`ScoreStatCalc` moved
+  inside the results-non-empty guard, keeping the E/444 early return. The
+  final-save block always runs (202 flips to D/200; save failure E/422).
+- **Relay PR #883 (key-error fix)**: `mergeDicts` keys qualifier dicts by
+  `qualifier_type_id`, so qualifier lists actually merge instead of the
+  old swallowed-KeyError no-op.
+- **Relay PR #882**: `Symptom` (NCIT:C4876) added to the blocklist.
+
+**Golden regeneration:** goldens are produced by *running the upstream code*
+over the corpus, never hand-written:
+
+```console
+$ python3.11 -m venv .venv-relay && .venv-relay/bin/pip install \
+    django==4.2.23 celery==5.5.3 scipy==1.10.1 sympy==1.13.3 "numpy<2" \
+    zstandard==0.23.0 objsize requests pyyaml pycryptodome pymysql \
+    reasoner-pydantic==5.1.1 pydantic==1.10.22 opentelemetry-api \
+    opentelemetry-sdk opentelemetry-instrumentation-celery \
+    opentelemetry-instrumentation-django opentelemetry-instrumentation-httpx \
+    opentelemetry-instrumentation-requests \
+    opentelemetry-exporter-otlp-proto-grpc "redis>=5,<6"
+$ python scripts/ars_parity/build_corpus.py
+$ PYTHONHASHSEED=0 .venv-relay/bin/python scripts/ars_parity/generate_goldens.py \
+    --relay /path/to/relay-checkout
+```
+
+Re-pinning to a newer Relay commit means: update the SHA here and in
+`generate_goldens.py`, regenerate, review the golden diff, and consciously
+accept each behavioral change.
+
+## Test layers
+
+| Layer | What it pins | Where |
+|---|---|---|
+| 1. Golden function parity | merge/premerge/filters/scoring/blocklist/validation outputs, byte-compared to upstream runs | `tests/unit/ars/test_golden_parity.py` |
+| 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_merge_worker.py`, `test_ars_postprocess.py`, `test_ars_watchdog.py`, `test_ars_notify.py` |
+| 3. API contract | paths, methods, status codes, error bodies, envelope shapes | `test_envelope.py`, `test_ars_api_contract.py` |
+| 4. Differential end-to-end | both stacks against the same mocked world | `tests/parity_e2e/` (run on demand; see its README) |
+
+## Invariant index (register rows referenced from tests)
+
+- **P-ST-1..4** — the six status letters, terminal set `{D,S,E,U}`,
+  long-name mapping, save-time code coercion (R→202, D→200) with the
+  `_skip_post_save` escape hatch.
+- **P-ENV-1..6** — Django-serializer envelopes: DjangoJSONEncoder datetime
+  format, exact model field order, long-form statuses, inline-decompressed
+  `data`, FK/pk shapes.
+- **P-LC-1..6** — parent-completion counting verbatim from
+  `message_post_save`: `finished` over the terminal set;
+  `orig_count`/`merge_count` from result-bearing `ar*` agents; the
+  `'E'/444` merge child satisfying its origin while any other merge error
+  decrements; the empty-completion branch synthesizing an empty merged
+  message (and, faithfully, *not* clearing subscriptions there).
+- **P-NT-1..5** — `notify_subscribers` field overrides ('D'→admin,
+  'E'→ars_error), stats attachment, the `{pk, timestamp, code}` payload
+  base, `last_merged_completed` forcing code 200, per-client HMAC-SHA256
+  over compact sorted-key JSON.
+- **Callback guard order** — dup-Done → 200 text; repeated results → 409;
+  errored child → 400; decode failure → 500 `Can not decode json...`;
+  validation failure → 422 `Problem with TRAPI Validation` with the child
+  E/422; header `tr_ars.message.status` override; `results: null` → 
+  `result_count = 0` while `results: []` leaves it None.
+- **Timeouts** — 15-minute scan window on *creation* time; parents exempt;
+  merge children 8 min; everything else **5 min including pathfinder**
+  (upstream's code, not its log message); code 598.
+- **Known-broken endpoints reproduced** — `POST /ars/api/messages` (500),
+  `POST /ars/api/actors` (creates the actor, then 400
+  `Not a valid json format`), `GET /ars/api/merge/<pk>` (creates the shell
+  merge child, then 500), `timeoutTest`/`post_process` debug (500).
+- **Upstream error-behavior parity** — `decorate_edges_with_infores` raises
+  (UnboundLocalError) on non-empty sources with no primary;
+  `normalizeScores` raises IndexError on mixed scored/unscored results; the
+  `node_bindings` for/else; the `attributes`/`analyses` early returns; a
+  failed merge fold leaves the shell merge child Running for the watchdog.
+
+## Documented deviations (all consciously accepted)
+
+Infrastructure substitutions (behavior-preserving by definition):
+
+| Upstream | Port |
+|---|---|
+| Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.postprocess`, `ars.notify`) + the `ars_watchdog` loop |
+| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + `ars_message.data` bytea (durable, written at terminal status) |
+| `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent (semaphore column still maintained for envelope parity) |
+| `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
+| self-proxy views `/ara-*/api/runquery` | direct POST to the SmartAPI-resolved remote (same body; proxy endpoints not served) |
+
+Behavioral deviations:
+
+1. **reasoner-pydantic replaced with Shepherd pydantic-v2 models**
+   (`shepherd_utils/ars/trapi.py`), per project direction. Field
+   requirements were dumped from the installed upstream package and verdict
+   parity is golden-tested over valid + broken corpora.
+2. **Annotator**: the in-process `biothings_annotator` package, as
+   upstream, with two deltas. (a) *Version pinning*: Relay installs the
+   package as an unpinned git dependency off master, so its annotation
+   logic shifts per image build; the port pins commit `82d3acc` in
+   `workers/ars_postprocess/requirements.txt` and `test-requirements.txt`
+   -- bump deliberately when re-pinning. (b) *Invocation*: the async
+   worker awaits `annotate_curie_list` directly. Upstream's event-loop
+   dance has two branches: celery's sync workers always take
+   `run_until_complete` (to which the direct await is equivalent), while
+   the `loop.is_running()` branch would hand back a Future and crash the
+   consumption loop -- a branch a sync celery worker never takes, not
+   reproduced. The consumption loop itself is verbatim (notfound-list
+   skip, empty-dict skip, direct node indexing, quirky crash modes ->
+   E/444).
+3. **Watchdog intent fixes**: upstream indexes the Agent table with the
+   *actor's* pk (outcome depends on row-id coincidence) — the port joins
+   actor→agent properly; and `ars-workflow-agent` parents are exempted
+   alongside `ars-default-agent` (upstream would 598 workflow parents at 5
+   minutes).
+4. **Watchdog cadence**: 60s sweep vs. 3-minute beat. A timed-out message is
+   marked *sooner after* its threshold; the thresholds themselves are
+   identical.
+5. **Callback micro-paths**: the async-200 self-GET race probe is dropped
+   (upstream persists nothing on that path); the dead branch that upstream
+   hits when a child already has stored `data` (a `str in bytes` TypeError
+   → 500) is not reproduced.
+6. **merge failure retries**: upstream celery-retries `merge_and_post_process`
+   up to 20× (creating a fresh merge child per attempt); the port fails once
+   and leaves the shell merge child for the watchdog — the terminal outcome
+   (E/598 merge child decrementing `orig_count`) is the same shape.
+7. **notify stats on a custom-fields-less call**: upstream raises TypeError
+   when `result_count` is set and no fields dict exists; the port carries
+   the stats in a fresh dict.
+8. **Empty-completion robustness**: when the parent's payload is missing
+   (Redis TTL + no durable copy), the port synthesizes the empty merged
+   message from `{"message": {}}` instead of upstream's KeyError.
+9. **404 body for non-UUID pks**: Django returns its HTML 404 page (URL
+   resolution fails); the port returns the endpoint's own
+   `Unknown message: <pk>` text. Status code identical.
+10. **Retention**: upstream never purges (out-of-band cleanup honors
+    `retain`); the port nulls durable payload copies after
+    `ars_data_retention_days` for non-retained terminal messages, keeping
+    row metadata.
+11. **`GET /ars/api/messages` payload inclusion** and other list endpoints
+    load payloads from the blob store; a payload evicted from Redis with no
+    durable copy renders `fields.data: null` (upstream MySQL always had it
+    inline).
+12. **Notification delivery retries** run in-process with upstream's backoff
+    envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery.
+13. **normalized_score is a plain float**: upstream stores rankdata's
+    numpy.float64 through stdlib json (which accepts it as a float
+    subclass); Shepherd's orjson blob codec rejects numpy scalars, so the
+    port casts via ``.tolist()`` at the production site. Identical numeric
+    values; regression-tested against the blob codec round-trip.
+14. **Pre-merge processing is asynchronous** (post-parity change, accepted
+    2026-09-08 after load testing): upstream runs pre_merge_process +
+    phantom removal + TRAPI validation inline in its callback view; the
+    port runs them in the `ars_premerge` worker because the inline CPU work
+    saturated the server at 40 concurrent queries. Consequences for the
+    callback response: a result-bearing POST always answers 201 with the
+    child still Running (result_count/result_stat are set synchronously so
+    the repeated-results 409 guard still holds); upstream's inline HTTP 422
+    on validation failure becomes
+    an async child E/422 with the same ara_failed_validation notification;
+    upstream's inline-crash HTTP 500 becomes an async child E/500 with the
+    same "Internal ARS Server Error" log entry. Terminal child states,
+    notifications, merge inputs, and completion arithmetic are unchanged
+    (`tests/unit/ars/test_ars_premerge.py`); a child stuck in premerge is
+    covered by the watchdog's standard 5-minute 598.
+15. **Callback responses do not echo the payload** (post-parity change,
+    accepted 2026-09-08 with the same load testing): upstream's callback
+    view answers with the full stored message inline in `fields.data`; the
+    port answers both callback branches (result-bearing and no-results)
+    with `fields.data: null`. Serializing the multi-MB payload back at the
+    ARA -- which never reads the response body -- was the largest
+    per-callback CPU cost on the server's event loop. Envelope shape,
+    status codes, and every other field are unchanged; `GET` on the message
+    still returns the payload. Alongside this, the remaining synchronous
+    CPU on the callback path (request-body `json.loads`, `ScoreStatCalc`,
+    the zstd blob encode in `save_message`) moved to threads, and the
+    server runs 4 uvicorn worker processes (`WEB_CONCURRENCY` in
+    `shepherd_server/Dockerfile`) vs. upstream's 8 gunicorn workers x 4
+    threads.
+16. **Shepherd-hosted ARAs are dispatched internally** (post-parity change,
+    accepted 2026-09-10): for actors in
+    `shepherd_utils/ars/internal.INTERNAL_ARA_TARGETS` (infores:shepherd-*),
+    ars_fanout enqueues the ARA's worker task directly -- persisting the
+    same query record `POST /{ara}/asyncquery` would have -- with a
+    `shepherd-ars://callback/<child_pk>` sentinel callback, and
+    finish_query recognizes the sentinel and enqueues
+    `{intake_child_pk, response_id}` on `ars.premerge` instead of POSTing
+    the response to `/ars/api/messages/<child_pk>`. The premerge worker's
+    `intake_internal_response` then runs the callback endpoint's exact
+    state machine (guard order, result_count/result_stat, the
+    `ara_response_complete` notification, the no-results terminal rules,
+    the generic-failure E/500 with its log entry) before premerging in the
+    same task, so no multi-MB body crosses the network in either
+    direction. Differences in kind: HTTP-level answers nobody read (the
+    dup-200 text, the 409, the 400) become logged skips; a dispatch
+    failure is the same child E/500 as a failed POST; an intake whose
+    response blob is missing leaves the child Running for the watchdog
+    (the shape of a callback that never arrived); and a `get_logs` failure
+    delivers the response without spliced logs instead of failing
+    delivery. External actors, external callers, and both public endpoint
+    surfaces are unchanged; `settings.ars_internal_dispatch=false`
+    restores HTTP dispatch for everything (already-issued sentinels still
+    deliver internally, since they are not POSTable).
+
+## Not ported (documented drops)
+
+- Django admin, the websocket echo consumer, the HTML status/answers pages
+  (`/ars/app/*`, `/ars/answer/<pk>`), and the tr_kp proxy views. The JSON
+  APIs those pages consume are all served.
+- `ara-explanatory` special-case remains as the callback-injection skip
+  only, as upstream.

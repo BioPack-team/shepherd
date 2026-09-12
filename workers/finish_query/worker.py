@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from opentelemetry.propagate import inject
 from opentelemetry.trace import Status, StatusCode, get_current_span
 
-from shepherd_utils.broker import mark_task_as_complete
+from shepherd_utils.ars.internal import parse_internal_callback
+from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.db import (
     cleanup_callbacks,
     get_logs,
@@ -261,7 +262,39 @@ async def finish_query(task, logger: logging.Logger):
         logger.error(f"Query id {query_id} not found in db.")
     else:
         callback_url = query_state[8]
-        if callback_url is not None:
+        ars_child_pk = parse_internal_callback(callback_url)
+        if ars_child_pk is not None:
+            # The caller is this deployment's own ARS: hand the response over
+            # on the queue instead of POSTing it back through the server. The
+            # intake in ars_premerge loads the payload and logs from the blob
+            # store by response_id itself, so nothing large is even resident
+            # here. If the enqueue fails after its retries, the child stays
+            # Running for the ARS watchdog -- the same terminal shape as an
+            # undeliverable HTTP callback.
+            carrier: dict = {}
+            inject(carrier)
+            try:
+                await add_task(
+                    "ars.premerge",
+                    {
+                        "intake_child_pk": ars_child_pk,
+                        "response_id": response_id,
+                        "query_id": query_id,
+                        "otel": orjson.dumps(carrier).decode(),
+                    },
+                    logger,
+                    raise_on_failure=True,
+                )
+                logger.info(
+                    f"Handed response {response_id} to the ARS intake for "
+                    f"child {ars_child_pk}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to enqueue ARS intake for child {ars_child_pk}: "
+                    f"{e}. The response was not delivered."
+                )
+        elif callback_url is not None:
             # this was an async query, need to send message back
             message_bytes = await get_message(response_id, logger, raw=True)
             logs = await get_logs(response_id, logger)

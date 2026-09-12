@@ -18,6 +18,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from shepherd_server.aras.aragorn import ARAGORN
 from shepherd_server.aras.arax import ARAX
+from shepherd_server.aras.ars import ARS
 from shepherd_server.aras.bte import BTE
 from shepherd_server.aras.sipr import SIPR
 from shepherd_server.base_routes import base_router
@@ -38,6 +39,12 @@ tracer = setup_tracer("shepherd-server")
 async def lifespan(app: FastAPI):
     """Handle db connection."""
     await initialize_db()
+    # Upsert the ARS actor registry (the tr_ara_*/tr_kp_* AppConfig.ready()
+    # equivalent). Mounted sub-apps don't get their own lifespan, so the ARS
+    # seeding runs here.
+    from shepherd_utils.ars.lifecycle import seed_registry
+
+    await seed_registry(logging.getLogger("shepherd.ars"))
     yield
     await shutdown_db()
 
@@ -52,6 +59,8 @@ APP.include_router(base_router, prefix="")
 
 APP.mount("/aragorn", ARAGORN)
 APP.mount("/arax", ARAX)
+# The Translator ARS surface (hosted port of NCATSTranslator/Relay)
+APP.mount("/ars", ARS)
 APP.mount("/bte", BTE)
 APP.mount("/sipr", SIPR)
 

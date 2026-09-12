@@ -7,6 +7,8 @@ from pathlib import Path
 import httpx
 
 target_urls = {
+    "aragorn-test": "https://shepherd.test.transltr.io/aragorn",
+    "arax-test": "https://shepherd.test.transltr.io/arax",
     "aragorn-ci": "https://shepherd.ci.transltr.io/aragorn",
     "arax-ci": "https://shepherd.ci.transltr.io/arax",
     "aragorn-dev": "https://shepherd.renci.org/aragorn",
@@ -121,18 +123,17 @@ query_list = [
 
 async def main():
     """Run the given query and time it."""
-    targets = ["arax-local"]
+    targets = ["aragorn-local"]
     runs_per_target = 1
 
     start = time.time()
-    queries = []
     for curies in query_list:
-        queries.extend([
+        queries = [
             single_lookup(curies, target)
             for target in targets
             for _ in range(runs_per_target)
-        ])
-    await asyncio.gather(*queries)
+        ]
+        await asyncio.gather(*queries)
     print(f"\nAll queries took {time.time() - start:.2f} seconds")
 
 

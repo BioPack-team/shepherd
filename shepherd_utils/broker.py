@@ -120,18 +120,24 @@ async def create_consumer_group(stream, group, logger: logging.Logger):
         pass
 
 
-async def add_task(queue, payload, logger: logging.Logger):
-    """Put a payload on the queue for a worker to pick up."""
+async def add_task(queue, payload, logger: logging.Logger, raise_on_failure=False):
+    """Put a payload on the queue for a worker to pick up.
+
+    ``raise_on_failure`` is for callers whose success response PROMISES the
+    task exists (e.g. ARS submit returning 201): swallowing the enqueue
+    failure there leaves a query permanently Running with no worker ever
+    woken. Default stays swallow-and-log for fire-and-forget callers.
+    """
     try:
         # print(f"Putting {payload} on {queue} stream")
         await broker_client.xadd(queue, payload)
     except Exception as e:
         # failed to put message on ara stream
-        # TODO: do something more severe
         logger.error(
             f"Failed to put new task on the queue: {e}, inputs: {queue}, {payload}"
         )
-        pass
+        if raise_on_failure:
+            raise
 
 
 async def get_task(stream, group, consumer, logger: logging.Logger):
