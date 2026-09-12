@@ -115,6 +115,58 @@ CREATE TABLE IF NOT EXISTS ars_subscription (
   PRIMARY KEY (client_id, message_id)
 );
 
+-- ---------------------------------------------------------------------------
+-- ARS response cache (Shepherd-native; upstream has none). The cache stores
+-- no payloads of its own: it indexes a canonical query-graph hash to the
+-- parent pk of a completed message tree (the "source tree"), whose blobs
+-- already live in ars_message.data. A hit copies that tree for the new
+-- parent. See docs/ARS_RESPONSE_CACHE_PLAN.md.
+-- ---------------------------------------------------------------------------
+
+-- Singleton generation counter. Bumping it invalidates every entry at once
+-- (lookups filter on the current generation); superseded rows are purged
+-- lazily by the watchdog and their source trees then fall under the normal
+-- payload retention window.
+CREATE TABLE IF NOT EXISTS ars_cache_meta (
+  id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+  generation INT NOT NULL DEFAULT 1,
+  bumped_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  bumped_reason TEXT
+);
+INSERT INTO ars_cache_meta (id) VALUES (TRUE) ON CONFLICT DO NOTHING;
+
+-- 'pending' while the leader query runs (identical submits coalesce onto it
+-- as waiters), 'ready' once the source tree is complete. label_map records
+-- the source query graph's node/edge/path ids -> canonical ids so a hit can
+-- rewrite bindings to the caller's own ids.
+CREATE TABLE IF NOT EXISTS ars_response_cache (
+  generation INT NOT NULL,
+  cache_key TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'ready')),
+  source_pk UUID NOT NULL REFERENCES ars_message(id),
+  label_map JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ready_at TIMESTAMPTZ,
+  hit_count INT NOT NULL DEFAULT 0,
+  last_hit_at TIMESTAMPTZ,
+  PRIMARY KEY (generation, cache_key)
+);
+-- idx_ars_response_cache_source doubles as the schema-upgrade marker for
+-- this block (shepherd_utils.db.apply_schema_upgrades).
+CREATE INDEX IF NOT EXISTS idx_ars_response_cache_source ON ars_response_cache (source_pk);
+CREATE INDEX IF NOT EXISTS idx_ars_response_cache_state_created ON ars_response_cache (state, created_at);
+
+-- Parents waiting on a pending leader; resolved (copied + deleted) when the
+-- leader completes, repaired by the watchdog when it does not.
+CREATE TABLE IF NOT EXISTS ars_response_cache_waiter (
+  parent_pk UUID PRIMARY KEY REFERENCES ars_message(id),
+  leader_pk UUID NOT NULL REFERENCES ars_message(id),
+  generation INT NOT NULL,
+  cache_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ars_response_cache_waiter_leader ON ars_response_cache_waiter (leader_pk);
+
 -- Historical metrics archive, written by the monitor every 30s. Used by the
 -- History tab to show trends over days/weeks. Live dashboard reads from Redis
 -- (recent, fast); this is the durable 30-day record.

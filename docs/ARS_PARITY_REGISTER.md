@@ -151,13 +151,36 @@ Behavioral deviations:
 10. **Retention**: upstream never purges (out-of-band cleanup honors
     `retain`); the port nulls durable payload copies after
     `ars_data_retention_days` for non-retained terminal messages, keeping
-    row metadata.
+    row metadata. Trees that back a live response-cache entry (item 13)
+    are exempt while their cache generation is current.
 11. **`GET /ars/api/messages` payload inclusion** and other list endpoints
     load payloads from the blob store; a payload evicted from Redis with no
     durable copy renders `fields.data: null` (upstream MySQL always had it
     inline).
 12. **Notification delivery retries** run in-process with upstream's backoff
     envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery.
+13. **Response cache** (Shepherd-native; upstream has none —
+    `shepherd_utils/ars/cache.py`, design in
+    `docs/ARS_RESPONSE_CACHE_PLAN.md`). With `ars_cache_enabled`, a submit
+    whose structurally canonical query graph (node/edge/path ids treated
+    as labels, key order and null/missing/empty ignored, lists as sets)
+    plus non-empty `workflow` matches a completed prior submit is answered
+    by copying that tree under the new parent: the `201` envelope already
+    reads `Done/200` with `merged_version` set; every per-ARA child is
+    copied with its original status/code/counts/url; query-graph labels
+    and result bindings are rewritten to the caller's ids; the merged
+    message carries an appended `logs` entry naming the cache source.
+    Identical in-flight submits coalesce onto one leader run and receive
+    its answer (or are handed leadership if it fails). Opt out per query
+    with TRAPI `bypass_cache` (no read, no write); refresh one entry with
+    `parameters.overwrite_cache` (no read, forced write); flush all by
+    bumping the cache generation (`scripts/ars_cache.py invalidate` or the
+    token-gated `POST /ars/api/cache/invalidate`). `params.cache` on the
+    parent records the role (`hit` / `leader` / `follower` / `overwrite` /
+    `bypass` / `uncached`). Never cached: an empty merged result where an
+    ARA child errored. Tests: `tests/unit/ars/test_cache_key.py`,
+    `test_cache_flow.py`, and the cache section of
+    `test_ars_api_contract.py`.
 13. **normalized_score is a plain float**: upstream stores rankdata's
     numpy.float64 through stdlib json (which accepts it as a float
     subclass); Shepherd's orjson blob codec rejects numpy scalars, so the

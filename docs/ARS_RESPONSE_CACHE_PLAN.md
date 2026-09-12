@@ -1,6 +1,11 @@
 # ARS Response Cache — Design Plan
 
-**Status:** Proposed, revision 2 (not yet implemented)
+**Status:** Implemented (revision 2 design). Code: `shepherd_utils/ars/cache.py`,
+SQL in `shepherd_utils/ars/db.py` (response-cache section), routes in
+`shepherd_server/aras/ars.py`, hook in `shepherd_utils/ars/lifecycle.py`,
+sweep in `workers/ars_watchdog/worker.py`, CLI `scripts/ars_cache.py`.
+Tests: `tests/unit/ars/test_cache_key.py`, `test_cache_flow.py`,
+`test_ars_api_contract.py` (cache section). Register: deviation 13.
 **Scope:** A whole-response cache in front of the ARS pipeline. A cache hit on
 `POST /ars/api/submit` produces a fully completed ARS message tree (parent,
 merged message, per-ARA children) without enqueuing work for any other
@@ -64,7 +69,7 @@ storage a problem; not in v1.
 
 `cache_key = sha256(CACHE_KEY_VERSION + "\n" + canonical_json(key_material))`
 
-**Key material** (Q1 in §10 still open):
+**Key material** (Q1 in §10, accepted):
 
 ```
 { "query_graph": <canonical structural form of body.message.query_graph>,

@@ -17,6 +17,7 @@ which enqueues ``ars.merge`` on success.
 
 import ast
 import asyncio
+import hmac
 import json
 import logging
 import uuid
@@ -26,6 +27,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from opentelemetry.propagate import inject
 
+import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.broker as broker
@@ -243,19 +245,27 @@ async def submit(request: Request) -> Response:
         carrier: Dict[str, str] = {}
         inject(carrier)
         await ars_db.save_otel_carrier(message["id"], carrier, logger)
-        # post_save broadcast -> the ars_fanout worker
-        await broker.add_task(
-            "ars.fanout",
-            {
-                "parent_pk": str(message["id"]),
-                # query_id keys the shared task-context builder + log store
-                "query_id": str(message["id"]),
-                "log_level": resolve_log_level(settings.log_level),
-                "otel": json.dumps(carrier),
-            },
-            logger,
-            raise_on_failure=True,
-        )
+        # Response cache (Shepherd-native, docs/ARS_RESPONSE_CACHE_PLAN.md):
+        # a structurally identical completed query is copied under this
+        # parent right here (SERVED: the row is already Done), an identical
+        # in-flight one is joined as a waiter (WAITING: no fan-out), and
+        # everything else -- miss, bypass_cache, overwrite_cache -- fans out
+        # as upstream does.
+        outcome, message = await cache.before_dispatch(message, data, logger)
+        if outcome == cache.DISPATCH:
+            # post_save broadcast -> the ars_fanout worker
+            await broker.add_task(
+                "ars.fanout",
+                {
+                    "parent_pk": str(message["id"]),
+                    # query_id keys the shared task-context builder + log store
+                    "query_id": str(message["id"]),
+                    "log_level": resolve_log_level(settings.log_level),
+                    "otel": json.dumps(carrier),
+                },
+                logger,
+                raise_on_failure=True,
+            )
         return dj_json(message_envelope(message, data=data), 201)
     except Exception as e:
         logger.error(f"submit failed: {e}", exc_info=True)
@@ -946,6 +956,50 @@ async def get_status(request: Request) -> Response:
             },
             status_code=405,
         )
+
+
+# ---------------------------------------------------------------------------
+# response cache admin (Shepherd-native; not part of the upstream surface)
+# ---------------------------------------------------------------------------
+
+
+def _admin_authorized(request: Request) -> bool:
+    """Bearer-token gate for the cache admin routes. With no token
+    configured the routes are disabled outright."""
+    token = settings.ars_admin_token
+    if not token:
+        return False
+    header = request.headers.get("authorization", "")
+    scheme, _, presented = header.partition(" ")
+    return scheme.lower() == "bearer" and hmac.compare_digest(
+        presented.strip(), token
+    )
+
+
+@route("/api/cache", ["GET"])
+async def cache_stats(request: Request) -> Response:
+    if not _admin_authorized(request):
+        return text("Forbidden", 403)
+    return JSONResponse(content=json.loads(json.dumps(await cache.stats(), default=str)))
+
+
+@route("/api/cache/invalidate", ["POST"])
+async def cache_invalidate(request: Request) -> Response:
+    """Bump the cache generation: every cached response becomes a miss."""
+    if not _admin_authorized(request):
+        return text("Forbidden", 403)
+    reason = None
+    body = await request.body()
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and parsed.get("reason") is not None:
+                reason = str(parsed["reason"])
+        except json.JSONDecodeError:
+            return text("Body must be JSON", 400)
+    generation = await cache.invalidate_all(reason)
+    logger.info(f"ARS response cache invalidated (generation {generation}): {reason}")
+    return JSONResponse(content={"generation": generation, "reason": reason})
 
 
 async def _database_available() -> bool:

@@ -10,6 +10,10 @@ compares against now-5min). Timed-out messages get code 598 / status 'E',
 and, since 'E' is terminal, the parent completion check runs (upstream got
 this via the post_save signal).
 
+The loop also hosts the response-cache repair sweep (shepherd_utils.ars.cache
+.repair_sweep): pending entries whose leader is finished or gone, waiters
+whose copy crashed part-way, and superseded cache generations.
+
 Intent-level deviations, register-documented: upstream resolves the agent by
 indexing the Agent table with the ACTOR's pk (a latent bug whose outcome
 depends on row-id coincidence); this port joins actor->agent properly. It
@@ -22,6 +26,7 @@ import datetime
 import logging
 import uuid
 
+import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 from shepherd_utils.config import settings
@@ -88,6 +93,14 @@ async def run_forever():
             await sweep(LOGGER)
         except Exception as e:
             LOGGER.error(f"Watchdog sweep failed: {e}", exc_info=True)
+        # Response cache upkeep: stuck leaders / waiters, superseded
+        # generations (docs/ARS_RESPONSE_CACHE_PLAN.md).
+        try:
+            repaired = await cache.repair_sweep(LOGGER)
+            if any(repaired.values()):
+                LOGGER.info(f"Cache repair sweep: {repaired}")
+        except Exception as e:
+            LOGGER.error(f"Cache repair sweep failed: {e}", exc_info=True)
         now = loop.time()
         if now - last_purge >= _PURGE_INTERVAL_SEC:
             last_purge = now

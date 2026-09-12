@@ -201,6 +201,9 @@ def _ars_schema_statements():
 
 
 ARS_SCHEMA_MARKER_INDEX = "idx_ars_message_ref"
+# The response-cache tables landed after the first ARS release; their own
+# marker keeps volumes that already carry the ars_* block from skipping them.
+ARS_CACHE_SCHEMA_MARKER_INDEX = "idx_ars_response_cache_source"
 
 # Arbitrary-but-fixed advisory lock id serializing the upgrades across the
 # whole fleet booting at once: IF NOT EXISTS alone still races when two
@@ -221,7 +224,8 @@ async def apply_schema_upgrades() -> None:
         # The check is a single indexed catalog read and does not serialize, so
         # the common "already applied" case now costs one query and no lock.
         marker_names = [name for name, _ in _SCHEMA_UPGRADES] + [
-            ARS_SCHEMA_MARKER_INDEX
+            ARS_SCHEMA_MARKER_INDEX,
+            ARS_CACHE_SCHEMA_MARKER_INDEX,
         ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",

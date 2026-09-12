@@ -96,6 +96,20 @@ def make_message(
     }
 
 
+def make_cache_entry(generation, key, source_pk, state="ready", label_map=None):
+    return {
+        "generation": generation,
+        "cache_key": key,
+        "state": state,
+        "source_pk": source_pk,
+        "label_map": label_map,
+        "created_at": TS,
+        "ready_at": TS if state == "ready" else None,
+        "hit_count": 0,
+        "last_hit_at": None,
+    }
+
+
 @pytest.fixture
 def db(mocker):
     """Patch every ars_db collaborator the endpoints use."""
@@ -189,6 +203,27 @@ def db(mocker):
         "get_client": _patch("get_client", return_value=None),
         "add_subscription": _patch("add_subscription"),
         "remove_subscription": _patch("remove_subscription"),
+        # response cache index (shepherd_utils.ars.cache): default = every
+        # submit claims leadership of a fresh key and fans out as upstream
+        "get_cache_generation": _patch("get_cache_generation", return_value=1),
+        "claim_or_get_cache_entry": _patch(
+            "claim_or_get_cache_entry",
+            side_effect=lambda gen, key, pk: (
+                make_cache_entry(gen, key, pk, state="pending"),
+                True,
+            ),
+        ),
+        "get_cache_entry": _patch("get_cache_entry", return_value=None),
+        "add_cache_waiter": _patch("add_cache_waiter"),
+        "delete_cache_waiter": _patch("delete_cache_waiter"),
+        "record_cache_hit": _patch("record_cache_hit"),
+        "delete_cache_entry": _patch("delete_cache_entry", return_value=True),
+        "delete_children": _patch("delete_children", return_value=0),
+        "bump_cache_generation": _patch("bump_cache_generation", return_value=2),
+        "cache_stats": _patch(
+            "cache_stats",
+            return_value={"generation": 1, "current": {"ready": 0}},
+        ),
         "check_parent_completion": mocker.patch.object(
             lifecycle, "check_parent_completion", new_callable=AsyncMock
         ),
@@ -844,3 +879,229 @@ async def test_submit_payload_save_failure_is_honest_400(
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 400
     assert "failing due to" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# response cache (Shepherd-native; docs/ARS_RESPONSE_CACHE_PLAN.md)
+# ---------------------------------------------------------------------------
+
+import logging as _logging  # noqa: E402
+
+from shepherd_utils.broker import get_task as _get_task  # noqa: E402
+
+
+async def _fanout_enqueued():
+    task = await _get_task("ars.fanout", "consumer", "t", _logging.getLogger())
+    return task is not None
+
+
+def _source_tree(db, source_pk, merged_pk, child_pk):
+    """A completed source tree: parent Done -> merged child + one ARA child."""
+    source = make_message(
+        pk=source_pk,
+        actor=1,
+        status="D",
+        code=200,
+        merged_version=merged_pk,
+        merged_versions_list=[[str(merged_pk), "ara-aragorn"]],
+        params={"query_type": "standard", "stats": {"results": 1}},
+        result_count=1,
+    )
+    ara_child = dict(
+        make_message(pk=child_pk, actor=7, ref=source_pk, status="E", code=598),
+        agent_name="ara-aragorn",
+        inforesid="infores:aragorn",
+        url="http://aragorn/asyncquery",
+    )
+    merged_child = dict(
+        make_message(pk=merged_pk, actor=3, ref=source_pk, status="D", code=200),
+        agent_name="ars-ars-agent",
+        inforesid="infores:ars",
+        result_count=1,
+    )
+    rows = {str(source_pk): source}
+    db["get_message_row"].side_effect = lambda pk: rows.get(str(pk)) or (
+        db["parent"] if str(pk) == str(db["parent_pk"]) else None
+    )
+    db["get_children"].return_value = [ara_child, merged_child]
+    payload = {
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["MONDO:0005148"]}, "n1": {}},
+                "edges": {"e": {"subject": "n1", "object": "n0"}},
+            },
+            "knowledge_graph": {"nodes": {"MONDO:0005148": {}}, "edges": {}},
+            "results": [
+                {
+                    "node_bindings": {"n0": [{"id": "MONDO:0005148"}], "n1": []},
+                    "analyses": [{"resource_id": "infores:x", "edge_bindings": {"e": []}}],
+                }
+            ],
+        },
+        "logs": [{"message": "merged", "level": "INFO"}],
+    }
+    db["load_message_data"].side_effect = lambda pk, *a: json.loads(json.dumps(payload))
+    return source
+
+
+async def test_submit_cache_hit_copies_tree_without_fanout(client, db, redis_mock):
+    source_pk, merged_pk, child_pk = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    _source_tree(db, source_pk, merged_pk, child_pk)
+    label_map = {"nodes": {"n0": "n0", "n1": "n1"}, "edges": {"e": "e0"}, "paths": {}}
+    db["claim_or_get_cache_entry"].side_effect = lambda gen, key, pk: (
+        make_cache_entry(gen, key, source_pk, label_map=label_map),
+        False,
+    )
+    # same graph, different labels: bindings must be rewritten to ours
+    query = {
+        "message": {
+            "query_graph": {
+                "nodes": {"disease": {"ids": ["MONDO:0005148"]}, "chem": {}},
+                "edges": {"treats": {"subject": "chem", "object": "disease"}},
+            }
+        }
+    }
+    resp = await client.post("/api/submit", json=query)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["fields"]["status"] == "Done"
+    assert body["fields"]["code"] == 200
+    assert body["fields"]["merged_version"] is not None
+    assert body["fields"]["params"]["cache"]["role"] == "hit"
+    assert body["fields"]["params"]["cache"]["source_pk"] == str(source_pk)
+    assert body["fields"]["params"]["stats"] == {"results": 1}
+    assert not await _fanout_enqueued()
+    # after the parent's own row: the ARA child and the final merged message
+    created = [c.kwargs for c in db["create_message"].await_args_list][1:]
+    assert [c["actor_id"] for c in created] == [7, 3]
+    assert created[0]["status"] == "E" and created[0]["code"] == 598
+    # the E/598 child keeps its code (skip_coercion)
+    child_updates = [
+        c for c in db["update_message"].await_args_list if c.kwargs.get("skip_coercion")
+    ]
+    assert child_updates[0].kwargs["code"] == 598
+    assert child_updates[0].kwargs["url"] == "http://aragorn/asyncquery"
+    # payloads were rewritten to the caller's labels; the merged one logs the hit
+    saved = [c.args[1] for c in db["save_message_data"].await_args_list]
+    # first save is the parent's own query blob, then child, then merged
+    child_payload, merged_payload = saved[-2], saved[-1]
+    for payload in (child_payload, merged_payload):
+        qg = payload["message"]["query_graph"]
+        assert set(qg["nodes"]) == {"disease", "chem"}
+        assert set(qg["edges"]) == {"treats"}
+        assert qg["edges"]["treats"] == {"subject": "chem", "object": "disease"}
+        result = payload["message"]["results"][0]
+        assert set(result["node_bindings"]) == {"disease", "chem"}
+        assert set(result["analyses"][0]["edge_bindings"]) == {"treats"}
+        assert "MONDO:0005148" in payload["message"]["knowledge_graph"]["nodes"]
+    assert "Served from ARS response cache" in merged_payload["logs"][-1]["message"]
+    assert str(source_pk) in merged_payload["logs"][-1]["message"]
+    assert all("cache" not in log["message"] for log in child_payload["logs"])
+    db["record_cache_hit"].assert_awaited_once()
+
+
+async def test_submit_pending_entry_joins_as_waiter(client, db, redis_mock):
+    leader_pk = uuid.uuid4()
+    db["claim_or_get_cache_entry"].side_effect = lambda gen, key, pk: (
+        make_cache_entry(gen, key, leader_pk, state="pending"),
+        False,
+    )
+    db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
+        gen, key, leader_pk, state="pending"
+    )
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["fields"]["status"] == "Running"
+    assert body["fields"]["params"]["cache"]["role"] == "follower"
+    assert body["fields"]["params"]["cache"]["leader_pk"] == str(leader_pk)
+    assert not await _fanout_enqueued()
+    waiter_pk, waiter_leader, _, _ = db["add_cache_waiter"].await_args.args
+    assert str(waiter_pk) == body["pk"]
+    assert waiter_leader == leader_pk
+
+
+async def test_submit_miss_claims_leadership_and_fans_out(client, db, redis_mock):
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "leader"
+    assert await _fanout_enqueued()
+    gen, key, pk = db["claim_or_get_cache_entry"].await_args.args
+    assert gen == 1 and len(key) == 64 and str(pk) == resp.json()["pk"]
+
+
+async def test_submit_bypass_cache_skips_lookup(client, db, redis_mock):
+    resp = await client.post("/api/submit", json=dict(QUERY, bypass_cache=True))
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "bypass"
+    db["claim_or_get_cache_entry"].assert_not_awaited()
+    assert await _fanout_enqueued()
+
+
+async def test_submit_overwrite_cache_runs_and_marks_role(client, db, redis_mock):
+    q = dict(QUERY, parameters={"overwrite_cache": True})
+    resp = await client.post("/api/submit", json=q)
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "overwrite"
+    db["claim_or_get_cache_entry"].assert_not_awaited()
+    assert await _fanout_enqueued()
+
+
+async def test_submit_cache_disabled_behaves_as_upstream(client, db, redis_mock, monkeypatch):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_cache_enabled", False)
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert "cache" not in (resp.json()["fields"]["params"] or {})
+    db["get_cache_generation"].assert_not_awaited()
+    assert await _fanout_enqueued()
+
+
+async def test_submit_broken_ready_entry_falls_back_to_leading(client, db, redis_mock):
+    """A ready entry whose source tree is gone is dropped; we run the query."""
+    source_pk = uuid.uuid4()
+    calls = {"n": 0}
+
+    def _claim(gen, key, pk):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return make_cache_entry(gen, key, source_pk), False
+        return make_cache_entry(gen, key, pk, state="pending"), True
+
+    db["claim_or_get_cache_entry"].side_effect = _claim
+    # get_message_row knows nothing about source_pk -> broken
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "leader"
+    db["delete_cache_entry"].assert_awaited_once()
+    assert await _fanout_enqueued()
+
+
+async def test_cache_admin_routes_disabled_without_token(client, db, redis_mock, monkeypatch):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_admin_token", "")
+    assert (await client.get("/api/cache")).status_code == 403
+    assert (await client.post("/api/cache/invalidate")).status_code == 403
+    db["bump_cache_generation"].assert_not_awaited()
+
+
+async def test_cache_admin_routes_with_token(client, db, redis_mock, monkeypatch):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_admin_token", "s3cret")
+    bad = {"Authorization": "Bearer nope"}
+    good = {"Authorization": "Bearer s3cret"}
+    assert (await client.get("/api/cache", headers=bad)).status_code == 403
+    resp = await client.get("/api/cache", headers=good)
+    assert resp.status_code == 200
+    assert resp.json()["generation"] == 1
+    resp = await client.post(
+        "/api/cache/invalidate", headers=good, json={"reason": "new KG"}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"generation": 2, "reason": "new KG"}
+    db["bump_cache_generation"].assert_awaited_once_with("new KG")
+    resp = await client.post("/api/cache/invalidate", headers=good, content=b"{bad")
+    assert resp.status_code == 400

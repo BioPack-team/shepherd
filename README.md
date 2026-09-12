@@ -99,6 +99,46 @@ differential harness. Deployment knobs live in `shepherd_utils/config.py`
 under the "Translator ARS" block (`ARS_PUBLIC_HOST` must be reachable by
 remote ARAs for their result callbacks).
 
+#### ARS response cache
+
+The ARS keeps a whole-response cache in front of `/ars/api/submit`
+(`shepherd_utils/ars/cache.py`; design and rationale in
+`docs/ARS_RESPONSE_CACHE_PLAN.md`). A submit whose query graph is
+structurally identical to a completed earlier submit -- same content
+regardless of key order, null-vs-missing-vs-empty fields, list order, or
+the names chosen for query nodes/edges/paths -- is answered by copying that
+completed message tree under the new parent, so no ARA, merge or
+post-process worker runs. Identical queries that arrive while the first is
+still running coalesce onto it and all receive its answer. The copy is a
+full tree (every per-ARA child included), result bindings are rewritten to
+the caller's own node/edge ids, and the merged message gets a TRAPI log
+entry saying it was served from the cache and from which source.
+
+The cache lives in Postgres and stores no payloads of its own: it indexes
+a query-graph hash to the source tree already kept in `ars_message.data`,
+and source trees backing a live cache generation are exempt from the
+`ARS_DATA_RETENTION_DAYS` payload purge. Budget disk accordingly (one tree
+per distinct query, kept until invalidated, plus one copied tree per hit,
+aging out normally). Entries have no TTL.
+
+Controls:
+
+- `bypass_cache: true` (TRAPI top level) -- run fresh; neither read nor
+  write the cache.
+- `parameters.overwrite_cache: true` -- run fresh and replace the cached
+  entry for this query with the result.
+- Whole-cache invalidation (e.g. after a knowledge-graph release):
+  `python scripts/ars_cache.py invalidate --reason "..."` from any host
+  that reaches Postgres, or `POST /ars/api/cache/invalidate` with
+  `Authorization: Bearer $ARS_ADMIN_TOKEN` (the route is disabled until
+  `ARS_ADMIN_TOKEN` is set). `scripts/ars_cache.py stats|show|evict|key`
+  and `GET /ars/api/cache` cover inspection.
+- `ARS_CACHE_ENABLED=false` turns the whole thing off.
+
+Each parent message records what happened in `params.cache`
+(`role: hit | leader | follower | overwrite | bypass`), which the envelope
+exposes and monitoring can count.
+
 ### Worker
 
 Each worker is it's own separate docker container. It spins up and begins to watch a central message broker for tasks to work on. Once it gets a task, it
