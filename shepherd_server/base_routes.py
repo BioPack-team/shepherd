@@ -1,6 +1,7 @@
 """Base API routes that all Shepherd ARAs can use."""
 
 import asyncio
+import email.message
 import json
 import logging
 import time
@@ -10,7 +11,7 @@ from typing import Optional, Tuple
 
 import orjson
 import zstandard
-from fastapi import APIRouter, Body, Request, Response
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, ORJSONResponse
 from opentelemetry.propagate import extract, inject
 
@@ -63,6 +64,10 @@ ABANDONED_STATUS_PREFIX = "abandoned"
 QUERY_ERROR_CODE = 500
 QUERY_TIMEOUT_CODE = 504
 QUERY_UNAVAILABLE_CODE = 503
+# What a body we refuse to parse answers with. 422 is what FastAPI's own
+# ``query: dict = Body(...)`` validation returned for the same rejections, kept
+# so the parser swap isn't visible to callers.
+QUERY_BODY_ERROR_CODE = 422
 
 
 class QueryIntakeError(Exception):
@@ -72,6 +77,13 @@ class QueryIntakeError(Exception):
     The message is client-safe -- it's surfaced verbatim in the HTTP response,
     so it must not leak connection details. The specific underlying cause is
     logged server-side (see ``PG_DISK_FULL`` in ``shepherd_utils.db``)."""
+
+
+class QueryBodyError(Exception):
+    """Raised when a posted query body isn't a JSON object.
+
+    Client-safe like ``QueryIntakeError``: the message is returned verbatim as
+    the 422 ``detail``."""
 
 
 class ARATargetEnum(str, Enum):
@@ -102,6 +114,117 @@ default_input_query: dict = {
         "auxiliary_graphs": {},
     }
 }
+
+
+def query_openapi_extra() -> dict:
+    """Build the OpenAPI overrides for one /query or /asyncquery route.
+
+    Those routes take the raw ``Request`` so the body can be parsed with orjson
+    (see ``parse_query_body``), which leaves FastAPI with no body parameter to
+    infer a schema from -- and so no auto-generated request body or 422.
+    Declaring both here, and wiring them in via each route's ``openapi_extra``,
+    keeps /openapi.json equivalent to what the old
+    ``query: dict = Body(..., examples=[default_input_query])`` signature
+    produced, so the TRAPI validators and the Swagger "Try it out" example are
+    unaffected by the parser swap.
+
+    A fresh dict per call: FastAPI stores ``openapi_extra`` on the route and
+    merges it into the generated operation, and eight routes sharing one mutable
+    module-level dict would make any future in-place merge leak across apps.
+
+    The 422 body is documented as ``{"status": str, "description": str}`` rather
+    than FastAPI's ``HTTPValidationError`` (``{"detail": [ValidationError,...]}``):
+    the rejection is ours now, and that is the shape these routes already use for
+    every other error they return -- including /asyncquery's pre-existing
+    missing-callback 422.
+    """
+    return {
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "additionalProperties": True,
+                        "type": "object",
+                        "title": "Query",
+                        "examples": [default_input_query],
+                    }
+                }
+            },
+            "required": True,
+        },
+        "responses": {
+            "422": {
+                "description": "Validation Error",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "title": "QueryValidationError",
+                            "properties": {
+                                "status": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                        }
+                    }
+                },
+            }
+        },
+    }
+
+
+def _is_json_content_type(content_type: Optional[str]) -> bool:
+    """Whether a Content-Type header names a JSON body.
+
+    Mirrors the rule FastAPI applied when these routes still declared a
+    ``query: dict = Body(...)`` parameter: an absent header is accepted, and a
+    present one has to be ``application/json`` or a ``+json`` structured suffix
+    (``application/trapi+json``). Parsed via ``email.message`` so parameters
+    (``application/json; charset=utf-8``) and casing are handled the same way.
+    """
+    if not content_type:
+        return True
+    message = email.message.Message()
+    message["content-type"] = content_type
+    if message.get_content_maintype() != "application":
+        return False
+    subtype = message.get_content_subtype()
+    return subtype == "json" or subtype.endswith("+json")
+
+
+async def parse_query_body(request: Request) -> dict:
+    """Read and parse a posted TRAPI query body.
+
+    Deliberately bypasses FastAPI's own body handling, which routes through
+    Starlette's ``Request.json()`` -> stdlib ``json.loads``. TRAPI query bodies
+    routinely carry a populated knowledge graph, and parsing one is pure CPU on
+    the single event loop this server runs on, so it stalls every other
+    in-flight request for its duration. orjson cuts that stall by roughly a
+    third (measured: ~87ms -> ~59ms on a 6.8MB body), which makes it cheaper but
+    does not make it go away -- the parse is still synchronous, and moving it to
+    ``run_in_threadpool`` is what would actually unblock the loop. Dropping
+    FastAPI's ``dict`` body field also skips a pydantic pass, but that one is a
+    shallow check on the four top-level keys and measures at ~0ms; it is not
+    part of the win.
+
+    Raises ``QueryBodyError`` for a body that isn't JSON-typed, isn't valid
+    JSON, or isn't a JSON object. The ``query: dict = Body(...)`` signature got
+    all three checks for free; without them a form-encoded post or a posted list
+    would reach ``query.get(...)`` downstream and 500.
+    """
+    content_type = request.headers.get("content-type")
+    if not _is_json_content_type(content_type):
+        raise QueryBodyError(
+            "Invalid request body: expected content-type application/json, "
+            f"got {content_type}."
+        )
+    raw = await request.body()
+    try:
+        query = orjson.loads(raw)
+    except orjson.JSONDecodeError as e:
+        raise QueryBodyError("Invalid request body: not valid JSON.") from e
+    if not isinstance(query, dict):
+        raise QueryBodyError("Invalid request body: expected a JSON object.")
+    return query
 
 
 async def run_query(
@@ -244,11 +367,16 @@ def apply_query_status(response: dict, status: Optional[str]) -> None:
 
 async def run_sync_query(
     target: ARATargetEnum,
-    query: dict = Body(..., examples=[default_input_query]),
+    request: Request,
 ) -> Response:
     """Handle synchronous TRAPI queries."""
-    # query_dict = query.dict()
-    query_dict = query
+    try:
+        query_dict = await parse_query_body(request)
+    except QueryBodyError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_BODY_ERROR_CODE,
+        )
     try:
         query_id, response_id, logger = await run_query(target, query_dict)
     except QueryIntakeError as e:
@@ -310,26 +438,33 @@ async def run_sync_query(
 
 async def run_async_query(
     target: ARATargetEnum,
-    query: dict = Body(..., examples=[default_input_query]),
-) -> JSONResponse:
+    request: Request,
+) -> ORJSONResponse:
     """Handle asynchronous TRAPI queries."""
+    try:
+        query = await parse_query_body(request)
+    except QueryBodyError as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=QUERY_BODY_ERROR_CODE,
+        )
     callback_url = query.get("callback")
     if callback_url is None:
-        return JSONResponse(
+        return ORJSONResponse(
             content={
                 "status": "Failed",
                 "description": "callback URL missing",
             },
-            status_code=422,
+            status_code=QUERY_BODY_ERROR_CODE,
         )
     try:
         query_id, _, _ = await run_query(target, query, callback_url)
     except QueryIntakeError as e:
-        return JSONResponse(
+        return ORJSONResponse(
             content={"status": "Failed", "description": str(e)},
-            status_code=500,
+            status_code=QUERY_ERROR_CODE,
         )
-    return JSONResponse(
+    return ORJSONResponse(
         content={
             "status": "Accepted",
             "description": f"Query commenced. Will send result to {callback_url}",
