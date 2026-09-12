@@ -17,13 +17,13 @@ from shepherd_server.openapi import set_open_api_schema
 ARAGORN = FastAPI(title="Shepherd Aragorn")
 
 
-@ARAGORN.post("/query", openapi_extra=query_openapi_extra)
+@ARAGORN.post("/query", openapi_extra=query_openapi_extra())
 async def sync_query(request: Request) -> Response:
     response = await run_sync_query(ARATargetEnum.ARAGORN, request)
     return response
 
 
-@ARAGORN.post("/asyncquery", openapi_extra=query_openapi_extra)
+@ARAGORN.post("/asyncquery", openapi_extra=query_openapi_extra())
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.ARAGORN, request)
     return response

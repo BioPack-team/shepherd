@@ -16,13 +16,13 @@ from shepherd_server.openapi import set_open_api_schema
 SIPR = FastAPI(title="Shepherd SIPR")
 
 
-@SIPR.post("/query", openapi_extra=query_openapi_extra)
+@SIPR.post("/query", openapi_extra=query_openapi_extra())
 async def sync_query(request: Request) -> Response:
     response = await run_sync_query(ARATargetEnum.SIPR, request)
     return response
 
 
-@SIPR.post("/asyncquery", openapi_extra=query_openapi_extra)
+@SIPR.post("/asyncquery", openapi_extra=query_openapi_extra())
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.SIPR, request)
     return response

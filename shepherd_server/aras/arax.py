@@ -16,13 +16,13 @@ from shepherd_server.openapi import set_open_api_schema
 ARAX = FastAPI(title="Shepherd ARAX")
 
 
-@ARAX.post("/query", openapi_extra=query_openapi_extra)
+@ARAX.post("/query", openapi_extra=query_openapi_extra())
 async def sync_query(request: Request) -> Response:
     response = await run_sync_query(ARATargetEnum.ARAX, request)
     return response
 
 
-@ARAX.post("/asyncquery", openapi_extra=query_openapi_extra)
+@ARAX.post("/asyncquery", openapi_extra=query_openapi_extra())
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.ARAX, request)
     return response

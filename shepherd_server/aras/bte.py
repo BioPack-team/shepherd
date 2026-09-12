@@ -17,13 +17,13 @@ from shepherd_server.openapi import set_open_api_schema
 BTE = FastAPI(title="Shepherd BTE")
 
 
-@BTE.post("/query", openapi_extra=query_openapi_extra)
+@BTE.post("/query", openapi_extra=query_openapi_extra())
 async def sync_query(request: Request) -> Response:
     response = await run_sync_query(ARATargetEnum.BTE, request)
     return response
 
 
-@BTE.post("/asyncquery", openapi_extra=query_openapi_extra)
+@BTE.post("/asyncquery", openapi_extra=query_openapi_extra())
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.BTE, request)
     return response

@@ -5,10 +5,11 @@ letting FastAPI do it, because Starlette's ``Request.json()`` goes through
 stdlib ``json.loads`` -- slow on the populated knowledge graphs TRAPI bodies
 carry, and blocking on the single event loop the server runs on.
 
-Dropping the ``query: dict = Body(...)`` signature also dropped the pydantic
-pass that used to reject a non-object body, so these tests pin the replacement
-checks in ``parse_query_body`` and confirm the OpenAPI request body the routes
-now declare by hand still matches what that signature generated.
+Dropping the ``query: dict = Body(...)`` signature also dropped the checks
+FastAPI ran for free -- content-type, valid JSON, and a JSON object -- so these
+tests pin the replacements in ``parse_query_body`` and confirm the OpenAPI
+request body the routes now declare by hand still matches what that signature
+generated.
 """
 
 from unittest import mock
@@ -52,6 +53,41 @@ async def test_rejects_non_object_json(body):
     # Without the check, they'd reach ``query.get(...)`` downstream and 500.
     with pytest.raises(QueryBodyError, match="expected a JSON object"):
         await parse_query_body(_make_request(body, {}))
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/json",
+        # Casing and parameters are part of the header grammar, not the type.
+        "APPLICATION/JSON",
+        "application/json; charset=utf-8",
+        # Structured suffix: what a TRAPI-specific media type would look like.
+        "application/trapi+json",
+    ],
+)
+async def test_accepts_json_content_types(content_type):
+    request = _make_request(b'{"message": {}}', {"content-type": content_type})
+    assert await parse_query_body(request) == {"message": {}}
+
+
+async def test_accepts_a_missing_content_type():
+    """FastAPI parsed a body with no content-type as JSON; so do we."""
+    assert await parse_query_body(_make_request(b'{"message": {}}', {})) == {
+        "message": {}
+    }
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"],
+)
+async def test_rejects_non_json_content_types(content_type):
+    """``Body(...)`` only parsed application/json; keep that rather than
+    silently accepting a form-encoded post that happens to hold JSON."""
+    request = _make_request(b'{"message": {}}', {"content-type": content_type})
+    with pytest.raises(QueryBodyError, match="content-type"):
+        await parse_query_body(request)
 
 
 # --- route behavior ------------------------------------------------------
@@ -118,7 +154,7 @@ def test_malformed_body_returns_422(path, client_factory):
     )
 
     assert response.status_code == 422
-    assert "not valid JSON" in response.json()["detail"]
+    assert "not valid JSON" in response.json()["description"]
     # Rejected before intake, so no query was ever registered.
     assert captured == {}
 
@@ -130,8 +166,51 @@ def test_non_object_body_returns_422(path, client_factory):
     response = client.post(path, json=[1, 2, 3])
 
     assert response.status_code == 422
-    assert "expected a JSON object" in response.json()["detail"]
+    assert "expected a JSON object" in response.json()["description"]
     assert captured == {}
+
+
+@pytest.mark.parametrize("path", ["/query", "/asyncquery"])
+def test_non_json_content_type_returns_422(path, client_factory):
+    client, captured, _ = client_factory(ARAGORN)
+
+    response = client.post(
+        path,
+        content=b'{"message": {}, "callback": "http://callback/1"}',
+        headers={"content-type": "text/plain"},
+    )
+
+    assert response.status_code == 422
+    assert "content-type" in response.json()["description"]
+    assert captured == {}
+
+
+def test_every_asyncquery_422_uses_one_body_shape(client_factory):
+    """A caller shouldn't have to branch on which 422 it got.
+
+    /asyncquery rejects a bad body and a missing callback with the same code;
+    they used to answer in two different shapes, only one of which the
+    hand-written OpenAPI 422 described.
+    """
+    client, _, _ = client_factory(ARAGORN)
+
+    bad_body = client.post(
+        "/asyncquery",
+        content=b"{not json",
+        headers={"content-type": "application/json"},
+    )
+    no_callback = client.post("/asyncquery", json=default_input_query)
+
+    assert bad_body.status_code == no_callback.status_code == 422
+    assert (
+        sorted(bad_body.json())
+        == sorted(no_callback.json())
+        == [
+            "description",
+            "status",
+        ]
+    )
+    assert bad_body.json()["status"] == no_callback.json()["status"] == "Failed"
 
 
 # --- OpenAPI -------------------------------------------------------------
@@ -159,4 +238,21 @@ def test_openapi_still_documents_the_request_body(app, path):
     error_schema = operation["responses"]["422"]["content"]["application/json"][
         "schema"
     ]
-    assert error_schema["properties"] == {"detail": {"type": "string"}}
+    # Documents the shape every 422 these routes return actually uses -- the
+    # body rejections and /asyncquery's missing-callback alike.
+    assert error_schema["properties"] == {
+        "status": {"type": "string"},
+        "description": {"type": "string"},
+    }
+
+
+def test_each_route_gets_its_own_openapi_extra():
+    """``query_openapi_extra`` hands out a fresh dict per route.
+
+    Eight routes sharing one mutable module-level dict would let any in-place
+    merge by FastAPI leak from one app's operation into every other's.
+    """
+    first, second = base_routes.query_openapi_extra(), base_routes.query_openapi_extra()
+    assert first == second
+    assert first is not second
+    assert first["responses"] is not second["responses"]
