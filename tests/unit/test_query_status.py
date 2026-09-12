@@ -10,6 +10,7 @@ the query had finished with anything other than OK.
 import json
 import logging
 
+import orjson
 import pytest
 
 from shepherd_server.base_routes import (
@@ -21,7 +22,18 @@ from shepherd_server.base_routes import (
     run_sync_query,
 )
 
+from .test_callback_size_limit import _make_request
+
 logger = logging.getLogger(__name__)
+
+
+def _query_request(query):
+    """Wrap a TRAPI query dict in a Request, the way a real POST arrives.
+
+    ``run_sync_query`` parses the raw body itself (see ``parse_query_body``),
+    so these tests have to hand it a request rather than a dict.
+    """
+    return _make_request(orjson.dumps(query), {})
 
 
 def _row(state="QUEUED", status="OK", description=None):
@@ -158,7 +170,7 @@ async def test_query_returns_200_for_a_healthy_query(mocker):
     _patch_sync_query(
         mocker, _row(state="COMPLETED", status="OK"), response={"message": {}}
     )
-    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    response = await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
     assert response.status_code == 200
     assert "status" not in _body(response)
 
@@ -179,7 +191,7 @@ async def test_query_returns_the_code_for_how_it_failed(mocker, status, code):
     _patch_sync_query(
         mocker, _row(state="COMPLETED", status=status), response={"message": {}}
     )
-    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    response = await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
     assert response.status_code == code
     # The body still says which kind of failure it was.
     assert _body(response)["status"] == "Error"
@@ -189,7 +201,7 @@ async def test_query_returns_the_code_for_how_it_failed(mocker, status, code):
 @pytest.mark.asyncio
 async def test_query_returns_an_error_code_when_the_response_is_missing(mocker):
     _patch_sync_query(mocker, _row(state="COMPLETED", status="OK"), response=None)
-    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    response = await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
     assert response.status_code == 500
     assert _body(response)["description"] == "Unable to get response"
 
@@ -199,7 +211,8 @@ async def test_query_returns_an_error_code_when_it_times_out(mocker):
     """The caller's own timeout elapsed with the query still in flight."""
     _patch_sync_query(mocker, _row(state="QUEUED", status="OK"))
     response = await run_sync_query(
-        ARATargetEnum.ARAX, {"message": {}, "parameters": {"timeout": 0}}
+        ARATargetEnum.ARAX,
+        _query_request({"message": {}, "parameters": {"timeout": 0}}),
     )
     assert response.status_code == 504
     assert _body(response)["status"] == "TIMEOUT"
@@ -213,7 +226,7 @@ async def test_query_returns_unavailable_when_intake_fails(mocker):
         new_callable=mocker.AsyncMock,
         side_effect=QueryIntakeError("datastore unavailable"),
     )
-    response = await run_sync_query(ARATargetEnum.ARAX, {"message": {}})
+    response = await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
     assert response.status_code == 503
     assert "datastore unavailable" in _body(response)["description"]
 

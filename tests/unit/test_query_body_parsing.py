@@ -29,7 +29,6 @@ from shepherd_server.base_routes import (
 
 from .test_callback_size_limit import _make_request
 
-
 ALL_APPS = (ARAGORN, ARAX, BTE, SIPR)
 
 
