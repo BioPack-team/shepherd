@@ -192,7 +192,7 @@ async def submit(request: Request) -> Response:
             params = {"query_type": "standard"}
         if "validate" in data:
             params["validate"] = data["validate"]
-        message = None
+        actor = None
         if "workflow" in data:
             wf = data["workflow"]
             if isinstance(wf, list):
@@ -200,37 +200,37 @@ async def submit(request: Request) -> Response:
                     actor = await _retry_transient_pg(
                         lifecycle.ensure_workflow_actor, logger, "submit actor lookup"
                     )
-                    message = await _retry_transient_pg(
-                        lambda: ars_db.create_message(
-                            actor_id=actor["id"],
-                            status="Running",
-                            code=202,
-                            params=params,
-                            name=data.get("name", ""),
-                        ),
-                        logger,
-                        "submit message insert",
-                    )
         else:
             actor = await _retry_transient_pg(
                 lifecycle.ensure_default_actor, logger, "submit actor lookup"
             )
-            message = await _retry_transient_pg(
-                lambda: ars_db.create_message(
-                    actor_id=actor["id"],
-                    status="Running",
-                    code=202,
-                    params=params,
-                    name=data.get("name", ""),
-                ),
-                logger,
-                "submit message insert",
-            )
-        if message is None:
+        if actor is None:
             # upstream: `message` was never assigned -> UnboundLocalError
             raise UnboundLocalError(
                 "local variable 'message' referenced before assignment"
             )
+        # Response cache (Shepherd-native, docs/ARS_RESPONSE_CACHE_PLAN.md):
+        # there is one message tree per distinct query. A structurally
+        # identical completed query answers right here with the source
+        # parent's pk and its merged response converted to this caller's
+        # labels (SERVED); an identical in-flight one hands back the
+        # leader's pk, still Running (WAITING). Only a miss -- or
+        # bypass_cache / overwrite_cache -- creates a parent and fans out.
+        served = await cache.lookup(data, logger)
+        if served is not None:
+            _, row, payload = served
+            return dj_json(message_envelope(row, data=payload), 201)
+        message = await _retry_transient_pg(
+            lambda: ars_db.create_message(
+                actor_id=actor["id"],
+                status="Running",
+                code=202,
+                params=params,
+                name=data.get("name", ""),
+            ),
+            logger,
+            "submit message insert",
+        )
         # STRICT save + enqueue: our 201 promises a stored query and a
         # queued fanout. A swallowed failure on either would return success
         # for a query that then sits Running forever (parents are
@@ -245,13 +245,10 @@ async def submit(request: Request) -> Response:
         carrier: Dict[str, str] = {}
         inject(carrier)
         await ars_db.save_otel_carrier(message["id"], carrier, logger)
-        # Response cache (Shepherd-native, docs/ARS_RESPONSE_CACHE_PLAN.md):
-        # a structurally identical completed query is copied under this
-        # parent right here (SERVED: the row is already Done), an identical
-        # in-flight one is joined as a waiter (WAITING: no fan-out), and
-        # everything else -- miss, bypass_cache, overwrite_cache -- fans out
-        # as upstream does.
-        outcome, message = await cache.before_dispatch(message, data, logger)
+        # Claim leadership of the key (or, having lost that race to a
+        # concurrent identical submit, get the winner's answer instead --
+        # our own row is discarded in that case).
+        outcome, message, payload = await cache.claim_or_serve(message, data, logger)
         if outcome == cache.DISPATCH:
             # post_save broadcast -> the ars_fanout worker
             await broker.add_task(
@@ -266,7 +263,7 @@ async def submit(request: Request) -> Response:
                 logger,
                 raise_on_failure=True,
             )
-        return dj_json(message_envelope(message, data=data), 201)
+        return dj_json(message_envelope(message, data=payload), 201)
     except Exception as e:
         logger.error(f"submit failed: {e}", exc_info=True)
         return text(
@@ -409,6 +406,11 @@ async def message(key: str, request: Request) -> Response:
         actor = await ars_db.get_actor(mesg["actor"]) or {}
         mesg = dict(mesg, name=actor.get("agent_name"))
         env = await _envelope_with_data(mesg)
+        # readers of a cache source's merged message get told so (render-time
+        # note only; the stored payload is untouched)
+        env["fields"]["data"] = await cache.annotate_cached_read(
+            mesg, actor, env["fields"]["data"], logger
+        )
         env["fields"]["code"] = int(env["fields"]["code"])
         return JSONResponse(content=json.loads(json.dumps(env, default=str)))
 

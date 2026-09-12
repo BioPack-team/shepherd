@@ -952,10 +952,10 @@ async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
 # Response cache index (docs/ARS_RESPONSE_CACHE_PLAN.md)
 #
 # The cache stores no payloads: ``ars_response_cache`` maps a canonical
-# query-graph hash to the parent pk of a completed tree whose blobs already
-# live in ``ars_message.data``; ``ars_response_cache_waiter`` holds parents
-# coalesced onto a pending leader. Orchestration lives in
-# ``shepherd_utils.ars.cache``; this section is the SQL.
+# query-graph hash to the parent pk of the one tree that answers it (its
+# blobs already live in ``ars_message.data``); identical submits are handed
+# that pk. Orchestration lives in ``shepherd_utils.ars.cache``; this section
+# is the SQL.
 # ---------------------------------------------------------------------------
 
 CACHE_ENTRY_COLUMNS = (
@@ -971,8 +971,6 @@ CACHE_ENTRY_COLUMNS = (
 )
 _CACHE_ENTRY_SELECT = ", ".join(f"c.{col}" for col in CACHE_ENTRY_COLUMNS)
 
-CACHE_WAITER_COLUMNS = ("parent_pk", "leader_pk", "generation", "cache_key", "created_at")
-_CACHE_WAITER_SELECT = ", ".join(f"w.{col}" for col in CACHE_WAITER_COLUMNS)
 
 
 async def get_cache_generation() -> int:
@@ -1125,6 +1123,33 @@ async def repoint_pending_cache_entry(
     return updated
 
 
+async def get_ready_cache_entry_by_source(
+    source_pk: Union[str, uuid.UUID],
+) -> Optional[Dict[str, Any]]:
+    """The newest ready entry answered by this tree, any generation."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"SELECT {_CACHE_ENTRY_SELECT} FROM ars_response_cache c "
+            "WHERE c.source_pk = %s AND c.state = 'ready' "
+            "ORDER BY c.generation DESC LIMIT 1",
+            (uuid.UUID(str(source_pk)),),
+        )
+        row = await cur.fetchone()
+    return _row_dict(CACHE_ENTRY_COLUMNS, row) if row else None
+
+
+async def delete_message(message_id: Union[str, uuid.UUID]) -> bool:
+    """Remove a message row that has nothing under it (a parent that lost
+    the cache leadership race before anything was dispatched)."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "DELETE FROM ars_message WHERE id = %s", (uuid.UUID(str(message_id)),)
+        )
+        deleted = (cur.rowcount or 0) > 0
+        await conn.commit()
+    return deleted
+
+
 async def record_cache_hit(generation: int, cache_key: str) -> None:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         await conn.execute(
@@ -1133,83 +1158,6 @@ async def record_cache_hit(generation: int, cache_key: str) -> None:
             (generation, cache_key),
         )
         await conn.commit()
-
-
-async def add_cache_waiter(
-    parent_pk: Union[str, uuid.UUID],
-    leader_pk: Union[str, uuid.UUID],
-    generation: int,
-    cache_key: str,
-) -> None:
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        await conn.execute(
-            """
-            INSERT INTO ars_response_cache_waiter
-              (parent_pk, leader_pk, generation, cache_key)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (parent_pk) DO UPDATE SET leader_pk = EXCLUDED.leader_pk
-            """,
-            (
-                uuid.UUID(str(parent_pk)),
-                uuid.UUID(str(leader_pk)),
-                generation,
-                cache_key,
-            ),
-        )
-        await conn.commit()
-
-
-async def get_cache_waiters(leader_pk: Union[str, uuid.UUID]) -> List[Dict[str, Any]]:
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"SELECT {_CACHE_WAITER_SELECT} FROM ars_response_cache_waiter w "
-            "WHERE w.leader_pk = %s ORDER BY w.created_at",
-            (uuid.UUID(str(leader_pk)),),
-        )
-        rows = await cur.fetchall()
-    return [_row_dict(CACHE_WAITER_COLUMNS, r) for r in rows]
-
-
-async def claim_cache_waiter(parent_pk: Union[str, uuid.UUID]) -> bool:
-    """Atomically take a waiter off the table. Whoever gets True owns its
-    materialization; concurrent completion hooks for the same leader can
-    therefore never copy the tree twice under one parent."""
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            "DELETE FROM ars_response_cache_waiter WHERE parent_pk = %s",
-            (uuid.UUID(str(parent_pk)),),
-        )
-        claimed = (cur.rowcount or 0) > 0
-        await conn.commit()
-    return claimed
-
-
-async def delete_cache_waiter(parent_pk: Union[str, uuid.UUID]) -> None:
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        await conn.execute(
-            "DELETE FROM ars_response_cache_waiter WHERE parent_pk = %s",
-            (uuid.UUID(str(parent_pk)),),
-        )
-        await conn.commit()
-
-
-async def repoint_cache_waiters(
-    old_leader_pk: Union[str, uuid.UUID], new_leader_pk: Union[str, uuid.UUID]
-) -> int:
-    """Move the remaining waiters of a failed leader onto its successor
-    (which is itself removed from the waiter table)."""
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        await conn.execute(
-            "DELETE FROM ars_response_cache_waiter WHERE parent_pk = %s",
-            (uuid.UUID(str(new_leader_pk)),),
-        )
-        cur = await conn.execute(
-            "UPDATE ars_response_cache_waiter SET leader_pk = %s WHERE leader_pk = %s",
-            (uuid.UUID(str(new_leader_pk)), uuid.UUID(str(old_leader_pk))),
-        )
-        moved = cur.rowcount or 0
-        await conn.commit()
-    return moved
 
 
 async def get_stale_pending_cache_entries(max_age_sec: float) -> List[Dict[str, Any]]:
@@ -1237,31 +1185,6 @@ async def get_stale_pending_cache_entries(max_age_sec: float) -> List[Dict[str, 
     return entries
 
 
-async def get_stuck_cache_waiters() -> List[Dict[str, Any]]:
-    """Waiters whose entry is ready but whose parent is still Running: a
-    materialization that crashed part-way. Each carries its entry."""
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"""
-            SELECT {_CACHE_WAITER_SELECT}, {_CACHE_ENTRY_SELECT}
-            FROM ars_response_cache_waiter w
-            JOIN ars_response_cache c
-              ON c.generation = w.generation AND c.cache_key = w.cache_key
-            JOIN ars_message m ON m.id = w.parent_pk
-            WHERE c.state = 'ready' AND m.status = 'R'
-            ORDER BY w.created_at
-            """
-        )
-        rows = await cur.fetchall()
-    n = len(CACHE_WAITER_COLUMNS)
-    out = []
-    for r in rows:
-        waiter = _row_dict(CACHE_WAITER_COLUMNS, r[:n])
-        waiter["entry"] = _row_dict(CACHE_ENTRY_COLUMNS, r[n:])
-        out.append(waiter)
-    return out
-
-
 async def purge_stale_cache_entries(
     current_generation: int, grace_sec: float, batch: int = 1000
 ) -> int:
@@ -1285,19 +1208,6 @@ async def purge_stale_cache_entries(
     return deleted
 
 
-async def delete_children(parent_pk: Union[str, uuid.UUID]) -> int:
-    """Remove every child row of a parent (idempotent re-materialization)."""
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        pk = uuid.UUID(str(parent_pk))
-        await conn.execute(
-            "UPDATE ars_message SET merged_version = NULL WHERE id = %s", (pk,)
-        )
-        cur = await conn.execute("DELETE FROM ars_message WHERE ref = %s", (pk,))
-        deleted = cur.rowcount or 0
-        await conn.commit()
-    return deleted
-
-
 async def cache_stats() -> Dict[str, Any]:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
@@ -1313,8 +1223,6 @@ async def cache_stats() -> Dict[str, Any]:
             """
         )
         rows = await cur.fetchall()
-        cur = await conn.execute("SELECT count(*) FROM ars_response_cache_waiter")
-        waiters = await cur.fetchone()
     generation = int(meta[0]) if meta else 1
     current = {"pending": 0, "ready": 0, "hits": 0}
     superseded = {"entries": 0, "hits": 0}
@@ -1331,5 +1239,4 @@ async def cache_stats() -> Dict[str, Any]:
         "bumped_reason": meta[2] if meta else None,
         "current": current,
         "superseded": superseded,
-        "waiters": int(waiters[0]) if waiters else 0,
     }

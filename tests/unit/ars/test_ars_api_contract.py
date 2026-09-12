@@ -117,6 +117,7 @@ def db(mocker):
     child_pk = uuid.uuid4()
     default_actor = make_actor(1, "ars-default-agent", "", "", ("general",), uri="")
     ara_actor = make_actor()
+    merge_actor = make_actor(3, "ars-ars-agent", "infores:ars", "", (), uri="")
     parent = make_message(pk=parent_pk, actor=1)
     child = make_message(pk=child_pk, actor=7, ref=parent_pk)
 
@@ -132,6 +133,7 @@ def db(mocker):
         "child": child,
         "ara_actor": ara_actor,
         "default_actor": default_actor,
+        "merge_actor": merge_actor,
         "get_message_row": _patch(
             "get_message_row",
             side_effect=lambda pk: rows.get(str(pk)),
@@ -161,7 +163,9 @@ def db(mocker):
         "get_recent_messages": _patch("get_recent_messages", return_value=[]),
         "get_actor": _patch(
             "get_actor",
-            side_effect=lambda aid: {1: default_actor, 7: ara_actor}.get(aid),
+            side_effect=lambda aid: {1: default_actor, 7: ara_actor, 3: merge_actor}.get(
+                aid
+            ),
         ),
         "get_or_create_actor": _patch(
             "get_or_create_actor", return_value=(ara_actor, 302)
@@ -214,11 +218,12 @@ def db(mocker):
             ),
         ),
         "get_cache_entry": _patch("get_cache_entry", return_value=None),
-        "add_cache_waiter": _patch("add_cache_waiter"),
-        "delete_cache_waiter": _patch("delete_cache_waiter"),
+        "get_ready_cache_entry_by_source": _patch(
+            "get_ready_cache_entry_by_source", return_value=None
+        ),
         "record_cache_hit": _patch("record_cache_hit"),
         "delete_cache_entry": _patch("delete_cache_entry", return_value=True),
-        "delete_children": _patch("delete_children", return_value=0),
+        "delete_message": _patch("delete_message", return_value=True),
         "bump_cache_generation": _patch("bump_cache_generation", return_value=2),
         "cache_stats": _patch(
             "cache_stats",
@@ -895,8 +900,39 @@ async def _fanout_enqueued():
     return task is not None
 
 
-def _source_tree(db, source_pk, merged_pk, child_pk):
-    """A completed source tree: parent Done -> merged child + one ARA child."""
+MERGED_PAYLOAD = {
+    "message": {
+        "query_graph": {
+            "nodes": {"n0": {"ids": ["MONDO:0005148"]}, "n1": {}},
+            "edges": {"e": {"subject": "n1", "object": "n0"}},
+        },
+        "knowledge_graph": {"nodes": {"MONDO:0005148": {}}, "edges": {}},
+        "results": [
+            {
+                "node_bindings": {"n0": [{"id": "MONDO:0005148"}], "n1": []},
+                "analyses": [{"resource_id": "infores:x", "edge_bindings": {"e": []}}],
+            }
+        ],
+    },
+    "logs": [{"message": "merged", "level": "INFO"}],
+}
+
+# QUERY under other labels: same key, bindings must come back relabeled
+RELABELED_QUERY = {
+    "message": {
+        "query_graph": {
+            "nodes": {"disease": {"ids": ["MONDO:0005148"]}, "chem": {}},
+            "edges": {"treats": {"subject": "chem", "object": "disease"}},
+        }
+    }
+}
+
+
+def _source_tree(db):
+    """A completed source tree: parent Done -> merged message (actor 3)."""
+    from shepherd_utils.ars import cache as _cache
+
+    source_pk, merged_pk = uuid.uuid4(), uuid.uuid4()
     source = make_message(
         pk=source_pk,
         actor=1,
@@ -907,118 +943,66 @@ def _source_tree(db, source_pk, merged_pk, child_pk):
         params={"query_type": "standard", "stats": {"results": 1}},
         result_count=1,
     )
-    ara_child = dict(
-        make_message(pk=child_pk, actor=7, ref=source_pk, status="E", code=598),
-        agent_name="ara-aragorn",
-        inforesid="infores:aragorn",
-        url="http://aragorn/asyncquery",
+    merged = make_message(pk=merged_pk, actor=3, ref=source_pk, status="D", code=200)
+    rows = {str(source_pk): source, str(merged_pk): merged, str(db["parent_pk"]): db["parent"]}
+    db["get_message_row"].side_effect = lambda pk: rows.get(str(pk))
+    db["load_message_data"].side_effect = lambda pk, *a: (
+        json.loads(json.dumps(MERGED_PAYLOAD)) if str(pk) == str(merged_pk) else None
     )
-    merged_child = dict(
-        make_message(pk=merged_pk, actor=3, ref=source_pk, status="D", code=200),
-        agent_name="ars-ars-agent",
-        inforesid="infores:ars",
-        result_count=1,
-    )
-    rows = {str(source_pk): source}
-    db["get_message_row"].side_effect = lambda pk: rows.get(str(pk)) or (
-        db["parent"] if str(pk) == str(db["parent_pk"]) else None
-    )
-    db["get_children"].return_value = [ara_child, merged_child]
-    payload = {
-        "message": {
-            "query_graph": {
-                "nodes": {"n0": {"ids": ["MONDO:0005148"]}, "n1": {}},
-                "edges": {"e": {"subject": "n1", "object": "n0"}},
-            },
-            "knowledge_graph": {"nodes": {"MONDO:0005148": {}}, "edges": {}},
-            "results": [
-                {
-                    "node_bindings": {"n0": [{"id": "MONDO:0005148"}], "n1": []},
-                    "analyses": [{"resource_id": "infores:x", "edge_bindings": {"e": []}}],
-                }
-            ],
-        },
-        "logs": [{"message": "merged", "level": "INFO"}],
-    }
-    db["load_message_data"].side_effect = lambda pk, *a: json.loads(json.dumps(payload))
-    return source
+    _, label_map = _cache.canonical_graph(MERGED_PAYLOAD["message"]["query_graph"])
+    return source, merged, label_map
 
 
-async def test_submit_cache_hit_copies_tree_without_fanout(client, db, redis_mock):
-    source_pk, merged_pk, child_pk = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    _source_tree(db, source_pk, merged_pk, child_pk)
-    label_map = {"nodes": {"n0": "n0", "n1": "n1"}, "edges": {"e": "e0"}, "paths": {}}
-    db["claim_or_get_cache_entry"].side_effect = lambda gen, key, pk: (
-        make_cache_entry(gen, key, source_pk, label_map=label_map),
-        False,
+async def test_submit_cache_hit_returns_source_pk_with_converted_response(
+    client, db, redis_mock
+):
+    source, merged, label_map = _source_tree(db)
+    db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
+        gen, key, source["id"], label_map=label_map
     )
-    # same graph, different labels: bindings must be rewritten to ours
-    query = {
-        "message": {
-            "query_graph": {
-                "nodes": {"disease": {"ids": ["MONDO:0005148"]}, "chem": {}},
-                "edges": {"treats": {"subject": "chem", "object": "disease"}},
-            }
-        }
-    }
-    resp = await client.post("/api/submit", json=query)
+    resp = await client.post("/api/submit", json=RELABELED_QUERY)
     assert resp.status_code == 201
     body = resp.json()
+    # the caller is handed the shared, already-Done pk
+    assert body["pk"] == str(source["id"])
     assert body["fields"]["status"] == "Done"
     assert body["fields"]["code"] == 200
-    assert body["fields"]["merged_version"] is not None
-    assert body["fields"]["params"]["cache"]["role"] == "hit"
-    assert body["fields"]["params"]["cache"]["source_pk"] == str(source_pk)
-    assert body["fields"]["params"]["stats"] == {"results": 1}
+    assert body["fields"]["merged_version"] == str(merged["id"])
+    # ...and the cached merged response converted to their own labels
+    payload = body["fields"]["data"]
+    qg = payload["message"]["query_graph"]
+    assert set(qg["nodes"]) == {"disease", "chem"}
+    assert qg["edges"] == {"treats": {"subject": "chem", "object": "disease"}}
+    result = payload["message"]["results"][0]
+    assert set(result["node_bindings"]) == {"disease", "chem"}
+    assert set(result["analyses"][0]["edge_bindings"]) == {"treats"}
+    assert "MONDO:0005148" in payload["message"]["knowledge_graph"]["nodes"]
+    assert payload["logs"][0]["message"] == "merged"
+    assert "Served from ARS response cache" in payload["logs"][-1]["message"]
+    assert str(source["id"]) in payload["logs"][-1]["message"]
+    # nothing was created or dispatched
+    db["create_message"].assert_not_awaited()
+    db["save_message_data"].assert_not_awaited()
     assert not await _fanout_enqueued()
-    # after the parent's own row: the ARA child and the final merged message
-    created = [c.kwargs for c in db["create_message"].await_args_list][1:]
-    assert [c["actor_id"] for c in created] == [7, 3]
-    assert created[0]["status"] == "E" and created[0]["code"] == 598
-    # the E/598 child keeps its code (skip_coercion)
-    child_updates = [
-        c for c in db["update_message"].await_args_list if c.kwargs.get("skip_coercion")
-    ]
-    assert child_updates[0].kwargs["code"] == 598
-    assert child_updates[0].kwargs["url"] == "http://aragorn/asyncquery"
-    # payloads were rewritten to the caller's labels; the merged one logs the hit
-    saved = [c.args[1] for c in db["save_message_data"].await_args_list]
-    # first save is the parent's own query blob, then child, then merged
-    child_payload, merged_payload = saved[-2], saved[-1]
-    for payload in (child_payload, merged_payload):
-        qg = payload["message"]["query_graph"]
-        assert set(qg["nodes"]) == {"disease", "chem"}
-        assert set(qg["edges"]) == {"treats"}
-        assert qg["edges"]["treats"] == {"subject": "chem", "object": "disease"}
-        result = payload["message"]["results"][0]
-        assert set(result["node_bindings"]) == {"disease", "chem"}
-        assert set(result["analyses"][0]["edge_bindings"]) == {"treats"}
-        assert "MONDO:0005148" in payload["message"]["knowledge_graph"]["nodes"]
-    assert "Served from ARS response cache" in merged_payload["logs"][-1]["message"]
-    assert str(source_pk) in merged_payload["logs"][-1]["message"]
-    assert all("cache" not in log["message"] for log in child_payload["logs"])
     db["record_cache_hit"].assert_awaited_once()
 
 
-async def test_submit_pending_entry_joins_as_waiter(client, db, redis_mock):
+async def test_submit_pending_entry_returns_leader_pk(client, db, redis_mock):
     leader_pk = uuid.uuid4()
-    db["claim_or_get_cache_entry"].side_effect = lambda gen, key, pk: (
-        make_cache_entry(gen, key, leader_pk, state="pending"),
-        False,
-    )
+    leader = make_message(pk=leader_pk, actor=1, status="R", code=202)
+    db["get_message_row"].side_effect = lambda pk: leader if str(pk) == str(leader_pk) else None
     db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
         gen, key, leader_pk, state="pending"
     )
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 201
     body = resp.json()
+    assert body["pk"] == str(leader_pk)
     assert body["fields"]["status"] == "Running"
-    assert body["fields"]["params"]["cache"]["role"] == "follower"
-    assert body["fields"]["params"]["cache"]["leader_pk"] == str(leader_pk)
+    assert body["fields"]["code"] == 202
+    assert body["fields"]["data"] == QUERY
+    db["create_message"].assert_not_awaited()
     assert not await _fanout_enqueued()
-    waiter_pk, waiter_leader, _, _ = db["add_cache_waiter"].await_args.args
-    assert str(waiter_pk) == body["pk"]
-    assert waiter_leader == leader_pk
 
 
 async def test_submit_miss_claims_leadership_and_fans_out(client, db, redis_mock):
@@ -1028,12 +1012,32 @@ async def test_submit_miss_claims_leadership_and_fans_out(client, db, redis_mock
     assert await _fanout_enqueued()
     gen, key, pk = db["claim_or_get_cache_entry"].await_args.args
     assert gen == 1 and len(key) == 64 and str(pk) == resp.json()["pk"]
+    db["delete_message"].assert_not_awaited()
+
+
+async def test_submit_lost_race_discards_own_row_and_serves_winner(client, db, redis_mock):
+    """Two identical misses: the lookup saw nothing, but by the time we
+    claim, a concurrent submit already owns the key."""
+    source, merged, label_map = _source_tree(db)
+    db["claim_or_get_cache_entry"].side_effect = lambda gen, key, pk: (
+        make_cache_entry(gen, key, source["id"], label_map=label_map),
+        False,
+    )
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert resp.json()["pk"] == str(source["id"])
+    assert resp.json()["fields"]["status"] == "Done"
+    # our own parent was created, then discarded
+    db["create_message"].assert_awaited_once()
+    db["delete_message"].assert_awaited_once()
+    assert not await _fanout_enqueued()
 
 
 async def test_submit_bypass_cache_skips_lookup(client, db, redis_mock):
     resp = await client.post("/api/submit", json=dict(QUERY, bypass_cache=True))
     assert resp.status_code == 201
     assert resp.json()["fields"]["params"]["cache"]["role"] == "bypass"
+    db["get_cache_entry"].assert_not_awaited()
     db["claim_or_get_cache_entry"].assert_not_awaited()
     assert await _fanout_enqueued()
 
@@ -1043,6 +1047,7 @@ async def test_submit_overwrite_cache_runs_and_marks_role(client, db, redis_mock
     resp = await client.post("/api/submit", json=q)
     assert resp.status_code == 201
     assert resp.json()["fields"]["params"]["cache"]["role"] == "overwrite"
+    db["get_cache_entry"].assert_not_awaited()
     db["claim_or_get_cache_entry"].assert_not_awaited()
     assert await _fanout_enqueued()
 
@@ -1060,22 +1065,33 @@ async def test_submit_cache_disabled_behaves_as_upstream(client, db, redis_mock,
 
 async def test_submit_broken_ready_entry_falls_back_to_leading(client, db, redis_mock):
     """A ready entry whose source tree is gone is dropped; we run the query."""
-    source_pk = uuid.uuid4()
-    calls = {"n": 0}
-
-    def _claim(gen, key, pk):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return make_cache_entry(gen, key, source_pk), False
-        return make_cache_entry(gen, key, pk, state="pending"), True
-
-    db["claim_or_get_cache_entry"].side_effect = _claim
-    # get_message_row knows nothing about source_pk -> broken
+    db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
+        gen, key, uuid.uuid4()
+    )
+    # get_message_row knows nothing about that source -> broken
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 201
     assert resp.json()["fields"]["params"]["cache"]["role"] == "leader"
     db["delete_cache_entry"].assert_awaited_once()
     assert await _fanout_enqueued()
+
+
+async def test_message_get_of_cached_merged_message_carries_note(client, db, redis_mock):
+    source, merged, label_map = _source_tree(db)
+    db["get_ready_cache_entry_by_source"].return_value = make_cache_entry(
+        1, "k", source["id"], label_map=label_map
+    )
+    resp = await client.get(f"/api/messages/{merged['id']}")
+    assert resp.status_code == 200
+    logs = resp.json()["fields"]["data"]["logs"]
+    assert logs[0]["message"] == "merged"
+    assert "response cache entry" in logs[-1]["message"]
+    # the stored payload is untouched: nothing was saved
+    db["save_message_data"].assert_not_awaited()
+    # the parent itself (the query) gets no note
+    resp = await client.get(f"/api/messages/{source['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["fields"]["data"] is None  # parent payload not stubbed
 
 
 async def test_cache_admin_routes_disabled_without_token(client, db, redis_mock, monkeypatch):

@@ -1,24 +1,24 @@
 """ARS whole-response cache.
 
 Shepherd-native (the upstream ARS has none); design in
-docs/ARS_RESPONSE_CACHE_PLAN.md. A submit whose query graph is structurally
-identical to a completed prior submit is answered by copying that tree --
-parent, final merged message, every per-ARA child -- so no other Shepherd
-worker runs. Identical in-flight submits coalesce onto one leader run.
+docs/ARS_RESPONSE_CACHE_PLAN.md. There is exactly one message tree per
+distinct query per cache generation: the first submit to see a query
+becomes its *leader* and runs it; every later structurally identical submit
+is handed the leader's pk. A hit therefore stores nothing -- the 201 answers
+with the source parent's envelope whose ``data`` is the cached merged
+response converted to the caller's own query-graph labels -- and every
+subsequent GET of that pk returns the original, stored tree.
 
-The cache stores no payloads: ``ars_response_cache`` maps a canonical
-query-graph hash to the parent pk of a completed tree (the *source tree*),
-whose blobs already live in ``ars_message.data``. Source trees backing a
-live generation are exempt from the payload retention purge.
+The cache index (``ars_response_cache``) maps a canonical query-graph hash
+to the source parent's pk; the payloads are the ones already kept in
+``ars_message.data``. Source trees backing a live generation are exempt
+from the payload retention purge.
 
 Two request-side knobs: TRAPI ``bypass_cache`` (no read, no write) and
 ``parameters.overwrite_cache`` (no read, forced write). Whole-cache
-invalidation bumps a generation counter.
+invalidation bumps a generation counter; old pks keep working.
 
-Canonicalization is renaming-invariant: node / edge / path ids are labels,
-so results served from the cache have their bindings rewritten to the
-caller's ids, and the merged message gets a TRAPI log entry saying where it
-came from.
+Canonicalization is renaming-invariant: node / edge / path ids are labels.
 """
 
 import asyncio
@@ -30,13 +30,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
 
-from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
-from shepherd_utils.logger import resolve_log_level
+
+import shepherd_utils.db as shepherd_db
 
 from . import db as ars_db
 from .completion import MERGE_AGENT_NAME
-from .notify import notify_subscribers
 
 # Baked into every key: bump when any canonicalization rule changes, which
 # orphans (and lazily purges) every existing entry without an explicit
@@ -47,18 +46,16 @@ MODE_NORMAL = "normal"
 MODE_BYPASS = "bypass"
 MODE_OVERWRITE = "overwrite"
 
-ROLE_HIT = "hit"
 ROLE_LEADER = "leader"
-ROLE_FOLLOWER = "follower"
 ROLE_OVERWRITE = "overwrite"
 ROLE_BYPASS = "bypass"
 # Cache bookkeeping failed for this submit; it ran as an ordinary query.
 ROLE_UNCACHED = "uncached"
 
-# Outcomes of before_dispatch
-DISPATCH = "dispatch"  # fan out as usual
-SERVED = "served"  # tree copied from the cache; parent already Done
-WAITING = "waiting"  # coalesced onto a pending leader; parent stays Running
+# Outcomes of the submit-side steps
+DISPATCH = "dispatch"  # fan out as usual (this parent leads, or bypass/overwrite)
+SERVED = "served"  # answered from a ready entry: the source parent's pk + converted data
+WAITING = "waiting"  # coalesced onto a pending leader: the leader's pk, still Running
 
 MERGE_INFORESID = "infores:ars"
 
@@ -412,108 +409,24 @@ def _cache_params(parent_row: Dict[str, Any], **cache_fields) -> Dict[str, Any]:
     return params
 
 
-async def _set_role(parent_row, logger, **cache_fields) -> Dict[str, Any]:
+async def _set_role(parent_row, **cache_fields) -> Dict[str, Any]:
     params = _cache_params(parent_row, **cache_fields)
     updated = await ars_db.update_message(parent_row["id"], params=params)
     return updated or dict(parent_row, params=params)
-
-
-async def before_dispatch(
-    parent_row: Dict[str, Any], body: Dict[str, Any], logger: logging.Logger
-) -> Tuple[str, Dict[str, Any]]:
-    """Cache step of ``submit``, after the parent row + query blob exist.
-
-    Returns ``(outcome, parent_row)`` where outcome is DISPATCH (fan out as
-    usual), SERVED (the tree was copied; the row is already Done) or
-    WAITING (coalesced onto a pending leader; no fan-out). Any failure in
-    the cache bookkeeping degrades to DISPATCH -- the cache must never make
-    a submit fail.
-    """
-    if not settings.ars_cache_enabled:
-        return DISPATCH, parent_row
-    parent_pk = parent_row["id"]
-    mode = resolve_mode(body)
-    try:
-        key, caller_map = cache_key(body)
-        generation = await ars_db.get_cache_generation()
-        base = {"key": key, "generation": generation}
-        if mode == MODE_BYPASS:
-            row = await _set_role(parent_row, logger, role=ROLE_BYPASS, **base)
-            return DISPATCH, row
-        if mode == MODE_OVERWRITE:
-            row = await _set_role(parent_row, logger, role=ROLE_OVERWRITE, **base)
-            return DISPATCH, row
-
-        entry, claimed = await ars_db.claim_or_get_cache_entry(
-            generation, key, parent_pk
-        )
-        if claimed:
-            row = await _set_role(parent_row, logger, role=ROLE_LEADER, **base)
-            return DISPATCH, row
-        if entry is not None and entry["state"] == "ready":
-            served = await materialize(parent_row, entry, caller_map, logger)
-            if served is not None:
-                return SERVED, served
-            # broken entry was dropped inside materialize: try to lead
-            entry, claimed = await ars_db.claim_or_get_cache_entry(
-                generation, key, parent_pk
-            )
-            if claimed:
-                row = await _set_role(parent_row, logger, role=ROLE_LEADER, **base)
-                return DISPATCH, row
-        if entry is None or entry["state"] != "pending":
-            row = await _set_role(parent_row, logger, role=ROLE_UNCACHED, **base)
-            return DISPATCH, row
-
-        leader_pk = entry["source_pk"]
-        await ars_db.add_cache_waiter(parent_pk, leader_pk, generation, key)
-        row = await _set_role(
-            parent_row,
-            logger,
-            role=ROLE_FOLLOWER,
-            leader_pk=str(leader_pk),
-            **base,
-        )
-        # The leader may have completed between our conflict and the waiter
-        # insert, resolving its waiters without us; a ready entry now means
-        # nobody else will copy for this parent.
-        fresh = await ars_db.get_cache_entry(generation, key)
-        if fresh is not None and fresh["state"] == "ready":
-            served = await materialize(row, fresh, caller_map, logger)
-            await ars_db.delete_cache_waiter(parent_pk)
-            if served is not None:
-                return SERVED, served
-            row = await _set_role(parent_row, logger, role=ROLE_LEADER, **base)
-            return DISPATCH, row
-        logger.info(f"Cache: {parent_pk} coalesced onto leader {leader_pk}")
-        return WAITING, row
-    except Exception as e:
-        logger.error(f"Cache bookkeeping failed for {parent_pk}: {e}", exc_info=True)
-        return DISPATCH, parent_row
 
 
 class _BrokenEntry(Exception):
     """The source tree behind a ready entry is unusable."""
 
 
-async def materialize(
-    parent_row: Dict[str, Any],
+async def _serve_ready(
     entry: Dict[str, Any],
     caller_map: Optional[Dict[str, Dict[str, str]]],
     logger: logging.Logger,
-) -> Optional[Dict[str, Any]]:
-    """Copy the entry's source tree under ``parent_row``.
-
-    Every non-merge child and the final merged message are re-created as
-    children of the new parent with their original status / code /
-    counts; payloads are rewritten to the caller's query-graph labels and
-    the merged message gets the cache log entry. The parent ends Done with
-    ``merged_version`` pointing at the copy and ``params.cache`` recording
-    the hit. Returns the updated parent row, or None when the copy did not
-    happen (a broken entry is deleted; any transient failure leaves the
-    entry alone). Partially created children are removed either way.
-    """
-    parent_pk = parent_row["id"]
+) -> Optional[Tuple[Dict[str, Any], Any]]:
+    """The source parent row plus its merged response converted to the
+    caller's labels, with the cache log line appended. None (and the entry
+    dropped) when the source tree is unusable."""
     source_pk = entry["source_pk"]
     try:
         source = await ars_db.get_message_row(source_pk)
@@ -522,104 +435,162 @@ async def materialize(
         merged_pk = source.get("merged_version")
         if merged_pk is None:
             raise _BrokenEntry(f"source {source_pk} has no merged_version")
-        children = await ars_db.get_children(source_pk)
-        merged_row = next(
-            (c for c in children if str(c["id"]) == str(merged_pk)), None
-        )
-        if merged_row is None:
-            raise _BrokenEntry(f"merged message {merged_pk} not among children")
-        merged_data = await ars_db.load_message_data(merged_pk, logger)
-        if merged_data is None:
+        merged = await ars_db.load_message_data(merged_pk, logger)
+        if merged is None:
             raise _BrokenEntry(f"merged message {merged_pk} has no payload")
-
-        mapping = compose_label_maps(entry.get("label_map"), caller_map)
-        log_entry = cache_log_entry(
-            source_pk, entry.get("ready_at"), entry.get("generation")
-        )
-        new_merged_pk = None
-        for child in children:
-            is_merge = (
-                child.get("inforesid") == MERGE_INFORESID
-                or child.get("agent_name") == MERGE_AGENT_NAME
-            )
-            if is_merge and str(child["id"]) != str(merged_pk):
-                continue  # intermediate merges are not part of the answer
-            if is_merge:
-                data = merged_data
-            else:
-                data = await ars_db.load_message_data(child["id"], logger)
-            new = await ars_db.create_message(
-                actor_id=child["actor"],
-                status=child["status"],
-                code=child["code"],
-                ref=parent_pk,
-                params=child.get("params"),
-                name=child.get("name") or "",
-            )
-            if data is not None:
-                data = await asyncio.to_thread(
-                    _rewrite_payload, data, mapping, log_entry if is_merge else None
-                )
-                await ars_db.save_message_data(new["id"], data, logger)
-            await ars_db.update_message(
-                new["id"],
-                skip_coercion=True,
-                status=child["status"],
-                code=child["code"],
-                url=child.get("url"),
-                result_count=child.get("result_count"),
-                result_stat=child.get("result_stat"),
-            )
-            await ars_db.persist_data_copy(new["id"], logger)
-            if is_merge:
-                new_merged_pk = new["id"]
-
-        params = dict(parent_row.get("params") or {})
-        source_params = source.get("params") or {}
-        if "stats" in source_params:
-            params["stats"] = source_params["stats"]
-        params["cache"] = {
-            "key": entry.get("cache_key"),
-            "generation": entry.get("generation"),
-            "role": ROLE_HIT,
-            "source_pk": str(source_pk),
-            "served_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        }
-        updated = await ars_db.update_message(
-            parent_pk,
-            status="D",
-            code=200,
-            merged_version=str(new_merged_pk),
-            merged_versions_list=[[str(new_merged_pk), "ars"]],
-            result_count=source.get("result_count"),
-            result_stat=source.get("result_stat"),
-            params=params,
-        )
-        await ars_db.persist_data_copy(parent_pk, logger)
-        if updated is not None:
-            await notify_subscribers(updated, None, logger)
-        try:
-            await ars_db.record_cache_hit(entry["generation"], entry["cache_key"])
-        except Exception as e:  # bookkeeping only
-            logger.debug(f"Cache hit count update failed: {e}")
-        logger.info(
-            f"Cache hit: {parent_pk} served from source {source_pk} "
-            f"({len(mapping)} label kinds renamed)"
-        )
-        return updated
     except _BrokenEntry as e:
         logger.warning(f"Cache entry {entry.get('cache_key')} unusable, dropping: {e}")
         try:
             await ars_db.delete_cache_entry(entry["generation"], entry["cache_key"])
         except Exception as de:
             logger.error(f"Failed to drop broken cache entry: {de}")
-    except Exception as e:
-        logger.error(f"Cache copy for {parent_pk} failed: {e}", exc_info=True)
+        return None
+    mapping = compose_label_maps(entry.get("label_map"), caller_map)
+    log_entry = cache_log_entry(
+        source_pk, entry.get("ready_at"), entry.get("generation")
+    )
+    payload = await asyncio.to_thread(_rewrite_payload, merged, mapping, log_entry)
+    return source, payload
+
+
+async def _serve(
+    entry: Optional[Dict[str, Any]],
+    body: Any,
+    caller_map: Optional[Dict[str, Dict[str, str]]],
+    logger: logging.Logger,
+) -> Optional[Tuple[str, Dict[str, Any], Any]]:
+    """Answer from an existing entry: (SERVED, source row, converted data)
+    for a ready one, (WAITING, leader row, the caller's own body) for a
+    pending one, None when there is nothing usable to answer with."""
+    if entry is None:
+        return None
+    if entry["state"] == "ready":
+        result = await _serve_ready(entry, caller_map, logger)
+        if result is None:
+            return None
+        source, payload = result
+        try:
+            await ars_db.record_cache_hit(entry["generation"], entry["cache_key"])
+        except Exception as e:  # bookkeeping only
+            logger.debug(f"Cache hit count update failed: {e}")
+        logger.info(f"Cache hit: serving {source['id']} for key {entry['cache_key']}")
+        return SERVED, source, payload
+    leader = await ars_db.get_message_row(entry["source_pk"])
+    if leader is None:
+        logger.warning(
+            f"Cache: pending entry {entry.get('cache_key')} has no leader row; dropping"
+        )
+        await ars_db.delete_cache_entry(entry["generation"], entry["cache_key"])
+        return None
+    logger.info(f"Cache: coalescing onto pending leader {leader['id']}")
+    return WAITING, leader, body
+
+
+async def lookup(body: Any, logger: logging.Logger) -> Optional[Tuple[str, Dict[str, Any], Any]]:
+    """Submit step 1, before any row exists: answer a normal-mode submit
+    from the cache when it can. None means "create a parent row and call
+    claim_or_serve". Never raises."""
+    if not settings.ars_cache_enabled or resolve_mode(body) != MODE_NORMAL:
+        return None
     try:
-        await ars_db.delete_children(parent_pk)
+        key, caller_map = cache_key(body)
+        generation = await ars_db.get_cache_generation()
+        entry = await ars_db.get_cache_entry(generation, key)
+        return await _serve(entry, body, caller_map, logger)
     except Exception as e:
-        logger.error(f"Failed to clean up partial copy under {parent_pk}: {e}")
-    return None
+        logger.error(f"Cache lookup failed: {e}", exc_info=True)
+        return None
+
+
+async def _discard_parent(parent_row: Dict[str, Any], logger: logging.Logger) -> None:
+    """A freshly created parent that lost the leadership race is not
+    needed: the caller gets the winner's pk instead."""
+    pk = parent_row["id"]
+    try:
+        await ars_db.delete_message(pk)
+    except Exception as e:
+        logger.warning(f"Cache: could not delete orphan parent {pk}: {e}")
+    try:
+        await shepherd_db.data_db_client.delete(str(pk))
+    except Exception:
+        pass
+
+
+async def claim_or_serve(
+    parent_row: Dict[str, Any], body: Any, logger: logging.Logger
+) -> Tuple[str, Dict[str, Any], Any]:
+    """Submit step 2, once the parent row and its query blob exist.
+
+    Records the request's cache role on the row and, in normal mode, claims
+    leadership of the key. Returns ``(DISPATCH, row, body)`` when this
+    parent should fan out, or the SERVED / WAITING answer from a concurrent
+    winner -- in which case this parent row has been discarded. Any failure
+    degrades to DISPATCH: the cache never makes a submit fail.
+    """
+    if not settings.ars_cache_enabled:
+        return DISPATCH, parent_row, body
+    parent_pk = parent_row["id"]
+    mode = resolve_mode(body)
+    try:
+        key, caller_map = cache_key(body)
+        generation = await ars_db.get_cache_generation()
+        base = {"key": key, "generation": generation}
+        if mode == MODE_BYPASS:
+            return DISPATCH, await _set_role(parent_row, role=ROLE_BYPASS, **base), body
+        if mode == MODE_OVERWRITE:
+            return DISPATCH, await _set_role(parent_row, role=ROLE_OVERWRITE, **base), body
+        for _ in range(2):
+            entry, claimed = await ars_db.claim_or_get_cache_entry(
+                generation, key, parent_pk
+            )
+            if claimed:
+                return DISPATCH, await _set_role(parent_row, role=ROLE_LEADER, **base), body
+            served = await _serve(entry, body, caller_map, logger)
+            if served is not None:
+                await _discard_parent(parent_row, logger)
+                return served
+            # the entry was broken/vanished and has been dropped: claim again
+        return DISPATCH, await _set_role(parent_row, role=ROLE_UNCACHED, **base), body
+    except Exception as e:
+        logger.error(f"Cache bookkeeping failed for {parent_pk}: {e}", exc_info=True)
+        return DISPATCH, parent_row, body
+
+
+async def annotate_cached_read(
+    row: Dict[str, Any], actor: Dict[str, Any], payload: Any, logger: logging.Logger
+) -> Any:
+    """GET-time note for readers of a cached tree: when ``row`` is the final
+    merged message of a cache source, append a log line saying so. The
+    stored bytes are never touched."""
+    if not settings.ars_cache_enabled or not isinstance(payload, dict):
+        return payload
+    if row.get("ref") is None or actor.get("inforesid") != MERGE_INFORESID:
+        return payload
+    try:
+        entry = await ars_db.get_ready_cache_entry_by_source(row["ref"])
+        if entry is None:
+            return payload
+        parent = await ars_db.get_message_row(row["ref"])
+        if parent is None or str(parent.get("merged_version")) != str(row["id"]):
+            return payload
+        cached = entry.get("ready_at")
+        cached = cached.isoformat() if hasattr(cached, "isoformat") else str(cached)
+        append_cache_log(
+            payload,
+            {
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "level": "INFO",
+                "code": None,
+                "message": (
+                    f"This message is the ARS response cache entry for its query "
+                    f"(generation {entry.get('generation')}, cached {cached}, "
+                    f"served {entry.get('hit_count', 0)} time(s))"
+                ),
+            },
+        )
+    except Exception as e:
+        logger.debug(f"Cache read annotation skipped: {e}")
+    return payload
 
 
 async def _cacheable(parent_row: Dict[str, Any], children, logger) -> bool:
@@ -645,87 +616,11 @@ async def _cacheable(parent_row: Dict[str, Any], children, logger) -> bool:
     return True
 
 
-async def _dispatch_fanout(parent_pk, logger) -> None:
-    await add_task(
-        "ars.fanout",
-        {
-            "parent_pk": str(parent_pk),
-            "query_id": str(parent_pk),
-            "log_level": resolve_log_level(settings.log_level),
-            "otel": await ars_db.load_otel_carrier(parent_pk, logger),
-        },
-        logger,
-        raise_on_failure=True,
-    )
-
-
-async def fail_over(leader_pk, logger: logging.Logger) -> Optional[str]:
-    """A leader will not produce a cache entry: promote its oldest waiter
-    to leader (and fan it out), repoint the rest, or drop the pending entry
-    when nobody is waiting. Returns the new leader pk, if any."""
-    waiters = await ars_db.get_cache_waiters(leader_pk)
-    if not waiters:
-        await ars_db.delete_pending_cache_entry(leader_pk)
-        return None
-    new_leader = waiters[0]
-    new_pk = new_leader["parent_pk"]
-    repointed = await ars_db.repoint_pending_cache_entry(leader_pk, new_pk)
-    if not repointed:
-        # entry vanished (invalidated/dropped): re-create it so later
-        # identical submits coalesce onto the successor
-        await ars_db.claim_or_get_cache_entry(
-            new_leader["generation"], new_leader["cache_key"], new_pk
-        )
-    await ars_db.repoint_cache_waiters(leader_pk, new_pk)
-    row = await ars_db.get_message_row(new_pk)
-    if row is not None:
-        await _set_role(
-            row,
-            logger,
-            key=new_leader["cache_key"],
-            generation=new_leader["generation"],
-            role=ROLE_LEADER,
-            promoted_from=str(leader_pk),
-        )
-    await _dispatch_fanout(new_pk, logger)
-    logger.info(f"Cache: leader {leader_pk} failed over to {new_pk}")
-    return str(new_pk)
-
-
-async def _copy_to_waiter(waiter: Dict[str, Any], entry: Dict[str, Any], logger) -> bool:
-    """Claim a waiter (delete-first, so concurrent resolvers never both copy
-    under one parent), copy the tree to it, and put it back on failure so
-    the repair sweep retries."""
-    waiter_pk = waiter["parent_pk"]
-    if not await ars_db.claim_cache_waiter(waiter_pk):
-        return False
-    row = await ars_db.get_message_row(waiter_pk)
-    if row is None:
-        return False
-    body = await ars_db.load_message_data(waiter_pk, logger)
-    _, caller_map = cache_key(body if isinstance(body, dict) else {})
-    served = await materialize(row, entry, caller_map, logger)
-    if served is not None:
-        return True
-    logger.warning(f"Cache: copy for waiter {waiter_pk} failed; left for the sweep")
-    await ars_db.add_cache_waiter(
-        waiter_pk, waiter["leader_pk"], waiter["generation"], waiter["cache_key"]
-    )
-    return False
-
-
-async def _resolve_waiters(leader_pk, entry: Dict[str, Any], logger) -> None:
-    for waiter in await ars_db.get_cache_waiters(leader_pk):
-        await _copy_to_waiter(waiter, entry, logger)
-
-
 async def on_parent_complete(parent_row: Dict[str, Any], logger: logging.Logger) -> None:
-    """Completion hook: called once a parent reaches Done.
-
-    Leaders flip their pending entry to ready and copy the tree to every
-    waiter; overwrite runs repoint the key at their tree. Anything else is
-    a no-op.
-    """
+    """Completion hook, once a parent reaches Done: a leader flips its
+    pending entry to ready (or drops it when the run is not cacheable, so
+    the next identical submit re-runs); an overwrite run repoints its key.
+    Anything else is a no-op."""
     cache_info = (parent_row.get("params") or {}).get("cache") or {}
     role = cache_info.get("role")
     if role not in (ROLE_LEADER, ROLE_OVERWRITE):
@@ -734,52 +629,40 @@ async def on_parent_complete(parent_row: Dict[str, Any], logger: logging.Logger)
     try:
         children = await ars_db.get_children(parent_pk)
         cacheable = await _cacheable(parent_row, children, logger)
-        if role == ROLE_LEADER and not cacheable:
-            await fail_over(parent_pk, logger)
+        if not cacheable:
+            if role == ROLE_LEADER:
+                await ars_db.delete_pending_cache_entry(parent_pk)
+            else:
+                logger.info(f"Cache: overwrite run {parent_pk} not cacheable")
             return
         query = await ars_db.load_message_data(parent_pk, logger)
         _, label_map = cache_key(query if isinstance(query, dict) else {})
         if role == ROLE_LEADER:
             entry = await ars_db.mark_cache_entry_ready(parent_pk, label_map)
             if entry is None:
-                logger.info(
-                    f"Cache: {parent_pk} finished but no longer leads its entry"
-                )
-                # waiters, if any were left behind, still get this answer
-                entry = {
-                    "generation": cache_info.get("generation"),
-                    "cache_key": cache_info.get("key"),
-                    "source_pk": parent_pk,
-                    "label_map": label_map,
-                    "ready_at": datetime.datetime.now(datetime.timezone.utc),
-                }
+                logger.info(f"Cache: {parent_pk} finished but no longer leads its entry")
+            else:
+                logger.info(f"Cache: entry {entry['cache_key']} ready from {parent_pk}")
         else:
-            if not cacheable:
-                logger.info(f"Cache: overwrite run {parent_pk} not cacheable")
-                return
-            entry = await ars_db.upsert_cache_entry_ready(
-                cache_info.get("generation"),
-                cache_info.get("key"),
-                parent_pk,
-                label_map,
+            await ars_db.upsert_cache_entry_ready(
+                cache_info.get("generation"), cache_info.get("key"), parent_pk, label_map
             )
             logger.info(f"Cache: entry {cache_info.get('key')} overwritten by {parent_pk}")
-        await _resolve_waiters(parent_pk, entry, logger)
     except Exception as e:
         logger.error(f"Cache completion hook failed for {parent_pk}: {e}", exc_info=True)
 
 
 async def on_parent_failed(parent_row: Dict[str, Any], logger: logging.Logger) -> None:
-    """A leader ended in Error: its waiters must not wait on it."""
+    """A leader ended in Error: drop its pending entry so the next identical
+    submit runs the query again (whoever already holds the pk sees the
+    error, as they would for any failed query)."""
     cache_info = (parent_row.get("params") or {}).get("cache") or {}
     if cache_info.get("role") != ROLE_LEADER:
         return
     try:
-        await fail_over(parent_row["id"], logger)
+        await ars_db.delete_pending_cache_entry(parent_row["id"])
     except Exception as e:
-        logger.error(
-            f"Cache fail-over for {parent_row['id']} failed: {e}", exc_info=True
-        )
+        logger.error(f"Cache cleanup for failed leader {parent_row['id']}: {e}")
 
 
 async def invalidate_all(reason: Optional[str] = None) -> int:
@@ -792,9 +675,10 @@ async def stats() -> Dict[str, Any]:
 
 
 async def repair_sweep(logger: logging.Logger) -> Dict[str, int]:
-    """Watchdog pass: finish or fail over stuck leaders, re-copy stuck
-    waiters, purge superseded generations."""
-    counts = {"stale_pending": 0, "stuck_waiters": 0, "purged": 0}
+    """Watchdog pass: settle stale pending entries (finish a Done leader's
+    bookkeeping, drop anything else so the query can be re-run) and purge
+    superseded generations."""
+    counts = {"stale_pending": 0, "purged": 0}
     if not settings.ars_cache_enabled:
         return counts
     for entry in await ars_db.get_stale_pending_cache_entries(
@@ -807,23 +691,17 @@ async def repair_sweep(logger: logging.Logger) -> Dict[str, int]:
                 row = await ars_db.get_message_row(leader_pk)
                 if row is not None:
                     await on_parent_complete(row, logger)
+                    # a run the hook judged not cacheable leaves the row
+                    # behind; make sure it is gone either way
+                    await ars_db.delete_pending_cache_entry(leader_pk)
                     continue
             logger.warning(
                 f"Cache: pending entry led by {leader_pk} "
-                f"(status {entry.get('leader_status')}) is stale; failing over"
+                f"(status {entry.get('leader_status')}) is stale; dropping it"
             )
-            await fail_over(leader_pk, logger)
+            await ars_db.delete_pending_cache_entry(leader_pk)
         except Exception as e:
             logger.error(f"Cache repair for leader {leader_pk} failed: {e}")
-    for waiter in await ars_db.get_stuck_cache_waiters():
-        counts["stuck_waiters"] += 1
-        waiter_pk = waiter["parent_pk"]
-        try:
-            # a half-built copy from the crashed attempt is discarded first
-            await ars_db.delete_children(waiter_pk)
-            await _copy_to_waiter(waiter, waiter["entry"], logger)
-        except Exception as e:
-            logger.error(f"Cache repair for waiter {waiter_pk} failed: {e}")
     try:
         generation = await ars_db.get_cache_generation()
         counts["purged"] = await ars_db.purge_stale_cache_entries(

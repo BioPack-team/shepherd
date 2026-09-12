@@ -1,22 +1,28 @@
 # ARS Response Cache — Design Plan
 
-**Status:** Implemented (revision 2 design). Code: `shepherd_utils/ars/cache.py`,
+**Status:** Implemented (revision 3 design). Code: `shepherd_utils/ars/cache.py`,
 SQL in `shepherd_utils/ars/db.py` (response-cache section), routes in
 `shepherd_server/aras/ars.py`, hook in `shepherd_utils/ars/lifecycle.py`,
 sweep in `workers/ars_watchdog/worker.py`, CLI `scripts/ars_cache.py`.
 Tests: `tests/unit/ars/test_cache_key.py`, `test_cache_flow.py`,
 `test_ars_api_contract.py` (cache section). Register: deviation 13.
-**Scope:** A whole-response cache in front of the ARS pipeline. A cache hit on
-`POST /ars/api/submit` produces a fully completed ARS message tree (parent,
-merged message, per-ARA children) without enqueuing work for any other
-Shepherd worker (no fan-out, no ARA lookups, no merge, no post-process).
 
-Revision 2 changes (from review): the cache reuses the completed trees
-already stored in `ars_message.data` instead of a separate blob table;
-retention rules are redefined around that; query-graph canonicalization is
-renaming-invariant for node/edge/path ids; per-ARA children are always
-carried in full; a served response carries a TRAPI log entry saying it came
-from the cache.
+**Scope:** A whole-response cache in front of the ARS pipeline. There is
+**one message tree per distinct query per cache generation**. The first
+submit to see a query runs it; every later structurally identical submit is
+handed that same pk. A hit enqueues nothing for any Shepherd worker and
+stores nothing.
+
+Revision history:
+
+- *Revision 2:* reuse the completed trees already stored in
+  `ars_message.data` instead of a separate blob table; renaming-invariant
+  canonicalization; full per-ARA children; cache log line.
+- *Revision 3 (this):* **shared pks**. A hit no longer copies the source
+  tree under a fresh pk; it returns the source pk. The conversion to the
+  caller's query-graph labels happens once, in memory, on the POST
+  response. GETs of the pk return the stored original. This removed the
+  tree copy, the waiter table, leader fail-over and the stuck-waiter repair.
 
 ---
 
@@ -24,44 +30,40 @@ from the cache.
 
 | # | Requirement | Design answer (section) |
 |---|---|---|
-| R1 | Cache the **full response**; a hit must not touch any other Shepherd worker | The leader's own completed tree *is* the cache entry; a hit copies it into a new tree inline in `submit` (§4, §6.1) |
+| R1 | Cache the **full response**; a hit must not touch any other Shepherd worker | The leader's own completed tree *is* the cache entry; a hit answers with that tree's pk (§5, §6) |
 | R2 | Key = hash of the query graph, agnostic to key order, null / missing / empty fields, **and to node/edge/path id names** | Structural canonicalization + SHA-256 (§3) |
 | R3 | **No TTL** on cache entries | Postgres; cache-source trees are exempt from the retention purge while their generation is live (§7) |
 | R4 | Invalidate the **whole cache** on demand | Generation counter; bump = invalidate all; superseded sources age out under normal retention (§7) |
 | R5 | TRAPI `bypass_cache` skips the cache | No read, no write (§5) |
 | R6 | `parameters.overwrite_cache` overwrites that one entry | No read, forced write (§5) |
-| R7 | Two identical in-flight misses → run once, answer both | Leader/follower coalescing on a `pending` index row, resolved at parent completion (§6) |
-| R8 | Full-fidelity per-ARA children on a hit | Every child row + blob is copied (§6.1) |
-| R9 | A served response says it came from the cache | TRAPI `logs` entry appended to the merged message (§5) |
+| R7 | Two identical in-flight misses → run once, answer both | The second submit is handed the leader's pk while it is still Running (§6) |
+| R8 | Full-fidelity per-ARA children on a hit | The shared pk *is* the original tree, children included (§6) |
+| R9 | A served response says it came from the cache | TRAPI `logs` entry on the POST hit body, and a render-time note on GETs of the cached merged message (§5) |
+| R10 | One pk per cache key; no per-hit copies | Hits create no rows and no blobs (§2, §6) |
 
 ---
 
-## 2. Where the cache lives — Postgres, reusing `ars_message.data`
+## 2. Where the cache lives — Postgres, one tree per query
 
 Every terminal ARS message already has a zstd copy of its payload in
-`ars_message.data` (`persist_data_copy`). The cache adds **no second copy of
-any blob**. It adds one small **index table** mapping a cache key to the
-parent pk of a completed tree (the *source tree*), and a rule that source
-trees backing a live cache generation are never purged. A hit copies the
-source tree into a fresh tree for the new parent (rows + blobs), so every
-client still owns an ordinary message tree with its own pk.
+`ars_message.data` (`persist_data_copy`). The cache adds **no copy of any
+blob and no rows per hit**. It adds one small **index table** mapping a
+cache key to the parent pk of the one completed tree that answers it (the
+*source tree*), and a rule that source trees backing a live cache generation
+are never purged. Every submit that matches an entry gets **that pk**.
 
 Why not Redis: `shepherd_broker/redis.conf` runs `maxmemory 6gb` with
 `maxmemory-policy volatile-ttl`, under which only keys *with* a TTL are ever
 evicted. TTL-less data would grow until the cap, and then **every write to
 the shared instance fails** (Streams broker, hot blobs, locks, logs). Postgres
 disk is the cheap, growable resource here; Redis memory is not. Redis stays
-what it is today: the hot copy (with `redis_ttl`) that the UI reads, written
-for a cached tree exactly as for a fresh one.
+what it is today: the hot copy (with `redis_ttl`) that the UI reads;
+`load_message_data` re-warms it from Postgres when a cached tree is read
+after its Redis copy expired.
 
-Disk cost model: one source tree per distinct query (kept until the
-generation is invalidated *and* the normal retention window has passed) plus
-one copied tree per hit (aging out under normal retention like any other
-tree). The per-hit copy exists because bindings are rewritten to the
-caller's ids and a cache log entry is appended (§5, §6.1), so the bytes are
-never identical to the source anyway. A zero-copy variant (`data_ref`
-pointer column, rewrite on read) is possible later if hit volume makes copy
-storage a problem; not in v1.
+Disk cost model: one source tree per distinct query per generation, kept
+until the generation is invalidated *and* the normal retention window has
+passed. Hits cost one counter increment.
 
 ---
 
@@ -145,7 +147,7 @@ CREATE TABLE IF NOT EXISTS ars_cache_meta (
 );
 INSERT INTO ars_cache_meta (id) VALUES (TRUE) ON CONFLICT DO NOTHING;
 
--- The index: key -> source tree. 'pending' while the leader runs.
+-- The index: key -> the one tree that answers it. 'pending' while the leader runs.
 CREATE TABLE IF NOT EXISTS ars_response_cache (
   generation    INT  NOT NULL,
   cache_key     TEXT NOT NULL,
@@ -161,15 +163,6 @@ CREATE TABLE IF NOT EXISTS ars_response_cache (
 CREATE INDEX IF NOT EXISTS idx_ars_response_cache_source ON ars_response_cache (source_pk);
 CREATE INDEX IF NOT EXISTS idx_ars_response_cache_state_created ON ars_response_cache (state, created_at);
 
--- Followers waiting on a pending leader.
-CREATE TABLE IF NOT EXISTS ars_response_cache_waiter (
-  parent_pk   UUID PRIMARY KEY REFERENCES ars_message(id),
-  leader_pk   UUID NOT NULL REFERENCES ars_message(id),
-  generation  INT  NOT NULL,
-  cache_key   TEXT NOT NULL,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_ars_response_cache_waiter_leader ON ars_response_cache_waiter (leader_pk);
 ```
 
 No new columns on `ars_message`; a hit tree records its provenance in
@@ -194,127 +187,99 @@ elif body.parameters.overwrite_cache is true: mode = "overwrite"  # no read, for
 
 | mode | lookup | `ready` hit | `pending` hit | miss | at completion |
 |---|---|---|---|---|---|
-| normal | yes | copy source tree inline (§6.1) | become follower (§6.2) | claim leadership, fan out | leader flips row to `ready`, resolves followers |
-| overwrite | no | — | — | fan out (not a leader; ignores pending rows) | upsert row to point at *this* tree (last write wins) |
-| bypass | no | — | — | fan out | nothing |
+| normal | yes | **201 with the source pk**; `data` = converted merged response | **201 with the leader pk**, still Running; `data` = caller's body | create parent, claim key, fan out | leader flips row to `ready` |
+| overwrite | no | — | — | create parent, fan out (no claim) | upsert row to point at *this* tree |
+| bypass | no | — | — | create parent, fan out | nothing |
 
 The submit body is forwarded to ARAs unchanged in every mode.
 
-**What a hit serves.** For each blob copied from the source tree:
+**What a hit's 201 carries.** The envelope of the source parent row (so
+`pk`, `status: Done`, `merged_version`, `merged_versions_list`, `params`
+are the source's), with `fields.data` replaced by the source's final merged
+message converted to the caller's labels:
 
-1. **Label rewrite**: compose `source_id → canonical_id` (stored
-   `label_map`) with `canonical_id → caller_id` (computed from the incoming
-   graph) and rename, inside every payload: `message.query_graph` node /
-   edge / path keys and the `subject`/`object` references; every
-   `results[*].node_bindings` key; every `results[*].analyses[*].edge_bindings`
-   key; every `analyses[*].path_bindings` key. Knowledge-graph and
-   auxiliary-graph ids are untouched (they are KG ids, not query ids). When
-   the composed map is the identity, the rename pass is skipped.
-2. **Cache log entry** (merged message only — the per-ARA children are
-   copied verbatim so they remain what each ARA actually returned):
-   ```json
-   {"timestamp": "<now iso>", "level": "INFO", "code": null,
-    "message": "Served from ARS response cache (source <source_pk>, cached <ready_at>, generation <g>)"}
-   ```
-   appended to top-level `logs` (created if absent).
-3. Re-encode with the shared `encode_message` codec, write to Redis DB 1
-   (`redis_ttl`) and `ars_message.data`.
+1. **Label rewrite** (in memory, per request): compose `source_id →
+   canonical_id` (the entry's stored `label_map`) with `canonical_id →
+   caller_id` (computed from the incoming graph) and rename
+   `message.query_graph` node / edge / path keys and `subject` / `object`
+   references, every `results[*].node_bindings` key, every
+   `analyses[*].edge_bindings` / `path_bindings` key. KG and aux-graph ids
+   are untouched. An identity map is a no-op.
+2. **Cache log entry** appended to the converted copy's top-level `logs`:
+   `Served from ARS response cache (source <pk>, cached <ts>, generation <g>)`.
 
-Provenance on the parent row, visible in the envelope and cheap for the
-monitor to count:
+Nothing is written. **Subsequent GETs of the pk return the stored original**
+under the source's labels. That is fine: a response's bindings only need to
+agree with the query graph inside the same response, which they do.
 
-```json
-"cache": {"key": "<sha256>", "generation": 3,
-          "role": "hit" | "leader" | "follower" | "overwrite" | "bypass",
-          "source_pk": "<uuid>"   /* hit, follower */,
-          "leader_pk": "<uuid>"   /* follower while pending */,
-          "served_at": "<iso>"    /* hit, follower */}
-```
+**GET note.** When `GET /ars/api/messages/<pk>` renders the final merged
+message of a tree that backs a ready entry, a log line is appended to the
+rendered JSON at render time (`This message is the ARS response cache entry
+for its query (generation g, cached ts, served N time(s))`). The handler
+already decompresses the blob to render it, so this is one indexed lookup;
+the stored bytes are never modified.
 
-**Response to the client.** `201` with the parent envelope. On a hit the
-parent already reads `Done/200` with `merged_version` set (Q7). Clients
-polling `messages/<pk>?trace=y` see a complete tree with all children.
+**Provenance.** Source parents carry `params.cache = {key, generation,
+role}` with role `leader`, `overwrite`, `bypass` or `uncached` (cache
+bookkeeping failed; ran as an ordinary query). Hits leave no row, so hit
+volume lives in the index row's `hit_count` / `last_hit_at` (visible via
+`scripts/ars_cache.py stats|show` and `GET /ars/api/cache`).
 
 ---
 
-## 6. Coalescing and materialization
+## 6. Submit flow in detail
 
-### 6.1 Copying the source tree — `cache.materialize(parent_pk, entry, caller_graph, logger)`
+`submit` runs two cache steps around the parent-row creation:
 
-Called inline from `submit` (ready hit) and from the completion hook
-(followers). Runs the CPU-bound decode/rename/encode in a thread
-(`asyncio.to_thread`) like `save_message` already does.
+1. **`cache.lookup(body)`** — before any row exists. Normal mode only.
+   Reads the current generation and the entry for the key.
+   - `ready` → load the source parent and its `merged_version` payload,
+     rename to the caller's labels, append the log line, bump `hit_count`,
+     return **(SERVED, source row, converted payload)**.
+   - `pending` → return **(WAITING, leader row, caller's body)**.
+   - none → return None: proceed as a miss.
+   - A `ready` entry whose source is missing / not Done / has no merged
+     payload is **broken**: the entry is deleted and the submit proceeds as
+     a miss. A `pending` entry whose leader row is gone is deleted likewise.
+2. **`cache.claim_or_serve(parent_row, body)`** — after the parent row and
+   its query blob exist (the 201 for a miss still promises a stored query
+   and a queued fan-out).
+   - bypass / overwrite → record the role, DISPATCH.
+   - `INSERT … ON CONFLICT DO NOTHING` on `(generation, key)` with this
+     parent as `source_pk`. Inserted → role `leader`, DISPATCH.
+   - Conflict → a concurrent identical submit won between our lookup and
+     our claim: serve *its* entry exactly as in step 1 and **discard our own
+     parent row** (row + Redis blob); the caller gets the winner's pk.
+   - Any exception → DISPATCH (the cache never fails a submit).
 
-1. Load the source parent row and its children (`get_children(source_pk)`).
-   If the source parent is no longer `D`, or its merged message has no data
-   anywhere (Redis or Postgres), treat the entry as **broken**: delete the
-   index row, log a warning, and continue as a miss (become leader).
-2. For each non-merge child, in `ts` order: `create_message(actor_id=
-   child.actor, status, code, ref=parent_pk, params=child.params,
-   name=child.name)`; copy the blob via `load_message_data(child.id)` →
-   rename → `save_message_data(new_pk)`; `update_message(new_pk,
-   skip_coercion=True, status, code, url, result_count, result_stat)` so a
-   cached `E/598` child stays `598`; `persist_data_copy(new_pk)`.
-3. Merge child (`ars-ars-agent`, i.e. the source's `merged_version`):
-   same, plus the cache log entry; `status D / code 200`.
-4. `update_message(parent_pk, status="D", code=200, merged_version=<new
-   merge pk>, merged_versions_list=[[<new merge pk>, "ars"]],
-   params={...source params (query_type, stats), "cache": {...}})`, then
-   `persist_data_copy(parent_pk)`.
-5. `notify_subscribers(parent, None)` — the parent→`D` save-time
-   notification; relevant for followers, a no-op for inline hits.
-6. `UPDATE ars_response_cache SET hit_count = hit_count + 1, last_hit_at = NOW()`.
+**Completion hook** (`lifecycle.check_parent_completion` → `cache.on_parent_complete`):
+a `leader` whose run is cacheable flips its pending row to `ready` with the
+`label_map` of its own query graph; a leader whose run is **not cacheable**
+(Q5: empty merged result while an ARA child errored, or any error when
+`ars_cache_store_partial` is off) deletes its pending row so the next
+identical submit re-runs the query; an `overwrite` run upserts the row to
+point at itself. A leader that ends in Error (`on_parent_failed`) deletes its
+pending row.
 
-Actors are referenced by id straight from the source rows (same database,
-same registry), so no `(inforesid, path)` re-resolution is needed.
+**What a pending-hit caller experiences.** They poll the leader's pk and see
+Done at the same instant the leader's own submitter does. If the leader's
+run fails or is not cacheable, they see that outcome; the pending row is
+gone, so a resubmit (or `bypass_cache`) runs the query afresh.
 
-### 6.2 Leader / follower on a miss (in `submit`)
+**Watchdog sweep** (`cache.repair_sweep`, every `ars_watchdog` tick):
+`pending` rows older than `ars_cache_pending_max_sec` whose leader is Done
+get the completion hook re-run (then the row is removed if still pending);
+any other stale pending row — leader Error, missing, or still Running past
+the threshold — is dropped so the query can be re-run. Superseded
+generations' rows are deleted in batches after `ars_cache_stale_grace_sec`.
 
-```sql
-INSERT INTO ars_response_cache (generation, cache_key, state, source_pk)
-VALUES (%s, %s, 'pending', %s) ON CONFLICT (generation, cache_key) DO NOTHING RETURNING source_pk;
-```
-
-- Inserted → **leader**: proceed exactly as today (`add_task("ars.fanout")`),
-  `params.cache.role = "leader"`.
-- Conflict → re-read the row: `ready` (lost a race) → materialize as a hit;
-  `pending` → **follower**: insert a waiter row, **no** fan-out, parent stays
-  `Running/202`, return the 201 envelope.
-
-### 6.3 Completion hook (in `lifecycle.check_parent_completion`)
-
-After the parent transitions to `D` (both branches), `cache.on_parent_complete(parent_pk)`:
-
-- **leader**: cacheability check (Q5 — skip when the merged result is the
-  synthesized empty message *and* an ARA child ended in `E`; behind
-  `ars_cache_store_partial`). If cacheable: compute `label_map` from the
-  parent's own query graph and `UPDATE … SET state='ready', ready_at=NOW(),
-  label_map=%s WHERE source_pk=%s AND state='pending'`. If not: delete the
-  pending row and fail followers over (below).
-- **overwrite**: `INSERT … ON CONFLICT DO UPDATE SET state='ready',
-  source_pk=<this parent>, label_map=…, ready_at=NOW()` (the previous
-  source tree becomes an ordinary tree and ages out).
-- Then resolve waiters: `SELECT parent_pk FROM ars_response_cache_waiter
-  WHERE leader_pk = %s`; for each, load its stored query blob (for the
-  caller-side label map), `materialize`, delete the waiter row. Failures
-  are per-waiter and left for the repair sweep.
-
-If the parent transitions to **`E`** (leader failed): **fail over** — oldest
-waiter becomes the new leader (`UPDATE ars_response_cache SET source_pk =
-<it>`, repoint remaining waiters, set its `params.cache.role = "leader"`),
-and `add_task("ars.fanout")` for it from its own stored query. No waiters →
-delete the pending row.
-
-### 6.4 Repair sweep (`ars_watchdog`, existing 60 s loop)
-
-1. `pending` rows older than `ars_cache_pending_max_sec` (default 1200 s)
-   whose leader is terminal or missing → run §6.3 for that leader.
-2. Waiters whose entry is `ready` but who are still `R` (a materialization
-   crashed) → delete any half-created children (`DELETE FROM ars_message
-   WHERE ref = waiter_pk`) and materialize again; idempotent.
-3. Delete index rows with `generation < current` once older than
-   `ars_cache_stale_grace_sec` (default 86400 s), in batches. Their source
-   trees then fall under normal retention (§7).
+**Shared-pk consequences, accepted:** `retain/<pk>` retains the tree for
+everyone (desirable); `block/<pk>` rewrites the shared payload for
+everyone; the row's `timestamp`, `name` and stored submit body are the
+first submitter's; `latest_pk` / `reports` / `get_status` count parent
+rows, so hits are not query volume there (use `hit_count`). `filter/<pk>`
+creates a *new* parent for its output, so it does not leak into the shared
+trace.
 
 ---
 
@@ -354,7 +319,8 @@ Consequences, and how the settings/flags now read:
 | `ars_cache_stale_grace_sec` (new) | — | how long superseded-generation index rows linger before deletion; only after they are gone does their source tree become purgeable |
 
 Since disk is the accepted cost, `ars_data_retention_days` can also simply be
-raised; nothing in the cache depends on its value. Hit-copy trees are
+raised; nothing in the cache depends on its value. Trees from `bypass_cache`
+and `overwrite_cache` runs that are not (or no longer) cache sources are
 ordinary trees and age out under it.
 
 ---
@@ -376,94 +342,32 @@ carried in full.)
 
 ## 9. Parity register entry
 
-Add to `docs/ARS_PARITY_REGISTER.md` → *Behavioral deviations*:
-
-> **Response cache** (Shepherd-native; upstream has none). With
-> `ars_cache_enabled`, a submit whose structurally-canonical query graph
-> (+workflow) matches a completed prior submit is answered by copying that
-> tree: the `201` envelope already reads `Done/200` with `merged_version`
-> set; the merged message carries an appended `logs` entry naming the cache
-> source; query-graph labels and result bindings are rewritten to the
-> caller's ids; children are copied with their original status/code.
-> Identical in-flight submits coalesce onto one run. Opt out per query with
-> TRAPI `bypass_cache`; refresh one entry with `parameters.overwrite_cache`;
-> flush all with the generation bump. Trees backing a live cache entry are
-> exempt from the payload retention purge. `params.cache` on the parent
-> records the role.
+See `docs/ARS_PARITY_REGISTER.md`, behavioral deviation 13.
 
 ---
 
 ## 10. Decisions
 
-Resolved in review: reuse `ars_message.data` (§2, §7); renaming-invariant
-ids (§3.2); full-fidelity children (§6.1); cache log entry in the response
-(§5). Still open, with proposed defaults:
-
-| # | Question | Proposed default |
-|---|---|---|
-| Q1 | Key material = `query_graph` **+ `workflow`**? | Include `workflow` when non-empty |
-| Q2 | Fold TRAPI schema defaults (`set_interpretation: "BATCH"`, `knowledge_type: "lookup"`) so explicit-default ≡ missing? | Not in v1; trivial behind `CACHE_KEY_VERSION` |
-| Q5 | Cache trees where some ARAs errored/timed out? | Yes, except "empty because everything failed"; `ars_cache_store_partial` to tighten |
-| Q6 | HTTP invalidation route gated by a bearer token, or script-only? | Both; route disabled unless `ars_admin_token` is set |
-| Q7 | `201` on a hit reports `Done`, or stays `Running` and materializes via a task? | Report `Done` |
-| Q8 | Cache log entry on the merged message only, or also on each copied child? | Merged only; children stay verbatim ARA output |
+Resolved: Postgres index over `ars_message.data` (§2); renaming-invariant
+ids with POST-time conversion (§3, §5); one pk per key, no per-hit copies
+(§6); `workflow` in the key; TRAPI schema defaults not folded (behind
+`CACHE_KEY_VERSION` if wanted later); partial trees cached except the
+"empty because everything failed" case (`ars_cache_store_partial`); admin
+route gated on `ars_admin_token` plus the CLI; the hit's 201 already reads
+`Done`; cache log line on the POST hit body plus a render-time GET note.
 
 ---
 
-## 11. Implementation outline
+## 11. Implementation map
 
-Files, in dependency order:
-
-1. `shepherd_utils/ars/schema.sql`, `shepherd_db/init_db.sql`,
-   `shepherd_utils/db.py` (marker index) — §4 tables.
-2. `shepherd_utils/config.py` — §8 settings.
-3. `shepherd_utils/ars/cache.py` (new) — `canonicalize`, `canonical_graph`
-   (+ label map), `cache_key`, `resolve_mode`, `rename_labels(payload,
-   mapping)`, `append_cache_log`, `lookup_or_claim`, `register_waiter`,
-   `materialize`, `on_parent_complete`, `fail_over`, `invalidate_all`,
-   `stats`, `repair_sweep`. SQL helpers in `shepherd_utils/ars/db.py`,
-   including the rewritten `purge_old_message_data`.
-4. `shepherd_server/aras/ars.py` — `submit` branches (§5, §6.2); `GET
-   /api/cache/`, `POST /api/cache/invalidate` (§7).
-5. `shepherd_utils/ars/lifecycle.py` — call `cache.on_parent_complete` in
-   both `D` branches and the `E` branch.
-6. `workers/ars_watchdog/worker.py` — `cache.repair_sweep` each tick.
-7. `scripts/ars_cache.py` — operator CLI.
-8. Docs: status → Implemented; register entry (§9); README section.
-
-Tests (`tests/unit/ars/test_cache_*.py`, existing fakeredis + `ars_db`
-AsyncMock conventions):
-
-- **Key / canonicalization**: reordered keys; reordered `ids` /
-  `categories` / `predicates`; `null` vs missing vs `[]` / `{}` — all equal.
-  **Renaming**: `{sn, on, t_edge}` ≡ `{n0, n1, e0}` ≡ `{a, b, x}` with
-  subject/object rewritten; a 2-hop chain with two blank middle nodes is
-  stable under every relabeling; swapping subject/object changes the key;
-  pathfinder `paths` relabel like edges; a graph with a symmetric pair of
-  identical nodes yields the same key under either assignment and a label
-  map that composes to a valid rename. `CACHE_KEY_VERSION` bump changes all.
-- **Rename pass**: `query_graph`, `node_bindings`, `edge_bindings`,
-  `path_bindings` keys renamed; KG / aux-graph ids untouched; identity map
-  is a no-op that preserves bytes.
-- **Submit contract**: miss → leader claims + fanout enqueued; ready hit →
-  no fanout, tree copied (children count, statuses, `598` preserved),
-  merged `logs` has the cache entry, envelope `Done`, `params.cache.role =
-  hit`, hit_count incremented; pending → waiter, no fanout, `Running`;
-  `bypass_cache` → no lookup/claim; `overwrite_cache` → no lookup, fanout,
-  `role=overwrite`; `ars_cache_enabled=false` → bypass; broken source
-  (missing data) → row deleted, becomes leader.
-- **Completion hook**: leader `D` → row `ready` with `label_map`, waiters
-  materialized (with *their* label maps) and deleted, subscribers notified;
-  leader `E` → oldest waiter promoted + fanned out, others repointed;
-  empty-merge with an `E` child → not cached, followers failed over;
-  overwrite → `source_pk` repointed.
-- **Retention**: purge skips a live cache source, purges it after
-  invalidation + grace; retained trees still exempt; hit-copy trees purge
-  normally.
-- **Watchdog repair**: stale pending resolved; stuck follower
-  re-materialized idempotently; stale generations purged after grace only.
-- **Invalidation**: bump makes a ready row a miss; route `403` without
-  token, `200` with; script `stats` / `invalidate` smoke test.
-- **Parity harness**: second identical submit (with different node labels)
-  yields an equivalent terminal tree after label normalization, with no
-  stub-ARA requests in the mockworld journal and the cache log line present.
+| concern | where |
+|---|---|
+| canonicalization, key, label maps, rename pass, log lines | `shepherd_utils/ars/cache.py` (pure functions) |
+| `lookup`, `claim_or_serve`, `annotate_cached_read`, completion hook, `repair_sweep`, `invalidate_all`, `stats` | `shepherd_utils/ars/cache.py` (orchestration) |
+| index SQL, generation, hit counting, stale/purge queries, retention exemption in `purge_old_message_data` | `shepherd_utils/ars/db.py` |
+| tables + marker index | `shepherd_utils/ars/schema.sql`, `shepherd_db/init_db.sql`, `shepherd_utils/db.py` |
+| submit wiring, GET note, `GET /api/cache`, `POST /api/cache/invalidate` | `shepherd_server/aras/ars.py` |
+| hook calls | `shepherd_utils/ars/lifecycle.py` |
+| sweep call | `workers/ars_watchdog/worker.py` |
+| operator CLI | `scripts/ars_cache.py` |
+| tests | `tests/unit/ars/test_cache_key.py`, `test_cache_flow.py`, `test_ars_api_contract.py` |

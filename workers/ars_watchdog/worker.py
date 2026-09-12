@@ -11,8 +11,8 @@ and, since 'E' is terminal, the parent completion check runs (upstream got
 this via the post_save signal).
 
 The loop also hosts the response-cache repair sweep (shepherd_utils.ars.cache
-.repair_sweep): pending entries whose leader is finished or gone, waiters
-whose copy crashed part-way, and superseded cache generations.
+.repair_sweep): pending entries whose leader is finished or gone, and
+superseded cache generations.
 
 Intent-level deviations, register-documented: upstream resolves the agent by
 indexing the Agent table with the ACTOR's pk (a latent bug whose outcome
@@ -93,7 +93,7 @@ async def run_forever():
             await sweep(LOGGER)
         except Exception as e:
             LOGGER.error(f"Watchdog sweep failed: {e}", exc_info=True)
-        # Response cache upkeep: stuck leaders / waiters, superseded
+        # Response cache upkeep: stale pending leaders, superseded
         # generations (docs/ARS_RESPONSE_CACHE_PLAN.md).
         try:
             repaired = await cache.repair_sweep(LOGGER)

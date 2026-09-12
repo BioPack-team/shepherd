@@ -103,41 +103,42 @@ remote ARAs for their result callbacks).
 
 The ARS keeps a whole-response cache in front of `/ars/api/submit`
 (`shepherd_utils/ars/cache.py`; design and rationale in
-`docs/ARS_RESPONSE_CACHE_PLAN.md`). A submit whose query graph is
-structurally identical to a completed earlier submit -- same content
-regardless of key order, null-vs-missing-vs-empty fields, list order, or
-the names chosen for query nodes/edges/paths -- is answered by copying that
-completed message tree under the new parent, so no ARA, merge or
-post-process worker runs. Identical queries that arrive while the first is
-still running coalesce onto it and all receive its answer. The copy is a
-full tree (every per-ARA child included), result bindings are rewritten to
-the caller's own node/edge ids, and the merged message gets a TRAPI log
-entry saying it was served from the cache and from which source.
+`docs/ARS_RESPONSE_CACHE_PLAN.md`). There is one message tree per distinct
+query: a submit whose query graph is structurally identical to a completed
+earlier submit -- same content regardless of key order,
+null-vs-missing-vs-empty fields, list order, or the names chosen for query
+nodes/edges/paths -- is handed **that tree's pk**. The `201` body is the
+source parent's envelope, already `Done`, whose `data` is the cached merged
+response converted to the caller's own node/edge ids with a log entry
+saying it came from the cache. Later `GET`s of the pk return the stored
+original. A submit identical to a query still in flight is handed the
+running query's pk. Hits create no rows and no payloads, so no ARA, merge
+or post-process worker runs and nothing is stored.
 
-The cache lives in Postgres and stores no payloads of its own: it indexes
-a query-graph hash to the source tree already kept in `ars_message.data`,
+The cache lives in Postgres and holds no payloads of its own: it indexes a
+query-graph hash to the source tree already kept in `ars_message.data`,
 and source trees backing a live cache generation are exempt from the
-`ARS_DATA_RETENTION_DAYS` payload purge. Budget disk accordingly (one tree
-per distinct query, kept until invalidated, plus one copied tree per hit,
-aging out normally). Entries have no TTL.
+`ARS_DATA_RETENTION_DAYS` payload purge. Budget disk for one tree per
+distinct query per generation. Entries have no TTL; old pks keep working
+after an invalidation until their payloads age out (or forever if retained).
 
 Controls:
 
 - `bypass_cache: true` (TRAPI top level) -- run fresh; neither read nor
   write the cache.
-- `parameters.overwrite_cache: true` -- run fresh and replace the cached
-  entry for this query with the result.
+- `parameters.overwrite_cache: true` -- run fresh and point the cached
+  entry for this query at the result.
 - Whole-cache invalidation (e.g. after a knowledge-graph release):
   `python scripts/ars_cache.py invalidate --reason "..."` from any host
   that reaches Postgres, or `POST /ars/api/cache/invalidate` with
   `Authorization: Bearer $ARS_ADMIN_TOKEN` (the route is disabled until
   `ARS_ADMIN_TOKEN` is set). `scripts/ars_cache.py stats|show|evict|key`
-  and `GET /ars/api/cache` cover inspection.
+  and `GET /ars/api/cache` cover inspection, including per-entry hit counts.
 - `ARS_CACHE_ENABLED=false` turns the whole thing off.
 
-Each parent message records what happened in `params.cache`
-(`role: hit | leader | follower | overwrite | bypass`), which the envelope
-exposes and monitoring can count.
+Because pks are shared, `retain/<pk>` retains the tree for every reader and
+`block/<pk>` edits it for every reader; the row's timestamp and name are the
+first submitter's.
 
 ### Worker
 

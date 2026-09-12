@@ -161,26 +161,29 @@ Behavioral deviations:
     envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery.
 13. **Response cache** (Shepherd-native; upstream has none —
     `shepherd_utils/ars/cache.py`, design in
-    `docs/ARS_RESPONSE_CACHE_PLAN.md`). With `ars_cache_enabled`, a submit
+    `docs/ARS_RESPONSE_CACHE_PLAN.md`). With `ars_cache_enabled` there is
+    one message tree per distinct query per cache generation. A submit
     whose structurally canonical query graph (node/edge/path ids treated
     as labels, key order and null/missing/empty ignored, lists as sets)
     plus non-empty `workflow` matches a completed prior submit is answered
-    by copying that tree under the new parent: the `201` envelope already
-    reads `Done/200` with `merged_version` set; every per-ARA child is
-    copied with its original status/code/counts/url; query-graph labels
-    and result bindings are rewritten to the caller's ids; the merged
-    message carries an appended `logs` entry naming the cache source.
-    Identical in-flight submits coalesce onto one leader run and receive
-    its answer (or are handed leadership if it fails). Opt out per query
-    with TRAPI `bypass_cache` (no read, no write); refresh one entry with
-    `parameters.overwrite_cache` (no read, forced write); flush all by
-    bumping the cache generation (`scripts/ars_cache.py invalidate` or the
-    token-gated `POST /ars/api/cache/invalidate`). `params.cache` on the
-    parent records the role (`hit` / `leader` / `follower` / `overwrite` /
-    `bypass` / `uncached`). Never cached: an empty merged result where an
-    ARA child errored. Tests: `tests/unit/ars/test_cache_key.py`,
-    `test_cache_flow.py`, and the cache section of
-    `test_ars_api_contract.py`.
+    with **that tree's pk**: the `201` envelope is the source parent's
+    (already `Done/200`, `merged_version` set) and its `data` is the cached
+    merged response converted to the caller's labels with an appended
+    `logs` line naming the source. GETs of the pk return the stored
+    original; GETs of the cached merged message carry a render-time log
+    note. A submit matching an in-flight query is handed the leader's pk
+    while it is still Running. No rows or payloads are written on a hit.
+    Opt out per query with TRAPI `bypass_cache` (no read, no write);
+    refresh one entry with `parameters.overwrite_cache` (no read, forced
+    write); flush all by bumping the cache generation
+    (`scripts/ars_cache.py invalidate` or the token-gated
+    `POST /ars/api/cache/invalidate`). Source parents record their role in
+    `params.cache` (`leader` / `overwrite` / `bypass` / `uncached`). Never
+    cached: an empty merged result where an ARA child errored. Shared-pk
+    consequences (retain/block act for all readers; timestamps and name are
+    the first submitter's) are accepted. Tests:
+    `tests/unit/ars/test_cache_key.py`, `test_cache_flow.py`, and the cache
+    section of `test_ars_api_contract.py`.
 13. **normalized_score is a plain float**: upstream stores rankdata's
     numpy.float64 through stdlib json (which accepts it as a float
     subclass); Shepherd's orjson blob codec rejects numpy scalars, so the

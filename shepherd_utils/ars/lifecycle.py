@@ -157,8 +157,9 @@ async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> Non
             await notify_subscribers(updated, None, task_logger)
             await ars_db.clear_subscriptions(parent_pk)
         await ars_db.persist_data_copy(parent_pk, task_logger)
-        # Response cache: a leader publishes its tree and answers its
-        # waiters; an overwrite run repoints its key. No-op otherwise.
+        # Response cache: a leader publishes its tree (or drops its pending
+        # entry when the run is not cacheable); an overwrite run repoints
+        # its key. No-op otherwise.
         if updated is not None:
             await cache.on_parent_complete(updated, task_logger)
     elif parent["status"] == "E":
