@@ -61,7 +61,17 @@ class Settings(BaseSettings):
     # out into many concurrent DB ops, so compose.yml/Helm give those
     # containers larger pools via these env vars while the remaining workers
     # keep the small default.
-    postgres_pool_min_size: int = 5
+    #
+    # min_size is a FLOOR, not a target: psycopg opens that many connections at
+    # startup and never reaps below it (``max_idle`` only trims connections
+    # above min_size), so the fleet holds (number of containers x min size)
+    # backends open even while completely idle. Keep the default low -- most
+    # workers are CPU-bound and touch the DB only between tasks, so they pay a
+    # one-off connect latency at most. Containers that really need warm
+    # connections raise it explicitly in compose.yml/Helm. Whenever the worker
+    # count changes, redo this arithmetic against both max_connections and the
+    # monitor's pg_connection_saturation threshold.
+    postgres_pool_min_size: int = 2
     postgres_pool_max_size: int = 10
     # Size of the Postgres data volume, set from the SAME Helm value that sizes
     # the PVC (e.g. "100Gi"). Lets the monitor compute how full the disk is and

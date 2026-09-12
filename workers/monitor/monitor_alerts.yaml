@@ -131,10 +131,19 @@ rules:
   # via MONITOR_POSTGRES_DOWN_GRACE_SEC.
 
   # Postgres health: connection saturation.
+  #
+  # This counts backends on the database, so it has to clear the fleet's IDLE
+  # FLOOR -- every container holds POSTGRES_POOL_MIN_SIZE connections open for
+  # its whole life -- or it fires around the clock on a healthy system. With
+  # the compose topology (29 DB-connecting containers: 26 at the default min 2,
+  # the two lookup workers at 10, the server at 3) that floor is ~75, and the
+  # all-pools-saturated ceiling is ~330 against max_connections=400. 250 sits
+  # well clear of the floor and of normal load while still warning before the
+  # cap. Recheck both numbers when workers are added or pool sizes change.
   - name: pg_connection_saturation
     type: threshold
     metric: pg_connection_count
-    threshold: 150
+    threshold: 250
     duration: 1m
     severity: warning
 
