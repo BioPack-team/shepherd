@@ -224,6 +224,7 @@ def db(mocker):
         "record_cache_hit": _patch("record_cache_hit"),
         "delete_cache_entry": _patch("delete_cache_entry", return_value=True),
         "delete_message": _patch("delete_message", return_value=True),
+        "message_has_data": _patch("message_has_data", return_value=True),
         "bump_cache_generation": _patch("bump_cache_generation", return_value=2),
         "cache_stats": _patch(
             "cache_stats",
@@ -953,9 +954,7 @@ def _source_tree(db):
     return source, merged, label_map
 
 
-async def test_submit_cache_hit_returns_source_pk_with_converted_response(
-    client, db, redis_mock
-):
+async def test_submit_cache_hit_returns_source_pk_without_payload(client, db, redis_mock):
     source, merged, label_map = _source_tree(db)
     db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
         gen, key, source["id"], label_map=label_map
@@ -963,26 +962,19 @@ async def test_submit_cache_hit_returns_source_pk_with_converted_response(
     resp = await client.post("/api/submit", json=RELABELED_QUERY)
     assert resp.status_code == 201
     body = resp.json()
-    # the caller is handed the shared, already-Done pk
+    # the caller is handed the shared, already-Done pk...
     assert body["pk"] == str(source["id"])
     assert body["fields"]["status"] == "Done"
     assert body["fields"]["code"] == 200
     assert body["fields"]["merged_version"] == str(merged["id"])
-    # ...and the cached merged response converted to their own labels
-    payload = body["fields"]["data"]
-    qg = payload["message"]["query_graph"]
-    assert set(qg["nodes"]) == {"disease", "chem"}
-    assert qg["edges"] == {"treats": {"subject": "chem", "object": "disease"}}
-    result = payload["message"]["results"][0]
-    assert set(result["node_bindings"]) == {"disease", "chem"}
-    assert set(result["analyses"][0]["edge_bindings"]) == {"treats"}
-    assert "MONDO:0005148" in payload["message"]["knowledge_graph"]["nodes"]
-    assert payload["logs"][0]["message"] == "merged"
-    assert "Served from ARS response cache" in payload["logs"][-1]["message"]
-    assert str(source["id"]) in payload["logs"][-1]["message"]
-    # nothing was created or dispatched
+    # ...with their own submit body as data, like any fresh parent: the
+    # merged response is NOT embedded (the client fetches merged_version)
+    assert body["fields"]["data"] == RELABELED_QUERY
+    assert len(resp.content) < 4096
+    # nothing was created, dispatched, or even decompressed
     db["create_message"].assert_not_awaited()
     db["save_message_data"].assert_not_awaited()
+    db["load_message_data"].assert_not_awaited()
     assert not await _fanout_enqueued()
     db["record_cache_hit"].assert_awaited_once()
 
@@ -1027,6 +1019,7 @@ async def test_submit_lost_race_discards_own_row_and_serves_winner(client, db, r
     assert resp.status_code == 201
     assert resp.json()["pk"] == str(source["id"])
     assert resp.json()["fields"]["status"] == "Done"
+    assert resp.json()["fields"]["data"] == QUERY
     # our own parent was created, then discarded
     db["create_message"].assert_awaited_once()
     db["delete_message"].assert_awaited_once()
@@ -1083,9 +1076,11 @@ async def test_message_get_of_cached_merged_message_carries_note(client, db, red
     )
     resp = await client.get(f"/api/messages/{merged['id']}")
     assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
     logs = resp.json()["fields"]["data"]["logs"]
     assert logs[0]["message"] == "merged"
-    assert "response cache entry" in logs[-1]["message"]
+    assert logs[-1]["message"].startswith("Served from ARS response cache")
+    assert str(source["id"]) in logs[-1]["message"]
     # the stored payload is untouched: nothing was saved
     db["save_message_data"].assert_not_awaited()
     # the parent itself (the query) gets no note

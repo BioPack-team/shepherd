@@ -113,6 +113,7 @@ def db(mocker):
         "get_stale_pending_cache_entries",
         "purge_stale_cache_entries",
         "delete_message",
+        "message_has_data",
         "get_message_row",
         "get_children",
         "update_message",
@@ -123,6 +124,7 @@ def db(mocker):
     }
     mocks["get_cache_generation"].return_value = 1
     mocks["get_cache_entry"].return_value = None
+    mocks["message_has_data"].return_value = True
     mocks["get_stale_pending_cache_entries"].return_value = []
     mocks["purge_stale_cache_entries"].return_value = 0
     mocks["update_message"].side_effect = lambda pk, **kw: {
@@ -170,32 +172,18 @@ async def test_lookup_miss_is_none(db):
     db["get_cache_entry"].assert_awaited_once_with(1, KEY)
 
 
-async def test_lookup_ready_hit_serves_source_pk_with_converted_data(db):
+async def test_lookup_ready_hit_serves_source_pk_with_callers_body(db):
     source = _source(db)
     db["get_cache_entry"].return_value = entry(source["id"])
     outcome, served_row, payload = await cache.lookup(RELABELED, LOGGER)
     assert outcome == cache.SERVED
     assert served_row is source  # the caller gets the source parent's pk
-    qg = payload["message"]["query_graph"]
-    assert set(qg["nodes"]) == {"dz", "cx"}
-    assert qg["edges"] == {"rel": {"subject": "cx", "object": "dz"}}
-    result = payload["message"]["results"][0]
-    assert set(result["node_bindings"]) == {"dz", "cx"}
-    assert set(result["analyses"][0]["edge_bindings"]) == {"rel"}
-    assert "MONDO:0005148" in payload["message"]["knowledge_graph"]["nodes"]
-    assert payload["logs"][0]["message"] == "merged"
-    assert "Served from ARS response cache" in payload["logs"][-1]["message"]
-    assert str(source["id"]) in payload["logs"][-1]["message"]
+    assert payload is RELABELED  # ...and their own body as the envelope data
+    # the merged payload itself is never loaded on the submit path
+    db["load_message_data"].assert_not_awaited()
+    db["message_has_data"].assert_awaited_once_with(source["merged_version"])
     db["record_cache_hit"].assert_awaited_once_with(1, KEY)
     db["delete_message"].assert_not_awaited()
-
-
-async def test_lookup_same_labels_is_identity(db):
-    source = _source(db)
-    db["get_cache_entry"].return_value = entry(source["id"])
-    _, _, payload = await cache.lookup(QUERY, LOGGER)
-    assert set(payload["message"]["query_graph"]["nodes"]) == {"n0", "n1"}
-    assert set(payload["message"]["results"][0]["node_bindings"]) == {"n0", "n1"}
 
 
 async def test_lookup_pending_hands_back_leader_pk(db):
@@ -218,8 +206,7 @@ async def test_lookup_pending_with_missing_leader_drops_entry(db):
 
 @pytest.mark.parametrize("breakage", ["missing_source", "source_running", "no_merged_version", "no_payload"])
 async def test_lookup_broken_ready_entry_is_dropped(db, breakage):
-    merged_pk = uuid.uuid4()
-    source = _source(db, merged_pk=merged_pk)
+    source = _source(db)
     if breakage == "missing_source":
         db["get_message_row"].side_effect = lambda pk: None
     elif breakage == "source_running":
@@ -227,7 +214,7 @@ async def test_lookup_broken_ready_entry_is_dropped(db, breakage):
     elif breakage == "no_merged_version":
         source["merged_version"] = None
     elif breakage == "no_payload":
-        db["load_message_data"].side_effect = lambda pk, *a: None
+        db["message_has_data"].return_value = False
     db["get_cache_entry"].return_value = entry(source["id"])
     assert await cache.lookup(QUERY, LOGGER) is None
     db["delete_cache_entry"].assert_awaited_once_with(1, KEY)
@@ -278,8 +265,7 @@ async def test_lost_race_to_ready_entry_serves_and_discards_own_row(db):
     source = _source(db)
     db["claim_or_get_cache_entry"].return_value = (entry(source["id"]), False)
     outcome, out, payload = await cache.claim_or_serve(parent, RELABELED, LOGGER)
-    assert outcome == cache.SERVED and out is source
-    assert set(payload["message"]["query_graph"]["nodes"]) == {"dz", "cx"}
+    assert outcome == cache.SERVED and out is source and payload is RELABELED
     db["delete_message"].assert_awaited_once_with(parent["id"])
     db["redis_delete"].assert_awaited_once_with(str(parent["id"]))
 
@@ -339,7 +325,8 @@ async def test_read_note_on_source_merged_message(db):
     out = await cache.annotate_cached_read(merged_row, MERGE_ACTOR, payload, LOGGER)
     assert out is payload
     note = payload["logs"][-1]["message"]
-    assert "response cache entry" in note and "served 4 time(s)" in note
+    assert note.startswith("Served from ARS response cache")
+    assert str(source["id"]) in note and "served 4 time(s)" in note
     assert len(payload["logs"]) == 2
 
 

@@ -18,11 +18,18 @@ Revision history:
 - *Revision 2:* reuse the completed trees already stored in
   `ars_message.data` instead of a separate blob table; renaming-invariant
   canonicalization; full per-ARA children; cache log line.
-- *Revision 3 (this):* **shared pks**. A hit no longer copies the source
-  tree under a fresh pk; it returns the source pk. The conversion to the
-  caller's query-graph labels happens once, in memory, on the POST
-  response. GETs of the pk return the stored original. This removed the
-  tree copy, the waiter table, leader fail-over and the stuck-waiter repair.
+- *Revision 3:* **shared pks**. A hit no longer copies the source tree
+  under a fresh pk; it returns the source pk. This removed the tree copy,
+  the waiter table, leader fail-over and the stuck-waiter repair.
+- *Revision 3.1 (this):* **the 201 carries no payload.** Embedding the
+  merged response (converted to the caller's labels) in the hit's 201 cost
+  seconds per hit -- decompress + stdlib `json.dumps(indent=2)` of tens of
+  MB on the event loop, then the same bytes fetched again via
+  `merged_version` -- and serialized concurrent hits. The 201 is now the
+  source envelope with the caller's own submit body as `data`, like any
+  fresh parent; clients fetch `merged_version` as usual and get the stored
+  original under the source's labels. The label-rewrite code was removed.
+  The merged-message GET decodes and serializes (orjson) in a worker thread.
 
 ---
 
@@ -38,7 +45,7 @@ Revision history:
 | R6 | `parameters.overwrite_cache` overwrites that one entry | No read, forced write (§5) |
 | R7 | Two identical in-flight misses → run once, answer both | The second submit is handed the leader's pk while it is still Running (§6) |
 | R8 | Full-fidelity per-ARA children on a hit | The shared pk *is* the original tree, children included (§6) |
-| R9 | A served response says it came from the cache | TRAPI `logs` entry on the POST hit body, and a render-time note on GETs of the cached merged message (§5) |
+| R9 | A served response says it came from the cache | Render-time TRAPI `logs` entry on GETs of the cached merged message (§5) |
 | R10 | One pk per cache key; no per-hit copies | Hits create no rows and no blobs (§2, §6) |
 
 ---
@@ -100,7 +107,7 @@ pre-populated `knowledge_graph` / `results`.
 
 Node, edge and path ids (`n0`, `sn`, `t_edge`, `p0`) are **labels**, not
 content. Two query graphs that differ only in those labels must produce the
-same key, and (§5) the hit must map the source's labels onto the caller's.
+same key. The served tree keeps the source's labels (§5).
 
 Algorithm (graphs are tiny — 2 to ~6 nodes — so exactness is cheap):
 
@@ -122,8 +129,8 @@ Algorithm (graphs are tiny — 2 to ~6 nodes — so exactness is cheap):
    inside a query graph.
 5. The canonical graph is `{nodes: {n0:…}, edges: {e0:…}, paths: {p0:…}}`
    with §3.1 applied. The **label map** `{caller_id → canonical_id}` for
-   nodes, edges and paths is returned alongside; it is what §5 uses to
-   rewrite bindings.
+   nodes, edges and paths is returned alongside and stored on the index
+   row for inspection (`scripts/ars_cache.py show`).
 
 Correctness note: a *wrong* hit is impossible from label symmetry — two
 nodes with identical colors are structurally interchangeable, so any
@@ -187,7 +194,7 @@ elif body.parameters.overwrite_cache is true: mode = "overwrite"  # no read, for
 
 | mode | lookup | `ready` hit | `pending` hit | miss | at completion |
 |---|---|---|---|---|---|
-| normal | yes | **201 with the source pk**; `data` = converted merged response | **201 with the leader pk**, still Running; `data` = caller's body | create parent, claim key, fan out | leader flips row to `ready` |
+| normal | yes | **201 with the source pk**, already Done; `data` = caller's body | **201 with the leader pk**, still Running; `data` = caller's body | create parent, claim key, fan out | leader flips row to `ready` |
 | overwrite | no | — | — | create parent, fan out (no claim) | upsert row to point at *this* tree |
 | bypass | no | — | — | create parent, fan out | nothing |
 
@@ -195,29 +202,29 @@ The submit body is forwarded to ARAs unchanged in every mode.
 
 **What a hit's 201 carries.** The envelope of the source parent row (so
 `pk`, `status: Done`, `merged_version`, `merged_versions_list`, `params`
-are the source's), with `fields.data` replaced by the source's final merged
-message converted to the caller's labels:
-
-1. **Label rewrite** (in memory, per request): compose `source_id →
-   canonical_id` (the entry's stored `label_map`) with `canonical_id →
-   caller_id` (computed from the incoming graph) and rename
-   `message.query_graph` node / edge / path keys and `subject` / `object`
-   references, every `results[*].node_bindings` key, every
-   `analyses[*].edge_bindings` / `path_bindings` key. KG and aux-graph ids
-   are untouched. An identity map is a no-op.
-2. **Cache log entry** appended to the converted copy's top-level `logs`:
-   `Served from ARS response cache (source <pk>, cached <ts>, generation <g>)`.
-
-Nothing is written. **Subsequent GETs of the pk return the stored original**
-under the source's labels. That is fine: a response's bindings only need to
-agree with the query graph inside the same response, which they do.
+are the source's) with `fields.data` set to the **caller's own submit
+body**, exactly as a fresh parent's 201 would carry it. The merged response
+is **not** embedded: the client polls `messages/<pk>?trace=y` (already
+Done on the first read) and fetches `merged_version`, just as for a query
+it ran itself. The fetched tree keeps the source's node/edge/path labels;
+its bindings agree with its own query graph, which is what a response has
+to satisfy. Nothing is written on a hit but the hit counter, and nothing
+large is decompressed or serialized on the submit path -- the only
+payload check is an `EXISTS` on the merged message.
 
 **GET note.** When `GET /ars/api/messages/<pk>` renders the final merged
 message of a tree that backs a ready entry, a log line is appended to the
-rendered JSON at render time (`This message is the ARS response cache entry
-for its query (generation g, cached ts, served N time(s))`). The handler
-already decompresses the blob to render it, so this is one indexed lookup;
-the stored bytes are never modified.
+rendered JSON at render time (`Served from ARS response cache: this message
+is the cached answer for its query (source <pk>, generation g, cached ts,
+served N time(s))`). The handler already decompresses the blob to render
+it, so this is one indexed lookup; the stored bytes are never modified.
+
+**Rendering cost.** That GET is the expensive half of every fetch, cached or
+not: a merged message is tens of MB of JSON. `load_message_data` now
+decompresses + parses in a worker thread, and the handler serializes once
+with orjson in a worker thread (previously stdlib `json.dumps` → `loads` →
+`dumps` on the event loop, ~4 s for 50 MB and blocking every other request
+on that process meanwhile).
 
 **Provenance.** Source parents carry `params.cache = {key, generation,
 role}` with role `leader`, `overwrite`, `bypass` or `uncached` (cache
@@ -233,9 +240,9 @@ volume lives in the index row's `hit_count` / `last_hit_at` (visible via
 
 1. **`cache.lookup(body)`** — before any row exists. Normal mode only.
    Reads the current generation and the entry for the key.
-   - `ready` → load the source parent and its `merged_version` payload,
-     rename to the caller's labels, append the log line, bump `hit_count`,
-     return **(SERVED, source row, converted payload)**.
+   - `ready` → load the source parent row, check its `merged_version`
+     payload exists (`EXISTS`, no decompression), bump `hit_count`, return
+     **(SERVED, source row, caller's body)**.
    - `pending` → return **(WAITING, leader row, caller's body)**.
    - none → return None: proceed as a miss.
    - A `ready` entry whose source is missing / not Done / has no merged
@@ -354,7 +361,8 @@ ids with POST-time conversion (§3, §5); one pk per key, no per-hit copies
 `CACHE_KEY_VERSION` if wanted later); partial trees cached except the
 "empty because everything failed" case (`ars_cache_store_partial`); admin
 route gated on `ars_admin_token` plus the CLI; the hit's 201 already reads
-`Done`; cache log line on the POST hit body plus a render-time GET note.
+`Done` and carries no payload; the served tree keeps the source's labels;
+the cache note is a render-time log line on the merged-message GET.
 
 ---
 
@@ -362,7 +370,7 @@ route gated on `ars_admin_token` plus the CLI; the hit's 201 already reads
 
 | concern | where |
 |---|---|
-| canonicalization, key, label maps, rename pass, log lines | `shepherd_utils/ars/cache.py` (pure functions) |
+| canonicalization, key, label maps, log-line helper | `shepherd_utils/ars/cache.py` (pure functions) |
 | `lookup`, `claim_or_serve`, `annotate_cached_read`, completion hook, `repair_sweep`, `invalidate_all`, `stats` | `shepherd_utils/ars/cache.py` (orchestration) |
 | index SQL, generation, hit counting, stale/purge queries, retention exemption in `purge_old_message_data` | `shepherd_utils/ars/db.py` |
 | tables + marker index | `shepherd_utils/ars/schema.sql`, `shepherd_db/init_db.sql`, `shepherd_utils/db.py` |

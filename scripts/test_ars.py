@@ -293,8 +293,10 @@ async def single_lookup(curie: str, target: str) -> dict:
             # 2. poll the trace until the parent leaves Running
             trace: dict = {}
             deadline = start + COMPLETION_TIMEOUT_SECONDS
+            # Poll first, then sleep: a response-cache hit comes back from
+            # /submit already Done, so the first trace read settles it
+            # without waiting a whole POLL_INTERVAL_SECONDS.
             while True:
-                await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 tr = await client.get(f"{base}/api/messages/{parent_pk}?trace=y")
                 metrics["poll_count"] += 1
                 tr.raise_for_status()
@@ -308,6 +310,7 @@ async def single_lookup(curie: str, target: str) -> dict:
                         f"parent {parent_pk} still {status} after "
                         f"{COMPLETION_TIMEOUT_SECONDS:.0f}s"
                     )
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
             metrics["completion_time_seconds"] = round(time.perf_counter() - start, 4)
             metrics["children"] = summarize_children(trace)
             _save_response(target, curie, "trace", trace)

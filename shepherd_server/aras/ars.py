@@ -19,6 +19,8 @@ import ast
 import asyncio
 import hmac
 import json
+
+import orjson
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -212,10 +214,12 @@ async def submit(request: Request) -> Response:
         # Response cache (Shepherd-native, docs/ARS_RESPONSE_CACHE_PLAN.md):
         # there is one message tree per distinct query. A structurally
         # identical completed query answers right here with the source
-        # parent's pk and its merged response converted to this caller's
-        # labels (SERVED); an identical in-flight one hands back the
-        # leader's pk, still Running (WAITING). Only a miss -- or
-        # bypass_cache / overwrite_cache -- creates a parent and fans out.
+        # parent's pk, already Done (SERVED); an identical in-flight one
+        # hands back the leader's pk, still Running (WAITING). Either way
+        # the envelope's data is this caller's own body, as for a fresh
+        # parent, and the client fetches merged_version as usual. Only a
+        # miss -- or bypass_cache / overwrite_cache -- creates a parent and
+        # fans out.
         served = await cache.lookup(data, logger)
         if served is not None:
             _, row, payload = served
@@ -412,7 +416,11 @@ async def message(key: str, request: Request) -> Response:
             mesg, actor, env["fields"]["data"], logger
         )
         env["fields"]["code"] = int(env["fields"]["code"])
-        return JSONResponse(content=json.loads(json.dumps(env, default=str)))
+        # A merged message is tens of MB of JSON: one orjson pass in a worker
+        # thread instead of stdlib dumps -> loads -> dumps on the event loop
+        # (which also stalled every other request on this process).
+        body = await asyncio.to_thread(orjson.dumps, env, default=str)
+        return Response(content=body, media_type="application/json")
 
     if request.method == "POST":
         return await _result_callback(pk, request)

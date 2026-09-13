@@ -4,10 +4,10 @@ Shepherd-native (the upstream ARS has none); design in
 docs/ARS_RESPONSE_CACHE_PLAN.md. There is exactly one message tree per
 distinct query per cache generation: the first submit to see a query
 becomes its *leader* and runs it; every later structurally identical submit
-is handed the leader's pk. A hit therefore stores nothing -- the 201 answers
-with the source parent's envelope whose ``data`` is the cached merged
-response converted to the caller's own query-graph labels -- and every
-subsequent GET of that pk returns the original, stored tree.
+is handed the leader's pk. A hit therefore stores nothing and transfers
+nothing but the envelope -- the 201 is the source parent's row (already
+Done, ``merged_version`` set) with the caller's own submit body as its
+``data`` -- and the client fetches the tree exactly as it would its own.
 
 The cache index (``ars_response_cache``) maps a canonical query-graph hash
 to the source parent's pk; the payloads are the ones already kept in
@@ -19,9 +19,10 @@ Two request-side knobs: TRAPI ``bypass_cache`` (no read, no write) and
 invalidation bumps a generation counter; old pks keep working.
 
 Canonicalization is renaming-invariant: node / edge / path ids are labels.
+The served tree keeps the source's labels (its bindings agree with its own
+query graph); the index records the source's label map for inspection.
 """
 
-import asyncio
 import datetime
 import hashlib
 import itertools
@@ -54,7 +55,7 @@ ROLE_UNCACHED = "uncached"
 
 # Outcomes of the submit-side steps
 DISPATCH = "dispatch"  # fan out as usual (this parent leads, or bypass/overwrite)
-SERVED = "served"  # answered from a ready entry: the source parent's pk + converted data
+SERVED = "served"  # answered from a ready entry: the source parent's pk
 WAITING = "waiting"  # coalesced onto a pending leader: the leader's pk, still Running
 
 MERGE_INFORESID = "infores:ars"
@@ -65,7 +66,6 @@ MERGE_INFORESID = "infores:ars"
 MAX_TIE_PERMUTATIONS = 5040
 
 _ENDPOINT_KEYS = ("subject", "object")
-_LABEL_KINDS = ("nodes", "edges", "paths")
 
 
 # ---------------------------------------------------------------------------
@@ -277,124 +277,23 @@ def resolve_mode(body: Any) -> str:
     return MODE_NORMAL
 
 
-# ---------------------------------------------------------------------------
-# Payload rewriting for a hit
-# ---------------------------------------------------------------------------
-
-
-def compose_label_maps(
-    source_map: Optional[Dict[str, Dict[str, str]]],
-    caller_map: Optional[Dict[str, Dict[str, str]]],
-) -> Dict[str, Dict[str, str]]:
-    """source id -> caller id, via the shared canonical ids. Identity
-    entries are dropped so an empty result means "nothing to rename"."""
-    out: Dict[str, Dict[str, str]] = {}
-    for kind in _LABEL_KINDS:
-        src = (source_map or {}).get(kind) or {}
-        caller = (caller_map or {}).get(kind) or {}
-        canon_to_caller = {canon: orig for orig, canon in caller.items()}
-        mapping = {}
-        for source_id, canon in src.items():
-            target = canon_to_caller.get(canon)
-            if target is not None and target != source_id:
-                mapping[source_id] = target
-        if mapping:
-            out[kind] = mapping
-    return out
-
-
-def _rename_keys(obj: Any, mapping: Dict[str, str]) -> Any:
-    if not isinstance(obj, dict) or not mapping:
-        return obj
-    return {mapping.get(k, k): v for k, v in obj.items()}
-
-
-def rename_labels(payload: Any, mapping: Dict[str, Dict[str, str]]) -> Any:
-    """Rewrite query-graph labels and result bindings in a TRAPI payload.
-
-    Renames ``message.query_graph`` node/edge/path keys and the
-    subject/object references inside edges and paths, every
-    ``results[*].node_bindings`` key, and every
-    ``results[*].analyses[*].edge_bindings`` / ``path_bindings`` key.
-    Knowledge-graph and auxiliary-graph ids are KG ids, not query ids, and
-    are untouched. Mutates and returns ``payload``; a no-op for an empty
-    mapping or a non-dict payload.
-    """
-    if not mapping or not isinstance(payload, dict):
-        return payload
-    node_map = mapping.get("nodes") or {}
-    edge_map = mapping.get("edges") or {}
-    path_map = mapping.get("paths") or {}
-    message = payload.get("message")
-    if not isinstance(message, dict):
-        return payload
-    qg = message.get("query_graph")
-    if isinstance(qg, dict):
-        if isinstance(qg.get("nodes"), dict):
-            qg["nodes"] = _rename_keys(qg["nodes"], node_map)
-        for section, section_map in (("edges", edge_map), ("paths", path_map)):
-            items = qg.get(section)
-            if not isinstance(items, dict):
-                continue
-            for item in items.values():
-                if isinstance(item, dict):
-                    for key in _ENDPOINT_KEYS:
-                        if key in item and item[key] in node_map:
-                            item[key] = node_map[item[key]]
-            qg[section] = _rename_keys(items, section_map)
-    results = message.get("results")
-    if isinstance(results, list):
-        for result in results:
-            if not isinstance(result, dict):
-                continue
-            if isinstance(result.get("node_bindings"), dict):
-                result["node_bindings"] = _rename_keys(result["node_bindings"], node_map)
-            analyses = result.get("analyses")
-            if isinstance(analyses, list):
-                for analysis in analyses:
-                    if not isinstance(analysis, dict):
-                        continue
-                    if isinstance(analysis.get("edge_bindings"), dict):
-                        analysis["edge_bindings"] = _rename_keys(
-                            analysis["edge_bindings"], edge_map
-                        )
-                    if isinstance(analysis.get("path_bindings"), dict):
-                        analysis["path_bindings"] = _rename_keys(
-                            analysis["path_bindings"], path_map
-                        )
-    return payload
-
-
-def cache_log_entry(source_pk, ready_at, generation) -> Dict[str, Any]:
-    now = datetime.datetime.now(datetime.timezone.utc)
-    cached = ready_at.isoformat() if hasattr(ready_at, "isoformat") else str(ready_at)
-    return {
-        "timestamp": now.isoformat(),
-        "level": "INFO",
-        "code": None,
-        "message": (
-            f"Served from ARS response cache (source {source_pk}, "
-            f"cached {cached}, generation {generation})"
-        ),
-    }
-
-
-def append_cache_log(payload: Any, entry: Dict[str, Any]) -> Any:
+def append_log(payload: Any, message: str) -> Any:
+    """Append a TRAPI log entry to a payload's top-level ``logs`` (created or
+    replaced when missing / malformed). Non-dict payloads pass through."""
     if not isinstance(payload, dict):
         return payload
     logs = payload.get("logs")
     if not isinstance(logs, list):
         logs = []
-    logs.append(entry)
+    logs.append(
+        {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "level": "INFO",
+            "code": None,
+            "message": message,
+        }
+    )
     payload["logs"] = logs
-    return payload
-
-
-def _rewrite_payload(payload, mapping, log_entry):
-    """CPU-bound part of a copy, run off the event loop."""
-    payload = rename_labels(payload, mapping)
-    if log_entry is not None:
-        payload = append_cache_log(payload, log_entry)
     return payload
 
 
@@ -420,13 +319,11 @@ class _BrokenEntry(Exception):
 
 
 async def _serve_ready(
-    entry: Dict[str, Any],
-    caller_map: Optional[Dict[str, Dict[str, str]]],
-    logger: logging.Logger,
-) -> Optional[Tuple[Dict[str, Any], Any]]:
-    """The source parent row plus its merged response converted to the
-    caller's labels, with the cache log line appended. None (and the entry
-    dropped) when the source tree is unusable."""
+    entry: Dict[str, Any], logger: logging.Logger
+) -> Optional[Dict[str, Any]]:
+    """The source parent row behind a ready entry, after checking the tree
+    can actually be read (Done, merged_version set, merged payload present
+    in Redis or Postgres). None (and the entry dropped) otherwise."""
     source_pk = entry["source_pk"]
     try:
         source = await ars_db.get_message_row(source_pk)
@@ -435,8 +332,7 @@ async def _serve_ready(
         merged_pk = source.get("merged_version")
         if merged_pk is None:
             raise _BrokenEntry(f"source {source_pk} has no merged_version")
-        merged = await ars_db.load_message_data(merged_pk, logger)
-        if merged is None:
+        if not await ars_db.message_has_data(merged_pk):
             raise _BrokenEntry(f"merged message {merged_pk} has no payload")
     except _BrokenEntry as e:
         logger.warning(f"Cache entry {entry.get('cache_key')} unusable, dropping: {e}")
@@ -445,36 +341,28 @@ async def _serve_ready(
         except Exception as de:
             logger.error(f"Failed to drop broken cache entry: {de}")
         return None
-    mapping = compose_label_maps(entry.get("label_map"), caller_map)
-    log_entry = cache_log_entry(
-        source_pk, entry.get("ready_at"), entry.get("generation")
-    )
-    payload = await asyncio.to_thread(_rewrite_payload, merged, mapping, log_entry)
-    return source, payload
+    return source
 
 
 async def _serve(
-    entry: Optional[Dict[str, Any]],
-    body: Any,
-    caller_map: Optional[Dict[str, Dict[str, str]]],
-    logger: logging.Logger,
+    entry: Optional[Dict[str, Any]], body: Any, logger: logging.Logger
 ) -> Optional[Tuple[str, Dict[str, Any], Any]]:
-    """Answer from an existing entry: (SERVED, source row, converted data)
-    for a ready one, (WAITING, leader row, the caller's own body) for a
-    pending one, None when there is nothing usable to answer with."""
+    """Answer from an existing entry: (SERVED, source row, body) for a ready
+    one, (WAITING, leader row, body) for a pending one, None when there is
+    nothing usable to answer with. ``body`` -- the caller's own submit --
+    rides along as the envelope's ``data``, exactly as for a fresh parent."""
     if entry is None:
         return None
     if entry["state"] == "ready":
-        result = await _serve_ready(entry, caller_map, logger)
-        if result is None:
+        source = await _serve_ready(entry, logger)
+        if source is None:
             return None
-        source, payload = result
         try:
             await ars_db.record_cache_hit(entry["generation"], entry["cache_key"])
         except Exception as e:  # bookkeeping only
             logger.debug(f"Cache hit count update failed: {e}")
         logger.info(f"Cache hit: serving {source['id']} for key {entry['cache_key']}")
-        return SERVED, source, payload
+        return SERVED, source, body
     leader = await ars_db.get_message_row(entry["source_pk"])
     if leader is None:
         logger.warning(
@@ -493,10 +381,10 @@ async def lookup(body: Any, logger: logging.Logger) -> Optional[Tuple[str, Dict[
     if not settings.ars_cache_enabled or resolve_mode(body) != MODE_NORMAL:
         return None
     try:
-        key, caller_map = cache_key(body)
+        key, _ = cache_key(body)
         generation = await ars_db.get_cache_generation()
         entry = await ars_db.get_cache_entry(generation, key)
-        return await _serve(entry, body, caller_map, logger)
+        return await _serve(entry, body, logger)
     except Exception as e:
         logger.error(f"Cache lookup failed: {e}", exc_info=True)
         return None
@@ -532,7 +420,7 @@ async def claim_or_serve(
     parent_pk = parent_row["id"]
     mode = resolve_mode(body)
     try:
-        key, caller_map = cache_key(body)
+        key, _ = cache_key(body)
         generation = await ars_db.get_cache_generation()
         base = {"key": key, "generation": generation}
         if mode == MODE_BYPASS:
@@ -545,7 +433,7 @@ async def claim_or_serve(
             )
             if claimed:
                 return DISPATCH, await _set_role(parent_row, role=ROLE_LEADER, **base), body
-            served = await _serve(entry, body, caller_map, logger)
+            served = await _serve(entry, body, logger)
             if served is not None:
                 await _discard_parent(parent_row, logger)
                 return served
@@ -575,18 +463,12 @@ async def annotate_cached_read(
             return payload
         cached = entry.get("ready_at")
         cached = cached.isoformat() if hasattr(cached, "isoformat") else str(cached)
-        append_cache_log(
+        append_log(
             payload,
-            {
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "level": "INFO",
-                "code": None,
-                "message": (
-                    f"This message is the ARS response cache entry for its query "
-                    f"(generation {entry.get('generation')}, cached {cached}, "
-                    f"served {entry.get('hit_count', 0)} time(s))"
-                ),
-            },
+            f"Served from ARS response cache: this message is the cached answer "
+            f"for its query (source {row['ref']}, generation "
+            f"{entry.get('generation')}, cached {cached}, served "
+            f"{entry.get('hit_count', 0)} time(s))",
         )
     except Exception as e:
         logger.debug(f"Cache read annotation skipped: {e}")

@@ -1,9 +1,9 @@
-"""Response-cache key canonicalization and payload label rewriting.
+"""Response-cache key canonicalization.
 
 Pure functions from shepherd_utils.ars.cache: value canonicalization
 (key order, null/missing/empty, set-like lists), structural canonicalization
-(node/edge/path ids are labels), key material selection, request-mode
-resolution, and the rename pass applied to a served payload.
+(node/edge/path ids are labels), key material selection and request-mode
+resolution.
 """
 
 import copy
@@ -291,127 +291,23 @@ def test_resolve_mode():
 
 
 # ---------------------------------------------------------------------------
-# rename pass on a served payload
+# log line helper
 # ---------------------------------------------------------------------------
 
 
-def _payload():
-    return {
-        "message": {
-            "query_graph": copy.deepcopy(QG),
-            "knowledge_graph": {
-                "nodes": {"MONDO:0005148": {}, "CHEBI:1": {}},
-                "edges": {"kge1": {"subject": "CHEBI:1", "object": "MONDO:0005148"}},
-            },
-            "results": [
-                {
-                    "node_bindings": {"sn": [{"id": "MONDO:0005148"}], "on": [{"id": "CHEBI:1"}]},
-                    "analyses": [
-                        {
-                            "resource_id": "infores:aragorn",
-                            "edge_bindings": {"t_edge": [{"id": "kge1"}]},
-                            "support_graphs": ["aux1"],
-                        }
-                    ],
-                }
-            ],
-            "auxiliary_graphs": {"aux1": {"edges": ["kge1"]}},
-        },
-        "logs": [{"message": "x"}],
-    }
-
-
-def test_compose_label_maps_source_to_caller():
-    source = {"nodes": {"sn": "n0", "on": "n1"}, "edges": {"t_edge": "e0"}, "paths": {}}
-    caller = {"nodes": {"disease": "n0", "chem": "n1"}, "edges": {"treats": "e0"}, "paths": {}}
-    assert cache.compose_label_maps(source, caller) == {
-        "nodes": {"sn": "disease", "on": "chem"},
-        "edges": {"t_edge": "treats"},
-    }
-    # identical labels compose to nothing
-    assert cache.compose_label_maps(source, source) == {}
-    assert cache.compose_label_maps(None, caller) == {}
-
-
-def test_rename_labels_rewrites_graph_and_bindings_only():
-    payload = _payload()
-    mapping = {"nodes": {"sn": "disease", "on": "chem"}, "edges": {"t_edge": "treats"}}
-    out = cache.rename_labels(payload, mapping)
-    qg = out["message"]["query_graph"]
-    assert set(qg["nodes"]) == {"disease", "chem"}
-    assert qg["edges"] == {
-        "treats": {
-            "subject": "chem",
-            "object": "disease",
-            "predicates": ["biolink:treats"],
-            "knowledge_type": "inferred",
-        }
-    }
-    result = out["message"]["results"][0]
-    assert set(result["node_bindings"]) == {"disease", "chem"}
-    assert result["analyses"][0]["edge_bindings"] == {"treats": [{"id": "kge1"}]}
-    # KG / aux graph ids are untouched
-    assert set(out["message"]["knowledge_graph"]["nodes"]) == {"MONDO:0005148", "CHEBI:1"}
-    assert out["message"]["auxiliary_graphs"] == {"aux1": {"edges": ["kge1"]}}
-    assert result["analyses"][0]["support_graphs"] == ["aux1"]
-
-
-def test_rename_labels_paths():
-    payload = {
-        "message": {
-            "query_graph": {
-                "nodes": {"n0": {}, "n1": {}},
-                "paths": {"p0": {"subject": "n0", "object": "n1"}},
-            },
-            "results": [
-                {"node_bindings": {"n0": [], "n1": []}, "analyses": [{"path_bindings": {"p0": []}}]}
-            ],
-        }
-    }
-    out = cache.rename_labels(
-        payload, {"nodes": {"n0": "s", "n1": "o"}, "paths": {"p0": "route"}}
-    )
-    assert out["message"]["query_graph"]["paths"] == {"route": {"subject": "s", "object": "o"}}
-    assert out["message"]["results"][0]["analyses"][0]["path_bindings"] == {"route": []}
-
-
-def test_rename_labels_identity_is_noop_and_tolerates_junk():
-    payload = _payload()
-    assert cache.rename_labels(copy.deepcopy(payload), {}) == payload
-    assert cache.rename_labels(["not", "a", "dict"], {"nodes": {"a": "b"}}) == ["not", "a", "dict"]
-    assert cache.rename_labels({"message": None}, {"nodes": {"a": "b"}}) == {"message": None}
-    junk = {"message": {"query_graph": {"nodes": 5}, "results": [7, {"node_bindings": 3}]}}
-    assert cache.rename_labels(copy.deepcopy(junk), {"nodes": {"a": "b"}}) == junk
-
-
-def test_source_to_caller_roundtrip_through_canonical_graph():
-    """End to end: a source tree answered under one labeling is renamed to a
-    caller's labeling via the two canonical label maps."""
-    source_qg = QG
-    caller_qg = relabel(QG, {"sn": "disease", "on": "chem"}, {"t_edge": "treats"})
-    _, source_map = cache.canonical_graph(source_qg)
-    _, caller_map = cache.canonical_graph(caller_qg)
-    mapping = cache.compose_label_maps(source_map, caller_map)
-    out = cache.rename_labels(_payload(), mapping)
-    assert out["message"]["query_graph"]["nodes"].keys() == caller_qg["nodes"].keys()
-    assert out["message"]["query_graph"]["edges"] == caller_qg["edges"]
-    assert set(out["message"]["results"][0]["node_bindings"]) == {"disease", "chem"}
-
-
-def test_append_cache_log():
-    entry = cache.cache_log_entry("src", "2026-09-12T00:00:00+00:00", 3)
-    assert entry["level"] == "INFO"
-    assert "source src" in entry["message"] and "generation 3" in entry["message"]
+def test_append_log():
     payload = {"logs": [{"message": "a"}]}
-    cache.append_cache_log(payload, entry)
-    assert payload["logs"][-1] is entry and len(payload["logs"]) == 2
+    cache.append_log(payload, "hello")
+    assert len(payload["logs"]) == 2
+    assert payload["logs"][-1]["message"] == "hello"
+    assert payload["logs"][-1]["level"] == "INFO"
     payload = {"logs": "garbage"}
-    cache.append_cache_log(payload, entry)
-    assert payload["logs"] == [entry]
+    cache.append_log(payload, "x")
+    assert [e["message"] for e in payload["logs"]] == ["x"]
     payload = {}
-    cache.append_cache_log(payload, entry)
-    assert payload["logs"] == [entry]
-    assert cache.append_cache_log("nope", entry) == "nope"
+    cache.append_log(payload, "x")
+    assert payload["logs"][0]["message"] == "x"
+    assert cache.append_log("nope", "x") == "nope"
 
 
 @pytest.mark.parametrize("bad", [None, 5, "x", [1, 2]])

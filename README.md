@@ -108,12 +108,13 @@ query: a submit whose query graph is structurally identical to a completed
 earlier submit -- same content regardless of key order,
 null-vs-missing-vs-empty fields, list order, or the names chosen for query
 nodes/edges/paths -- is handed **that tree's pk**. The `201` body is the
-source parent's envelope, already `Done`, whose `data` is the cached merged
-response converted to the caller's own node/edge ids with a log entry
-saying it came from the cache. Later `GET`s of the pk return the stored
-original. A submit identical to a query still in flight is handed the
-running query's pk. Hits create no rows and no payloads, so no ARA, merge
-or post-process worker runs and nothing is stored.
+source parent's envelope, already `Done`, with the caller's own submit body
+as `data` exactly like a fresh parent; the client then fetches
+`merged_version` as usual. The merged message keeps the labels of whoever
+ran the query first, and its `GET` carries a log entry saying it was served
+from the cache. A submit identical to a query still in flight is handed the
+running query's pk. Hits create no rows and no payloads and decompress
+nothing, so no ARA, merge or post-process worker runs and nothing is stored.
 
 The cache lives in Postgres and holds no payloads of its own: it indexes a
 query-graph hash to the source tree already kept in `ars_message.data`,

@@ -15,6 +15,7 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import orjson
 import zstandard
 from psycopg.types.json import Jsonb
 
@@ -850,7 +851,7 @@ def _decompress_payload(blob: bytes) -> Any:
             raw = gzip.decompress(blob)
         else:
             raw = blob
-        return json.loads(raw.decode("utf-8"))
+        return orjson.loads(raw)
     except Exception:
         return {}
 
@@ -905,13 +906,18 @@ async def load_message_data(
     message_id: Union[str, uuid.UUID],
     logger: logging.Logger,
 ) -> Optional[Any]:
-    """Payload dict for a message, or None when no blob exists anywhere."""
+    """Payload dict for a message, or None when no blob exists anywhere.
+
+    Decompression + JSON parsing of a multi-MB payload is pure CPU and runs
+    in a worker thread, so a server request handler (or a worker's task)
+    reading a large merged message does not stall its event loop."""
+    blob = None
     try:
-        return await shepherd_db.get_message(str(message_id), logger)
-    except KeyError:
-        pass
+        blob = await shepherd_db.data_db_client.get(str(message_id))
     except Exception as e:
         logger.warning(f"Redis read failed for {message_id}: {e}")
+    if blob is not None:
+        return await asyncio.to_thread(shepherd_db.decode_message, blob)
     try:
         async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
@@ -924,7 +930,7 @@ async def load_message_data(
         return None
     if row is None or row[0] is None:
         return None
-    payload = _decompress_payload(bytes(row[0]))
+    payload = await asyncio.to_thread(_decompress_payload, bytes(row[0]))
     # Re-warm Redis so subsequent reads are cheap again.
     try:
         await shepherd_db.save_message(str(message_id), payload, logger)

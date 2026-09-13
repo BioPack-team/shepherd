@@ -167,12 +167,14 @@ Behavioral deviations:
     as labels, key order and null/missing/empty ignored, lists as sets)
     plus non-empty `workflow` matches a completed prior submit is answered
     with **that tree's pk**: the `201` envelope is the source parent's
-    (already `Done/200`, `merged_version` set) and its `data` is the cached
-    merged response converted to the caller's labels with an appended
-    `logs` line naming the source. GETs of the pk return the stored
-    original; GETs of the cached merged message carry a render-time log
-    note. A submit matching an in-flight query is handed the leader's pk
-    while it is still Running. No rows or payloads are written on a hit.
+    (already `Done/200`, `merged_version` set) with the caller's own
+    submit body as `data`, like any fresh parent; the merged response is
+    fetched via `merged_version` as usual and keeps the source's
+    node/edge/path labels. GETs of the cached merged message carry a
+    render-time `logs` line naming the cache source. A submit matching an
+    in-flight query is handed the leader's pk while it is still Running.
+    No rows or payloads are written on a hit. The merged-message GET
+    decodes and serializes (orjson) off the event loop.
     Opt out per query with TRAPI `bypass_cache` (no read, no write);
     refresh one entry with `parameters.overwrite_cache` (no read, forced
     write); flush all by bumping the cache generation
