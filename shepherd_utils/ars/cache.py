@@ -382,8 +382,7 @@ async def lookup(body: Any, logger: logging.Logger) -> Optional[Tuple[str, Dict[
         return None
     try:
         key, _ = cache_key(body)
-        generation = await ars_db.get_cache_generation()
-        entry = await ars_db.get_cache_entry(generation, key)
+        _, entry = await ars_db.get_current_cache_entry(key)
         return await _serve(entry, body, logger)
     except Exception as e:
         logger.error(f"Cache lookup failed: {e}", exc_info=True)
@@ -421,58 +420,60 @@ async def claim_or_serve(
     mode = resolve_mode(body)
     try:
         key, _ = cache_key(body)
-        generation = await ars_db.get_cache_generation()
-        base = {"key": key, "generation": generation}
-        if mode == MODE_BYPASS:
-            return DISPATCH, await _set_role(parent_row, role=ROLE_BYPASS, **base), body
-        if mode == MODE_OVERWRITE:
-            return DISPATCH, await _set_role(parent_row, role=ROLE_OVERWRITE, **base), body
+        if mode in (MODE_BYPASS, MODE_OVERWRITE):
+            generation = await ars_db.get_cache_generation()
+            role = ROLE_BYPASS if mode == MODE_BYPASS else ROLE_OVERWRITE
+            row = await _set_role(parent_row, role=role, key=key, generation=generation)
+            return DISPATCH, row, body
+        generation = None
         for _ in range(2):
-            entry, claimed = await ars_db.claim_or_get_cache_entry(
-                generation, key, parent_pk
+            generation, entry, claimed = await ars_db.claim_or_get_cache_entry(
+                key, parent_pk
             )
             if claimed:
-                return DISPATCH, await _set_role(parent_row, role=ROLE_LEADER, **base), body
+                row = await _set_role(
+                    parent_row, role=ROLE_LEADER, key=key, generation=generation
+                )
+                return DISPATCH, row, body
             served = await _serve(entry, body, logger)
             if served is not None:
                 await _discard_parent(parent_row, logger)
                 return served
             # the entry was broken/vanished and has been dropped: claim again
-        return DISPATCH, await _set_role(parent_row, role=ROLE_UNCACHED, **base), body
+        row = await _set_role(
+            parent_row, role=ROLE_UNCACHED, key=key, generation=generation
+        )
+        return DISPATCH, row, body
     except Exception as e:
         logger.error(f"Cache bookkeeping failed for {parent_pk}: {e}", exc_info=True)
         return DISPATCH, parent_row, body
 
 
-async def annotate_cached_read(
-    row: Dict[str, Any], actor: Dict[str, Any], payload: Any, logger: logging.Logger
-) -> Any:
-    """GET-time note for readers of a cached tree: when ``row`` is the final
-    merged message of a cache source, append a log line saying so. The
-    stored bytes are never touched."""
-    if not settings.ars_cache_enabled or not isinstance(payload, dict):
-        return payload
-    if row.get("ref") is None or actor.get("inforesid") != MERGE_INFORESID:
-        return payload
+def cache_note(source_pk, cache_key_: str, generation) -> str:
+    return (
+        f"Served from ARS response cache: this message is the cached answer for "
+        f"its query (source {source_pk}, cache key {cache_key_}, generation "
+        f"{generation}, cached {datetime.datetime.now(datetime.timezone.utc).isoformat()})"
+    )
+
+
+async def _stamp_cached_answer(parent_row, cache_key_, generation, logger) -> None:
+    """Write the cache note into the stored merged message, once, at the
+    moment the tree becomes the cached answer. Reads of the message are then
+    a pure byte pass-through (no parse per read). Best-effort: a failure here
+    must not stop the entry from being published."""
+    merged_pk = parent_row.get("merged_version")
+    if merged_pk is None:
+        return
     try:
-        entry = await ars_db.get_ready_cache_entry_by_source(row["ref"])
-        if entry is None:
-            return payload
-        parent = await ars_db.get_message_row(row["ref"])
-        if parent is None or str(parent.get("merged_version")) != str(row["id"]):
-            return payload
-        cached = entry.get("ready_at")
-        cached = cached.isoformat() if hasattr(cached, "isoformat") else str(cached)
-        append_log(
-            payload,
-            f"Served from ARS response cache: this message is the cached answer "
-            f"for its query (source {row['ref']}, generation "
-            f"{entry.get('generation')}, cached {cached}, served "
-            f"{entry.get('hit_count', 0)} time(s))",
-        )
+        payload = await ars_db.load_message_data(merged_pk, logger)
+        if not isinstance(payload, dict):
+            return
+        append_log(payload, cache_note(parent_row["id"], cache_key_, generation))
+        await ars_db.save_message_data(merged_pk, payload, logger, raise_on_failure=True)
+        await ars_db.persist_data_copy(merged_pk, logger)
     except Exception as e:
-        logger.debug(f"Cache read annotation skipped: {e}")
-    return payload
+        logger.warning(f"Cache: could not stamp merged message {merged_pk}: {e}")
 
 
 async def _cacheable(parent_row: Dict[str, Any], children, logger) -> bool:
@@ -519,6 +520,11 @@ async def on_parent_complete(parent_row: Dict[str, Any], logger: logging.Logger)
             return
         query = await ars_db.load_message_data(parent_pk, logger)
         _, label_map = cache_key(query if isinstance(query, dict) else {})
+        # stamp before publishing, so no reader ever sees the cached answer
+        # without its note
+        await _stamp_cached_answer(
+            parent_row, cache_info.get("key"), cache_info.get("generation"), logger
+        )
         if role == ROLE_LEADER:
             entry = await ars_db.mark_cache_entry_ready(parent_pk, label_map)
             if entry is None:

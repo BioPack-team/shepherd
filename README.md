@@ -111,8 +111,8 @@ nodes/edges/paths -- is handed **that tree's pk**. The `201` body is the
 source parent's envelope, already `Done`, with the caller's own submit body
 as `data` exactly like a fresh parent; the client then fetches
 `merged_version` as usual. The merged message keeps the labels of whoever
-ran the query first, and its `GET` carries a log entry saying it was served
-from the cache. A submit identical to a query still in flight is handed the
+ran the query first and carries a log entry, written when it became the
+cached answer, saying it is served from the cache. A submit identical to a query still in flight is handed the
 running query's pk. Hits create no rows and no payloads and decompress
 nothing, so no ARA, merge or post-process worker runs and nothing is stored.
 

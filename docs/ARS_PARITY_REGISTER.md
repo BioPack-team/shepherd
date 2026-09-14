@@ -170,11 +170,12 @@ Behavioral deviations:
     (already `Done/200`, `merged_version` set) with the caller's own
     submit body as `data`, like any fresh parent; the merged response is
     fetched via `merged_version` as usual and keeps the source's
-    node/edge/path labels. GETs of the cached merged message carry a
-    render-time `logs` line naming the cache source. A submit matching an
-    in-flight query is handed the leader's pk while it is still Running.
-    No rows or payloads are written on a hit. The merged-message GET
-    decodes and serializes (orjson) off the event loop.
+    node/edge/path labels and, once the tree is the cached answer, carries
+    a stored `logs` line naming the cache source, key and generation. A
+    submit matching an in-flight query is handed the leader's pk while it
+    is still Running. No rows or payloads are written on a hit. Message
+    GETs splice the stored payload bytes into the envelope without parsing
+    them (the recent-messages list likewise).
     Opt out per query with TRAPI `bypass_cache` (no read, no write);
     refresh one entry with `parameters.overwrite_cache` (no read, forced
     write); flush all by bumping the cache generation

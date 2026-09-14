@@ -103,8 +103,7 @@ def db(mocker):
     names = [
         "get_cache_generation",
         "claim_or_get_cache_entry",
-        "get_cache_entry",
-        "get_ready_cache_entry_by_source",
+        "get_current_cache_entry",
         "mark_cache_entry_ready",
         "upsert_cache_entry_ready",
         "delete_cache_entry",
@@ -118,12 +117,14 @@ def db(mocker):
         "get_children",
         "update_message",
         "load_message_data",
+        "save_message_data",
+        "persist_data_copy",
     ]
     mocks = {
         n: mocker.patch.object(cache.ars_db, n, new_callable=AsyncMock) for n in names
     }
     mocks["get_cache_generation"].return_value = 1
-    mocks["get_cache_entry"].return_value = None
+    mocks["get_current_cache_entry"].return_value = (1, None)
     mocks["message_has_data"].return_value = True
     mocks["get_stale_pending_cache_entries"].return_value = []
     mocks["purge_stale_cache_entries"].return_value = 0
@@ -164,17 +165,17 @@ async def test_lookup_disabled_or_non_normal_mode_is_none(db, monkeypatch):
     assert await cache.lookup(dict(QUERY, parameters={"overwrite_cache": True}), LOGGER) is None
     monkeypatch.setattr(settings, "ars_cache_enabled", False)
     assert await cache.lookup(QUERY, LOGGER) is None
-    db["get_cache_entry"].assert_not_awaited()
+    db["get_current_cache_entry"].assert_not_awaited()
 
 
 async def test_lookup_miss_is_none(db):
     assert await cache.lookup(QUERY, LOGGER) is None
-    db["get_cache_entry"].assert_awaited_once_with(1, KEY)
+    db["get_current_cache_entry"].assert_awaited_once_with(KEY)
 
 
 async def test_lookup_ready_hit_serves_source_pk_with_callers_body(db):
     source = _source(db)
-    db["get_cache_entry"].return_value = entry(source["id"])
+    db["get_current_cache_entry"].return_value = (1, entry(source["id"]))
     outcome, served_row, payload = await cache.lookup(RELABELED, LOGGER)
     assert outcome == cache.SERVED
     assert served_row is source  # the caller gets the source parent's pk
@@ -189,7 +190,7 @@ async def test_lookup_ready_hit_serves_source_pk_with_callers_body(db):
 async def test_lookup_pending_hands_back_leader_pk(db):
     leader = row(status="R")
     db["get_message_row"].return_value = leader
-    db["get_cache_entry"].return_value = entry(leader["id"], "pending")
+    db["get_current_cache_entry"].return_value = (1, entry(leader["id"], "pending"))
     outcome, served_row, payload = await cache.lookup(RELABELED, LOGGER)
     assert outcome == cache.WAITING
     assert served_row is leader
@@ -199,7 +200,7 @@ async def test_lookup_pending_hands_back_leader_pk(db):
 
 async def test_lookup_pending_with_missing_leader_drops_entry(db):
     db["get_message_row"].return_value = None
-    db["get_cache_entry"].return_value = entry(uuid.uuid4(), "pending")
+    db["get_current_cache_entry"].return_value = (1, entry(uuid.uuid4(), "pending"))
     assert await cache.lookup(QUERY, LOGGER) is None
     db["delete_cache_entry"].assert_awaited_once_with(1, KEY)
 
@@ -215,14 +216,14 @@ async def test_lookup_broken_ready_entry_is_dropped(db, breakage):
         source["merged_version"] = None
     elif breakage == "no_payload":
         db["message_has_data"].return_value = False
-    db["get_cache_entry"].return_value = entry(source["id"])
+    db["get_current_cache_entry"].return_value = (1, entry(source["id"]))
     assert await cache.lookup(QUERY, LOGGER) is None
     db["delete_cache_entry"].assert_awaited_once_with(1, KEY)
     db["record_cache_hit"].assert_not_awaited()
 
 
 async def test_lookup_failure_degrades_to_miss(db):
-    db["get_cache_generation"].side_effect = RuntimeError("pg down")
+    db["get_current_cache_entry"].side_effect = RuntimeError("pg down")
     assert await cache.lookup(QUERY, LOGGER) is None
 
 
@@ -252,18 +253,19 @@ async def test_bypass_and_overwrite_record_role_and_dispatch(db):
 
 async def test_miss_claims_leadership(db):
     parent = row()
-    db["claim_or_get_cache_entry"].return_value = (entry(parent["id"], "pending"), True)
+    db["claim_or_get_cache_entry"].return_value = (3, entry(parent["id"], "pending", generation=3), True)
     outcome, out, payload = await cache.claim_or_serve(parent, QUERY, LOGGER)
     assert outcome == cache.DISPATCH and payload is QUERY
-    assert out["params"]["cache"]["role"] == "leader"
-    db["claim_or_get_cache_entry"].assert_awaited_once_with(1, KEY, parent["id"])
+    assert out["params"]["cache"] == {"role": "leader", "key": KEY, "generation": 3}
+    db["claim_or_get_cache_entry"].assert_awaited_once_with(KEY, parent["id"])
+    db["get_cache_generation"].assert_not_awaited()  # folded into the claim
     db["delete_message"].assert_not_awaited()
 
 
 async def test_lost_race_to_ready_entry_serves_and_discards_own_row(db):
     parent = row()
     source = _source(db)
-    db["claim_or_get_cache_entry"].return_value = (entry(source["id"]), False)
+    db["claim_or_get_cache_entry"].return_value = (1, entry(source["id"]), False)
     outcome, out, payload = await cache.claim_or_serve(parent, RELABELED, LOGGER)
     assert outcome == cache.SERVED and out is source and payload is RELABELED
     db["delete_message"].assert_awaited_once_with(parent["id"])
@@ -274,7 +276,7 @@ async def test_lost_race_to_pending_entry_waits_on_leader(db):
     parent = row()
     leader = row(status="R")
     db["get_message_row"].return_value = leader
-    db["claim_or_get_cache_entry"].return_value = (entry(leader["id"], "pending"), False)
+    db["claim_or_get_cache_entry"].return_value = (1, entry(leader["id"], "pending"), False)
     outcome, out, payload = await cache.claim_or_serve(parent, QUERY, LOGGER)
     assert outcome == cache.WAITING and out is leader and payload is QUERY
     db["delete_message"].assert_awaited_once_with(parent["id"])
@@ -284,8 +286,8 @@ async def test_broken_entry_then_claim_again(db):
     parent = row()
     db["get_message_row"].return_value = None  # broken source
     db["claim_or_get_cache_entry"].side_effect = [
-        (entry(uuid.uuid4()), False),
-        (entry(parent["id"], "pending"), True),
+        (1, entry(uuid.uuid4()), False),
+        (1, entry(parent["id"], "pending"), True),
     ]
     outcome, out, _ = await cache.claim_or_serve(parent, QUERY, LOGGER)
     assert outcome == cache.DISPATCH
@@ -296,7 +298,7 @@ async def test_broken_entry_then_claim_again(db):
 
 async def test_entry_keeps_vanishing_dispatches_uncached(db):
     parent = row()
-    db["claim_or_get_cache_entry"].return_value = (None, False)
+    db["claim_or_get_cache_entry"].return_value = (1, None, False)
     outcome, out, _ = await cache.claim_or_serve(parent, QUERY, LOGGER)
     assert outcome == cache.DISPATCH
     assert out["params"]["cache"]["role"] == "uncached"
@@ -304,68 +306,55 @@ async def test_entry_keeps_vanishing_dispatches_uncached(db):
 
 async def test_claim_failure_degrades_to_dispatch(db):
     parent = row()
-    db["get_cache_generation"].side_effect = RuntimeError("pg down")
+    db["claim_or_get_cache_entry"].side_effect = RuntimeError("pg down")
     outcome, out, payload = await cache.claim_or_serve(parent, QUERY, LOGGER)
     assert (outcome, out, payload) == (cache.DISPATCH, parent, QUERY)
 
 
 # ---------------------------------------------------------------------------
-# annotate_cached_read (GET)
+# write-time cache note
 # ---------------------------------------------------------------------------
 
-MERGE_ACTOR = {"inforesid": "infores:ars", "agent_name": "ars-ars-agent"}
 
-
-async def test_read_note_on_source_merged_message(db):
+async def test_leader_stamps_merged_message_before_publishing(db):
     merged_pk = uuid.uuid4()
-    source = _source(db, merged_pk=merged_pk)
-    merged_row = row(pk=merged_pk, ref=source["id"], status="D", code=200)
-    db["get_ready_cache_entry_by_source"].return_value = entry(source["id"], hit_count=4)
+    leader = _leader(merged_version=merged_pk)
+    db["get_children"].return_value = [_ara("D", 3), _merge(merged_pk, 3)]
     payload = json.loads(json.dumps(MERGED_PAYLOAD))
-    out = await cache.annotate_cached_read(merged_row, MERGE_ACTOR, payload, LOGGER)
-    assert out is payload
-    note = payload["logs"][-1]["message"]
+    db["load_message_data"].side_effect = lambda pk, *a: payload if pk == merged_pk else QUERY
+    db["mark_cache_entry_ready"].return_value = entry(leader["id"])
+    order = []
+    db["save_message_data"].side_effect = lambda *a, **k: order.append("save")
+    db["mark_cache_entry_ready"].side_effect = lambda *a, **k: order.append("ready") or entry(leader["id"])
+    await cache.on_parent_complete(leader, LOGGER)
+    saved_pk, saved_payload = db["save_message_data"].await_args.args[:2]
+    assert saved_pk == merged_pk
+    assert saved_payload["logs"][0]["message"] == "merged"
+    note = saved_payload["logs"][-1]["message"]
     assert note.startswith("Served from ARS response cache")
-    assert str(source["id"]) in note and "served 4 time(s)" in note
-    assert len(payload["logs"]) == 2
+    assert str(leader["id"]) in note and KEY in note and "generation 1" in note
+    assert db["save_message_data"].await_args.kwargs.get("raise_on_failure") is True
+    db["persist_data_copy"].assert_awaited_once_with(merged_pk, LOGGER)
+    assert order == ["save", "ready"]  # note lands before the entry is visible
 
 
-async def test_read_note_skipped_when_not_applicable(db, monkeypatch):
-    source = _source(db)
-    db["get_ready_cache_entry_by_source"].return_value = entry(source["id"])
-    base = json.loads(json.dumps(MERGED_PAYLOAD))
-    # not a merge child
-    p = json.loads(json.dumps(base))
-    await cache.annotate_cached_read(row(ref=source["id"]), {"inforesid": "infores:aragorn"}, p, LOGGER)
-    assert p == base
-    # a parent (no ref)
-    p = json.loads(json.dumps(base))
-    await cache.annotate_cached_read(row(), MERGE_ACTOR, p, LOGGER)
-    assert p == base
-    # an intermediate merge, not the parent's merged_version
-    p = json.loads(json.dumps(base))
-    await cache.annotate_cached_read(row(ref=source["id"]), MERGE_ACTOR, p, LOGGER)
-    assert p == base
-    # no entry for this tree
-    db["get_ready_cache_entry_by_source"].return_value = None
-    p = json.loads(json.dumps(base))
-    await cache.annotate_cached_read(row(pk=source["merged_version"], ref=source["id"]), MERGE_ACTOR, p, LOGGER)
-    assert p == base
-    # disabled
-    monkeypatch.setattr(settings, "ars_cache_enabled", False)
-    db["get_ready_cache_entry_by_source"].return_value = entry(source["id"])
-    p = json.loads(json.dumps(base))
-    await cache.annotate_cached_read(row(pk=source["merged_version"], ref=source["id"]), MERGE_ACTOR, p, LOGGER)
-    assert p == base
-    # non-dict payload
-    assert await cache.annotate_cached_read(row(), MERGE_ACTOR, None, LOGGER) is None
+async def test_stamp_failure_does_not_block_publishing(db):
+    merged_pk = uuid.uuid4()
+    leader = _leader(merged_version=merged_pk)
+    db["get_children"].return_value = [_ara("D", 3), _merge(merged_pk, 3)]
+    db["load_message_data"].side_effect = lambda pk, *a: {"message": {}} if pk == merged_pk else QUERY
+    db["save_message_data"].side_effect = RuntimeError("redis down")
+    db["mark_cache_entry_ready"].return_value = entry(leader["id"])
+    await cache.on_parent_complete(leader, LOGGER)
+    db["mark_cache_entry_ready"].assert_awaited_once()
 
 
-async def test_read_note_survives_db_errors(db):
-    db["get_ready_cache_entry_by_source"].side_effect = RuntimeError("pg")
-    payload = {"logs": []}
-    assert await cache.annotate_cached_read(row(ref=uuid.uuid4()), MERGE_ACTOR, payload, LOGGER) is payload
-    assert payload["logs"] == []
+async def test_not_cacheable_run_is_not_stamped(db):
+    merged_pk = uuid.uuid4()
+    leader = _leader(merged_version=merged_pk)
+    db["get_children"].return_value = [_ara("E"), _merge(merged_pk, 0)]
+    await cache.on_parent_complete(leader, LOGGER)
+    db["save_message_data"].assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +393,9 @@ async def test_leader_publishes_entry_with_label_map(db):
     merged_pk = uuid.uuid4()
     leader = _leader(merged_version=merged_pk)
     db["get_children"].return_value = [_ara("D", 3), _merge(merged_pk, 3)]
-    db["load_message_data"].return_value = RELABELED
+    db["load_message_data"].side_effect = lambda pk, *a: (
+        {"message": {}} if pk == merged_pk else RELABELED
+    )
     db["mark_cache_entry_ready"].return_value = entry(leader["id"])
     await cache.on_parent_complete(leader, LOGGER)
     _, label_map = cache.cache_key(RELABELED)

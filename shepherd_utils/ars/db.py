@@ -12,6 +12,7 @@ import asyncio
 import gzip
 import json
 import logging
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -286,6 +287,7 @@ async def get_or_create_actor(
                 )
             actor["agent_name"] = agent_row["name"]
             actor["agent_uri"] = agent_row["uri"]
+            invalidate_actor_cache()
             return actor, 302
         cur = await conn.execute(
             f"""
@@ -307,6 +309,7 @@ async def get_or_create_actor(
         actor = _row_dict(ACTOR_COLUMNS, row)
         actor["agent_name"] = agent_row["name"]
         actor["agent_uri"] = agent_row["uri"]
+        invalidate_actor_cache()
         return actor, 201
 
 
@@ -330,12 +333,27 @@ async def list_actors(exclude_empty_path: bool = False) -> List[Dict[str, Any]]:
     return actors
 
 
+# Actor rows only change through registry seeding at boot and the rare
+# agents/actors POST, yet every message GET and trace poll resolves one.
+# A short in-process cache keeps those off Postgres; writes invalidate it.
+ACTOR_CACHE_TTL_SEC = 60.0
+_actor_cache: Dict[int, Tuple[float, Optional[Dict[str, Any]]]] = {}
+
+
+def invalidate_actor_cache() -> None:
+    _actor_cache.clear()
+
+
 async def get_actor(actor_id: int) -> Optional[Dict[str, Any]]:
+    cached = _actor_cache.get(actor_id)
+    now = time.monotonic()
+    if cached is not None and cached[0] > now:
+        return cached[1]
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
-            SELECT {_ACTOR_SELECT}, g.name, g.uri FROM ars_actor a
-            JOIN ars_agent g ON g.id = a.agent
+            SELECT {_ACTOR_SELECT}, g.name, g.uri
+            FROM ars_actor a JOIN ars_agent g ON g.id = a.agent
             WHERE a.id = %s
             """,
             (actor_id,),
@@ -346,6 +364,7 @@ async def get_actor(actor_id: int) -> Optional[Dict[str, Any]]:
     actor = _row_dict(ACTOR_COLUMNS, row[: len(ACTOR_COLUMNS)])
     actor["agent_name"] = row[len(ACTOR_COLUMNS)]
     actor["agent_uri"] = row[len(ACTOR_COLUMNS) + 1]
+    _actor_cache[actor_id] = (now + ACTOR_CACHE_TTL_SEC, actor)
     return actor
 
 
@@ -842,16 +861,20 @@ async def load_otel_carrier(
     return "{}"
 
 
+def _decompress_payload_bytes(blob: bytes) -> bytes:
+    """Message.decompress_dict codec, bytes out: zstd magic, gzip fallback,
+    else the blob is taken as already-plain JSON."""
+    if blob[:4] == b"\x28\xb5\x2f\xfd":
+        return shepherd_db.decompress_zstd(blob)
+    if blob[:2] == b"\x1f\x8b":
+        return gzip.decompress(blob)
+    return blob
+
+
 def _decompress_payload(blob: bytes) -> Any:
-    """Message.decompress_dict codec: zstd magic, gzip fallback, {} on error."""
+    """Message.decompress_dict codec: parsed payload, {} on error."""
     try:
-        if blob[:4] == b"\x28\xb5\x2f\xfd":
-            raw = zstandard.ZstdDecompressor().decompress(blob)
-        elif blob[:2] == b"\x1f\x8b":
-            raw = gzip.decompress(blob)
-        else:
-            raw = blob
-        return orjson.loads(raw)
+        return orjson.loads(_decompress_payload_bytes(blob))
     except Exception:
         return {}
 
@@ -939,6 +962,53 @@ async def load_message_data(
     return payload
 
 
+async def load_message_bytes(
+    message_id: Union[str, uuid.UUID],
+    logger: logging.Logger,
+) -> Optional[bytes]:
+    """The payload as decompressed JSON bytes, never parsed.
+
+    This is the read path for serving a stored message: decompression
+    releases the GIL (so the worker thread genuinely frees the event loop),
+    and no Python object graph is built -- a parsed payload costs ~4x its
+    JSON size in memory and a GIL-holding parse per read. None when no blob
+    exists anywhere. A Postgres fallback re-warms Redis with the stored
+    compressed bytes as-is."""
+    blob = None
+    try:
+        blob = await shepherd_db.data_db_client.get(str(message_id))
+    except Exception as e:
+        logger.warning(f"Redis read failed for {message_id}: {e}")
+    if blob is not None:
+        return await asyncio.to_thread(shepherd_db.decompress_zstd, blob)
+    try:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute(
+                "SELECT data FROM ars_message WHERE id = %s",
+                (uuid.UUID(str(message_id)),),
+            )
+            row = await cur.fetchone()
+    except Exception as e:
+        logger.error(f"Postgres blob read failed for {message_id}: {e}")
+        return None
+    if row is None or row[0] is None:
+        return None
+    stored = bytes(row[0])
+    try:
+        raw = await asyncio.to_thread(_decompress_payload_bytes, stored)
+    except Exception as e:
+        logger.error(f"Undecodable durable payload for {message_id}: {e}")
+        return None
+    if stored[:4] == b"\x28\xb5\x2f\xfd":
+        try:  # re-warm with the same zstd frame Redis normally holds
+            await shepherd_db.data_db_client.set(
+                str(message_id), stored, ex=settings.redis_ttl
+            )
+        except Exception:
+            pass
+    return raw
+
+
 async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
     if await shepherd_db.message_exists(str(message_id)):
         return True
@@ -1003,6 +1073,29 @@ async def bump_cache_generation(reason: Optional[str]) -> int:
     return int(row[0])
 
 
+async def get_current_cache_entry(
+    cache_key: str,
+) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """The current generation and its entry for a key, in one round trip."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"""
+            SELECT g.generation, {_CACHE_ENTRY_SELECT}
+            FROM ars_cache_meta g
+            LEFT JOIN ars_response_cache c
+              ON c.generation = g.generation AND c.cache_key = %s
+            WHERE g.id
+            """,
+            (cache_key,),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return 1, None
+    generation = int(row[0])
+    entry = _row_dict(CACHE_ENTRY_COLUMNS, row[1:]) if row[1] is not None else None
+    return generation, entry
+
+
 async def get_cache_entry(generation: int, cache_key: str) -> Optional[Dict[str, Any]]:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
@@ -1015,36 +1108,35 @@ async def get_cache_entry(generation: int, cache_key: str) -> Optional[Dict[str,
 
 
 async def claim_or_get_cache_entry(
-    generation: int, cache_key: str, source_pk: Union[str, uuid.UUID]
-) -> Tuple[Optional[Dict[str, Any]], bool]:
-    """Atomically claim leadership of a key, or return the existing entry.
+    cache_key: str, source_pk: Union[str, uuid.UUID]
+) -> Tuple[int, Optional[Dict[str, Any]], bool]:
+    """Atomically claim leadership of a key in the current generation, or
+    return the existing entry.
 
-    ``(entry, True)`` when this parent inserted the pending row and is the
-    leader; ``(entry, False)`` when another entry (pending or ready) already
-    holds the key. ``(None, False)`` only if the row vanished between the
-    conflict and the re-read (caller treats it as a plain dispatch).
+    ``(generation, entry, True)`` when this parent inserted the pending row
+    and is the leader; ``(generation, entry, False)`` when another entry
+    (pending or ready) already holds the key; ``(generation, None, False)``
+    only if the row vanished between the conflict and the re-read (caller
+    treats it as a plain dispatch). The generation is read inside the same
+    statement, so a miss costs one round trip and a conflict two.
     """
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
             INSERT INTO ars_response_cache (generation, cache_key, state, source_pk)
-            VALUES (%s, %s, 'pending', %s)
+            SELECT g.generation, %s, 'pending', %s FROM ars_cache_meta g WHERE g.id
             ON CONFLICT (generation, cache_key) DO NOTHING
             RETURNING {_CACHE_ENTRY_SELECT.replace("c.", "")}
             """,
-            (generation, cache_key, uuid.UUID(str(source_pk))),
+            (cache_key, uuid.UUID(str(source_pk))),
         )
         row = await cur.fetchone()
         await conn.commit()
         if row is not None:
-            return _row_dict(CACHE_ENTRY_COLUMNS, row), True
-        cur = await conn.execute(
-            f"SELECT {_CACHE_ENTRY_SELECT} FROM ars_response_cache c "
-            "WHERE c.generation = %s AND c.cache_key = %s",
-            (generation, cache_key),
-        )
-        row = await cur.fetchone()
-    return (_row_dict(CACHE_ENTRY_COLUMNS, row) if row else None), False
+            entry = _row_dict(CACHE_ENTRY_COLUMNS, row)
+            return int(entry["generation"]), entry, True
+    generation, entry = await get_current_cache_entry(cache_key)
+    return generation, entry, False
 
 
 async def mark_cache_entry_ready(
@@ -1127,21 +1219,6 @@ async def repoint_pending_cache_entry(
         updated = (cur.rowcount or 0) > 0
         await conn.commit()
     return updated
-
-
-async def get_ready_cache_entry_by_source(
-    source_pk: Union[str, uuid.UUID],
-) -> Optional[Dict[str, Any]]:
-    """The newest ready entry answered by this tree, any generation."""
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"SELECT {_CACHE_ENTRY_SELECT} FROM ars_response_cache c "
-            "WHERE c.source_pk = %s AND c.state = 'ready' "
-            "ORDER BY c.generation DESC LIMIT 1",
-            (uuid.UUID(str(source_pk)),),
-        )
-        row = await cur.fetchone()
-    return _row_dict(CACHE_ENTRY_COLUMNS, row) if row else None
 
 
 async def delete_message(message_id: Union[str, uuid.UUID]) -> bool:

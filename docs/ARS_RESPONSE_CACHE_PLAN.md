@@ -29,7 +29,12 @@ Revision history:
   source envelope with the caller's own submit body as `data`, like any
   fresh parent; clients fetch `merged_version` as usual and get the stored
   original under the source's labels. The label-rewrite code was removed.
-  The merged-message GET decodes and serializes (orjson) in a worker thread.
+- *Revision 3.2 (this):* **server as byte pass-through.** The merged-message
+  GET splices the stored, decompressed bytes into the envelope without
+  parsing (orjson holds the GIL, so threads never helped there); the cache
+  note is stamped into the stored message once at publish time instead of
+  per read; the cache lookup and claim each fold the generation read into
+  one statement; actor rows are cached in-process for 60 s.
 
 ---
 
@@ -45,7 +50,7 @@ Revision history:
 | R6 | `parameters.overwrite_cache` overwrites that one entry | No read, forced write (§5) |
 | R7 | Two identical in-flight misses → run once, answer both | The second submit is handed the leader's pk while it is still Running (§6) |
 | R8 | Full-fidelity per-ARA children on a hit | The shared pk *is* the original tree, children included (§6) |
-| R9 | A served response says it came from the cache | Render-time TRAPI `logs` entry on GETs of the cached merged message (§5) |
+| R9 | A served response says it came from the cache | TRAPI `logs` entry written into the stored merged message when the tree becomes the cached answer (§5) |
 | R10 | One pk per cache key; no per-hit copies | Hits create no rows and no blobs (§2, §6) |
 
 ---
@@ -212,19 +217,24 @@ to satisfy. Nothing is written on a hit but the hit counter, and nothing
 large is decompressed or serialized on the submit path -- the only
 payload check is an `EXISTS` on the merged message.
 
-**GET note.** When `GET /ars/api/messages/<pk>` renders the final merged
-message of a tree that backs a ready entry, a log line is appended to the
-rendered JSON at render time (`Served from ARS response cache: this message
-is the cached answer for its query (source <pk>, generation g, cached ts,
-served N time(s))`). The handler already decompresses the blob to render
-it, so this is one indexed lookup; the stored bytes are never modified.
+**Cache note, written once.** When a leader publishes its entry (or an
+overwrite run repoints one), the completion hook appends a TRAPI `logs`
+line to the *stored* merged message -- `Served from ARS response cache:
+this message is the cached answer for its query (source <pk>, cache key
+<k>, generation <g>, cached <ts>)` -- and re-persists it, *before* the
+entry becomes visible. That is one parse per query completion, in the
+worker that just produced the message, instead of one per read. The
+original submitter sees the line too, which is accurate: their tree is the
+cached answer.
 
-**Rendering cost.** That GET is the expensive half of every fetch, cached or
-not: a merged message is tens of MB of JSON. `load_message_data` now
-decompresses + parses in a worker thread, and the handler serializes once
-with orjson in a worker thread (previously stdlib `json.dumps` → `loads` →
-`dumps` on the event loop, ~4 s for 50 MB and blocking every other request
-on that process meanwhile).
+**Rendering cost.** `GET /ars/api/messages/<pk>` never parses a payload. The
+stored bytes are decompressed in a worker thread (zstd releases the GIL, so
+this genuinely frees the event loop) and spliced into the serialized
+envelope in place of a sentinel (`_envelope_bytes`). Memory per read is
+about twice the payload's JSON size instead of ~4x for a parsed object
+graph, and CPU is a memcpy. orjson / stdlib JSON calls hold the GIL, so
+"run it in a thread" was never a fix for them -- not parsing is. The
+recent-messages list renders the same way.
 
 **Provenance.** Source parents carry `params.cache = {key, generation,
 role}` with role `leader`, `overwrite`, `bypass` or `uncached` (cache
@@ -242,7 +252,8 @@ volume lives in the index row's `hit_count` / `last_hit_at` (visible via
    Reads the current generation and the entry for the key.
    - `ready` → load the source parent row, check its `merged_version`
      payload exists (`EXISTS`, no decompression), bump `hit_count`, return
-     **(SERVED, source row, caller's body)**.
+     **(SERVED, source row, caller's body)**. The generation and entry come
+     from one joined statement.
    - `pending` → return **(WAITING, leader row, caller's body)**.
    - none → return None: proceed as a miss.
    - A `ready` entry whose source is missing / not Done / has no merged
@@ -260,8 +271,9 @@ volume lives in the index row's `hit_count` / `last_hit_at` (visible via
    - Any exception → DISPATCH (the cache never fails a submit).
 
 **Completion hook** (`lifecycle.check_parent_completion` → `cache.on_parent_complete`):
-a `leader` whose run is cacheable flips its pending row to `ready` with the
-`label_map` of its own query graph; a leader whose run is **not cacheable**
+a `leader` whose run is cacheable stamps the cache note into its merged
+message and then flips its pending row to `ready` with the `label_map` of
+its own query graph; a leader whose run is **not cacheable**
 (Q5: empty merged result while an ARA child errored, or any error when
 `ars_cache_store_partial` is off) deletes its pending row so the next
 identical submit re-runs the query; an `overwrite` run upserts the row to

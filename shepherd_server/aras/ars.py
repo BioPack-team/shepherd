@@ -117,9 +117,25 @@ def _parse_uuid(key: str) -> Optional[uuid.UUID]:
         return None
 
 
-async def _envelope_with_data(row, task_logger=logger):
-    data = await ars_db.load_message_data(row["id"], task_logger)
-    return message_envelope(row, data=data)
+async def _envelope_bytes(row, task_logger=logger) -> bytes:
+    """Render a message envelope with its payload as JSON bytes WITHOUT
+    parsing the payload.
+
+    A merged message is tens of MB of JSON; parsing it costs ~4x its size in
+    memory and a GIL-holding pass that stalls every other request on this
+    process. Instead the stored bytes are decompressed (GIL-free, in a
+    worker thread) and spliced into the serialized envelope in place of a
+    sentinel. The server stays an I/O pass-through, as the rest of Shepherd
+    is designed."""
+    raw = await ars_db.load_message_bytes(row["id"], task_logger)
+    env = message_envelope(row, data=None)
+    env["fields"]["code"] = int(env["fields"]["code"])
+    if raw is None:
+        return orjson.dumps(env, default=str)
+    sentinel = f"__ARS_DATA_{row['id']}__"
+    env["fields"]["data"] = sentinel
+    head = orjson.dumps(env, default=str)
+    return head.replace(b'"' + sentinel.encode() + b'"', raw, 1)
 
 
 def _host_base(request: Request) -> str:
@@ -283,11 +299,11 @@ async def submit(request: Request) -> Response:
 @route("/api/messages", ["GET", "POST"])
 async def messages(request: Request) -> Response:
     if request.method == "GET":
-        response = []
+        bodies = []
         for row in await ars_db.get_recent_messages(10):
-            response.append(await _envelope_with_data(row))
+            bodies.append(await _envelope_bytes(row))
         return Response(
-            content=json.dumps(response, default=str),
+            content=b"[" + b",".join(bodies) + b"]",
             media_type="application/json",
         )
     # POST /messages is broken upstream (looks the actor up in the Agent
@@ -409,18 +425,9 @@ async def message(key: str, request: Request) -> Response:
             return text(f"Unknown message: {key}", 404)
         actor = await ars_db.get_actor(mesg["actor"]) or {}
         mesg = dict(mesg, name=actor.get("agent_name"))
-        env = await _envelope_with_data(mesg)
-        # readers of a cache source's merged message get told so (render-time
-        # note only; the stored payload is untouched)
-        env["fields"]["data"] = await cache.annotate_cached_read(
-            mesg, actor, env["fields"]["data"], logger
+        return Response(
+            content=await _envelope_bytes(mesg), media_type="application/json"
         )
-        env["fields"]["code"] = int(env["fields"]["code"])
-        # A merged message is tens of MB of JSON: one orjson pass in a worker
-        # thread instead of stdlib dumps -> loads -> dumps on the event loop
-        # (which also stalled every other request on this process).
-        body = await asyncio.to_thread(orjson.dumps, env, default=str)
-        return Response(content=body, media_type="application/json")
 
     if request.method == "POST":
         return await _result_callback(pk, request)

@@ -158,6 +158,7 @@ def db(mocker):
         ),
         "save_message_data": _patch("save_message_data"),
         "load_message_data": _patch("load_message_data", return_value=None),
+        "load_message_bytes": _patch("load_message_bytes", return_value=None),
         "persist_data_copy": _patch("persist_data_copy"),
         "get_children": _patch("get_children", return_value=[]),
         "get_recent_messages": _patch("get_recent_messages", return_value=[]),
@@ -212,14 +213,14 @@ def db(mocker):
         "get_cache_generation": _patch("get_cache_generation", return_value=1),
         "claim_or_get_cache_entry": _patch(
             "claim_or_get_cache_entry",
-            side_effect=lambda gen, key, pk: (
-                make_cache_entry(gen, key, pk, state="pending"),
+            side_effect=lambda key, pk: (
+                1,
+                make_cache_entry(1, key, pk, state="pending"),
                 True,
             ),
         ),
-        "get_cache_entry": _patch("get_cache_entry", return_value=None),
-        "get_ready_cache_entry_by_source": _patch(
-            "get_ready_cache_entry_by_source", return_value=None
+        "get_current_cache_entry": _patch(
+            "get_current_cache_entry", return_value=(1, None)
         ),
         "record_cache_hit": _patch("record_cache_hit"),
         "delete_cache_entry": _patch("delete_cache_entry", return_value=True),
@@ -377,7 +378,7 @@ async def test_message_get_unknown_404(client, db, redis_mock):
 
 
 async def test_message_get_envelope_uses_agent_name(client, db, redis_mock):
-    db["load_message_data"].return_value = {"message": {}}
+    db["load_message_bytes"].return_value = b'{"message": {}}'
     resp = await client.get(f"/api/messages/{db['parent_pk']}")
     assert resp.status_code == 200
     body = resp.json()
@@ -950,14 +951,18 @@ def _source_tree(db):
     db["load_message_data"].side_effect = lambda pk, *a: (
         json.loads(json.dumps(MERGED_PAYLOAD)) if str(pk) == str(merged_pk) else None
     )
+    db["load_message_bytes"].side_effect = lambda pk, *a: (
+        json.dumps(MERGED_PAYLOAD).encode() if str(pk) == str(merged_pk) else None
+    )
     _, label_map = _cache.canonical_graph(MERGED_PAYLOAD["message"]["query_graph"])
     return source, merged, label_map
 
 
 async def test_submit_cache_hit_returns_source_pk_without_payload(client, db, redis_mock):
     source, merged, label_map = _source_tree(db)
-    db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
-        gen, key, source["id"], label_map=label_map
+    db["get_current_cache_entry"].side_effect = lambda key: (
+        1,
+        make_cache_entry(1, key, source["id"], label_map=label_map),
     )
     resp = await client.post("/api/submit", json=RELABELED_QUERY)
     assert resp.status_code == 201
@@ -983,8 +988,9 @@ async def test_submit_pending_entry_returns_leader_pk(client, db, redis_mock):
     leader_pk = uuid.uuid4()
     leader = make_message(pk=leader_pk, actor=1, status="R", code=202)
     db["get_message_row"].side_effect = lambda pk: leader if str(pk) == str(leader_pk) else None
-    db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
-        gen, key, leader_pk, state="pending"
+    db["get_current_cache_entry"].side_effect = lambda key: (
+        1,
+        make_cache_entry(1, key, leader_pk, state="pending"),
     )
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 201
@@ -1002,8 +1008,8 @@ async def test_submit_miss_claims_leadership_and_fans_out(client, db, redis_mock
     assert resp.status_code == 201
     assert resp.json()["fields"]["params"]["cache"]["role"] == "leader"
     assert await _fanout_enqueued()
-    gen, key, pk = db["claim_or_get_cache_entry"].await_args.args
-    assert gen == 1 and len(key) == 64 and str(pk) == resp.json()["pk"]
+    key, pk = db["claim_or_get_cache_entry"].await_args.args
+    assert len(key) == 64 and str(pk) == resp.json()["pk"]
     db["delete_message"].assert_not_awaited()
 
 
@@ -1011,8 +1017,9 @@ async def test_submit_lost_race_discards_own_row_and_serves_winner(client, db, r
     """Two identical misses: the lookup saw nothing, but by the time we
     claim, a concurrent submit already owns the key."""
     source, merged, label_map = _source_tree(db)
-    db["claim_or_get_cache_entry"].side_effect = lambda gen, key, pk: (
-        make_cache_entry(gen, key, source["id"], label_map=label_map),
+    db["claim_or_get_cache_entry"].side_effect = lambda key, pk: (
+        1,
+        make_cache_entry(1, key, source["id"], label_map=label_map),
         False,
     )
     resp = await client.post("/api/submit", json=QUERY)
@@ -1030,7 +1037,7 @@ async def test_submit_bypass_cache_skips_lookup(client, db, redis_mock):
     resp = await client.post("/api/submit", json=dict(QUERY, bypass_cache=True))
     assert resp.status_code == 201
     assert resp.json()["fields"]["params"]["cache"]["role"] == "bypass"
-    db["get_cache_entry"].assert_not_awaited()
+    db["get_current_cache_entry"].assert_not_awaited()
     db["claim_or_get_cache_entry"].assert_not_awaited()
     assert await _fanout_enqueued()
 
@@ -1040,7 +1047,7 @@ async def test_submit_overwrite_cache_runs_and_marks_role(client, db, redis_mock
     resp = await client.post("/api/submit", json=q)
     assert resp.status_code == 201
     assert resp.json()["fields"]["params"]["cache"]["role"] == "overwrite"
-    db["get_cache_entry"].assert_not_awaited()
+    db["get_current_cache_entry"].assert_not_awaited()
     db["claim_or_get_cache_entry"].assert_not_awaited()
     assert await _fanout_enqueued()
 
@@ -1052,14 +1059,16 @@ async def test_submit_cache_disabled_behaves_as_upstream(client, db, redis_mock,
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 201
     assert "cache" not in (resp.json()["fields"]["params"] or {})
-    db["get_cache_generation"].assert_not_awaited()
+    db["get_current_cache_entry"].assert_not_awaited()
+    db["claim_or_get_cache_entry"].assert_not_awaited()
     assert await _fanout_enqueued()
 
 
 async def test_submit_broken_ready_entry_falls_back_to_leading(client, db, redis_mock):
     """A ready entry whose source tree is gone is dropped; we run the query."""
-    db["get_cache_entry"].side_effect = lambda gen, key: make_cache_entry(
-        gen, key, uuid.uuid4()
+    db["get_current_cache_entry"].side_effect = lambda key: (
+        1,
+        make_cache_entry(1, key, uuid.uuid4()),
     )
     # get_message_row knows nothing about that source -> broken
     resp = await client.post("/api/submit", json=QUERY)
@@ -1069,24 +1078,36 @@ async def test_submit_broken_ready_entry_falls_back_to_leading(client, db, redis
     assert await _fanout_enqueued()
 
 
-async def test_message_get_of_cached_merged_message_carries_note(client, db, redis_mock):
-    source, merged, label_map = _source_tree(db)
-    db["get_ready_cache_entry_by_source"].return_value = make_cache_entry(
-        1, "k", source["id"], label_map=label_map
-    )
+async def test_message_get_splices_stored_bytes_without_parsing(client, db, redis_mock):
+    """The payload is served from its stored bytes: it is never parsed on the
+    server, and the envelope around it is intact."""
+    source, merged, _ = _source_tree(db)
     resp = await client.get(f"/api/messages/{merged['id']}")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
-    logs = resp.json()["fields"]["data"]["logs"]
-    assert logs[0]["message"] == "merged"
-    assert logs[-1]["message"].startswith("Served from ARS response cache")
-    assert str(source["id"]) in logs[-1]["message"]
-    # the stored payload is untouched: nothing was saved
-    db["save_message_data"].assert_not_awaited()
-    # the parent itself (the query) gets no note
+    body = resp.json()
+    assert body["pk"] == str(merged["id"])
+    assert body["fields"]["name"] == "ars-ars-agent"
+    assert body["fields"]["status"] == "Done"
+    assert isinstance(body["fields"]["code"], int)
+    assert body["fields"]["data"] == MERGED_PAYLOAD
+    db["load_message_data"].assert_not_awaited()
+    db["load_message_bytes"].assert_awaited_once()
+    # a message without any stored payload renders data: null
     resp = await client.get(f"/api/messages/{source['id']}")
     assert resp.status_code == 200
-    assert resp.json()["fields"]["data"] is None  # parent payload not stubbed
+    assert resp.json()["fields"]["data"] is None
+
+
+async def test_messages_get_recent_splices_each_payload(client, db, redis_mock):
+    db["get_recent_messages"].return_value = [db["parent"], db["child"]]
+    db["load_message_bytes"].side_effect = lambda pk, *a: (
+        b'{"message": {"results": []}}' if str(pk) == str(db["parent_pk"]) else None
+    )
+    resp = await client.get("/api/messages")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [b["fields"]["data"] for b in body] == [{"message": {"results": []}}, None]
 
 
 async def test_cache_admin_routes_disabled_without_token(client, db, redis_mock, monkeypatch):
