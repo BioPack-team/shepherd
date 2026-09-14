@@ -9,6 +9,11 @@ last_merged_completed forces code 200; one POST per subscribed client, body
 = compact sorted-key JSON, signed with HMAC-SHA256 of the client's
 AES-decrypted secret in x-event-signature; failures retried with
 exponential backoff (cap 300s, jitter, max 8 attempts).
+
+Recipients normally arrive in the task (``client_pks``), resolved when the
+event was emitted: the completion path clears a parent's subscriptions
+right after its final events, so resolving them here would find nobody.
+Tasks without the field fall back to the subscriber list.
 """
 
 import asyncio
@@ -82,12 +87,20 @@ async def ars_notify(task, logger: logging.Logger):
             if k == "event_type" and v == "last_merged_completed":
                 notification["code"] = 200
             notification[k] = v
-    client_pk = task[1].get("client_pk")
-    if client_pk:
-        # a replay addressed to one client (a late subscriber to a finished
-        # query, e.g. a response-cache hit), not the subscriber list
-        client = await ars_db.get_client_by_pk(int(client_pk))
-        clients = [client] if client is not None else []
+    raw_pks = task[1].get("client_pks")
+    if raw_pks is not None:
+        # recipients were resolved when the event was emitted (before the
+        # completion path cleared the subscriptions) or the event is a
+        # replay addressed to one late subscriber
+        try:
+            client_pks = [int(pk) for pk in json.loads(raw_pks)]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            client_pks = []
+        clients = []
+        for pk in client_pks:
+            client = await ars_db.get_client_by_pk(pk)
+            if client is not None:
+                clients.append(client)
     else:
         clients = await ars_db.get_subscribed_clients(message_pk)
     logger.info(

@@ -1193,7 +1193,7 @@ async def test_subscribe_to_done_pk_replays_completion_to_that_client(
         "last_merged_completed",
         "admin",
     ]
-    assert all(t["client_pk"] == "7" for t in tasks)
+    assert all(json.loads(t["client_pks"]) == ["7"] for t in tasks)
     assert all(t["message_pk"] == str(source["id"]) for t in tasks)
 
 

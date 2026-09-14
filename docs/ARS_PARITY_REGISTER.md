@@ -72,7 +72,10 @@ accept each behavioral change.
 - **P-NT-1..5** — `notify_subscribers` field overrides ('D'→admin,
   'E'→ars_error), stats attachment, the `{pk, timestamp, code}` payload
   base, `last_merged_completed` forcing code 200, per-client HMAC-SHA256
-  over compact sorted-key JSON.
+  over compact sorted-key JSON. Recipients are resolved when the event is
+  emitted and carried in the `ars.notify` task (`client_pks`): the
+  completion path clears the parent's subscriptions immediately after its
+  final events, so a worker resolving them later would deliver to nobody.
 - **Callback guard order** — dup-Done → 200 text; repeated results → 409;
   errored child → 400; decode failure → 500 `Can not decode json...`;
   validation failure → 422 `Problem with TRAPI Validation` with the child

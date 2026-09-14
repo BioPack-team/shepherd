@@ -61,9 +61,14 @@ async def notify_subscribers(
 ) -> None:
     """Build the notification fields and wake the ars_notify worker.
 
-    ``client_pk`` addresses one client instead of the message's subscriber
-    list -- used to replay a finished query's completion to a client that
-    subscribed after the fact (see ``replay_completion``)."""
+    Recipients are resolved HERE, at emit time, and carried in the task as
+    ``client_pks``: the completion path clears a parent's subscriptions
+    right after emitting its final events, so a worker that looked the
+    subscribers up later would find nobody. ``client_pk`` addresses one
+    client explicitly (a late subscriber to a finished query, see
+    ``replay_completion``). If the subscriber lookup itself fails the task
+    is still enqueued without a recipient list and the worker falls back to
+    looking them up."""
     fields = build_notification(message_row, additional_fields, data=data)
     try:
         # rejoin the query's submit-time trace (the row is normally the
@@ -77,7 +82,16 @@ async def notify_subscribers(
             "otel": await ars_db.load_otel_carrier(query_pk, logger),
         }
         if client_pk is not None:
-            payload["client_pk"] = str(client_pk)
+            payload["client_pks"] = json.dumps([str(client_pk)])
+        else:
+            try:
+                clients = await ars_db.get_subscribed_clients(message_row["id"])
+                payload["client_pks"] = json.dumps([str(c["id"]) for c in clients])
+            except Exception as e:
+                logger.warning(
+                    f"Could not resolve subscribers for {message_row['id']} at emit "
+                    f"time; the notify worker will look them up: {e}"
+                )
         await add_task("ars.notify", payload, logger)
     except Exception as e:
         logger.error(f"Failed to enqueue notification for {message_row['id']}: {e}")
@@ -110,7 +124,9 @@ async def replay_completion(
     real merge, ``last_merged_completed`` (built against a Running-shaped
     row exactly as the live path does, so the custom fields survive the
     'D' override) and then the save-time admin/complete; an Error message
-    yields ars_error via the same override rules.
+    yields ars_error via the same override rules. The events are addressed
+    to ``client_pk`` alone: the message's own subscriber list was cleared
+    when it completed.
     """
     status = message_row.get("status")
     if status == "D" and message_row.get("ref") is None and _has_real_merge(message_row):
