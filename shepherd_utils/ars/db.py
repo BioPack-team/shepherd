@@ -1048,7 +1048,6 @@ CACHE_ENTRY_COLUMNS = (
 _CACHE_ENTRY_SELECT = ", ".join(f"c.{col}" for col in CACHE_ENTRY_COLUMNS)
 
 
-
 async def get_cache_generation() -> int:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute("SELECT generation FROM ars_cache_meta WHERE id")
@@ -1297,14 +1296,12 @@ async def cache_stats() -> Dict[str, Any]:
             "SELECT generation, bumped_at, bumped_reason FROM ars_cache_meta WHERE id"
         )
         meta = await cur.fetchone()
-        cur = await conn.execute(
-            """
+        cur = await conn.execute("""
             SELECT c.generation, c.state, count(*), COALESCE(sum(c.hit_count), 0)
             FROM ars_response_cache c
             GROUP BY c.generation, c.state
             ORDER BY c.generation, c.state
-            """
-        )
+            """)
         rows = await cur.fetchall()
     generation = int(meta[0]) if meta else 1
     current = {"pending": 0, "ready": 0, "hits": 0}

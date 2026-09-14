@@ -164,9 +164,11 @@ def db(mocker):
         "get_recent_messages": _patch("get_recent_messages", return_value=[]),
         "get_actor": _patch(
             "get_actor",
-            side_effect=lambda aid: {1: default_actor, 7: ara_actor, 3: merge_actor}.get(
-                aid
-            ),
+            side_effect=lambda aid: {
+                1: default_actor,
+                7: ara_actor,
+                3: merge_actor,
+            }.get(aid),
         ),
         "get_or_create_actor": _patch(
             "get_or_create_actor", return_value=(ara_actor, 302)
@@ -946,7 +948,11 @@ def _source_tree(db):
         result_count=1,
     )
     merged = make_message(pk=merged_pk, actor=3, ref=source_pk, status="D", code=200)
-    rows = {str(source_pk): source, str(merged_pk): merged, str(db["parent_pk"]): db["parent"]}
+    rows = {
+        str(source_pk): source,
+        str(merged_pk): merged,
+        str(db["parent_pk"]): db["parent"],
+    }
     db["get_message_row"].side_effect = lambda pk: rows.get(str(pk))
     db["load_message_data"].side_effect = lambda pk, *a: (
         json.loads(json.dumps(MERGED_PAYLOAD)) if str(pk) == str(merged_pk) else None
@@ -958,7 +964,9 @@ def _source_tree(db):
     return source, merged, label_map
 
 
-async def test_submit_cache_hit_returns_source_pk_without_payload(client, db, redis_mock):
+async def test_submit_cache_hit_returns_source_pk_without_payload(
+    client, db, redis_mock
+):
     source, merged, label_map = _source_tree(db)
     db["get_current_cache_entry"].side_effect = lambda key: (
         1,
@@ -987,7 +995,9 @@ async def test_submit_cache_hit_returns_source_pk_without_payload(client, db, re
 async def test_submit_pending_entry_returns_leader_pk(client, db, redis_mock):
     leader_pk = uuid.uuid4()
     leader = make_message(pk=leader_pk, actor=1, status="R", code=202)
-    db["get_message_row"].side_effect = lambda pk: leader if str(pk) == str(leader_pk) else None
+    db["get_message_row"].side_effect = lambda pk: (
+        leader if str(pk) == str(leader_pk) else None
+    )
     db["get_current_cache_entry"].side_effect = lambda key: (
         1,
         make_cache_entry(1, key, leader_pk, state="pending"),
@@ -1013,7 +1023,9 @@ async def test_submit_miss_claims_leadership_and_fans_out(client, db, redis_mock
     db["delete_message"].assert_not_awaited()
 
 
-async def test_submit_lost_race_discards_own_row_and_serves_winner(client, db, redis_mock):
+async def test_submit_lost_race_discards_own_row_and_serves_winner(
+    client, db, redis_mock
+):
     """Two identical misses: the lookup saw nothing, but by the time we
     claim, a concurrent submit already owns the key."""
     source, merged, label_map = _source_tree(db)
@@ -1052,7 +1064,9 @@ async def test_submit_overwrite_cache_runs_and_marks_role(client, db, redis_mock
     assert await _fanout_enqueued()
 
 
-async def test_submit_cache_disabled_behaves_as_upstream(client, db, redis_mock, monkeypatch):
+async def test_submit_cache_disabled_behaves_as_upstream(
+    client, db, redis_mock, monkeypatch
+):
     from shepherd_utils.config import settings
 
     monkeypatch.setattr(settings, "ars_cache_enabled", False)
@@ -1110,7 +1124,9 @@ async def test_messages_get_recent_splices_each_payload(client, db, redis_mock):
     assert [b["fields"]["data"] for b in body] == [{"message": {"results": []}}, None]
 
 
-async def test_cache_admin_routes_disabled_without_token(client, db, redis_mock, monkeypatch):
+async def test_cache_admin_routes_disabled_without_token(
+    client, db, redis_mock, monkeypatch
+):
     from shepherd_utils.config import settings
 
     monkeypatch.setattr(settings, "ars_admin_token", "")
@@ -1160,7 +1176,9 @@ def subscriber(mocker, db):
     mocker.patch.object(_crypto, "master_key", return_value=b"k" * 32)
     mocker.patch.object(_crypto, "decrypt_secret", return_value="secret")
     mocker.patch.object(_crypto, "verify_body_signature", return_value=True)
-    mocker.patch.object(ars_db, "load_otel_carrier", new_callable=AsyncMock, return_value="{}")
+    mocker.patch.object(
+        ars_db, "load_otel_carrier", new_callable=AsyncMock, return_value="{}"
+    )
     return client
 
 
@@ -1197,7 +1215,9 @@ async def test_subscribe_to_done_pk_replays_completion_to_that_client(
     assert all(t["message_pk"] == str(source["id"]) for t in tasks)
 
 
-async def test_subscribe_to_running_pk_still_subscribes(client, db, redis_mock, subscriber):
+async def test_subscribe_to_running_pk_still_subscribes(
+    client, db, redis_mock, subscriber
+):
     body = json.dumps({"client_id": "ui", "pks": [str(db["parent_pk"])]})
     resp = await client.post(
         "/api/query_event_subscribe",

@@ -148,7 +148,9 @@ def _source(db, merged_pk=None, status="D"):
         result_count=1,
         params={"query_type": "standard", "stats": {"results": 1}},
     )
-    db["get_message_row"].side_effect = lambda pk: source if pk == source["id"] else None
+    db["get_message_row"].side_effect = lambda pk: (
+        source if pk == source["id"] else None
+    )
     db["load_message_data"].side_effect = lambda pk, *a: (
         json.loads(json.dumps(MERGED_PAYLOAD)) if pk == merged_pk else None
     )
@@ -162,7 +164,10 @@ def _source(db, merged_pk=None, status="D"):
 
 async def test_lookup_disabled_or_non_normal_mode_is_none(db, monkeypatch):
     assert await cache.lookup(dict(QUERY, bypass_cache=True), LOGGER) is None
-    assert await cache.lookup(dict(QUERY, parameters={"overwrite_cache": True}), LOGGER) is None
+    assert (
+        await cache.lookup(dict(QUERY, parameters={"overwrite_cache": True}), LOGGER)
+        is None
+    )
     monkeypatch.setattr(settings, "ars_cache_enabled", False)
     assert await cache.lookup(QUERY, LOGGER) is None
     db["get_current_cache_entry"].assert_not_awaited()
@@ -205,7 +210,9 @@ async def test_lookup_pending_with_missing_leader_drops_entry(db):
     db["delete_cache_entry"].assert_awaited_once_with(1, KEY)
 
 
-@pytest.mark.parametrize("breakage", ["missing_source", "source_running", "no_merged_version", "no_payload"])
+@pytest.mark.parametrize(
+    "breakage", ["missing_source", "source_running", "no_merged_version", "no_payload"]
+)
 async def test_lookup_broken_ready_entry_is_dropped(db, breakage):
     source = _source(db)
     if breakage == "missing_source":
@@ -253,7 +260,11 @@ async def test_bypass_and_overwrite_record_role_and_dispatch(db):
 
 async def test_miss_claims_leadership(db):
     parent = row()
-    db["claim_or_get_cache_entry"].return_value = (3, entry(parent["id"], "pending", generation=3), True)
+    db["claim_or_get_cache_entry"].return_value = (
+        3,
+        entry(parent["id"], "pending", generation=3),
+        True,
+    )
     outcome, out, payload = await cache.claim_or_serve(parent, QUERY, LOGGER)
     assert outcome == cache.DISPATCH and payload is QUERY
     assert out["params"]["cache"] == {"role": "leader", "key": KEY, "generation": 3}
@@ -276,7 +287,11 @@ async def test_lost_race_to_pending_entry_waits_on_leader(db):
     parent = row()
     leader = row(status="R")
     db["get_message_row"].return_value = leader
-    db["claim_or_get_cache_entry"].return_value = (1, entry(leader["id"], "pending"), False)
+    db["claim_or_get_cache_entry"].return_value = (
+        1,
+        entry(leader["id"], "pending"),
+        False,
+    )
     outcome, out, payload = await cache.claim_or_serve(parent, QUERY, LOGGER)
     assert outcome == cache.WAITING and out is leader and payload is QUERY
     db["delete_message"].assert_awaited_once_with(parent["id"])
@@ -321,11 +336,15 @@ async def test_leader_stamps_merged_message_before_publishing(db):
     leader = _leader(merged_version=merged_pk)
     db["get_children"].return_value = [_ara("D", 3), _merge(merged_pk, 3)]
     payload = json.loads(json.dumps(MERGED_PAYLOAD))
-    db["load_message_data"].side_effect = lambda pk, *a: payload if pk == merged_pk else QUERY
+    db["load_message_data"].side_effect = lambda pk, *a: (
+        payload if pk == merged_pk else QUERY
+    )
     db["mark_cache_entry_ready"].return_value = entry(leader["id"])
     order = []
     db["save_message_data"].side_effect = lambda *a, **k: order.append("save")
-    db["mark_cache_entry_ready"].side_effect = lambda *a, **k: order.append("ready") or entry(leader["id"])
+    db["mark_cache_entry_ready"].side_effect = lambda *a, **k: order.append(
+        "ready"
+    ) or entry(leader["id"])
     await cache.on_parent_complete(leader, LOGGER)
     saved_pk, saved_payload = db["save_message_data"].await_args.args[:2]
     assert saved_pk == merged_pk
@@ -342,7 +361,9 @@ async def test_stamp_failure_does_not_block_publishing(db):
     merged_pk = uuid.uuid4()
     leader = _leader(merged_version=merged_pk)
     db["get_children"].return_value = [_ara("D", 3), _merge(merged_pk, 3)]
-    db["load_message_data"].side_effect = lambda pk, *a: {"message": {}} if pk == merged_pk else QUERY
+    db["load_message_data"].side_effect = lambda pk, *a: (
+        {"message": {}} if pk == merged_pk else QUERY
+    )
     db["save_message_data"].side_effect = RuntimeError("redis down")
     db["mark_cache_entry_ready"].return_value = entry(leader["id"])
     await cache.on_parent_complete(leader, LOGGER)
@@ -366,17 +387,30 @@ def _leader(role="leader", status="D", **extra):
     return row(
         status=status,
         code=200 if status == "D" else 500,
-        params={"query_type": "standard", "cache": {"key": KEY, "generation": 1, "role": role}},
+        params={
+            "query_type": "standard",
+            "cache": {"key": KEY, "generation": 1, "role": role},
+        },
         **extra,
     )
 
 
 def _ara(status, result_count=None):
-    return dict(row(status=status, code=200 if status == "D" else 598), agent_name="ara-x", inforesid="infores:x", result_count=result_count)
+    return dict(
+        row(status=status, code=200 if status == "D" else 598),
+        agent_name="ara-x",
+        inforesid="infores:x",
+        result_count=result_count,
+    )
 
 
 def _merge(pk, result_count):
-    return dict(row(pk=pk, status="D", code=200), agent_name="ars-ars-agent", inforesid="infores:ars", result_count=result_count)
+    return dict(
+        row(pk=pk, status="D", code=200),
+        agent_name="ars-ars-agent",
+        inforesid="infores:ars",
+        result_count=result_count,
+    )
 
 
 async def test_on_parent_complete_ignores_non_leaders(db):
@@ -446,7 +480,9 @@ async def test_overwrite_upserts_entry(db):
     db["upsert_cache_entry_ready"].return_value = entry(parent["id"])
     await cache.on_parent_complete(parent, LOGGER)
     _, label_map = cache.cache_key(QUERY)
-    db["upsert_cache_entry_ready"].assert_awaited_once_with(1, KEY, parent["id"], label_map)
+    db["upsert_cache_entry_ready"].assert_awaited_once_with(
+        1, KEY, parent["id"], label_map
+    )
     db["mark_cache_entry_ready"].assert_not_awaited()
 
 
@@ -498,7 +534,9 @@ async def test_repair_sweep_finishes_done_leader_and_drops_others(db, mocker):
     complete.assert_awaited_once_with(done_leader, LOGGER)
     dropped = [c.args[0] for c in db["delete_pending_cache_entry"].await_args_list]
     assert dropped == [done_leader["id"], stuck_pk, gone_pk]
-    db["get_stale_pending_cache_entries"].assert_awaited_once_with(settings.ars_cache_pending_max_sec)
+    db["get_stale_pending_cache_entries"].assert_awaited_once_with(
+        settings.ars_cache_pending_max_sec
+    )
 
 
 async def test_repair_sweep_purges_superseded_generations(db):
@@ -506,7 +544,9 @@ async def test_repair_sweep_purges_superseded_generations(db):
     db["purge_stale_cache_entries"].return_value = 12
     counts = await cache.repair_sweep(LOGGER)
     assert counts["purged"] == 12
-    db["purge_stale_cache_entries"].assert_awaited_once_with(4, settings.ars_cache_stale_grace_sec)
+    db["purge_stale_cache_entries"].assert_awaited_once_with(
+        4, settings.ars_cache_stale_grace_sec
+    )
 
 
 async def test_repair_sweep_isolates_failures(db):
@@ -520,6 +560,8 @@ async def test_repair_sweep_isolates_failures(db):
 
 
 async def test_invalidate_all_bumps_generation(mocker):
-    bump = mocker.patch.object(cache.ars_db, "bump_cache_generation", new_callable=AsyncMock, return_value=7)
+    bump = mocker.patch.object(
+        cache.ars_db, "bump_cache_generation", new_callable=AsyncMock, return_value=7
+    )
     assert await cache.invalidate_all("new KG") == 7
     bump.assert_awaited_once_with("new KG")

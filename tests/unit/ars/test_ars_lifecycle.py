@@ -284,7 +284,10 @@ def replay_env(mocker):
 
     mocker.patch.object(notify_mod, "add_task", fake_add_task)
     mocker.patch.object(
-        notify_mod.ars_db, "load_otel_carrier", new_callable=AsyncMock, return_value="{}"
+        notify_mod.ars_db,
+        "load_otel_carrier",
+        new_callable=AsyncMock,
+        return_value="{}",
     )
     mocker.patch.object(
         notify_mod.ars_db,
@@ -316,7 +319,11 @@ async def test_replay_done_parent_emits_last_merged_then_admin(replay_env):
     assert first["complete"] is True
     assert first["merged_versions_list"] == mvl
     assert first["stats"]["results"] == 5
-    assert second == {"event_type": "admin", "complete": True, "stats": {"results": 5, "auxiliary_graphs": 0}}
+    assert second == {
+        "event_type": "admin",
+        "complete": True,
+        "stats": {"results": 5, "auxiliary_graphs": 0},
+    }
     assert all(_json.loads(t[1]["client_pks"]) == ["7"] for t in replay_env)
     assert all(t[1]["message_pk"] == str(parent["id"]) for t in replay_env)
 
@@ -327,7 +334,10 @@ async def test_replay_empty_completion_emits_only_admin(replay_env):
     parent = _done_parent([["m0", "ars"]], result_count=None)
     await notify_mod.replay_completion(parent, 7, LOGGER)
     assert len(replay_env) == 1
-    assert _json.loads(replay_env[0][1]["fields"]) == {"event_type": "admin", "complete": True}
+    assert _json.loads(replay_env[0][1]["fields"]) == {
+        "event_type": "admin",
+        "complete": True,
+    }
 
 
 async def test_replay_error_parent_emits_ars_error(replay_env):
@@ -353,7 +363,9 @@ async def test_live_notify_resolves_recipients_at_emit_time(replay_env):
     assert _json.loads(replay_env[0][1]["client_pks"]) == ["3", "4"]
 
 
-async def test_live_notify_without_resolvable_subscribers_still_enqueues(replay_env, mocker):
+async def test_live_notify_without_resolvable_subscribers_still_enqueues(
+    replay_env, mocker
+):
     mocker.patch.object(
         notify_mod.ars_db,
         "get_subscribed_clients",

@@ -988,16 +988,16 @@ def _admin_authorized(request: Request) -> bool:
         return False
     header = request.headers.get("authorization", "")
     scheme, _, presented = header.partition(" ")
-    return scheme.lower() == "bearer" and hmac.compare_digest(
-        presented.strip(), token
-    )
+    return scheme.lower() == "bearer" and hmac.compare_digest(presented.strip(), token)
 
 
 @route("/api/cache", ["GET"])
 async def cache_stats(request: Request) -> Response:
     if not _admin_authorized(request):
         return text("Forbidden", 403)
-    return JSONResponse(content=json.loads(json.dumps(await cache.stats(), default=str)))
+    return JSONResponse(
+        content=json.loads(json.dumps(await cache.stats(), default=str))
+    )
 
 
 @route("/api/cache/invalidate", ["POST"])

@@ -170,7 +170,9 @@ def test_two_hop_with_blank_middle_nodes_is_label_invariant():
         },
     }
     renamed = relabel(
-        chain, {"a": "q", "b": "z", "c": "y", "d": "p"}, {"e1": "k", "e2": "j", "e3": "i"}
+        chain,
+        {"a": "q", "b": "z", "c": "y", "d": "p"},
+        {"e1": "k", "e2": "j", "e3": "i"},
     )
     assert key(chain) == key(renamed)
     # the blank nodes are distinguishable by position: b touches the pinned
@@ -202,7 +204,13 @@ def test_symmetric_nodes_same_key_and_valid_map():
 def test_pathfinder_paths_relabel_like_edges():
     pf = {
         "nodes": {"n0": {"ids": ["CHEBI:45783"]}, "n1": {"ids": ["MONDO:0004979"]}},
-        "paths": {"p0": {"subject": "n0", "object": "n1", "predicates": ["biolink:related_to"]}},
+        "paths": {
+            "p0": {
+                "subject": "n0",
+                "object": "n1",
+                "predicates": ["biolink:related_to"],
+            }
+        },
     }
     renamed = relabel(pf, {"n0": "start", "n1": "end"}, path_map={"p0": "route"})
     assert key(pf) == key(renamed)

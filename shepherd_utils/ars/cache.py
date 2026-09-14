@@ -168,9 +168,10 @@ def _serialize_candidate(
     path_items = _relabel_collection(paths, node_map)
     canon_edges = {f"e{i}": body for i, (_, _, body) in enumerate(edge_items)}
     canon_paths = {f"p{i}": body for i, (_, _, body) in enumerate(path_items)}
-    graph = canonicalize(
-        {"nodes": canon_nodes, "edges": canon_edges, "paths": canon_paths}
-    ) or {}
+    graph = (
+        canonicalize({"nodes": canon_nodes, "edges": canon_edges, "paths": canon_paths})
+        or {}
+    )
     label_map = {
         "nodes": node_map,
         "edges": {orig: f"e{i}" for i, (_, orig, _) in enumerate(edge_items)},
@@ -374,7 +375,9 @@ async def _serve(
     return WAITING, leader, body
 
 
-async def lookup(body: Any, logger: logging.Logger) -> Optional[Tuple[str, Dict[str, Any], Any]]:
+async def lookup(
+    body: Any, logger: logging.Logger
+) -> Optional[Tuple[str, Dict[str, Any], Any]]:
     """Submit step 1, before any row exists: answer a normal-mode submit
     from the cache when it can. None means "create a parent row and call
     claim_or_serve". Never raises."""
@@ -470,7 +473,9 @@ async def _stamp_cached_answer(parent_row, cache_key_, generation, logger) -> No
         if not isinstance(payload, dict):
             return
         append_log(payload, cache_note(parent_row["id"], cache_key_, generation))
-        await ars_db.save_message_data(merged_pk, payload, logger, raise_on_failure=True)
+        await ars_db.save_message_data(
+            merged_pk, payload, logger, raise_on_failure=True
+        )
         await ars_db.persist_data_copy(merged_pk, logger)
     except Exception as e:
         logger.warning(f"Cache: could not stamp merged message {merged_pk}: {e}")
@@ -499,7 +504,9 @@ async def _cacheable(parent_row: Dict[str, Any], children, logger) -> bool:
     return True
 
 
-async def on_parent_complete(parent_row: Dict[str, Any], logger: logging.Logger) -> None:
+async def on_parent_complete(
+    parent_row: Dict[str, Any], logger: logging.Logger
+) -> None:
     """Completion hook, once a parent reaches Done: a leader flips its
     pending entry to ready (or drops it when the run is not cacheable, so
     the next identical submit re-runs); an overwrite run repoints its key.
@@ -528,16 +535,25 @@ async def on_parent_complete(parent_row: Dict[str, Any], logger: logging.Logger)
         if role == ROLE_LEADER:
             entry = await ars_db.mark_cache_entry_ready(parent_pk, label_map)
             if entry is None:
-                logger.info(f"Cache: {parent_pk} finished but no longer leads its entry")
+                logger.info(
+                    f"Cache: {parent_pk} finished but no longer leads its entry"
+                )
             else:
                 logger.info(f"Cache: entry {entry['cache_key']} ready from {parent_pk}")
         else:
             await ars_db.upsert_cache_entry_ready(
-                cache_info.get("generation"), cache_info.get("key"), parent_pk, label_map
+                cache_info.get("generation"),
+                cache_info.get("key"),
+                parent_pk,
+                label_map,
             )
-            logger.info(f"Cache: entry {cache_info.get('key')} overwritten by {parent_pk}")
+            logger.info(
+                f"Cache: entry {cache_info.get('key')} overwritten by {parent_pk}"
+            )
     except Exception as e:
-        logger.error(f"Cache completion hook failed for {parent_pk}: {e}", exc_info=True)
+        logger.error(
+            f"Cache completion hook failed for {parent_pk}: {e}", exc_info=True
+        )
 
 
 async def on_parent_failed(parent_row: Dict[str, Any], logger: logging.Logger) -> None:

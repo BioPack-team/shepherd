@@ -129,7 +129,11 @@ async def replay_completion(
     when it completed.
     """
     status = message_row.get("status")
-    if status == "D" and message_row.get("ref") is None and _has_real_merge(message_row):
+    if (
+        status == "D"
+        and message_row.get("ref") is None
+        and _has_real_merge(message_row)
+    ):
         await notify_subscribers(
             dict(message_row, status="R"),
             {
