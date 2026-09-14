@@ -175,7 +175,12 @@ Behavioral deviations:
     submit matching an in-flight query is handed the leader's pk while it
     is still Running. No rows or payloads are written on a hit. Message
     GETs splice the stored payload bytes into the envelope without parsing
-    them (the recent-messages list likewise).
+    them (the recent-messages list likewise). Because a hit's pk is already
+    finished when the client subscribes to it, `query_event_subscribe` on a
+    terminal pk **replays that message's completion notifications to the
+    subscribing client** (`last_merged_completed` then `admin/complete`, or
+    `ars_error`) and reports success, where upstream refused with "Query
+    already complete"; with the cache disabled the refusal is preserved.
     Opt out per query with TRAPI `bypass_cache` (no read, no write);
     refresh one entry with `parameters.overwrite_cache` (no read, forced
     write); flush all by bumping the cache generation

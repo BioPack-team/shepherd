@@ -292,6 +292,17 @@ any other stale pending row — leader Error, missing, or still Running past
 the threshold — is dropped so the query can be re-run. Superseded
 generations' rows are deleted in batches after `ars_cache_stale_grace_sec`.
 
+**Subscribers.** A hit's pk is already Done when the client goes to
+subscribe to it, and upstream's `query_event_subscribe` refuses finished
+pks ("Query already complete"), so nothing would ever be delivered. With
+the cache enabled, subscribing to a terminal pk instead **replays that
+message's completion notifications to the subscribing client only**
+(`replay_completion`: `last_merged_completed` for a parent with a real
+merge, then the save-time `admin/complete`; `ars_error` for an Error), via
+an `ars.notify` task addressed with `client_pk`, and reports success. No
+standing subscription is created. A client that subscribes to a *pending*
+leader's pk is a normal subscriber and receives the live events.
+
 **Shared-pk consequences, accepted:** `retain/<pk>` retains the tree for
 everyone (desirable); `block/<pk>` rewrites the shared payload for
 everyone; the row's `timestamp`, `name` and stored submit body are the

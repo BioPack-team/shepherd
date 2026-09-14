@@ -47,7 +47,7 @@ from shepherd_utils.ars.filters import (
     score_filter,
     specific_node_filter,
 )
-from shepherd_utils.ars.notify import notify_subscribers
+from shepherd_utils.ars.notify import notify_subscribers, replay_completion
 from shepherd_utils.ars.premerge import ScoreStatCalc, get_safe
 from shepherd_utils.ars.statuses import to_name
 from shepherd_utils.config import settings
@@ -1185,7 +1185,16 @@ async def query_event_subscribe(request: Request) -> Response:
                     out["failure"][key] = "UUID not found"
                     continue
                 if mesg["status"] in ("D", "E"):
-                    out["failure"][key] = "Query already complete"
+                    if settings.ars_cache_enabled:
+                        # A response-cache hit hands back a pk that is
+                        # already Done, so the client's subscription lands
+                        # after every completion event fired. Replay them
+                        # to this client instead of upstream's refusal
+                        # (documented deviation, parity register 13).
+                        await replay_completion(mesg, client["id"], logger)
+                        out["success"].append(key)
+                    else:
+                        out["failure"][key] = "Query already complete"
                 else:
                     await ars_db.add_subscription(mesg["id"], client["id"])
                     out["success"].append(key)

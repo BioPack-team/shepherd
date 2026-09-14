@@ -82,7 +82,14 @@ async def ars_notify(task, logger: logging.Logger):
             if k == "event_type" and v == "last_merged_completed":
                 notification["code"] = 200
             notification[k] = v
-    clients = await ars_db.get_subscribed_clients(message_pk)
+    client_pk = task[1].get("client_pk")
+    if client_pk:
+        # a replay addressed to one client (a late subscriber to a finished
+        # query, e.g. a response-cache hit), not the subscriber list
+        client = await ars_db.get_client_by_pk(int(client_pk))
+        clients = [client] if client is not None else []
+    else:
+        clients = await ars_db.get_subscribed_clients(message_pk)
     logger.info(
         f"Sending notification for {message_pk} to {len(clients)} client(s): "
         f"{notification.get('event_type')}"

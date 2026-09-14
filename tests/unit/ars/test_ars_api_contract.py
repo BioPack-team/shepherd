@@ -1137,3 +1137,92 @@ async def test_cache_admin_routes_with_token(client, db, redis_mock, monkeypatch
     db["bump_cache_generation"].assert_awaited_once_with("new KG")
     resp = await client.post("/api/cache/invalidate", headers=good, content=b"{bad")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# subscriptions to an already-finished pk (response-cache hit)
+# ---------------------------------------------------------------------------
+
+from shepherd_utils.ars import crypto as _crypto  # noqa: E402
+
+
+@pytest.fixture
+def subscriber(mocker, db):
+    client = {
+        "id": 7,
+        "client_id": "ui",
+        "client_secret": "enc",
+        "callback_url": "https://ui.example/notify",
+        "active": True,
+        "subscriptions": [],
+    }
+    db["get_client"].return_value = client
+    mocker.patch.object(_crypto, "master_key", return_value=b"k" * 32)
+    mocker.patch.object(_crypto, "decrypt_secret", return_value="secret")
+    mocker.patch.object(_crypto, "verify_body_signature", return_value=True)
+    mocker.patch.object(ars_db, "load_otel_carrier", new_callable=AsyncMock, return_value="{}")
+    return client
+
+
+async def _notify_tasks():
+    out = []
+    while True:
+        task = await _get_task("ars.notify", "consumer", "t", _logging.getLogger())
+        if task is None:
+            return out
+        out.append(task[1])
+
+
+async def test_subscribe_to_done_pk_replays_completion_to_that_client(
+    client, db, redis_mock, subscriber
+):
+    source, merged, _ = _source_tree(db)
+    body = json.dumps({"client_id": "ui", "pks": [str(source["id"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["success"] == [str(source["id"])]
+    # no standing subscription is created for a finished query...
+    db["add_subscription"].assert_not_awaited()
+    # ...the completion events are replayed to this client alone
+    tasks = await _notify_tasks()
+    assert [json.loads(t["fields"])["event_type"] for t in tasks] == [
+        "last_merged_completed",
+        "admin",
+    ]
+    assert all(t["client_pk"] == "7" for t in tasks)
+    assert all(t["message_pk"] == str(source["id"]) for t in tasks)
+
+
+async def test_subscribe_to_running_pk_still_subscribes(client, db, redis_mock, subscriber):
+    body = json.dumps({"client_id": "ui", "pks": [str(db["parent_pk"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+    assert resp.status_code == 200
+    db["add_subscription"].assert_awaited_once()
+    assert await _notify_tasks() == []
+
+
+async def test_subscribe_to_done_pk_refused_when_cache_disabled(
+    client, db, redis_mock, subscriber, monkeypatch
+):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_cache_enabled", False)
+    source, merged, _ = _source_tree(db)
+    body = json.dumps({"client_id": "ui", "pks": [str(source["id"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+    # upstream _analyze_response: nothing succeeded -> 400 with the failure map
+    assert resp.status_code == 400
+    assert resp.json()["failure"] == {str(source["id"]): "Query already complete"}
+    assert await _notify_tasks() == []

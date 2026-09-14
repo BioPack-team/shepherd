@@ -57,23 +57,71 @@ async def notify_subscribers(
     additional_fields: Optional[Dict[str, Any]],
     logger: logging.Logger,
     data: Optional[Dict[str, Any]] = None,
+    client_pk: Optional[int] = None,
 ) -> None:
-    """Build the notification fields and wake the ars_notify worker."""
+    """Build the notification fields and wake the ars_notify worker.
+
+    ``client_pk`` addresses one client instead of the message's subscriber
+    list -- used to replay a finished query's completion to a client that
+    subscribed after the fact (see ``replay_completion``)."""
     fields = build_notification(message_row, additional_fields, data=data)
     try:
         # rejoin the query's submit-time trace (the row is normally the
         # query parent; fall back through ref for a child row)
         query_pk = message_row.get("ref") or message_row["id"]
-        await add_task(
-            "ars.notify",
-            {
-                "message_pk": str(message_row["id"]),
-                "query_id": str(message_row["id"]),
-                "code": str(message_row.get("code", 200)),
-                "fields": json.dumps(fields) if fields is not None else "null",
-                "otel": await ars_db.load_otel_carrier(query_pk, logger),
-            },
-            logger,
-        )
+        payload = {
+            "message_pk": str(message_row["id"]),
+            "query_id": str(message_row["id"]),
+            "code": str(message_row.get("code", 200)),
+            "fields": json.dumps(fields) if fields is not None else "null",
+            "otel": await ars_db.load_otel_carrier(query_pk, logger),
+        }
+        if client_pk is not None:
+            payload["client_pk"] = str(client_pk)
+        await add_task("ars.notify", payload, logger)
     except Exception as e:
         logger.error(f"Failed to enqueue notification for {message_row['id']}: {e}")
+
+
+def _has_real_merge(message_row: Dict[str, Any]) -> bool:
+    """True when the parent finished with at least one ARA merge. The
+    empty-completion branch records only [[pk, "ars"]] and upstream does not
+    emit last_merged_completed for it."""
+    for item in message_row.get("merged_versions_list") or []:
+        try:
+            agent = item[1]
+        except (IndexError, TypeError, KeyError):
+            continue
+        if agent != "ars":
+            return True
+    return False
+
+
+async def replay_completion(
+    message_row: Dict[str, Any], client_pk: int, logger: logging.Logger
+) -> None:
+    """Deliver, to one client, the notifications a live subscriber would have
+    received when this already-terminal message completed.
+
+    The response cache hands a Done pk straight back from /submit, so the
+    client's subscription arrives after every completion event has already
+    fired (and upstream would refuse it as "Query already complete"). The
+    same events are re-emitted in the same order: for a Done parent with a
+    real merge, ``last_merged_completed`` (built against a Running-shaped
+    row exactly as the live path does, so the custom fields survive the
+    'D' override) and then the save-time admin/complete; an Error message
+    yields ars_error via the same override rules.
+    """
+    status = message_row.get("status")
+    if status == "D" and message_row.get("ref") is None and _has_real_merge(message_row):
+        await notify_subscribers(
+            dict(message_row, status="R"),
+            {
+                "event_type": "last_merged_completed",
+                "complete": True,
+                "merged_versions_list": message_row.get("merged_versions_list") or [],
+            },
+            logger,
+            client_pk=client_pk,
+        )
+    await notify_subscribers(message_row, None, logger, client_pk=client_pk)
