@@ -27,7 +27,6 @@ import pathlib
 
 import pytest
 
-from shepherd_utils.ars import filters as ars_filters
 from shepherd_utils.ars import merge as ars_merge
 from shepherd_utils.ars import premerge as ars_premerge
 from shepherd_utils.ars import scoring as ars_scoring
@@ -307,54 +306,6 @@ def test_remove_blocked_parity():
     assert_parity(
         mask_log_timestamps(jsonable(data)),
         mask_log_timestamps(golden["data"]),
-    )
-
-
-# ---------------------------------------------------------------------------
-# filters
-# ---------------------------------------------------------------------------
-
-
-def test_filters_parity():
-    fin = load("filters_input.json")
-    golden = GOLDENS["filters"]
-    assert_parity(
-        jsonable(ars_filters.hop_level_filter(copy.deepcopy(fin["results"]), 3)),
-        golden["hop_3"],
-    )
-    assert_parity(
-        jsonable(ars_filters.hop_level_filter(copy.deepcopy(fin["results"]), 4)),
-        golden["hop_4"],
-    )
-    assert_parity(
-        jsonable(ars_filters.score_filter(copy.deepcopy(fin["results"]), [20, 80])),
-        golden["score_20_80"],
-    )
-    assert_parity(
-        jsonable(
-            ars_filters.node_type_filter(
-                copy.deepcopy(fin["kg_nodes"]), copy.deepcopy(fin["results"]), ["Gene"]
-            )
-        ),
-        golden["node_type_gene"],
-    )
-    assert_parity(
-        jsonable(
-            ars_filters.node_type_filter(
-                copy.deepcopy(fin["kg_nodes"]),
-                copy.deepcopy(fin["results"]),
-                ["ChemicalEntity"],
-            )
-        ),
-        golden["node_type_chemical"],
-    )
-    assert_parity(
-        jsonable(
-            ars_filters.specific_node_filter(
-                copy.deepcopy(fin["results"]), ["NCBIGene:5468"]
-            )
-        ),
-        golden["spec_node"],
     )
 
 

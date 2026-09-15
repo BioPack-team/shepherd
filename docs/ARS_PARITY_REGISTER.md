@@ -50,7 +50,7 @@ accept each behavioral change.
 
 | Layer | What it pins | Where |
 |---|---|---|
-| 1. Golden function parity | merge/premerge/filters/scoring/blocklist/validation outputs, byte-compared to upstream runs | `tests/unit/ars/test_golden_parity.py` |
+| 1. Golden function parity | merge/premerge/scoring/blocklist/validation outputs, byte-compared to upstream runs | `tests/unit/ars/test_golden_parity.py` |
 | 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_merge_worker.py`, `test_ars_postprocess.py`, `test_ars_watchdog.py`, `test_ars_notify.py` |
 | 3. API contract | paths, methods, status codes, error bodies, envelope shapes | `test_envelope.py`, `test_ars_api_contract.py` |
 | 3b. Deliberate divergences | the upstream bugs the port does NOT reproduce | `test_upstream_bugfixes.py` |
@@ -87,12 +87,9 @@ accept each behavioral change.
   code 598. Upstream's 15-minute ceiling on *creation* time is **not**
   reproduced (see the divergences below); the sweep is bounded by
   `ars_timeout_scan_limit` rows per pass instead.
-- **Known-broken endpoints reproduced** — `POST /ars/api/messages` (500),
-  `POST /ars/api/actors` (creates the actor, then 400
-  `Not a valid json format`), `GET /ars/api/merge/<pk>` (creates the shell
-  merge child, then 500), `timeoutTest`/`post_process` debug (500).
-  `GET /ars/api/block/<pk>` is **not served at all** — see the divergences
-  below.
+- **Known-broken endpoints** — **none are reproduced any more.** Every
+  upstream route that could only fail is either fixed or dropped; see the
+  Endpoints table under the divergences below.
 - **Upstream error-behavior parity** — a failed merge fold leaves the shell
   merge child Running for the watchdog. The crash-and-drop behaviors this
   row used to list (`decorate_edges_with_infores`'s UnboundLocalError,
@@ -313,6 +310,11 @@ failure is the prompt to re-decide each one, not a bug).
 | Upstream | Port |
 |---|---|
 | `GET /ars/api/block/<pk>` ran the blocklist cascade over an arbitrary stored message and saved the result in place — an unauthenticated destructive edit of a shared tree, which also 500s on any response without `auxiliary_graphs` | **not served**, and dropped from the `api/` index. Blocklist removal still runs where it belongs, in `ars_postprocess` over each merged message |
+| `GET /ars/api/merge/<pk>` called `utils.merge.apply_async`, which does not exist. Before dying it created a Running merge child under the parent — never a terminal status, so that parent could never complete again | **not served** |
+| `GET /ars/api/post_process/<pk>` passed a dict where a `Message` was expected → 500; `/ars/api/timeoutTest` returned `None` → 500 | **not served** (neither ever did anything else) |
+| `POST /ars/api/messages` looked the actor up in the Agent table and assigned the result to the actor FK → 500 | `405 Only GET is permitted!`. The collection is read-only: nothing can depend on a route that never succeeded, and unauthenticated out-of-band message creation is not a surface worth adding |
+| `POST /ars/api/actors` created the actor and *then* evaluated `actor.channel.name` on a list, so every caller got `400 Not a valid json format` for an actor that had in fact been created. It also tested the posted envelope against `tr_ars.agent` in an actor endpoint | returns the actor envelope with `201`/`302`, like `POST /agents`; accepts `tr_ars.actor` (and still `tr_ars.agent`); missing `agent`/`path` is a 400 that names them, an unknown agent or channel is 404, and only a real failure is 500 |
+| `GET /ars/api/filters` and `GET /ars/api/filter/<pk>` — the filter path read a stored message, rewrote its results, and saved new message rows for the filtered copy | **not served**, and `shepherd_utils/ars/filters.py` is removed with them. Unused in practice, and the endpoint was a write path into stored trees dressed as a query |
 | `GET /ars/api/messages/<pk>?compress` read only Redis, so it 404'd once the Redis TTL lapsed on a message still readable through every other endpoint | falls back to the durable `ars_message.data` copy and re-warms Redis |
 | `GET /ars/api/health` answered a non-GET with `Only POST is permitted!` | `Only GET is permitted!` |
 | `GET /ars/api/filter/<pk>` ran `ast.literal_eval` on raw query-string values, so a malformed literal escaped as an unstyled 500 | 400 naming the filter and value |

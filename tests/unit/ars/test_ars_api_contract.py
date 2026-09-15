@@ -364,13 +364,17 @@ async def test_messages_get_recent(client, db, redis_mock):
     assert body[0]["model"] == "tr_ars.message"
 
 
-async def test_messages_post_is_500(client, db, redis_mock):
-    """Upstream POST /messages is broken (Agent-as-actor) -> 500."""
+async def test_messages_post_is_405(client, db, redis_mock):
+    """The collection is read-only. Upstream's POST looked the actor up in
+    the Agent table and assigned it to the actor FK, so it only ever 500'd;
+    nothing can depend on it, and creating messages out of band is not an
+    endpoint the ARS should expose unauthenticated."""
     resp = await client.post(
         "/api/messages", json={"actor": 1, "name": "x", "status": "D"}
     )
-    assert resp.status_code == 500
-    assert resp.text == "Internal server error"
+    assert resp.status_code == 405
+    assert resp.text == "Only GET is permitted!"
+    db["create_message"].assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -655,9 +659,14 @@ async def test_actors_get_shape(client, db, redis_mock):
     assert fields["inforesid"] == "infores:aragorn"
 
 
-async def test_actors_post_is_400(client, db, redis_mock):
-    """Upstream crashes on actor.channel.name after creating the actor ->
-    400 'Not a valid json format' (the side effect still happens)."""
+async def test_actors_post_returns_the_actor(client, db, redis_mock):
+    """Upstream created the actor and THEN crashed on actor.channel.name, so
+    every caller got 400 for an actor that had in fact been created. The
+    endpoint now returns the envelope it was always meant to."""
+    db["get_or_create_actor"].return_value = (
+        dict(make_actor(actor_id=11), agent_uri="/a/"),
+        201,
+    )
     resp = await client.post(
         "/api/actors",
         json={
@@ -667,9 +676,64 @@ async def test_actors_post_is_400(client, db, redis_mock):
             "inforesid": "infores:a",
         },
     )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["model"] == "tr_ars.actor"
+    assert body["pk"] == 11
+    assert body["fields"]["path"] == "runquery"
+    assert body["fields"]["url"] == "/a/runquery"
+    db["get_or_create_actor"].assert_awaited_once()
+
+
+async def test_actors_post_existing_actor_is_302(client, db, redis_mock):
+    db["get_or_create_actor"].return_value = (
+        dict(make_actor(actor_id=11), agent_uri="/a/"),
+        302,
+    )
+    resp = await client.post(
+        "/api/actors",
+        json={"agent": {"name": "a", "uri": "/a/"}, "path": "runquery"},
+    )
+    assert resp.status_code == 302
+
+
+async def test_actors_post_unwraps_a_serialized_envelope(client, db, redis_mock):
+    db["get_or_create_actor"].return_value = (
+        dict(make_actor(actor_id=11), agent_uri="/a/"),
+        201,
+    )
+    resp = await client.post(
+        "/api/actors",
+        json={
+            "model": "tr_ars.actor",
+            "pk": 11,
+            "fields": {"agent": {"name": "a", "uri": "/a/"}, "path": "runquery"},
+        },
+    )
+    assert resp.status_code == 201
+    assert db["get_or_create_actor"].await_args.args[0]["path"] == "runquery"
+
+
+async def test_actors_post_missing_fields_is_400(client, db, redis_mock):
+    resp = await client.post("/api/actors", json={"channel": ["general"]})
+    assert resp.status_code == 400
+    assert resp.text == 'JSON does not contain "agent" and "path" fields'
+    db["get_or_create_actor"].assert_not_awaited()
+
+
+async def test_actors_post_bad_json_is_400(client, db, redis_mock):
+    resp = await client.post(
+        "/api/actors", content=b"not json", headers={"content-type": "application/json"}
+    )
     assert resp.status_code == 400
     assert resp.text == "Not a valid json format"
-    db["get_or_create_actor"].assert_awaited_once()
+
+
+async def test_actors_post_unknown_agent_is_404(client, db, redis_mock):
+    db["get_or_create_actor"].side_effect = KeyError("agent: nope")
+    resp = await client.post("/api/actors", json={"agent": "nope", "path": "runquery"})
+    assert resp.status_code == 404
+    assert resp.text.startswith("Unknown ")
 
 
 async def test_channels_get_and_post(client, db, redis_mock):
@@ -692,52 +756,15 @@ async def test_channels_get_and_post(client, db, redis_mock):
 
 
 # ---------------------------------------------------------------------------
-# filters / retain / status / health / misc
+# retain / status / health / misc
 # ---------------------------------------------------------------------------
 
 
-async def test_filters_documentation(client, db, redis_mock):
-    resp = await client.get("/api/filters")
-    assert resp.status_code == 200
-    doc = resp.json()
-    assert doc["hop_level"]["default"] == 3
-    assert doc["score_level"]["default"] == [20, 80]
-    assert set(doc.keys()) == {
-        "hop_level",
-        "score_level",
-        "node_type",
-        "spec_node",
-        "multi-filtering",
-    }
-
-
-async def test_filter_redirects_302(client, db, redis_mock):
-    """Filtering a non-parent Done message creates a filtered copy and
-    302-redirects to its trace view."""
-    db["child"]["status"] = "D"
-    db["child"]["code"] = 200
-    db["child"]["result_count"] = 3
-    db["load_message_data"].return_value = {
-        "message": {
-            "results": [
-                {
-                    "node_bindings": {"n0": [{"id": "A"}], "n1": [{"id": "B"}]},
-                    "normalized_score": 50,
-                },
-            ],
-            "knowledge_graph": {"nodes": {}, "edges": {}},
-        }
-    }
-    resp = await client.get(f"/api/filter/{db['child_pk']}?hop=3")
-    assert resp.status_code == 302
-    assert resp.headers["location"].startswith("/ars/api/messages/")
-    assert resp.headers["location"].endswith("?trace=y")
-
-
-async def test_filter_not_done_400(client, db, redis_mock):
-    resp = await client.get(f"/api/filter/{db['child_pk']}?hop=3")
-    assert resp.status_code == 400
-    assert resp.text == 'message doesnt have results or marked as "Done"'
+async def test_filter_endpoints_are_gone(client, db, redis_mock):
+    """/filters and /filter/<pk> are not served: unused, and the filter path
+    rewrote and re-saved stored messages."""
+    assert (await client.get("/api/filters")).status_code == 404
+    assert (await client.get(f"/api/filter/{db['child_pk']}?hop=3")).status_code == 404
 
 
 async def test_retain_running_parent_refused(client, db, redis_mock):
@@ -811,12 +838,27 @@ async def test_index_lists_entries(client, db, redis_mock):
     assert any(e.endswith("/ars/api/submit/") for e in body["entries"])
 
 
-async def test_merge_debug_endpoint_500(client, db, redis_mock):
-    """Upstream utils.merge doesn't exist -> the endpoint dies after creating
-    the shell merge message."""
-    resp = await client.get(f"/api/merge/{db['parent_pk']}")
-    assert resp.status_code == 500
-    db["create_message"].assert_awaited_once()
+async def test_index_does_not_advertise_dropped_routes(client, db, redis_mock):
+    """The index is the ARS's own route directory: it must not point at
+    endpoints this port does not serve."""
+    entries = (await client.get("/api/")).json()["entries"]
+    for dropped in ("block/", "merge/", "post_process/", "timeoutTest", "filter"):
+        assert not any(dropped in e for e in entries), dropped
+
+
+async def test_dead_debug_endpoints_are_gone(client, db, redis_mock):
+    """merge, post_process and timeoutTest never did anything but 500 -- and
+    merge left a Running merge child behind first, which is never terminal,
+    so the parent could never complete again."""
+    for path in (
+        f"/api/merge/{db['parent_pk']}",
+        f"/api/post_process/{db['parent_pk']}",
+        "/api/timeoutTest",
+        f"/api/block/{db['parent_pk']}",
+    ):
+        resp = await client.get(path)
+        assert resp.status_code == 404, path
+    db["create_message"].assert_not_awaited()
 
 
 async def test_latest_pk_shape(client, db, redis_mock):

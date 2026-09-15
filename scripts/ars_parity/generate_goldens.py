@@ -278,33 +278,6 @@ def main():
     utils.remove_phantom_support_graphs(intact)
     out["remove_phantom_intact"] = jsonable(intact)
 
-    # ---------------- filters ----------------
-    fin = load("filters_input.json")
-    out["filters"] = {
-        "hop_3": jsonable(utils.hop_level_filter(copy.deepcopy(fin["results"]), 3)),
-        "hop_4": jsonable(utils.hop_level_filter(copy.deepcopy(fin["results"]), 4)),
-        "score_20_80": jsonable(
-            utils.score_filter(copy.deepcopy(fin["results"]), [20, 80])
-        ),
-        "node_type_gene": jsonable(
-            utils.node_type_filter(
-                copy.deepcopy(fin["kg_nodes"]),
-                copy.deepcopy(fin["results"]),
-                ["Gene"],
-            )
-        ),
-        "node_type_chemical": jsonable(
-            utils.node_type_filter(
-                copy.deepcopy(fin["kg_nodes"]),
-                copy.deepcopy(fin["results"]),
-                ["ChemicalEntity"],
-            )
-        ),
-        "spec_node": jsonable(
-            utils.specific_node_filter(copy.deepcopy(fin["results"]), ["NCBIGene:5468"])
-        ),
-    }
-
     # ---------------- validate (verdict parity) ----------------
     verdicts = {}
     verdicts["aragorn"] = utils.validate(copy.deepcopy(aragorn))

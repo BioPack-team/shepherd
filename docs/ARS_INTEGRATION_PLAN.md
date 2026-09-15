@@ -1,6 +1,11 @@
 # Translator ARS → Shepherd Integration Plan
 
 **Status:** Implemented (see the delivery appendix at the bottom and docs/ARS_PARITY_REGISTER.md)
+
+> **This document is the original plan, kept as a record of intent.** Where it
+> describes behavior the port has since deliberately changed — chiefly the
+> upstream bugs it no longer reproduces and the dead endpoints it no longer
+> serves — **docs/ARS_PARITY_REGISTER.md is authoritative**, not this file.
 **Scope:** Re-host the NCATS Translator ARS ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)) as a set of Shepherd workers + a Shepherd server sub-app, replacing its Django/Celery/RabbitMQ/MySQL runtime with Shepherd's FastAPI/Redis-Streams/Postgres infrastructure, while preserving externally observable ARS behavior exactly, as enforced by a parity test suite.
 
 ---
@@ -40,7 +45,7 @@ Note the topology inversion: today the ARS sits *in front of* Shepherd (it fans 
 - N1. **Django admin** (`/admin/`) — replaced by direct SQL / existing Shepherd monitor.
 - N2. **Websocket consumer** (`ARSConsumer` echo) — vestigial upstream; dropped.
 - N3. **HTML status/answers pages** (`/ars/app/...`, `/ars/answer/<pk>`) — deferred to a later phase; the JSON APIs they render from are in scope.
-- N4. **`GET /ars/api/merge/<pk>`** — broken on current ARS master (calls `utils.merge.apply_async`, but no such task exists → `AttributeError`/500). We keep the route and return a 500-class error to match observable behavior, but do not reimplement the dead code path.
+- N4. **`GET /ars/api/merge/<pk>`** — broken on current ARS master (calls `utils.merge.apply_async`, but no such task exists → `AttributeError`/500). The route is **not served**: before dying it created a Running merge child under the parent, which is never terminal, so that parent could never complete again.
 - N5. **KP actor apps** (`tr_kp_*`) — the production fan-out path only exercises ARA actors on the `general`/`workflow` channels. KP actors are carried as configuration (they exist in the registry tables) but no KP-specific behavior is ported beyond generic actor handling.
 - N6. Behavior-preserving infrastructure substitutions listed in §5 (Celery→Streams, MySQL→Postgres, etc.) are by definition not parity violations; parity is defined over *externally observable* behavior (HTTP surface, message state machine, outbound calls to ARAs/Appraiser/Annotator/clients, payload contents).
 
@@ -87,7 +92,7 @@ flowchart LR
 | Celery beat `catch_timeout` (3 min) | `workers/ars_watchdog` (self-scheduling asyncio loop, no stream consumption) | same age thresholds: 5 min standard / 10 min pathfinder / 8 min merge → `code=598, status='E'` |
 | `notify_subscribers_task` / `notify_one_client_task` | `workers/ars_notify` (stream `ars.notify`) | HMAC-SHA256 signing, retry w/ backoff+jitter, max 8 retries — ported constants |
 | `tr_smartapi_client/smart_api_discover.py` | `shepherd_utils/smartapi.py` (ported) with shared Redis cache `ars:smartapi:cache` (3600 s refresh, 30 s failure retry) | all fan-out replicas share one registry view |
-| `utils.py` merge/filter/score/annotate helpers, `scoring.py`, `config/blocklist.json`, `config/config.yaml`, `config/url-config-legacy.yaml` | `shepherd_utils/ars/` package (`merge.py`, `filters.py`, `scoring.py`, `pre_merge.py`, `post_process.py`, `envelope.py`) + `workers/ars_fanout/config/` | ported near-verbatim, Django imports removed; DB side effects hoisted to callers |
+| `utils.py` merge/filter/score/annotate helpers, `scoring.py`, `config/blocklist.json`, `config/config.yaml`, `config/url-config-legacy.yaml` | `shepherd_utils/ars/` package (`merge.py`, `scoring.py`, `premerge.py`, `blocklist.py`, `envelope.py`; the filter helpers were dropped with the `/filter` endpoint) + `workers/ars_fanout/config/` | ported near-verbatim, Django imports removed; DB side effects hoisted to callers |
 | `celery_gates/expensive_gate.py` | dropped — superseded by `TASK_LIMIT` + `resolve_pool_workers` on `ars_merge`/`ars_postprocess` | N6 substitution |
 
 ### 3.2 Worker specifications
@@ -145,7 +150,7 @@ Port of `notify_subscribers_task` + `notify_one_client_task`: payload base `{"pk
 
 ### 3.3 Server sub-app (`shepherd_server/aras/ars.py`)
 
-Mounted in `server.py` at `/ars` (the ARS is a peer of the ARA sub-apps, not an `ARATargetEnum` member — it never enters the TRAPI-workflow pipeline). Routes and behaviors, all matching §7.3's contract table: `api/` index, `api/submit/`, `api/messages/` (GET recent 10 / POST create), `api/messages/{pk}` (GET + `?trace=y`; POST = ARA callback), `api/agents/`, `api/agents/{name}`, `api/actors/`, `api/channels/`, `api/filters/`, `api/filter/{pk}`, `api/reports/{inforesid}`, `api/retain/{pk}`, `api/latest_pk/{n}`, `api/query_event_subscribe/`, `api/query_event_unsubscribe/`, `api/post_process/{pk}`, `api/health/`, `api/get_status/`, `api/timeoutTest/`, `api/merge/{pk}` (N4). `api/block/{pk}` is deliberately not served -- see the divergences section of docs/ARS_PARITY_REGISTER.md.
+Mounted in `server.py` at `/ars` (the ARS is a peer of the ARA sub-apps, not an `ARATargetEnum` member — it never enters the TRAPI-workflow pipeline). Routes and behaviors, all matching §7.3's contract table: `api/` index, `api/submit/`, `api/messages/` (GET recent 10 / POST create), `api/messages/{pk}` (GET + `?trace=y`; POST = ARA callback), `api/agents/`, `api/agents/{name}`, `api/actors/`, `api/channels/`, `api/reports/{inforesid}`, `api/retain/{pk}`, `api/latest_pk/{n}`, `api/query_event_subscribe/`, `api/query_event_unsubscribe/`, `api/health/`, `api/get_status/`. The upstream routes that could only ever fail (`api/block/{pk}`, `api/merge/{pk}` (N4), `api/post_process/{pk}`, `api/timeoutTest/`) are not served, `POST api/messages` answers 405, `POST api/actors` returns the actor it creates, and `api/filters/` + `api/filter/{pk}` are dropped -- see the divergences section of docs/ARS_PARITY_REGISTER.md.
 
 Two handlers do real work:
 
