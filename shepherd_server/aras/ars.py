@@ -17,7 +17,10 @@ which enqueues ``ars.merge`` on success.
 
 import ast
 import asyncio
+import hmac
 import json
+
+import orjson
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -26,6 +29,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from opentelemetry.propagate import inject
 
+import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.broker as broker
@@ -43,7 +47,7 @@ from shepherd_utils.ars.filters import (
     score_filter,
     specific_node_filter,
 )
-from shepherd_utils.ars.notify import notify_subscribers
+from shepherd_utils.ars.notify import notify_subscribers, replay_completion
 from shepherd_utils.ars.premerge import ScoreStatCalc, get_safe
 from shepherd_utils.ars.statuses import to_name
 from shepherd_utils.config import settings
@@ -113,9 +117,25 @@ def _parse_uuid(key: str) -> Optional[uuid.UUID]:
         return None
 
 
-async def _envelope_with_data(row, task_logger=logger):
-    data = await ars_db.load_message_data(row["id"], task_logger)
-    return message_envelope(row, data=data)
+async def _envelope_bytes(row, task_logger=logger) -> bytes:
+    """Render a message envelope with its payload as JSON bytes WITHOUT
+    parsing the payload.
+
+    A merged message is tens of MB of JSON; parsing it costs ~4x its size in
+    memory and a GIL-holding pass that stalls every other request on this
+    process. Instead the stored bytes are decompressed (GIL-free, in a
+    worker thread) and spliced into the serialized envelope in place of a
+    sentinel. The server stays an I/O pass-through, as the rest of Shepherd
+    is designed."""
+    raw = await ars_db.load_message_bytes(row["id"], task_logger)
+    env = message_envelope(row, data=None)
+    env["fields"]["code"] = int(env["fields"]["code"])
+    if raw is None:
+        return orjson.dumps(env, default=str)
+    sentinel = f"__ARS_DATA_{row['id']}__"
+    env["fields"]["data"] = sentinel
+    head = orjson.dumps(env, default=str)
+    return head.replace(b'"' + sentinel.encode() + b'"', raw, 1)
 
 
 def _host_base(request: Request) -> str:
@@ -190,7 +210,7 @@ async def submit(request: Request) -> Response:
             params = {"query_type": "standard"}
         if "validate" in data:
             params["validate"] = data["validate"]
-        message = None
+        actor = None
         if "workflow" in data:
             wf = data["workflow"]
             if isinstance(wf, list):
@@ -198,37 +218,39 @@ async def submit(request: Request) -> Response:
                     actor = await _retry_transient_pg(
                         lifecycle.ensure_workflow_actor, logger, "submit actor lookup"
                     )
-                    message = await _retry_transient_pg(
-                        lambda: ars_db.create_message(
-                            actor_id=actor["id"],
-                            status="Running",
-                            code=202,
-                            params=params,
-                            name=data.get("name", ""),
-                        ),
-                        logger,
-                        "submit message insert",
-                    )
         else:
             actor = await _retry_transient_pg(
                 lifecycle.ensure_default_actor, logger, "submit actor lookup"
             )
-            message = await _retry_transient_pg(
-                lambda: ars_db.create_message(
-                    actor_id=actor["id"],
-                    status="Running",
-                    code=202,
-                    params=params,
-                    name=data.get("name", ""),
-                ),
-                logger,
-                "submit message insert",
-            )
-        if message is None:
+        if actor is None:
             # upstream: `message` was never assigned -> UnboundLocalError
             raise UnboundLocalError(
                 "local variable 'message' referenced before assignment"
             )
+        # Response cache (Shepherd-native, docs/ARS_RESPONSE_CACHE_PLAN.md):
+        # there is one message tree per distinct query. A structurally
+        # identical completed query answers right here with the source
+        # parent's pk, already Done (SERVED); an identical in-flight one
+        # hands back the leader's pk, still Running (WAITING). Either way
+        # the envelope's data is this caller's own body, as for a fresh
+        # parent, and the client fetches merged_version as usual. Only a
+        # miss -- or bypass_cache / overwrite_cache -- creates a parent and
+        # fans out.
+        served = await cache.lookup(data, logger)
+        if served is not None:
+            _, row, payload = served
+            return dj_json(message_envelope(row, data=payload), 201)
+        message = await _retry_transient_pg(
+            lambda: ars_db.create_message(
+                actor_id=actor["id"],
+                status="Running",
+                code=202,
+                params=params,
+                name=data.get("name", ""),
+            ),
+            logger,
+            "submit message insert",
+        )
         # STRICT save + enqueue: our 201 promises a stored query and a
         # queued fanout. A swallowed failure on either would return success
         # for a query that then sits Running forever (parents are
@@ -243,20 +265,25 @@ async def submit(request: Request) -> Response:
         carrier: Dict[str, str] = {}
         inject(carrier)
         await ars_db.save_otel_carrier(message["id"], carrier, logger)
-        # post_save broadcast -> the ars_fanout worker
-        await broker.add_task(
-            "ars.fanout",
-            {
-                "parent_pk": str(message["id"]),
-                # query_id keys the shared task-context builder + log store
-                "query_id": str(message["id"]),
-                "log_level": resolve_log_level(settings.log_level),
-                "otel": json.dumps(carrier),
-            },
-            logger,
-            raise_on_failure=True,
-        )
-        return dj_json(message_envelope(message, data=data), 201)
+        # Claim leadership of the key (or, having lost that race to a
+        # concurrent identical submit, get the winner's answer instead --
+        # our own row is discarded in that case).
+        outcome, message, payload = await cache.claim_or_serve(message, data, logger)
+        if outcome == cache.DISPATCH:
+            # post_save broadcast -> the ars_fanout worker
+            await broker.add_task(
+                "ars.fanout",
+                {
+                    "parent_pk": str(message["id"]),
+                    # query_id keys the shared task-context builder + log store
+                    "query_id": str(message["id"]),
+                    "log_level": resolve_log_level(settings.log_level),
+                    "otel": json.dumps(carrier),
+                },
+                logger,
+                raise_on_failure=True,
+            )
+        return dj_json(message_envelope(message, data=payload), 201)
     except Exception as e:
         logger.error(f"submit failed: {e}", exc_info=True)
         return text(
@@ -272,11 +299,11 @@ async def submit(request: Request) -> Response:
 @route("/api/messages", ["GET", "POST"])
 async def messages(request: Request) -> Response:
     if request.method == "GET":
-        response = []
+        bodies = []
         for row in await ars_db.get_recent_messages(10):
-            response.append(await _envelope_with_data(row))
+            bodies.append(await _envelope_bytes(row))
         return Response(
-            content=json.dumps(response, default=str),
+            content=b"[" + b",".join(bodies) + b"]",
             media_type="application/json",
         )
     # POST /messages is broken upstream (looks the actor up in the Agent
@@ -398,9 +425,9 @@ async def message(key: str, request: Request) -> Response:
             return text(f"Unknown message: {key}", 404)
         actor = await ars_db.get_actor(mesg["actor"]) or {}
         mesg = dict(mesg, name=actor.get("agent_name"))
-        env = await _envelope_with_data(mesg)
-        env["fields"]["code"] = int(env["fields"]["code"])
-        return JSONResponse(content=json.loads(json.dumps(env, default=str)))
+        return Response(
+            content=await _envelope_bytes(mesg), media_type="application/json"
+        )
 
     if request.method == "POST":
         return await _result_callback(pk, request)
@@ -948,6 +975,50 @@ async def get_status(request: Request) -> Response:
         )
 
 
+# ---------------------------------------------------------------------------
+# response cache admin (Shepherd-native; not part of the upstream surface)
+# ---------------------------------------------------------------------------
+
+
+def _admin_authorized(request: Request) -> bool:
+    """Bearer-token gate for the cache admin routes. With no token
+    configured the routes are disabled outright."""
+    token = settings.ars_admin_token
+    if not token:
+        return False
+    header = request.headers.get("authorization", "")
+    scheme, _, presented = header.partition(" ")
+    return scheme.lower() == "bearer" and hmac.compare_digest(presented.strip(), token)
+
+
+@route("/api/cache", ["GET"])
+async def cache_stats(request: Request) -> Response:
+    if not _admin_authorized(request):
+        return text("Forbidden", 403)
+    return JSONResponse(
+        content=json.loads(json.dumps(await cache.stats(), default=str))
+    )
+
+
+@route("/api/cache/invalidate", ["POST"])
+async def cache_invalidate(request: Request) -> Response:
+    """Bump the cache generation: every cached response becomes a miss."""
+    if not _admin_authorized(request):
+        return text("Forbidden", 403)
+    reason = None
+    body = await request.body()
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and parsed.get("reason") is not None:
+                reason = str(parsed["reason"])
+        except json.JSONDecodeError:
+            return text("Body must be JSON", 400)
+    generation = await cache.invalidate_all(reason)
+    logger.info(f"ARS response cache invalidated (generation {generation}): {reason}")
+    return JSONResponse(content={"generation": generation, "reason": reason})
+
+
 async def _database_available() -> bool:
     try:
         async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
@@ -1114,7 +1185,16 @@ async def query_event_subscribe(request: Request) -> Response:
                     out["failure"][key] = "UUID not found"
                     continue
                 if mesg["status"] in ("D", "E"):
-                    out["failure"][key] = "Query already complete"
+                    if settings.ars_cache_enabled:
+                        # A response-cache hit hands back a pk that is
+                        # already Done, so the client's subscription lands
+                        # after every completion event fired. Replay them
+                        # to this client instead of upstream's refusal
+                        # (documented deviation, parity register 13).
+                        await replay_completion(mesg, client["id"], logger)
+                        out["success"].append(key)
+                    else:
+                        out["failure"][key] = "Query already complete"
                 else:
                     await ars_db.add_subscription(mesg["id"], client["id"])
                     out["success"].append(key)

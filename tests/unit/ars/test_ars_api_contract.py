@@ -96,6 +96,20 @@ def make_message(
     }
 
 
+def make_cache_entry(generation, key, source_pk, state="ready", label_map=None):
+    return {
+        "generation": generation,
+        "cache_key": key,
+        "state": state,
+        "source_pk": source_pk,
+        "label_map": label_map,
+        "created_at": TS,
+        "ready_at": TS if state == "ready" else None,
+        "hit_count": 0,
+        "last_hit_at": None,
+    }
+
+
 @pytest.fixture
 def db(mocker):
     """Patch every ars_db collaborator the endpoints use."""
@@ -103,6 +117,7 @@ def db(mocker):
     child_pk = uuid.uuid4()
     default_actor = make_actor(1, "ars-default-agent", "", "", ("general",), uri="")
     ara_actor = make_actor()
+    merge_actor = make_actor(3, "ars-ars-agent", "infores:ars", "", (), uri="")
     parent = make_message(pk=parent_pk, actor=1)
     child = make_message(pk=child_pk, actor=7, ref=parent_pk)
 
@@ -118,6 +133,7 @@ def db(mocker):
         "child": child,
         "ara_actor": ara_actor,
         "default_actor": default_actor,
+        "merge_actor": merge_actor,
         "get_message_row": _patch(
             "get_message_row",
             side_effect=lambda pk: rows.get(str(pk)),
@@ -142,12 +158,17 @@ def db(mocker):
         ),
         "save_message_data": _patch("save_message_data"),
         "load_message_data": _patch("load_message_data", return_value=None),
+        "load_message_bytes": _patch("load_message_bytes", return_value=None),
         "persist_data_copy": _patch("persist_data_copy"),
         "get_children": _patch("get_children", return_value=[]),
         "get_recent_messages": _patch("get_recent_messages", return_value=[]),
         "get_actor": _patch(
             "get_actor",
-            side_effect=lambda aid: {1: default_actor, 7: ara_actor}.get(aid),
+            side_effect=lambda aid: {
+                1: default_actor,
+                7: ara_actor,
+                3: merge_actor,
+            }.get(aid),
         ),
         "get_or_create_actor": _patch(
             "get_or_create_actor", return_value=(ara_actor, 302)
@@ -189,6 +210,29 @@ def db(mocker):
         "get_client": _patch("get_client", return_value=None),
         "add_subscription": _patch("add_subscription"),
         "remove_subscription": _patch("remove_subscription"),
+        # response cache index (shepherd_utils.ars.cache): default = every
+        # submit claims leadership of a fresh key and fans out as upstream
+        "get_cache_generation": _patch("get_cache_generation", return_value=1),
+        "claim_or_get_cache_entry": _patch(
+            "claim_or_get_cache_entry",
+            side_effect=lambda key, pk: (
+                1,
+                make_cache_entry(1, key, pk, state="pending"),
+                True,
+            ),
+        ),
+        "get_current_cache_entry": _patch(
+            "get_current_cache_entry", return_value=(1, None)
+        ),
+        "record_cache_hit": _patch("record_cache_hit"),
+        "delete_cache_entry": _patch("delete_cache_entry", return_value=True),
+        "delete_message": _patch("delete_message", return_value=True),
+        "message_has_data": _patch("message_has_data", return_value=True),
+        "bump_cache_generation": _patch("bump_cache_generation", return_value=2),
+        "cache_stats": _patch(
+            "cache_stats",
+            return_value={"generation": 1, "current": {"ready": 0}},
+        ),
         "check_parent_completion": mocker.patch.object(
             lifecycle, "check_parent_completion", new_callable=AsyncMock
         ),
@@ -336,7 +380,7 @@ async def test_message_get_unknown_404(client, db, redis_mock):
 
 
 async def test_message_get_envelope_uses_agent_name(client, db, redis_mock):
-    db["load_message_data"].return_value = {"message": {}}
+    db["load_message_bytes"].return_value = b'{"message": {}}'
     resp = await client.get(f"/api/messages/{db['parent_pk']}")
     assert resp.status_code == 200
     body = resp.json()
@@ -844,3 +888,361 @@ async def test_submit_payload_save_failure_is_honest_400(
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 400
     assert "failing due to" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# response cache (Shepherd-native; docs/ARS_RESPONSE_CACHE_PLAN.md)
+# ---------------------------------------------------------------------------
+
+import logging as _logging  # noqa: E402
+
+from shepherd_utils.broker import get_task as _get_task  # noqa: E402
+
+
+async def _fanout_enqueued():
+    task = await _get_task("ars.fanout", "consumer", "t", _logging.getLogger())
+    return task is not None
+
+
+MERGED_PAYLOAD = {
+    "message": {
+        "query_graph": {
+            "nodes": {"n0": {"ids": ["MONDO:0005148"]}, "n1": {}},
+            "edges": {"e": {"subject": "n1", "object": "n0"}},
+        },
+        "knowledge_graph": {"nodes": {"MONDO:0005148": {}}, "edges": {}},
+        "results": [
+            {
+                "node_bindings": {"n0": [{"id": "MONDO:0005148"}], "n1": []},
+                "analyses": [{"resource_id": "infores:x", "edge_bindings": {"e": []}}],
+            }
+        ],
+    },
+    "logs": [{"message": "merged", "level": "INFO"}],
+}
+
+# QUERY under other labels: same key, bindings must come back relabeled
+RELABELED_QUERY = {
+    "message": {
+        "query_graph": {
+            "nodes": {"disease": {"ids": ["MONDO:0005148"]}, "chem": {}},
+            "edges": {"treats": {"subject": "chem", "object": "disease"}},
+        }
+    }
+}
+
+
+def _source_tree(db):
+    """A completed source tree: parent Done -> merged message (actor 3)."""
+    from shepherd_utils.ars import cache as _cache
+
+    source_pk, merged_pk = uuid.uuid4(), uuid.uuid4()
+    source = make_message(
+        pk=source_pk,
+        actor=1,
+        status="D",
+        code=200,
+        merged_version=merged_pk,
+        merged_versions_list=[[str(merged_pk), "ara-aragorn"]],
+        params={"query_type": "standard", "stats": {"results": 1}},
+        result_count=1,
+    )
+    merged = make_message(pk=merged_pk, actor=3, ref=source_pk, status="D", code=200)
+    rows = {
+        str(source_pk): source,
+        str(merged_pk): merged,
+        str(db["parent_pk"]): db["parent"],
+    }
+    db["get_message_row"].side_effect = lambda pk: rows.get(str(pk))
+    db["load_message_data"].side_effect = lambda pk, *a: (
+        json.loads(json.dumps(MERGED_PAYLOAD)) if str(pk) == str(merged_pk) else None
+    )
+    db["load_message_bytes"].side_effect = lambda pk, *a: (
+        json.dumps(MERGED_PAYLOAD).encode() if str(pk) == str(merged_pk) else None
+    )
+    _, label_map = _cache.canonical_graph(MERGED_PAYLOAD["message"]["query_graph"])
+    return source, merged, label_map
+
+
+async def test_submit_cache_hit_returns_source_pk_without_payload(
+    client, db, redis_mock
+):
+    source, merged, label_map = _source_tree(db)
+    db["get_current_cache_entry"].side_effect = lambda key: (
+        1,
+        make_cache_entry(1, key, source["id"], label_map=label_map),
+    )
+    resp = await client.post("/api/submit", json=RELABELED_QUERY)
+    assert resp.status_code == 201
+    body = resp.json()
+    # the caller is handed the shared, already-Done pk...
+    assert body["pk"] == str(source["id"])
+    assert body["fields"]["status"] == "Done"
+    assert body["fields"]["code"] == 200
+    assert body["fields"]["merged_version"] == str(merged["id"])
+    # ...with their own submit body as data, like any fresh parent: the
+    # merged response is NOT embedded (the client fetches merged_version)
+    assert body["fields"]["data"] == RELABELED_QUERY
+    assert len(resp.content) < 4096
+    # nothing was created, dispatched, or even decompressed
+    db["create_message"].assert_not_awaited()
+    db["save_message_data"].assert_not_awaited()
+    db["load_message_data"].assert_not_awaited()
+    assert not await _fanout_enqueued()
+    db["record_cache_hit"].assert_awaited_once()
+
+
+async def test_submit_pending_entry_returns_leader_pk(client, db, redis_mock):
+    leader_pk = uuid.uuid4()
+    leader = make_message(pk=leader_pk, actor=1, status="R", code=202)
+    db["get_message_row"].side_effect = lambda pk: (
+        leader if str(pk) == str(leader_pk) else None
+    )
+    db["get_current_cache_entry"].side_effect = lambda key: (
+        1,
+        make_cache_entry(1, key, leader_pk, state="pending"),
+    )
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["pk"] == str(leader_pk)
+    assert body["fields"]["status"] == "Running"
+    assert body["fields"]["code"] == 202
+    assert body["fields"]["data"] == QUERY
+    db["create_message"].assert_not_awaited()
+    assert not await _fanout_enqueued()
+
+
+async def test_submit_miss_claims_leadership_and_fans_out(client, db, redis_mock):
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "leader"
+    assert await _fanout_enqueued()
+    key, pk = db["claim_or_get_cache_entry"].await_args.args
+    assert len(key) == 64 and str(pk) == resp.json()["pk"]
+    db["delete_message"].assert_not_awaited()
+
+
+async def test_submit_lost_race_discards_own_row_and_serves_winner(
+    client, db, redis_mock
+):
+    """Two identical misses: the lookup saw nothing, but by the time we
+    claim, a concurrent submit already owns the key."""
+    source, merged, label_map = _source_tree(db)
+    db["claim_or_get_cache_entry"].side_effect = lambda key, pk: (
+        1,
+        make_cache_entry(1, key, source["id"], label_map=label_map),
+        False,
+    )
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert resp.json()["pk"] == str(source["id"])
+    assert resp.json()["fields"]["status"] == "Done"
+    assert resp.json()["fields"]["data"] == QUERY
+    # our own parent was created, then discarded
+    db["create_message"].assert_awaited_once()
+    db["delete_message"].assert_awaited_once()
+    assert not await _fanout_enqueued()
+
+
+async def test_submit_bypass_cache_skips_lookup(client, db, redis_mock):
+    resp = await client.post("/api/submit", json=dict(QUERY, bypass_cache=True))
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "bypass"
+    db["get_current_cache_entry"].assert_not_awaited()
+    db["claim_or_get_cache_entry"].assert_not_awaited()
+    assert await _fanout_enqueued()
+
+
+async def test_submit_overwrite_cache_runs_and_marks_role(client, db, redis_mock):
+    q = dict(QUERY, parameters={"overwrite_cache": True})
+    resp = await client.post("/api/submit", json=q)
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "overwrite"
+    db["get_current_cache_entry"].assert_not_awaited()
+    db["claim_or_get_cache_entry"].assert_not_awaited()
+    assert await _fanout_enqueued()
+
+
+async def test_submit_cache_disabled_behaves_as_upstream(
+    client, db, redis_mock, monkeypatch
+):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_cache_enabled", False)
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert "cache" not in (resp.json()["fields"]["params"] or {})
+    db["get_current_cache_entry"].assert_not_awaited()
+    db["claim_or_get_cache_entry"].assert_not_awaited()
+    assert await _fanout_enqueued()
+
+
+async def test_submit_broken_ready_entry_falls_back_to_leading(client, db, redis_mock):
+    """A ready entry whose source tree is gone is dropped; we run the query."""
+    db["get_current_cache_entry"].side_effect = lambda key: (
+        1,
+        make_cache_entry(1, key, uuid.uuid4()),
+    )
+    # get_message_row knows nothing about that source -> broken
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 201
+    assert resp.json()["fields"]["params"]["cache"]["role"] == "leader"
+    db["delete_cache_entry"].assert_awaited_once()
+    assert await _fanout_enqueued()
+
+
+async def test_message_get_splices_stored_bytes_without_parsing(client, db, redis_mock):
+    """The payload is served from its stored bytes: it is never parsed on the
+    server, and the envelope around it is intact."""
+    source, merged, _ = _source_tree(db)
+    resp = await client.get(f"/api/messages/{merged['id']}")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    body = resp.json()
+    assert body["pk"] == str(merged["id"])
+    assert body["fields"]["name"] == "ars-ars-agent"
+    assert body["fields"]["status"] == "Done"
+    assert isinstance(body["fields"]["code"], int)
+    assert body["fields"]["data"] == MERGED_PAYLOAD
+    db["load_message_data"].assert_not_awaited()
+    db["load_message_bytes"].assert_awaited_once()
+    # a message without any stored payload renders data: null
+    resp = await client.get(f"/api/messages/{source['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["fields"]["data"] is None
+
+
+async def test_messages_get_recent_splices_each_payload(client, db, redis_mock):
+    db["get_recent_messages"].return_value = [db["parent"], db["child"]]
+    db["load_message_bytes"].side_effect = lambda pk, *a: (
+        b'{"message": {"results": []}}' if str(pk) == str(db["parent_pk"]) else None
+    )
+    resp = await client.get("/api/messages")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [b["fields"]["data"] for b in body] == [{"message": {"results": []}}, None]
+
+
+async def test_cache_admin_routes_disabled_without_token(
+    client, db, redis_mock, monkeypatch
+):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_admin_token", "")
+    assert (await client.get("/api/cache")).status_code == 403
+    assert (await client.post("/api/cache/invalidate")).status_code == 403
+    db["bump_cache_generation"].assert_not_awaited()
+
+
+async def test_cache_admin_routes_with_token(client, db, redis_mock, monkeypatch):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_admin_token", "s3cret")
+    bad = {"Authorization": "Bearer nope"}
+    good = {"Authorization": "Bearer s3cret"}
+    assert (await client.get("/api/cache", headers=bad)).status_code == 403
+    resp = await client.get("/api/cache", headers=good)
+    assert resp.status_code == 200
+    assert resp.json()["generation"] == 1
+    resp = await client.post(
+        "/api/cache/invalidate", headers=good, json={"reason": "new KG"}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"generation": 2, "reason": "new KG"}
+    db["bump_cache_generation"].assert_awaited_once_with("new KG")
+    resp = await client.post("/api/cache/invalidate", headers=good, content=b"{bad")
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# subscriptions to an already-finished pk (response-cache hit)
+# ---------------------------------------------------------------------------
+
+from shepherd_utils.ars import crypto as _crypto  # noqa: E402
+
+
+@pytest.fixture
+def subscriber(mocker, db):
+    client = {
+        "id": 7,
+        "client_id": "ui",
+        "client_secret": "enc",
+        "callback_url": "https://ui.example/notify",
+        "active": True,
+        "subscriptions": [],
+    }
+    db["get_client"].return_value = client
+    mocker.patch.object(_crypto, "master_key", return_value=b"k" * 32)
+    mocker.patch.object(_crypto, "decrypt_secret", return_value="secret")
+    mocker.patch.object(_crypto, "verify_body_signature", return_value=True)
+    mocker.patch.object(
+        ars_db, "load_otel_carrier", new_callable=AsyncMock, return_value="{}"
+    )
+    return client
+
+
+async def _notify_tasks():
+    out = []
+    while True:
+        task = await _get_task("ars.notify", "consumer", "t", _logging.getLogger())
+        if task is None:
+            return out
+        out.append(task[1])
+
+
+async def test_subscribe_to_done_pk_replays_completion_to_that_client(
+    client, db, redis_mock, subscriber
+):
+    source, merged, _ = _source_tree(db)
+    body = json.dumps({"client_id": "ui", "pks": [str(source["id"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["success"] == [str(source["id"])]
+    # no standing subscription is created for a finished query...
+    db["add_subscription"].assert_not_awaited()
+    # ...the completion events are replayed to this client alone
+    tasks = await _notify_tasks()
+    assert [json.loads(t["fields"])["event_type"] for t in tasks] == [
+        "last_merged_completed",
+        "admin",
+    ]
+    assert all(json.loads(t["client_pks"]) == ["7"] for t in tasks)
+    assert all(t["message_pk"] == str(source["id"]) for t in tasks)
+
+
+async def test_subscribe_to_running_pk_still_subscribes(
+    client, db, redis_mock, subscriber
+):
+    body = json.dumps({"client_id": "ui", "pks": [str(db["parent_pk"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+    assert resp.status_code == 200
+    db["add_subscription"].assert_awaited_once()
+    assert await _notify_tasks() == []
+
+
+async def test_subscribe_to_done_pk_refused_when_cache_disabled(
+    client, db, redis_mock, subscriber, monkeypatch
+):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_cache_enabled", False)
+    source, merged, _ = _source_tree(db)
+    body = json.dumps({"client_id": "ui", "pks": [str(source["id"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+    # upstream _analyze_response: nothing succeeded -> 400 with the failure map
+    assert resp.status_code == 400
+    assert resp.json()["failure"] == {str(source["id"]): "Query already complete"}
+    assert await _notify_tasks() == []

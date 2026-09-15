@@ -72,7 +72,10 @@ accept each behavioral change.
 - **P-NT-1..5** — `notify_subscribers` field overrides ('D'→admin,
   'E'→ars_error), stats attachment, the `{pk, timestamp, code}` payload
   base, `last_merged_completed` forcing code 200, per-client HMAC-SHA256
-  over compact sorted-key JSON.
+  over compact sorted-key JSON. Recipients are resolved when the event is
+  emitted and carried in the `ars.notify` task (`client_pks`): the
+  completion path clears the parent's subscriptions immediately after its
+  final events, so a worker resolving them later would deliver to nobody.
 - **Callback guard order** — dup-Done → 200 text; repeated results → 409;
   errored child → 400; decode failure → 500 `Can not decode json...`;
   validation failure → 422 `Problem with TRAPI Validation` with the child
@@ -151,13 +154,47 @@ Behavioral deviations:
 10. **Retention**: upstream never purges (out-of-band cleanup honors
     `retain`); the port nulls durable payload copies after
     `ars_data_retention_days` for non-retained terminal messages, keeping
-    row metadata.
+    row metadata. Trees that back a live response-cache entry (item 13)
+    are exempt while their cache generation is current.
 11. **`GET /ars/api/messages` payload inclusion** and other list endpoints
     load payloads from the blob store; a payload evicted from Redis with no
     durable copy renders `fields.data: null` (upstream MySQL always had it
     inline).
 12. **Notification delivery retries** run in-process with upstream's backoff
     envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery.
+13. **Response cache** (Shepherd-native; upstream has none —
+    `shepherd_utils/ars/cache.py`, design in
+    `docs/ARS_RESPONSE_CACHE_PLAN.md`). With `ars_cache_enabled` there is
+    one message tree per distinct query per cache generation. A submit
+    whose structurally canonical query graph (node/edge/path ids treated
+    as labels, key order and null/missing/empty ignored, lists as sets)
+    plus non-empty `workflow` matches a completed prior submit is answered
+    with **that tree's pk**: the `201` envelope is the source parent's
+    (already `Done/200`, `merged_version` set) with the caller's own
+    submit body as `data`, like any fresh parent; the merged response is
+    fetched via `merged_version` as usual and keeps the source's
+    node/edge/path labels and, once the tree is the cached answer, carries
+    a stored `logs` line naming the cache source, key and generation. A
+    submit matching an in-flight query is handed the leader's pk while it
+    is still Running. No rows or payloads are written on a hit. Message
+    GETs splice the stored payload bytes into the envelope without parsing
+    them (the recent-messages list likewise). Because a hit's pk is already
+    finished when the client subscribes to it, `query_event_subscribe` on a
+    terminal pk **replays that message's completion notifications to the
+    subscribing client** (`last_merged_completed` then `admin/complete`, or
+    `ars_error`) and reports success, where upstream refused with "Query
+    already complete"; with the cache disabled the refusal is preserved.
+    Opt out per query with TRAPI `bypass_cache` (no read, no write);
+    refresh one entry with `parameters.overwrite_cache` (no read, forced
+    write); flush all by bumping the cache generation
+    (`scripts/ars_cache.py invalidate` or the token-gated
+    `POST /ars/api/cache/invalidate`). Source parents record their role in
+    `params.cache` (`leader` / `overwrite` / `bypass` / `uncached`). Never
+    cached: an empty merged result where an ARA child errored. Shared-pk
+    consequences (retain/block act for all readers; timestamps and name are
+    the first submitter's) are accepted. Tests:
+    `tests/unit/ars/test_cache_key.py`, `test_cache_flow.py`, and the cache
+    section of `test_ars_api_contract.py`.
 13. **normalized_score is a plain float**: upstream stores rankdata's
     numpy.float64 through stdlib json (which accepts it as a float
     subclass); Shepherd's orjson blob codec rejects numpy scalars, so the

@@ -264,3 +264,114 @@ async def test_parent_error_unsubscribes(orchestration):
     await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
     orchestration["clear_subscriptions"].assert_awaited_once()
     orchestration["update_message"].assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# replay_completion: late subscribers to a finished (cached) query
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+from shepherd_utils.ars import notify as notify_mod  # noqa: E402
+
+
+@pytest.fixture
+def replay_env(mocker):
+    tasks = []
+
+    async def fake_add_task(stream, payload, logger, **kw):
+        tasks.append((stream, payload))
+
+    mocker.patch.object(notify_mod, "add_task", fake_add_task)
+    mocker.patch.object(
+        notify_mod.ars_db,
+        "load_otel_carrier",
+        new_callable=AsyncMock,
+        return_value="{}",
+    )
+    mocker.patch.object(
+        notify_mod.ars_db,
+        "get_subscribed_clients",
+        new_callable=AsyncMock,
+        return_value=[{"id": 3}, {"id": 4}],
+    )
+    return tasks
+
+
+def _done_parent(merged_versions_list, result_count=5):
+    return {
+        "id": uuid.uuid4(),
+        "ref": None,
+        "status": "D",
+        "code": 200,
+        "result_count": result_count,
+        "merged_versions_list": merged_versions_list,
+    }
+
+
+async def test_replay_done_parent_emits_last_merged_then_admin(replay_env):
+    mvl = [["m1", "ara-aragorn"], ["m2", "ara-arax"]]
+    parent = _done_parent(mvl)
+    await notify_mod.replay_completion(parent, 7, LOGGER)
+    assert [t[0] for t in replay_env] == ["ars.notify", "ars.notify"]
+    first, second = (_json.loads(t[1]["fields"]) for t in replay_env)
+    assert first["event_type"] == "last_merged_completed"
+    assert first["complete"] is True
+    assert first["merged_versions_list"] == mvl
+    assert first["stats"]["results"] == 5
+    assert second == {
+        "event_type": "admin",
+        "complete": True,
+        "stats": {"results": 5, "auxiliary_graphs": 0},
+    }
+    assert all(_json.loads(t[1]["client_pks"]) == ["7"] for t in replay_env)
+    assert all(t[1]["message_pk"] == str(parent["id"]) for t in replay_env)
+
+
+async def test_replay_empty_completion_emits_only_admin(replay_env):
+    """The empty-completion branch records [[pk, "ars"]] and upstream never
+    emitted last_merged_completed for it."""
+    parent = _done_parent([["m0", "ars"]], result_count=None)
+    await notify_mod.replay_completion(parent, 7, LOGGER)
+    assert len(replay_env) == 1
+    assert _json.loads(replay_env[0][1]["fields"]) == {
+        "event_type": "admin",
+        "complete": True,
+    }
+
+
+async def test_replay_error_parent_emits_ars_error(replay_env):
+    parent = dict(_done_parent([["m1", "ara-aragorn"]]), status="E", code=500)
+    await notify_mod.replay_completion(parent, 7, LOGGER)
+    assert len(replay_env) == 1
+    fields = _json.loads(replay_env[0][1]["fields"])
+    assert fields["event_type"] == "ars_error"
+    assert replay_env[0][1]["code"] == "500"
+
+
+async def test_replay_child_message_emits_save_time_event_only(replay_env):
+    child = dict(_done_parent([["m1", "ara-aragorn"]]), ref=uuid.uuid4())
+    await notify_mod.replay_completion(child, 7, LOGGER)
+    assert len(replay_env) == 1
+    assert _json.loads(replay_env[0][1]["fields"])["event_type"] == "admin"
+
+
+async def test_live_notify_resolves_recipients_at_emit_time(replay_env):
+    """The completion path clears subscriptions right after emitting, so the
+    recipients must be captured now, not when the worker runs."""
+    await notify_mod.notify_subscribers(_done_parent([]), None, LOGGER)
+    assert _json.loads(replay_env[0][1]["client_pks"]) == ["3", "4"]
+
+
+async def test_live_notify_without_resolvable_subscribers_still_enqueues(
+    replay_env, mocker
+):
+    mocker.patch.object(
+        notify_mod.ars_db,
+        "get_subscribed_clients",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("pg down"),
+    )
+    await notify_mod.notify_subscribers(_done_parent([]), None, LOGGER)
+    assert len(replay_env) == 1
+    assert "client_pks" not in replay_env[0][1]  # worker falls back to the list

@@ -12,9 +12,11 @@ import asyncio
 import gzip
 import json
 import logging
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import orjson
 import zstandard
 from psycopg.types.json import Jsonb
 
@@ -285,6 +287,7 @@ async def get_or_create_actor(
                 )
             actor["agent_name"] = agent_row["name"]
             actor["agent_uri"] = agent_row["uri"]
+            invalidate_actor_cache()
             return actor, 302
         cur = await conn.execute(
             f"""
@@ -306,6 +309,7 @@ async def get_or_create_actor(
         actor = _row_dict(ACTOR_COLUMNS, row)
         actor["agent_name"] = agent_row["name"]
         actor["agent_uri"] = agent_row["uri"]
+        invalidate_actor_cache()
         return actor, 201
 
 
@@ -329,12 +333,27 @@ async def list_actors(exclude_empty_path: bool = False) -> List[Dict[str, Any]]:
     return actors
 
 
+# Actor rows only change through registry seeding at boot and the rare
+# agents/actors POST, yet every message GET and trace poll resolves one.
+# A short in-process cache keeps those off Postgres; writes invalidate it.
+ACTOR_CACHE_TTL_SEC = 60.0
+_actor_cache: Dict[int, Tuple[float, Optional[Dict[str, Any]]]] = {}
+
+
+def invalidate_actor_cache() -> None:
+    _actor_cache.clear()
+
+
 async def get_actor(actor_id: int) -> Optional[Dict[str, Any]]:
+    cached = _actor_cache.get(actor_id)
+    now = time.monotonic()
+    if cached is not None and cached[0] > now:
+        return cached[1]
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
-            SELECT {_ACTOR_SELECT}, g.name, g.uri FROM ars_actor a
-            JOIN ars_agent g ON g.id = a.agent
+            SELECT {_ACTOR_SELECT}, g.name, g.uri
+            FROM ars_actor a JOIN ars_agent g ON g.id = a.agent
             WHERE a.id = %s
             """,
             (actor_id,),
@@ -345,6 +364,7 @@ async def get_actor(actor_id: int) -> Optional[Dict[str, Any]]:
     actor = _row_dict(ACTOR_COLUMNS, row[: len(ACTOR_COLUMNS)])
     actor["agent_name"] = row[len(ACTOR_COLUMNS)]
     actor["agent_uri"] = row[len(ACTOR_COLUMNS) + 1]
+    _actor_cache[actor_id] = (now + ACTOR_CACHE_TTL_SEC, actor)
     return actor
 
 
@@ -645,14 +665,25 @@ async def purge_old_message_data(retention_days: int) -> int:
     """
     if retention_days <= 0:
         return 0
+    # Trees backing a live response-cache entry are the cache: purging their
+    # payloads would silently empty it. A message's tree root is itself for
+    # a parent and ``ref`` for a child / merge child; the root is exempt
+    # while an entry of the CURRENT generation points at it. Superseded
+    # generations are purged by the watchdog first (ars_cache_stale_grace_sec),
+    # after which their sources age out here like any other tree.
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             """
-            UPDATE ars_message SET data = NULL
-            WHERE data IS NOT NULL
-              AND retain = FALSE
-              AND status IN ('D', 'S', 'E', 'U')
-              AND updated_at < NOW() - make_interval(days => %s)
+            UPDATE ars_message m SET data = NULL
+            WHERE m.data IS NOT NULL
+              AND m.retain = FALSE
+              AND m.status IN ('D', 'S', 'E', 'U')
+              AND m.updated_at < NOW() - make_interval(days => %s)
+              AND NOT EXISTS (
+                SELECT 1 FROM ars_response_cache c
+                JOIN ars_cache_meta g ON g.generation = c.generation
+                WHERE c.source_pk = COALESCE(m.ref, m.id)
+              )
             """,
             (retention_days,),
         )
@@ -830,16 +861,20 @@ async def load_otel_carrier(
     return "{}"
 
 
+def _decompress_payload_bytes(blob: bytes) -> bytes:
+    """Message.decompress_dict codec, bytes out: zstd magic, gzip fallback,
+    else the blob is taken as already-plain JSON."""
+    if blob[:4] == b"\x28\xb5\x2f\xfd":
+        return shepherd_db.decompress_zstd(blob)
+    if blob[:2] == b"\x1f\x8b":
+        return gzip.decompress(blob)
+    return blob
+
+
 def _decompress_payload(blob: bytes) -> Any:
-    """Message.decompress_dict codec: zstd magic, gzip fallback, {} on error."""
+    """Message.decompress_dict codec: parsed payload, {} on error."""
     try:
-        if blob[:4] == b"\x28\xb5\x2f\xfd":
-            raw = zstandard.ZstdDecompressor().decompress(blob)
-        elif blob[:2] == b"\x1f\x8b":
-            raw = gzip.decompress(blob)
-        else:
-            raw = blob
-        return json.loads(raw.decode("utf-8"))
+        return orjson.loads(_decompress_payload_bytes(blob))
     except Exception:
         return {}
 
@@ -894,13 +929,18 @@ async def load_message_data(
     message_id: Union[str, uuid.UUID],
     logger: logging.Logger,
 ) -> Optional[Any]:
-    """Payload dict for a message, or None when no blob exists anywhere."""
+    """Payload dict for a message, or None when no blob exists anywhere.
+
+    Decompression + JSON parsing of a multi-MB payload is pure CPU and runs
+    in a worker thread, so a server request handler (or a worker's task)
+    reading a large merged message does not stall its event loop."""
+    blob = None
     try:
-        return await shepherd_db.get_message(str(message_id), logger)
-    except KeyError:
-        pass
+        blob = await shepherd_db.data_db_client.get(str(message_id))
     except Exception as e:
         logger.warning(f"Redis read failed for {message_id}: {e}")
+    if blob is not None:
+        return await asyncio.to_thread(shepherd_db.decode_message, blob)
     try:
         async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
@@ -913,13 +953,60 @@ async def load_message_data(
         return None
     if row is None or row[0] is None:
         return None
-    payload = _decompress_payload(bytes(row[0]))
+    payload = await asyncio.to_thread(_decompress_payload, bytes(row[0]))
     # Re-warm Redis so subsequent reads are cheap again.
     try:
         await shepherd_db.save_message(str(message_id), payload, logger)
     except Exception:
         pass
     return payload
+
+
+async def load_message_bytes(
+    message_id: Union[str, uuid.UUID],
+    logger: logging.Logger,
+) -> Optional[bytes]:
+    """The payload as decompressed JSON bytes, never parsed.
+
+    This is the read path for serving a stored message: decompression
+    releases the GIL (so the worker thread genuinely frees the event loop),
+    and no Python object graph is built -- a parsed payload costs ~4x its
+    JSON size in memory and a GIL-holding parse per read. None when no blob
+    exists anywhere. A Postgres fallback re-warms Redis with the stored
+    compressed bytes as-is."""
+    blob = None
+    try:
+        blob = await shepherd_db.data_db_client.get(str(message_id))
+    except Exception as e:
+        logger.warning(f"Redis read failed for {message_id}: {e}")
+    if blob is not None:
+        return await asyncio.to_thread(shepherd_db.decompress_zstd, blob)
+    try:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute(
+                "SELECT data FROM ars_message WHERE id = %s",
+                (uuid.UUID(str(message_id)),),
+            )
+            row = await cur.fetchone()
+    except Exception as e:
+        logger.error(f"Postgres blob read failed for {message_id}: {e}")
+        return None
+    if row is None or row[0] is None:
+        return None
+    stored = bytes(row[0])
+    try:
+        raw = await asyncio.to_thread(_decompress_payload_bytes, stored)
+    except Exception as e:
+        logger.error(f"Undecodable durable payload for {message_id}: {e}")
+        return None
+    if stored[:4] == b"\x28\xb5\x2f\xfd":
+        try:  # re-warm with the same zstd frame Redis normally holds
+            await shepherd_db.data_db_client.set(
+                str(message_id), stored, ex=settings.redis_ttl
+            )
+        except Exception:
+            pass
+    return raw
 
 
 async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
@@ -935,3 +1022,301 @@ async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
         return bool(row and row[0])
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Response cache index (docs/ARS_RESPONSE_CACHE_PLAN.md)
+#
+# The cache stores no payloads: ``ars_response_cache`` maps a canonical
+# query-graph hash to the parent pk of the one tree that answers it (its
+# blobs already live in ``ars_message.data``); identical submits are handed
+# that pk. Orchestration lives in ``shepherd_utils.ars.cache``; this section
+# is the SQL.
+# ---------------------------------------------------------------------------
+
+CACHE_ENTRY_COLUMNS = (
+    "generation",
+    "cache_key",
+    "state",
+    "source_pk",
+    "label_map",
+    "created_at",
+    "ready_at",
+    "hit_count",
+    "last_hit_at",
+)
+_CACHE_ENTRY_SELECT = ", ".join(f"c.{col}" for col in CACHE_ENTRY_COLUMNS)
+
+
+async def get_cache_generation() -> int:
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute("SELECT generation FROM ars_cache_meta WHERE id")
+        row = await cur.fetchone()
+    return int(row[0]) if row else 1
+
+
+async def bump_cache_generation(reason: Optional[str]) -> int:
+    """Invalidate the whole cache; returns the new generation."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            UPDATE ars_cache_meta
+            SET generation = generation + 1, bumped_at = NOW(), bumped_reason = %s
+            WHERE id
+            RETURNING generation
+            """,
+            (reason,),
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+    return int(row[0])
+
+
+async def get_current_cache_entry(
+    cache_key: str,
+) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """The current generation and its entry for a key, in one round trip."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"""
+            SELECT g.generation, {_CACHE_ENTRY_SELECT}
+            FROM ars_cache_meta g
+            LEFT JOIN ars_response_cache c
+              ON c.generation = g.generation AND c.cache_key = %s
+            WHERE g.id
+            """,
+            (cache_key,),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return 1, None
+    generation = int(row[0])
+    entry = _row_dict(CACHE_ENTRY_COLUMNS, row[1:]) if row[1] is not None else None
+    return generation, entry
+
+
+async def get_cache_entry(generation: int, cache_key: str) -> Optional[Dict[str, Any]]:
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"SELECT {_CACHE_ENTRY_SELECT} FROM ars_response_cache c "
+            "WHERE c.generation = %s AND c.cache_key = %s",
+            (generation, cache_key),
+        )
+        row = await cur.fetchone()
+    return _row_dict(CACHE_ENTRY_COLUMNS, row) if row else None
+
+
+async def claim_or_get_cache_entry(
+    cache_key: str, source_pk: Union[str, uuid.UUID]
+) -> Tuple[int, Optional[Dict[str, Any]], bool]:
+    """Atomically claim leadership of a key in the current generation, or
+    return the existing entry.
+
+    ``(generation, entry, True)`` when this parent inserted the pending row
+    and is the leader; ``(generation, entry, False)`` when another entry
+    (pending or ready) already holds the key; ``(generation, None, False)``
+    only if the row vanished between the conflict and the re-read (caller
+    treats it as a plain dispatch). The generation is read inside the same
+    statement, so a miss costs one round trip and a conflict two.
+    """
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"""
+            INSERT INTO ars_response_cache (generation, cache_key, state, source_pk)
+            SELECT g.generation, %s, 'pending', %s FROM ars_cache_meta g WHERE g.id
+            ON CONFLICT (generation, cache_key) DO NOTHING
+            RETURNING {_CACHE_ENTRY_SELECT.replace("c.", "")}
+            """,
+            (cache_key, uuid.UUID(str(source_pk))),
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+        if row is not None:
+            entry = _row_dict(CACHE_ENTRY_COLUMNS, row)
+            return int(entry["generation"]), entry, True
+    generation, entry = await get_current_cache_entry(cache_key)
+    return generation, entry, False
+
+
+async def mark_cache_entry_ready(
+    source_pk: Union[str, uuid.UUID], label_map: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Flip the pending entry led by ``source_pk`` to ready. None when the
+    entry no longer points at this leader (failed over / invalidated)."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"""
+            UPDATE ars_response_cache c
+            SET state = 'ready', ready_at = NOW(), label_map = %s
+            WHERE c.source_pk = %s AND c.state = 'pending'
+            RETURNING {_CACHE_ENTRY_SELECT}
+            """,
+            (_jsonb(label_map), uuid.UUID(str(source_pk))),
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+    return _row_dict(CACHE_ENTRY_COLUMNS, row) if row else None
+
+
+async def upsert_cache_entry_ready(
+    generation: int,
+    cache_key: str,
+    source_pk: Union[str, uuid.UUID],
+    label_map: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """overwrite_cache: point the key at this tree, replacing any entry."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"""
+            INSERT INTO ars_response_cache
+              (generation, cache_key, state, source_pk, label_map, ready_at)
+            VALUES (%s, %s, 'ready', %s, %s, NOW())
+            ON CONFLICT (generation, cache_key) DO UPDATE
+              SET state = 'ready', source_pk = EXCLUDED.source_pk,
+                  label_map = EXCLUDED.label_map, ready_at = NOW()
+            RETURNING {_CACHE_ENTRY_SELECT.replace("c.", "")}
+            """,
+            (generation, cache_key, uuid.UUID(str(source_pk)), _jsonb(label_map)),
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+    return _row_dict(CACHE_ENTRY_COLUMNS, row)
+
+
+async def delete_cache_entry(generation: int, cache_key: str) -> bool:
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "DELETE FROM ars_response_cache WHERE generation = %s AND cache_key = %s",
+            (generation, cache_key),
+        )
+        deleted = (cur.rowcount or 0) > 0
+        await conn.commit()
+    return deleted
+
+
+async def delete_pending_cache_entry(source_pk: Union[str, uuid.UUID]) -> bool:
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "DELETE FROM ars_response_cache WHERE source_pk = %s AND state = 'pending'",
+            (uuid.UUID(str(source_pk)),),
+        )
+        deleted = (cur.rowcount or 0) > 0
+        await conn.commit()
+    return deleted
+
+
+async def repoint_pending_cache_entry(
+    old_source_pk: Union[str, uuid.UUID], new_source_pk: Union[str, uuid.UUID]
+) -> bool:
+    """Leader fail-over: hand the pending entry to a new leader."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "UPDATE ars_response_cache SET source_pk = %s, created_at = NOW() "
+            "WHERE source_pk = %s AND state = 'pending'",
+            (uuid.UUID(str(new_source_pk)), uuid.UUID(str(old_source_pk))),
+        )
+        updated = (cur.rowcount or 0) > 0
+        await conn.commit()
+    return updated
+
+
+async def delete_message(message_id: Union[str, uuid.UUID]) -> bool:
+    """Remove a message row that has nothing under it (a parent that lost
+    the cache leadership race before anything was dispatched)."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "DELETE FROM ars_message WHERE id = %s", (uuid.UUID(str(message_id)),)
+        )
+        deleted = (cur.rowcount or 0) > 0
+        await conn.commit()
+    return deleted
+
+
+async def record_cache_hit(generation: int, cache_key: str) -> None:
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        await conn.execute(
+            "UPDATE ars_response_cache SET hit_count = hit_count + 1, "
+            "last_hit_at = NOW() WHERE generation = %s AND cache_key = %s",
+            (generation, cache_key),
+        )
+        await conn.commit()
+
+
+async def get_stale_pending_cache_entries(max_age_sec: float) -> List[Dict[str, Any]]:
+    """Pending entries older than the threshold, with their leader's status
+    (None when the leader row is gone)."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            f"""
+            SELECT {_CACHE_ENTRY_SELECT}, m.status
+            FROM ars_response_cache c
+            LEFT JOIN ars_message m ON m.id = c.source_pk
+            WHERE c.state = 'pending'
+              AND c.created_at < NOW() - make_interval(secs => %s)
+            ORDER BY c.created_at
+            """,
+            (float(max_age_sec),),
+        )
+        rows = await cur.fetchall()
+    n = len(CACHE_ENTRY_COLUMNS)
+    entries = []
+    for r in rows:
+        entry = _row_dict(CACHE_ENTRY_COLUMNS, r[:n])
+        entry["leader_status"] = r[n]
+        entries.append(entry)
+    return entries
+
+
+async def purge_stale_cache_entries(
+    current_generation: int, grace_sec: float, batch: int = 1000
+) -> int:
+    """Delete index rows of superseded generations once past the grace
+    window, a batch at a time. Returns rows deleted."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            DELETE FROM ars_response_cache
+            WHERE (generation, cache_key) IN (
+              SELECT generation, cache_key FROM ars_response_cache
+              WHERE generation < %s
+                AND created_at < NOW() - make_interval(secs => %s)
+              LIMIT %s
+            )
+            """,
+            (current_generation, float(grace_sec), batch),
+        )
+        deleted = cur.rowcount or 0
+        await conn.commit()
+    return deleted
+
+
+async def cache_stats() -> Dict[str, Any]:
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "SELECT generation, bumped_at, bumped_reason FROM ars_cache_meta WHERE id"
+        )
+        meta = await cur.fetchone()
+        cur = await conn.execute("""
+            SELECT c.generation, c.state, count(*), COALESCE(sum(c.hit_count), 0)
+            FROM ars_response_cache c
+            GROUP BY c.generation, c.state
+            ORDER BY c.generation, c.state
+            """)
+        rows = await cur.fetchall()
+    generation = int(meta[0]) if meta else 1
+    current = {"pending": 0, "ready": 0, "hits": 0}
+    superseded = {"entries": 0, "hits": 0}
+    for gen, state, count, hits in rows:
+        if int(gen) == generation:
+            current[state] = int(count)
+            current["hits"] += int(hits)
+        else:
+            superseded["entries"] += int(count)
+            superseded["hits"] += int(hits)
+    return {
+        "generation": generation,
+        "bumped_at": meta[1] if meta else None,
+        "bumped_reason": meta[2] if meta else None,
+        "current": current,
+        "superseded": superseded,
+    }

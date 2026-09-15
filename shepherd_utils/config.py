@@ -364,8 +364,38 @@ class Settings(BaseSettings):
     # Days after which non-retained message payload blobs are purged from
     # Postgres (row metadata is kept). Upstream has no purge job of its own --
     # only the retain flag honored by out-of-band cleanup -- so this is the
-    # Shepherd-native equivalent. 0 disables.
+    # Shepherd-native equivalent. 0 disables. Trees that back a live
+    # response-cache entry (see the cache block below) are exempt for as
+    # long as their generation is current; after an invalidation they fall
+    # under this window like any other tree.
     ars_data_retention_days: int = 30
+    # ------------------------------------------------------------------
+    # ARS response cache (docs/ARS_RESPONSE_CACHE_PLAN.md). A submit whose
+    # canonical query graph matches a completed prior submit is answered by
+    # copying that tree instead of fanning out; identical in-flight submits
+    # coalesce onto one run. Entries never expire on their own -- they are
+    # invalidated wholesale by bumping the cache generation (scripts/
+    # ars_cache.py invalidate, or POST /ars/api/cache/invalidate).
+    # ------------------------------------------------------------------
+    # Master switch. Off, every submit behaves as if it carried bypass_cache.
+    ars_cache_enabled: bool = True
+    # Cache trees in which some ARA children ended in error / timed out. The
+    # one case never cached regardless: an empty merged result where at
+    # least one ARA errored ("nothing, because things failed").
+    ars_cache_store_partial: bool = True
+    # A pending entry whose leader has not completed after this long is
+    # repaired by the watchdog: finished leaders are cached, anything else
+    # hands leadership to the oldest waiter. Comfortably above the child
+    # timeouts (5 min) plus merge (8 min).
+    ars_cache_pending_max_sec: float = 1200.0
+    # How long index rows of superseded generations linger before the
+    # watchdog deletes them; only then do their source trees become
+    # eligible for the ars_data_retention_days purge.
+    ars_cache_stale_grace_sec: float = 86400.0
+    # Bearer token for the cache admin routes (GET /ars/api/cache,
+    # POST /ars/api/cache/invalidate). Empty disables the routes (403); the
+    # upstream ARS has no admin auth, so nothing else on the surface uses it.
+    ars_admin_token: str = ""
     # SmartAPI registry cache refresh interval (upstream 3600s, 30s retry after
     # a failed refresh).
     smartapi_refresh_sec: int = 3600

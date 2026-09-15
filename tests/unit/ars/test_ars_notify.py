@@ -49,9 +49,11 @@ def env(mocker):
 
     return {
         "message_pk": message_pk,
+        "clients": clients,
         "get_subscribed_clients": _patch(
             "get_subscribed_clients", return_value=clients
         ),
+        "get_client_by_pk": _patch("get_client_by_pk", return_value=None),
     }
 
 
@@ -139,3 +141,52 @@ async def test_no_clients_no_posts(env, mocker):
         _task(env, {"event_type": "admin", "complete": True}), LOGGER
     )
     post.assert_not_awaited()
+
+
+async def test_client_pks_in_task_are_used_instead_of_the_subscriber_list(env, mocker):
+    """Recipients resolved at emit time (or a replay to one late subscriber)
+    ride in the task; the message's current subscriber list is not consulted."""
+    env["get_client_by_pk"].return_value = env["clients"][0]
+    env["get_subscribed_clients"].return_value = [
+        dict(env["clients"][0], id=2, callback_url="https://other.example/notify"),
+    ]
+    posted = []
+
+    async def fake_post(self, url, content=None, headers=None):
+        posted.append(url)
+        return httpx.Response(200)
+
+    mocker.patch.object(httpx.AsyncClient, "post", fake_post)
+    task = _task(env, {"event_type": "admin", "complete": True}, code="200")
+    task[1]["client_pks"] = json.dumps(["1"])
+    await notify_worker.ars_notify(task, LOGGER)
+    assert posted == ["https://ui.example/notify"]
+    env["get_client_by_pk"].assert_awaited_once_with(1)
+    env["get_subscribed_clients"].assert_not_awaited()
+
+
+async def test_unknown_or_empty_client_pks_post_nothing(env, mocker):
+    env["get_client_by_pk"].return_value = None
+    post = mocker.patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock)
+    task = _task(env, {"event_type": "admin", "complete": True}, code="200")
+    task[1]["client_pks"] = json.dumps(["99"])
+    await notify_worker.ars_notify(task, LOGGER)
+    task[1]["client_pks"] = json.dumps([])
+    await notify_worker.ars_notify(task, LOGGER)
+    post.assert_not_awaited()
+    env["get_subscribed_clients"].assert_not_awaited()
+
+
+async def test_task_without_client_pks_falls_back_to_subscriber_list(env, mocker):
+    posted = []
+
+    async def fake_post(self, url, content=None, headers=None):
+        posted.append(url)
+        return httpx.Response(200)
+
+    mocker.patch.object(httpx.AsyncClient, "post", fake_post)
+    await notify_worker.ars_notify(
+        _task(env, {"event_type": "admin"}, code="200"), LOGGER
+    )
+    assert posted == ["https://ui.example/notify"]
+    env["get_subscribed_clients"].assert_awaited_once()
