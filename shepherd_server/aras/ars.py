@@ -42,6 +42,7 @@ from shepherd_utils.ars.envelope import (
     actor_envelope,
     agent_envelope,
     channel_envelope,
+    django_datetime,
     message_envelope,
 )
 from shepherd_utils.ars.notify import notify_subscribers, replay_completion
@@ -295,15 +296,24 @@ async def submit(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
+# How many recent messages GET /api/messages lists, as upstream.
+RECENT_MESSAGE_LIMIT = 10
+
+
 @route("/api/messages", ["GET", "POST"])
 async def messages(request: Request) -> Response:
     if request.method == "GET":
-        bodies = []
-        for row in await ars_db.get_recent_messages(10):
-            bodies.append(await _envelope_bytes(row))
-        return Response(
-            content=b"[" + b",".join(bodies) + b"]",
-            media_type="application/json",
+        # Identifiers only. Upstream rendered a full envelope per message
+        # with its whole stored payload inline, so listing the last ten
+        # queries could mean serving hundreds of MB to answer "what has come
+        # through recently". Fetch a listed message by pk to get its
+        # payload. Timestamps keep the DjangoJSONEncoder spelling the rest
+        # of the API uses.
+        return dj_json(
+            [
+                {"pk": str(row["id"]), "timestamp": django_datetime(row["ts"])}
+                for row in await ars_db.get_recent_message_pks(RECENT_MESSAGE_LIMIT)
+            ]
         )
     # Upstream looked the actor up in the Agent table and then assigned the
     # result to the actor FK, so this has always been a 500. Rather than

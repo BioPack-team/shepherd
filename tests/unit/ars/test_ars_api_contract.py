@@ -167,7 +167,7 @@ def db(mocker):
         "load_message_bytes": _patch("load_message_bytes", return_value=None),
         "persist_data_copy": _patch("persist_data_copy"),
         "get_children": _patch("get_children", return_value=[]),
-        "get_recent_messages": _patch("get_recent_messages", return_value=[]),
+        "get_recent_message_pks": _patch("get_recent_message_pks", return_value=[]),
         "get_actor": _patch(
             "get_actor",
             side_effect=lambda aid: {
@@ -355,13 +355,35 @@ async def test_submit_name_from_body(client, db, redis_mock):
 # ---------------------------------------------------------------------------
 
 
-async def test_messages_get_recent(client, db, redis_mock):
-    db["get_recent_messages"].return_value = [db["parent"]]
+async def test_messages_get_recent_returns_pks_and_timestamps(client, db, redis_mock):
+    """Identifiers only. Upstream inlined every listed message's whole
+    stored payload, so listing the last ten queries could mean serving
+    hundreds of MB."""
+    db["get_recent_message_pks"].return_value = [
+        {"id": db["parent_pk"], "ts": TS},
+        {"id": db["child_pk"], "ts": TS},
+    ]
     resp = await client.get("/api/messages")
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body) == 1
-    assert body[0]["model"] == "tr_ars.message"
+    assert body == [
+        {"pk": str(db["parent_pk"]), "timestamp": "2026-09-01T12:00:00.123Z"},
+        {"pk": str(db["child_pk"]), "timestamp": "2026-09-01T12:00:00.123Z"},
+    ]
+    # no payload is read for a listing
+    db["load_message_bytes"].assert_not_awaited()
+    db["load_message_data"].assert_not_awaited()
+
+
+async def test_messages_get_recent_is_empty_when_there_are_none(client, db, redis_mock):
+    resp = await client.get("/api/messages")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_messages_get_recent_asks_for_ten(client, db, redis_mock):
+    await client.get("/api/messages")
+    db["get_recent_message_pks"].assert_awaited_once_with(10)
 
 
 async def test_messages_post_is_405(client, db, redis_mock):
@@ -1159,17 +1181,6 @@ async def test_message_get_splices_stored_bytes_without_parsing(client, db, redi
     resp = await client.get(f"/api/messages/{source['id']}")
     assert resp.status_code == 200
     assert resp.json()["fields"]["data"] is None
-
-
-async def test_messages_get_recent_splices_each_payload(client, db, redis_mock):
-    db["get_recent_messages"].return_value = [db["parent"], db["child"]]
-    db["load_message_bytes"].side_effect = lambda pk, *a: (
-        b'{"message": {"results": []}}' if str(pk) == str(db["parent_pk"]) else None
-    )
-    resp = await client.get("/api/messages")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert [b["fields"]["data"] for b in body] == [{"message": {"results": []}}, None]
 
 
 async def test_cache_admin_routes_disabled_without_token(

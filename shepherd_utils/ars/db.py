@@ -589,26 +589,24 @@ async def claim_terminal_transition(
     return _row_dict(MESSAGE_COLUMNS, row) if row is not None else None
 
 
-async def get_recent_messages(limit: int = 10) -> List[Dict[str, Any]]:
+async def get_recent_message_pks(limit: int = 10) -> List[Dict[str, Any]]:
+    """The most recently created messages as ``{"id", "ts"}``, newest first.
+
+    Only what ``GET /ars/api/messages`` renders. It used to select every
+    column plus a correlated subquery for each row's subscribers, and the
+    endpoint then loaded and spliced in each message's stored payload --
+    tens of MB per row for a listing that is only ever used to see what has
+    come through recently.
+    """
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
-            f"""
-            SELECT {_MESSAGE_SELECT},
-                   COALESCE(
-                     (SELECT array_agg(s.client_id ORDER BY s.client_id)
-                      FROM ars_subscription s WHERE s.message_id = m.id),
-                     ARRAY[]::int[]) AS clients
-            FROM ars_message m ORDER BY m.ts DESC LIMIT %s
+            """
+            SELECT id, ts FROM ars_message ORDER BY ts DESC LIMIT %s
             """,
             (limit,),
         )
         rows = await cur.fetchall()
-    out = []
-    for row in rows:
-        record = _row_dict(MESSAGE_COLUMNS, row[: len(MESSAGE_COLUMNS)])
-        record["clients"] = list(row[len(MESSAGE_COLUMNS)] or [])
-        out.append(record)
-    return out
+    return [{"id": r[0], "ts": r[1]} for r in rows]
 
 
 async def get_status_rows(pks: List[str]) -> Dict[str, Dict[str, Any]]:

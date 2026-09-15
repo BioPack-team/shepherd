@@ -159,10 +159,11 @@ Behavioral deviations:
     `ars_data_retention_days` for non-retained terminal messages, keeping
     row metadata. Trees that back a live response-cache entry (item 13)
     are exempt while their cache generation is current.
-11. **`GET /ars/api/messages` payload inclusion** and other list endpoints
-    load payloads from the blob store; a payload evicted from Redis with no
-    durable copy renders `fields.data: null` (upstream MySQL always had it
-    inline).
+11. **Payload inclusion in envelopes**: a single message GET loads its
+    payload from the blob store, and one evicted from Redis with no durable
+    copy renders `fields.data: null` (upstream MySQL always had it inline).
+    `GET /ars/api/messages` no longer carries payloads at all — see the
+    Endpoints table under the divergences below.
 12. **Notification delivery retries** run in-process with upstream's backoff
     envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery,
     detached from the stream task that emitted them and bounded by
@@ -315,6 +316,7 @@ failure is the prompt to re-decide each one, not a bug).
 | `POST /ars/api/messages` looked the actor up in the Agent table and assigned the result to the actor FK → 500 | `405 Only GET is permitted!`. The collection is read-only: nothing can depend on a route that never succeeded, and unauthenticated out-of-band message creation is not a surface worth adding |
 | `POST /ars/api/actors` created the actor and *then* evaluated `actor.channel.name` on a list, so every caller got `400 Not a valid json format` for an actor that had in fact been created. It also tested the posted envelope against `tr_ars.agent` in an actor endpoint | returns the actor envelope with `201`/`302`, like `POST /agents`; accepts `tr_ars.actor` (and still `tr_ars.agent`); missing `agent`/`path` is a 400 that names them, an unknown agent or channel is 404, and only a real failure is 500 |
 | `GET /ars/api/filters` and `GET /ars/api/filter/<pk>` — the filter path read a stored message, rewrote its results, and saved new message rows for the filtered copy | **not served**, and `shepherd_utils/ars/filters.py` is removed with them. Unused in practice, and the endpoint was a write path into stored trees dressed as a query |
+| `GET /ars/api/messages` rendered a full envelope per message with its whole stored payload inline, so listing the last ten queries could mean serving hundreds of MB to answer "what has come through recently" | returns `[{"pk", "timestamp"}, ...]`, newest first; fetch a listed pk to get its payload. Timestamps keep the DjangoJSONEncoder spelling |
 | `GET /ars/api/messages/<pk>?compress` read only Redis, so it 404'd once the Redis TTL lapsed on a message still readable through every other endpoint | falls back to the durable `ars_message.data` copy and re-warms Redis |
 | `GET /ars/api/health` answered a non-GET with `Only POST is permitted!` | `Only GET is permitted!` |
 | `GET /ars/api/filter/<pk>` ran `ast.literal_eval` on raw query-string values, so a malformed literal escaped as an unstyled 500 | 400 naming the filter and value |
