@@ -405,6 +405,8 @@ def test_divergences_are_declared():
         "decorate/no_primary",
         "scores/mixed",
         "mergedicts/node_bindings",
+        "mergedicts/attributes_unhashable_dict_values",
+        "mergedicts/unhashable_lists_concat",
         "merge_ba.message.knowledge_graph.edges.e1.qualifiers",
     }
     for name, reason in entries.items():

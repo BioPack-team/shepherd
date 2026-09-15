@@ -129,6 +129,115 @@ def test_all_scored_results_are_unaffected():
 # ---------------------------------------------------------------------------
 
 
+def _attrs(type_id, value):
+    return {"attributes": [{"attribute_type_id": type_id, "value": value}]}
+
+
+def test_object_valued_attributes_are_not_dropped():
+    """Upstream deduped the union with set(). A value list of OBJECTS --
+    publications carrying metadata, say -- raised "unhashable type: 'dict'",
+    the generic except swallowed it, the break never ran, and because this is
+    the else-branch of "append the whole attribute" the current agent's
+    values were dropped from the merged message entirely."""
+    out = ars_merge.mergeDicts(
+        copy.deepcopy(_attrs("biolink:publications", [{"id": "PMID:2"}])),
+        copy.deepcopy(_attrs("biolink:publications", [{"id": "PMID:1"}])),
+    )
+    assert len(out["attributes"]) == 1
+    ids = [v["id"] for v in out["attributes"][0]["value"]]
+    assert sorted(ids) == ["PMID:1", "PMID:2"]
+
+
+def test_identical_object_values_are_deduped():
+    out = ars_merge.mergeDicts(
+        copy.deepcopy(_attrs("p", [{"id": "PMID:1"}])),
+        copy.deepcopy(_attrs("p", [{"id": "PMID:1"}])),
+    )
+    assert out["attributes"][0]["value"] == [{"id": "PMID:1"}]
+
+
+def test_scalar_values_still_union_and_dedupe():
+    out = ars_merge.mergeDicts(
+        copy.deepcopy(_attrs("p", ["PMID:2", "PMID:1"])),
+        copy.deepcopy(_attrs("p", ["PMID:1", "PMID:3"])),
+    )
+    assert sorted(out["attributes"][0]["value"]) == ["PMID:1", "PMID:2", "PMID:3"]
+
+
+def test_value_union_is_order_stable():
+    """Upstream's set() union made the order depend on the hash seed, which
+    the golden harness had to work around. Merged side first, then whatever
+    the current side adds, both in their own order."""
+    out = ars_merge.mergeDicts(
+        copy.deepcopy(_attrs("p", ["c", "a"])),
+        copy.deepcopy(_attrs("p", ["b", "a"])),
+    )
+    assert out["attributes"][0]["value"] == ["b", "a", "c"]
+
+
+def test_mixed_scalar_and_object_values_survive():
+    out = ars_merge.mergeDicts(
+        copy.deepcopy(_attrs("p", ["PMID:2", {"id": "X"}])),
+        copy.deepcopy(_attrs("p", [{"id": "X"}, "PMID:1"])),
+    )
+    value = out["attributes"][0]["value"]
+    assert {"id": "X"} in value
+    assert "PMID:1" in value and "PMID:2" in value
+    assert len(value) == 3  # the duplicate object collapsed
+
+
+def test_non_list_merged_value_is_coerced():
+    """occurence_count == 1 only checks the CURRENT value is a list; upstream
+    then did scalar + list, another TypeError into the same swallow."""
+    out = ars_merge.mergeDicts(
+        copy.deepcopy(_attrs("p", ["PMID:2"])),
+        copy.deepcopy(_attrs("p", "PMID:1")),
+    )
+    assert sorted(out["attributes"][0]["value"]) == ["PMID:1", "PMID:2"]
+
+
+def test_value_dedupe_does_not_collapse_distinct_types():
+    out = ars_merge.mergeDicts(
+        copy.deepcopy(_attrs("p", [1, "1"])),
+        copy.deepcopy(_attrs("p", [True])),
+    )
+    assert len(out["attributes"][0]["value"]) == 3
+
+
+def test_object_lists_without_a_keying_field_survive():
+    """Objects in a list are matched on resource_id / qualifier_type_id.
+    Upstream dropped every object carrying neither -- and from BOTH sides,
+    since it replaced the merged list with the keyed map's values -- so a
+    list of objects of any other shape merged to []."""
+    out = ars_merge.mergeDicts({"a": [{"x": 1}]}, {"a": [{"y": 2}]})
+    assert {"x": 1} in out["a"] and {"y": 2} in out["a"]
+
+
+def test_unkeyed_objects_survive_alongside_keyed_ones():
+    out = ars_merge.mergeDicts(
+        {"sources": [{"resource_id": "infores:b"}, {"note": "keep me"}]},
+        {"sources": [{"resource_id": "infores:a"}]},
+    )
+    assert {"note": "keep me"} in out["sources"]
+    assert {"resource_id": "infores:a"} in out["sources"]
+    assert {"resource_id": "infores:b"} in out["sources"]
+
+
+def test_identical_unkeyed_objects_are_deduped():
+    out = ars_merge.mergeDicts({"a": [{"x": 1}]}, {"a": [{"x": 1}]})
+    assert out["a"] == [{"x": 1}]
+
+
+def test_sources_sharing_a_resource_id_still_merge():
+    """The keyed path is unchanged: same resource_id folds into one entry."""
+    out = ars_merge.mergeDicts(
+        {"sources": [{"resource_id": "infores:a", "upstream_resource_ids": ["u2"]}]},
+        {"sources": [{"resource_id": "infores:a", "upstream_resource_ids": ["u1"]}]},
+    )
+    assert len(out["sources"]) == 1
+    assert sorted(out["sources"][0]["upstream_resource_ids"]) == ["u1", "u2"]
+
+
 def test_keys_after_attributes_are_still_merged():
     """Upstream returned out of the attributes branch, abandoning every key
     it had not reached yet."""
