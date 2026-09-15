@@ -96,15 +96,21 @@ def make_message(
     }
 
 
-def make_cache_entry(generation, key, source_pk, state="ready", label_map=None):
+def make_cache_entry(
+    generation, key, source_pk, state="ready", label_map=None, age_sec=0.0
+):
+    """A cache index row. Timestamps are relative to now: a ready entry past
+    ars_cache_ready_max_age_sec stops answering, so a fixed past date would
+    quietly expire every fixture as the clock moved."""
+    stamp = datetime.datetime.now(UTC) - datetime.timedelta(seconds=age_sec)
     return {
         "generation": generation,
         "cache_key": key,
         "state": state,
         "source_pk": source_pk,
         "label_map": label_map,
-        "created_at": TS,
-        "ready_at": TS if state == "ready" else None,
+        "created_at": stamp,
+        "ready_at": stamp if state == "ready" else None,
         "hit_count": 0,
         "last_hit_at": None,
     }

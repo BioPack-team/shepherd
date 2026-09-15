@@ -42,6 +42,7 @@ from shepherd_utils.ars.premerge import (
     pre_merge_process,
     remove_phantom_support_graphs,
 )
+from shepherd_utils.ars.statuses import coerce_status
 from shepherd_utils.ars.trapi import validate
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
@@ -258,7 +259,8 @@ async def send_to_actor(actor, parent, parent_data, logger, otel="{}"):
             return
         # >= 400 (and any other unexpected status)
         if "tr_ars.message.status" in resp.headers:
-            status = resp.headers["tr_ars.message.status"]
+            # remote-controlled; anything unrecognized stays 'U'
+            status = coerce_status(resp.headers["tr_ars.message.status"], "U")
         if resp.status_code >= 400:
             if resp.status_code != 503:
                 status = "E"

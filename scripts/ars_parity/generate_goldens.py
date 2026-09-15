@@ -9,6 +9,11 @@ Usage:
     PYTHONHASHSEED=0 .venv-relay/bin/python scripts/ars_parity/generate_goldens.py \
         [--relay /path/to/relay/checkout]
 
+NOTE: a few golden entries deliberately record what the PORT does, not what
+upstream does -- the places where the port fixes an upstream bug. They are
+listed in the file's ``_divergences`` block; this script carries that block
+forward and prints a warning naming each entry it has just overwritten.
+
 PYTHONHASHSEED=0 keeps the handful of set-order-dependent upstream code paths
 (list(set(...)) unions) deterministic; the comparison harness additionally
 falls back to order-insensitive list comparison, so the seed is belt and
@@ -356,6 +361,29 @@ def main():
     out["validate"] = verdicts
 
     path = GOLDENS / "goldens.json"
+    previous = {}
+    if path.exists():
+        previous = json.loads(path.read_text())
+    divergences = previous.get("_divergences")
+    if divergences:
+        # Carry the block forward so the declaration survives, but do NOT
+        # carry the values: these entries record what the PORT does, and
+        # this run has just overwritten them with what upstream does. The
+        # golden tests will fail until each one is re-applied deliberately.
+        out["_divergences"] = divergences
+        print(
+            "\nWARNING: this file carries deliberate divergences from upstream.\n"
+            "The entries below were just overwritten with upstream's output and\n"
+            "must be re-recorded from the port (or consciously reverted to\n"
+            "upstream parity) before the golden suite will pass again:\n"
+        )
+        for name, reason in sorted(divergences.get("entries", {}).items()):
+            print(f"  - {name}\n      {reason}")
+        print(
+            "\nSee docs/ARS_PARITY_REGISTER.md, "
+            '"Deliberate divergences from upstream".\n'
+        )
+
     path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
     print(f"wrote {path} ({path.stat().st_size} bytes)")
 

@@ -283,6 +283,14 @@ async def ars_postprocess(task, logger: logging.Logger):
     await ars_db.update_message(merged_pk, skip_coercion=False, **final_updates)
     await ars_db.persist_data_copy(merged_pk, logger)
 
+    if result_count is not None:
+        # Carry the merge's result count up to the parent. Nothing used to
+        # set it, which left every stats-bearing notification unsent (the
+        # stats block in build_notification keys off the parent's
+        # result_count) and the parent's own envelope reporting null results
+        # for a query that had them.
+        await ars_db.update_message(parent_pk, result_count=result_count)
+
     parent = await ars_db.get_message_row(parent_pk)
     if parent is not None:
         await notify_subscribers(

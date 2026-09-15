@@ -125,6 +125,22 @@ def _expected_confidence(result):
     return 1 - product
 
 
+def _last_update_for(env, pk):
+    """The last update_message call made against ``pk``.
+
+    ars_postprocess also carries the result count up to the PARENT after it
+    finalizes the merged message, so the final call overall is not
+    necessarily the merged message's.
+    """
+    calls = [
+        c.kwargs
+        for c in env["update_message"].await_args_list
+        if c.args and str(c.args[0]) == str(pk)
+    ]
+    assert calls, f"no update_message call for {pk}"
+    return calls[-1]
+
+
 async def test_postprocess_happy_path(env, bt_annotator, redis_mock):
     expected_confidences = [
         _expected_confidence(r) for r in env["data"]["message"]["results"]
@@ -262,7 +278,31 @@ async def test_postprocess_annotator_failure_is_444(env, mocker, redis_mock):
         if str(c.args[0]) == str(env["merged_pk"])
     )
     assert saw_444
-    final = env["update_message"].await_args_list[-1].kwargs
+    final = _last_update_for(env, env["merged_pk"])
     assert final.get("status") == "E"
     assert final.get("code") == 444
     env["completion"].assert_awaited()
+
+
+async def test_result_count_is_carried_up_to_the_parent(env, bt_annotator, redis_mock):
+    """Nothing used to set the parent's result_count, which left the stats
+    block in build_notification permanently unreachable (it keys off exactly
+    that field) and the parent's own envelope reporting null results."""
+    await pp.ars_postprocess(_task(env), LOGGER)
+    parent_update = _last_update_for(env, env["parent_pk"])
+    assert parent_update == {"result_count": 2}
+
+
+async def test_no_results_leaves_the_parent_count_alone(
+    env, bt_annotator, redis_mock, mocker
+):
+    """A merged message with no results must not stamp a count on the
+    parent -- there is nothing to report yet."""
+    env["data"]["message"]["results"] = []
+    mocker.patch.object(pp, "load_blocklist", return_value={})
+    await pp.ars_postprocess(_task(env), LOGGER)
+    assert not [
+        c
+        for c in env["update_message"].await_args_list
+        if c.args and str(c.args[0]) == str(env["parent_pk"])
+    ]

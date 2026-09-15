@@ -41,7 +41,7 @@ from .completion import MERGE_AGENT_NAME
 # Baked into every key: bump when any canonicalization rule changes, which
 # orphans (and lazily purges) every existing entry without an explicit
 # invalidation.
-CACHE_KEY_VERSION = "1"
+CACHE_KEY_VERSION = "2"
 
 MODE_NORMAL = "normal"
 MODE_BYPASS = "bypass"
@@ -245,9 +245,22 @@ def canonical_graph(query_graph: Any) -> Tuple[Any, Dict[str, Dict[str, str]]]:
     return best[1], best[2]
 
 
+# Members of ``parameters`` that steer the cache itself rather than the
+# query. They are handled by ``resolve_mode`` and must not change the key,
+# or an overwrite run would write to a different entry than it read.
+_CACHE_CONTROL_PARAMETERS = ("overwrite_cache",)
+
+
 def key_material(body: Dict[str, Any]) -> Tuple[Any, Dict[str, Dict[str, str]]]:
-    """What the key hashes: the canonical query graph plus a non-empty
-    workflow. Returns it with the caller's label map."""
+    """What the key hashes: the canonical query graph, a non-empty workflow,
+    and any non-empty ``parameters``. Returns it with the caller's label map.
+
+    ``parameters`` is forwarded verbatim to every ARA by the fanout, so two
+    submits that differ only there are different queries and must not share
+    an entry -- everything else in the body (``submitter``, ``log_level``,
+    ``name``, ``bypass_cache``) does not reach the ARAs as query input and is
+    deliberately excluded so it cannot fragment the cache.
+    """
     message = body.get("message") if isinstance(body, dict) else None
     query_graph = message.get("query_graph") if isinstance(message, dict) else None
     graph, label_map = canonical_graph(query_graph)
@@ -256,6 +269,17 @@ def key_material(body: Dict[str, Any]) -> Tuple[Any, Dict[str, Dict[str, str]]]:
     if isinstance(workflow, list) and workflow:
         # workflow order is meaningful upstream; keep it, canonicalize values
         material["workflow"] = [canonicalize(step) for step in workflow]
+    parameters = body.get("parameters") if isinstance(body, dict) else None
+    if isinstance(parameters, dict):
+        parameters = {
+            k: v for k, v in parameters.items() if k not in _CACHE_CONTROL_PARAMETERS
+        }
+        canonical_parameters = canonicalize(parameters)
+        if not _is_empty(canonical_parameters):
+            material["parameters"] = canonical_parameters
+    elif not _is_empty(parameters):
+        # a non-dict ``parameters`` still changes what the ARAs receive
+        material["parameters"] = canonicalize(parameters)
     return material, label_map
 
 
@@ -319,6 +343,24 @@ class _BrokenEntry(Exception):
     """The source tree behind a ready entry is unusable."""
 
 
+def _entry_expired(entry: Dict[str, Any]) -> bool:
+    """True once a ready entry is past its max age.
+
+    The watchdog purges these, but it can be down or behind, and an entry
+    that outlives its window must not keep answering in the meantime.
+    """
+    max_age = settings.ars_cache_ready_max_age_sec
+    if max_age <= 0:
+        return False
+    stamp = entry.get("ready_at") or entry.get("created_at")
+    if stamp is None:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    age = (datetime.datetime.now(datetime.timezone.utc) - stamp).total_seconds()
+    return age > max_age
+
+
 async def _serve_ready(
     entry: Dict[str, Any], logger: logging.Logger
 ) -> Optional[Dict[str, Any]]:
@@ -327,6 +369,11 @@ async def _serve_ready(
     in Redis or Postgres). None (and the entry dropped) otherwise."""
     source_pk = entry["source_pk"]
     try:
+        if _entry_expired(entry):
+            raise _BrokenEntry(
+                f"entry is older than ars_cache_ready_max_age_sec "
+                f"({settings.ars_cache_ready_max_age_sec:.0f}s)"
+            )
         source = await ars_db.get_message_row(source_pk)
         if source is None or source.get("status") != "D":
             raise _BrokenEntry(f"source {source_pk} missing or not Done")
@@ -400,10 +447,13 @@ async def _discard_parent(parent_row: Dict[str, Any], logger: logging.Logger) ->
         await ars_db.delete_message(pk)
     except Exception as e:
         logger.warning(f"Cache: could not delete orphan parent {pk}: {e}")
-    try:
-        await shepherd_db.data_db_client.delete(str(pk))
-    except Exception:
-        pass
+    for key in (str(pk), f"ars:otel:{pk}"):
+        # the blob AND the trace carrier submit stored beside it -- the
+        # carrier outlived the row it belonged to by its own 7-day TTL
+        try:
+            await shepherd_db.data_db_client.delete(key)
+        except Exception:
+            pass
 
 
 async def claim_or_serve(
@@ -580,9 +630,9 @@ async def stats() -> Dict[str, Any]:
 
 async def repair_sweep(logger: logging.Logger) -> Dict[str, int]:
     """Watchdog pass: settle stale pending entries (finish a Done leader's
-    bookkeeping, drop anything else so the query can be re-run) and purge
-    superseded generations."""
-    counts = {"stale_pending": 0, "purged": 0}
+    bookkeeping, drop anything else so the query can be re-run), purge
+    superseded generations, and retire ready entries past their max age."""
+    counts = {"stale_pending": 0, "purged": 0, "expired": 0}
     if not settings.ars_cache_enabled:
         return counts
     for entry in await ars_db.get_stale_pending_cache_entries(
@@ -613,4 +663,10 @@ async def repair_sweep(logger: logging.Logger) -> Dict[str, int]:
         )
     except Exception as e:
         logger.error(f"Cache purge failed: {e}")
+    try:
+        counts["expired"] = await ars_db.purge_expired_ready_cache_entries(
+            settings.ars_cache_ready_max_age_sec
+        )
+    except Exception as e:
+        logger.error(f"Cache expiry purge failed: {e}")
     return counts

@@ -5,6 +5,14 @@ NCATSTranslator/Relay code over tests/fixtures/ars_corpus/ (see
 scripts/ars_parity/generate_goldens.py). These tests run the Shepherd ports
 over the same corpus and require identical output.
 
+A handful of entries are the exception: where the port deliberately does not
+reproduce an upstream bug, the golden records the PORT's output instead.
+Those entries are named in the file's ``_divergences`` block with the reason,
+and test_divergences_are_declared below keeps that list honest. Regenerating
+the goldens re-records them from upstream and will fail these tests until the
+declared entries are re-applied -- which is the intended prompt to re-decide
+each divergence, not a bug.
+
 Comparison rules:
   - dicts/scalars: exact
   - lists: exact order first; on mismatch, fall back to multiset equality
@@ -428,3 +436,34 @@ def test_normalized_scores_survive_shepherd_blob_codec():
     # the whole premerged payload must round-trip through the blob codec
     payload = {"message": {"results": normalized}}
     assert decode_message(encode_message(payload)) == payload
+
+
+# ---------------------------------------------------------------------------
+# declared divergences
+# ---------------------------------------------------------------------------
+
+
+def test_divergences_are_declared():
+    """Every golden recorded from the port rather than from upstream has to
+    say so, with a reason, so a later reader cannot mistake it for parity."""
+    block = GOLDENS.get("_divergences")
+    assert block is not None, "goldens.json must carry a _divergences block"
+    assert GOLDENS["_relay_commit"] in block["note"]
+    entries = block["entries"]
+    assert set(entries) == {
+        "decorate/no_primary",
+        "scores/mixed",
+        "mergedicts/node_bindings",
+        "merge_ba.message.knowledge_graph.edges.e1.qualifiers",
+    }
+    for name, reason in entries.items():
+        assert reason.strip(), f"{name} has no reason recorded"
+
+
+def test_no_golden_still_expects_an_upstream_crash():
+    """The four upstream error-parity markers are gone: the port no longer
+    reproduces those crashes, so nothing should still be asserting them."""
+    for entry in GOLDENS["decorate"] + GOLDENS["mergedicts"]:
+        assert "raises" not in entry, f"{entry['name']} still expects a raise"
+    for entry in GOLDENS["scores"]:
+        assert "normalized_raises" not in entry, entry["name"]

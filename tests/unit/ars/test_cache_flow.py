@@ -68,15 +68,27 @@ def row(pk=None, status="R", code=202, actor=1, ref=None, params=None, **extra):
     return base
 
 
-def entry(source_pk, state="ready", generation=1, key=KEY, label_map=None, hit_count=0):
+def entry(
+    source_pk,
+    state="ready",
+    generation=1,
+    key=KEY,
+    label_map=None,
+    hit_count=0,
+    age_sec=0.0,
+):
+    """A cache index row. Timestamps are relative to now: a ready entry past
+    ars_cache_ready_max_age_sec no longer answers, so a fixed date in the
+    past would silently expire every fixture as the clock moved."""
+    stamp = datetime.datetime.now(UTC) - datetime.timedelta(seconds=age_sec)
     return {
         "generation": generation,
         "cache_key": key,
         "state": state,
         "source_pk": source_pk,
         "label_map": label_map if label_map is not None else SOURCE_MAP,
-        "created_at": TS,
-        "ready_at": TS if state == "ready" else None,
+        "created_at": stamp,
+        "ready_at": stamp if state == "ready" else None,
         "hit_count": hit_count,
         "last_hit_at": None,
     }
@@ -111,6 +123,7 @@ def db(mocker):
         "record_cache_hit",
         "get_stale_pending_cache_entries",
         "purge_stale_cache_entries",
+        "purge_expired_ready_cache_entries",
         "delete_message",
         "message_has_data",
         "get_message_row",
@@ -128,6 +141,7 @@ def db(mocker):
     mocks["message_has_data"].return_value = True
     mocks["get_stale_pending_cache_entries"].return_value = []
     mocks["purge_stale_cache_entries"].return_value = 0
+    mocks["purge_expired_ready_cache_entries"].return_value = 0
     mocks["update_message"].side_effect = lambda pk, **kw: {
         **row(pk=pk),
         **{k: v for k, v in kw.items() if k != "skip_coercion"},
@@ -280,7 +294,11 @@ async def test_lost_race_to_ready_entry_serves_and_discards_own_row(db):
     outcome, out, payload = await cache.claim_or_serve(parent, RELABELED, LOGGER)
     assert outcome == cache.SERVED and out is source and payload is RELABELED
     db["delete_message"].assert_awaited_once_with(parent["id"])
-    db["redis_delete"].assert_awaited_once_with(str(parent["id"]))
+    # the query blob AND the trace carrier submit stored beside it
+    assert [c.args[0] for c in db["redis_delete"].await_args_list] == [
+        str(parent["id"]),
+        f"ars:otel:{parent['id']}",
+    ]
 
 
 async def test_lost_race_to_pending_entry_waits_on_leader(db):
@@ -515,7 +533,11 @@ async def test_on_parent_failed_drops_pending_entry_for_leaders_only(db):
 
 async def test_repair_sweep_disabled(db, monkeypatch):
     monkeypatch.setattr(settings, "ars_cache_enabled", False)
-    assert await cache.repair_sweep(LOGGER) == {"stale_pending": 0, "purged": 0}
+    assert await cache.repair_sweep(LOGGER) == {
+        "stale_pending": 0,
+        "purged": 0,
+        "expired": 0,
+    }
     db["get_stale_pending_cache_entries"].assert_not_awaited()
 
 
@@ -555,8 +577,9 @@ async def test_repair_sweep_isolates_failures(db):
     ]
     db["delete_pending_cache_entry"].side_effect = RuntimeError("x")
     db["purge_stale_cache_entries"].side_effect = RuntimeError("y")
+    db["purge_expired_ready_cache_entries"].side_effect = RuntimeError("z")
     counts = await cache.repair_sweep(LOGGER)  # no raise
-    assert counts == {"stale_pending": 1, "purged": 0}
+    assert counts == {"stale_pending": 1, "purged": 0, "expired": 0}
 
 
 async def test_invalidate_all_bumps_generation(mocker):
@@ -565,3 +588,55 @@ async def test_invalidate_all_bumps_generation(mocker):
     )
     assert await cache.invalidate_all("new KG") == 7
     bump.assert_awaited_once_with("new KG")
+
+
+# ---------------------------------------------------------------------------
+# ready-entry expiry
+# ---------------------------------------------------------------------------
+
+
+async def test_expired_ready_entry_is_not_served(db, monkeypatch):
+    """An entry past ars_cache_ready_max_age_sec stops answering even before
+    the watchdog gets round to purging it."""
+    monkeypatch.setattr(settings, "ars_cache_ready_max_age_sec", 60.0)
+    source = _leader(status="D")
+    db["get_current_cache_entry"].return_value = (
+        1,
+        entry(source["id"], "ready", age_sec=3600),
+    )
+    assert await cache.lookup(QUERY, LOGGER) is None
+    db["delete_cache_entry"].assert_awaited_once()
+    db["get_message_row"].assert_not_awaited()
+
+
+async def test_fresh_ready_entry_still_serves(db, monkeypatch):
+    monkeypatch.setattr(settings, "ars_cache_ready_max_age_sec", 3600.0)
+    source = _leader(status="D", merged_version=uuid.uuid4())
+    db["get_message_row"].return_value = source
+    db["get_current_cache_entry"].return_value = (
+        1,
+        entry(source["id"], "ready", age_sec=60),
+    )
+    served = await cache.lookup(QUERY, LOGGER)
+    assert served is not None and served[0] == cache.SERVED
+
+
+async def test_expiry_disabled_keeps_old_entries(db, monkeypatch):
+    monkeypatch.setattr(settings, "ars_cache_ready_max_age_sec", 0.0)
+    source = _leader(status="D", merged_version=uuid.uuid4())
+    db["get_message_row"].return_value = source
+    db["get_current_cache_entry"].return_value = (
+        1,
+        entry(source["id"], "ready", age_sec=10**7),
+    )
+    served = await cache.lookup(QUERY, LOGGER)
+    assert served is not None and served[0] == cache.SERVED
+
+
+async def test_repair_sweep_purges_expired_ready_entries(db):
+    db["purge_expired_ready_cache_entries"].return_value = 5
+    counts = await cache.repair_sweep(LOGGER)
+    assert counts["expired"] == 5
+    db["purge_expired_ready_cache_entries"].assert_awaited_once_with(
+        settings.ars_cache_ready_max_age_sec
+    )

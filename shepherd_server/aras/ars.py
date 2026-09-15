@@ -35,7 +35,6 @@ import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.broker as broker
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars import crypto
-from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
 from shepherd_utils.ars.envelope import (
     agent_envelope,
     channel_envelope,
@@ -49,7 +48,7 @@ from shepherd_utils.ars.filters import (
 )
 from shepherd_utils.ars.notify import notify_subscribers, replay_completion
 from shepherd_utils.ars.premerge import ScoreStatCalc, get_safe
-from shepherd_utils.ars.statuses import to_name
+from shepherd_utils.ars.statuses import coerce_status, to_letter, to_name
 from shepherd_utils.config import settings
 from shepherd_utils.logger import resolve_log_level
 
@@ -135,7 +134,15 @@ async def _envelope_bytes(row, task_logger=logger) -> bytes:
     sentinel = f"__ARS_DATA_{row['id']}__"
     env["fields"]["data"] = sentinel
     head = orjson.dumps(env, default=str)
-    return head.replace(b'"' + sentinel.encode() + b'"', raw, 1)
+    # Anchored on the member, not just the value: a bare first-occurrence
+    # replace would splice into whichever field happened to serialize first
+    # if its text ever matched (``name`` precedes ``data`` in the envelope).
+    marker = b'"data":"' + sentinel.encode() + b'"'
+    if head.count(marker) != 1:
+        # cannot splice safely -- fall back to a parsed payload
+        env["fields"]["data"] = await ars_db.load_message_data(row["id"], task_logger)
+        return orjson.dumps(env, default=str)
+    return head.replace(marker, b'"data":' + raw, 1)
 
 
 def _host_base(request: Request) -> str:
@@ -162,7 +169,6 @@ _API_PATTERNS = [
     ("timeoutTest/", True),
     ("merge/<uuid:key>", False),
     ("retain/<uuid:key>", False),
-    ("block/<uuid:key>", False),
     ("latest_pk/<int:n>", False),
     ("query_event_subscribe/", True),
     ("query_event_unsubscribe/", True),
@@ -415,7 +421,7 @@ async def message(key: str, request: Request) -> Response:
         if mesg is None:
             return text(f"Unknown message: {key}", 404)
         if request.query_params.get("compress", False):
-            blob = await shepherd_db.data_db_client.get(str(pk))
+            blob = await ars_db.load_message_compressed(pk, logger)
             if blob is not None:
                 return Response(
                     content=blob,
@@ -455,7 +461,17 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
         status = "D"
         code = 200
         if "tr_ars.message.status" in request.headers:
-            status = request.headers["tr_ars.message.status"]
+            # Caller-controlled: an unrecognized value used to be written
+            # straight into the CHAR(1) status column, where a one-character
+            # nonsense status is never terminal (so the parent never
+            # completes) and never 'R' (so the watchdog never reaps it).
+            raw_status = request.headers["tr_ars.message.status"]
+            status = coerce_status(raw_status, "D")
+            if status != to_letter(raw_status):
+                logger.warning(
+                    f"Ignoring unrecognized tr_ars.message.status "
+                    f"{raw_status!r} on callback for {key}; using 'D'"
+                )
         res = get_safe(data, "message", "results")
         actor = await ars_db.get_actor(mesg["actor"]) or {}
         inforesid = actor.get("inforesid")
@@ -737,7 +753,15 @@ async def filter_endpoint(key: str, request: Request) -> Response:
     filter_arg_list = []
     for filter_type in request.query_params.keys():
         value = request.query_params.getlist(filter_type)[0]
-        filter_value = ast.literal_eval(value)
+        try:
+            # a raw query-string value: a malformed literal used to raise
+            # ValueError/SyntaxError out of the handler as an unstyled 500
+            filter_value = ast.literal_eval(value)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return text(
+                f"Could not parse a value for filter {filter_type!r}: {value!r}",
+                400,
+            )
         filter_arg_list.append([filter_type, filter_value])
 
     mesg = await ars_db.get_message_row(pk)
@@ -801,7 +825,13 @@ async def filter_endpoint(key: str, request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# retain / block / merge / post_process / timeoutTest
+# retain / merge / post_process / timeoutTest
+#
+# GET /api/block/<pk> is deliberately not served. Upstream's endpoint ran the
+# blocklist cascade over an arbitrary stored message and saved the result in
+# place -- a destructive, unauthenticated edit of a shared message tree, and
+# one that 500s on any response without auxiliary_graphs. Blocklist removal
+# still runs where it belongs, in ars_postprocess over each merged message.
 # ---------------------------------------------------------------------------
 
 
@@ -836,26 +866,6 @@ async def retain(key: str) -> Response:
     else:
         json_response["description"] = "Invalid PK"
     return dj_json(json_response)
-
-
-@route("/api/block/{key}", ["GET"])
-async def block(key: str) -> Response:
-    pk = _parse_uuid(key)
-    if pk is None:
-        return text(f"Unknown message: {key}", 404)
-    mesg = await ars_db.get_message_row(pk)
-    if mesg is None:
-        return text(f"Unknown message: {key}", 404)
-    data = await ars_db.load_message_data(pk, logger) or {}
-    report = remove_blocked(data, load_blocklist(), str(mesg["id"]))
-    await ars_db.save_message_data(pk, data, logger)
-    await ars_db.persist_data_copy(pk, logger)
-    httpjson = {
-        "pk": report[0],
-        "blocked_nodes": report[1],
-        "removed_results": report[2],
-    }
-    return dj_json(httpjson)
 
 
 @route("/api/merge/{key}", ["GET"])
@@ -910,10 +920,21 @@ async def get_report(inforesid: str) -> Response:
     return JSONResponse(content=json.loads(json.dumps(report, default=str)))
 
 
+# latest_pk's path parameter is both a day count and a row limit; it walks a
+# dict entry per day, so an unbounded value is a cheap way to make the server
+# build an enormous response.
+MAX_LATEST_PK_N = 365
+
+
 @route("/api/latest_pk/{n}", ["GET"])
 async def latest_pk(n: int) -> Response:
     import datetime
 
+    if n < 1 or n > MAX_LATEST_PK_N:
+        return text(
+            f"n must be between 1 and {MAX_LATEST_PK_N}",
+            400,
+        )
     response: Dict[str, Any] = {}
     response[f"pk_count_last_{n}_days"] = {}
     response[f"latest_{n}_pks"] = []
@@ -1038,7 +1059,7 @@ async def _broker_available() -> bool:
 @route("/api/health", ["GET", "POST"])
 async def health(request: Request) -> Response:
     if request.method != "GET":
-        return text("Only POST is permitted!", 405)
+        return text("Only GET is permitted!", 405)
     health_body: Dict[str, Any] = {"status": "ok"}
     code = 200
     if await _database_available():

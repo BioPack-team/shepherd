@@ -53,6 +53,7 @@ accept each behavioral change.
 | 1. Golden function parity | merge/premerge/filters/scoring/blocklist/validation outputs, byte-compared to upstream runs | `tests/unit/ars/test_golden_parity.py` |
 | 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_merge_worker.py`, `test_ars_postprocess.py`, `test_ars_watchdog.py`, `test_ars_notify.py` |
 | 3. API contract | paths, methods, status codes, error bodies, envelope shapes | `test_envelope.py`, `test_ars_api_contract.py` |
+| 3b. Deliberate divergences | the upstream bugs the port does NOT reproduce | `test_upstream_bugfixes.py` |
 | 4. Differential end-to-end | both stacks against the same mocked world | `tests/parity_e2e/` (run on demand; see its README) |
 
 ## Invariant index (register rows referenced from tests)
@@ -81,18 +82,23 @@ accept each behavioral change.
   validation failure → 422 `Problem with TRAPI Validation` with the child
   E/422; header `tr_ars.message.status` override; `results: null` → 
   `result_count = 0` while `results: []` leaves it None.
-- **Timeouts** — 15-minute scan window on *creation* time; parents exempt;
-  merge children 8 min; everything else **5 min including pathfinder**
-  (upstream's code, not its log message); code 598.
+- **Timeouts** — parents exempt; merge children 8 min; everything else
+  **5 min including pathfinder** (upstream's code, not its log message);
+  code 598. Upstream's 15-minute ceiling on *creation* time is **not**
+  reproduced (see the divergences below); the sweep is bounded by
+  `ars_timeout_scan_limit` rows per pass instead.
 - **Known-broken endpoints reproduced** — `POST /ars/api/messages` (500),
   `POST /ars/api/actors` (creates the actor, then 400
   `Not a valid json format`), `GET /ars/api/merge/<pk>` (creates the shell
   merge child, then 500), `timeoutTest`/`post_process` debug (500).
-- **Upstream error-behavior parity** — `decorate_edges_with_infores` raises
-  (UnboundLocalError) on non-empty sources with no primary;
-  `normalizeScores` raises IndexError on mixed scored/unscored results; the
-  `node_bindings` for/else; the `attributes`/`analyses` early returns; a
-  failed merge fold leaves the shell merge child Running for the watchdog.
+  `GET /ars/api/block/<pk>` is **not served at all** — see the divergences
+  below.
+- **Upstream error-behavior parity** — a failed merge fold leaves the shell
+  merge child Running for the watchdog. The crash-and-drop behaviors this
+  row used to list (`decorate_edges_with_infores`'s UnboundLocalError,
+  `normalizeScores`'s IndexError, the `node_bindings` for/else, the
+  `attributes`/`analyses` early returns) are **no longer reproduced** — see
+  "Deliberate divergences from upstream" below.
 
 ## Documented deviations (all consciously accepted)
 
@@ -161,7 +167,11 @@ Behavioral deviations:
     durable copy renders `fields.data: null` (upstream MySQL always had it
     inline).
 12. **Notification delivery retries** run in-process with upstream's backoff
-    envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery.
+    envelope (cap 300s, jitter, 8 attempts) instead of celery re-delivery,
+    detached from the stream task that emitted them and bounded by
+    `ars_notify_max_inflight` / `ars_notify_max_delivery_sec`. Retrying
+    inline let one unreachable client callback pin a `TASK_LIMIT` slot for
+    the whole ladder and stall every other query's notifications.
 13. **Response cache** (Shepherd-native; upstream has none —
     `shepherd_utils/ars/cache.py`, design in
     `docs/ARS_RESPONSE_CACHE_PLAN.md`). With `ars_cache_enabled` there is
@@ -253,6 +263,61 @@ Behavioral deviations:
     surfaces are unchanged; `settings.ars_internal_dispatch=false`
     restores HTTP dispatch for everything (already-issued sentinels still
     deliver internally, since they are not POSTable).
+
+## Deliberate divergences from upstream (upstream bugs NOT reproduced)
+
+Everything above is parity work. This section is the opposite: places where
+the port used to reproduce an upstream defect faithfully and no longer does.
+Each one is pinned by `tests/unit/ars/test_upstream_bugfixes.py`, and the
+four that change a golden are declared in the `_divergences` block of
+`tests/fixtures/ars_goldens/goldens.json` (a regeneration re-records them
+from upstream and will fail the suite until they are re-applied — that
+failure is the prompt to re-decide each one, not a bug).
+
+### Crashes on ordinary input
+
+| Upstream | Port |
+|---|---|
+| `decorate_edges_with_infores` read `has_primary`, only ever assigned inside its loop → `UnboundLocalError` on any non-empty `sources` with no `primary_knowledge_source`, failing the whole callback | `has_primary` is initialized; the agent adds itself as primary, which is what the unreachable branch intended |
+| `decorate_edges_with_infores` shared ONE `self_source` dict across the whole graph, so the last edge to need a role rewrote the role of every earlier edge | a fresh source dict per edge (`_self_source`) |
+| `normalizeScores` ranked only score-bearing results but popped one rank per RESULT → `IndexError` on any mixed response, after misassigning the ranks it did hand out | each rank goes to the result it was computed from; unscored results get no `normalized_score` |
+| `scrub_null_attributes` iterated `get_safe(edge, "sources")` directly → `TypeError` on an edge with no `sources` key | treated as empty |
+| `remove_blocked` bound `nodes_to_remove` / `edges_to_remove` / `aux_graphs_to_remove` / `results_to_remove` inside conditional branches and read them unconditionally → `UnboundLocalError` on any response without `auxiliary_graphs` (an ordinary shape), without a knowledge graph, or with a null `edges` map | every accumulator bound up front |
+| `remove_blocked`'s pathfinder branch raised `UnboundLocalError` on an empty `path_bindings` | the removal loop is inside the per-path loop, so there is nothing to leave unbound |
+| `QueryGraph` / `KnowledgeGraph` / `Results` returned early on a `None` input, leaving every attribute unset → `AttributeError` from the next getter | they initialize empty |
+
+### Silently wrong results
+
+| Upstream | Port |
+|---|---|
+| `mergeDicts` `return`ed out of its `attributes` and `analyses` branches, abandoning every key it had not reached yet (e.g. an edge's `qualifiers`) | `continue`; the remaining keys merge |
+| `mergeDicts`' `node_bindings` branch hung its `else` off the `for` rather than the `if`, so only the LAST current-only binding was carried — into a local map it never wrote back — and bindings past index 0 were ignored entirely | bindings are unioned per query-graph node, merging matching ids and appending new ones |
+| `TranslatorMessage.to_dict` emitted `"results": {}` for a message with no results | `[]`, as TRAPI requires |
+| `remove_blocked` pruned pathfinder `path_bindings` for only the last path id (its removal loop was dedented out of the per-path loop and shadowed the dict with its own values) | every path id is pruned |
+| `remove_blocked` matched analysis-level `support_graphs` (aux graph ids) against removed EDGE ids — never a match — so support graphs that really had gone away stayed on the analysis | matched against removed aux graph ids |
+| The notification `stats` block keyed off the parent's `result_count`, which nothing ever set, and counted aux graphs from a `data` argument no caller passed — so stats were never attached, and would have read 0 if they had been | `ars_postprocess` carries the merge's result count up to the parent; the aux count comes from the `params.stats` the merge already recorded |
+
+### Stuck or unbounded state
+
+| Upstream | Port |
+|---|---|
+| The `tr_ars.message.status` request header was written verbatim into the `CHAR(1)` status column. A one-character nonsense value is not terminal (so the parent never completes) and is not `'R'` (so the watchdog never scans it) — the message was stranded for good, from an unauthenticated callback | `coerce_status` clamps at every ingress (callback header, fanout response header, task payload) and `validate_letter` rejects at the db layer |
+| The timeout sweep examined only messages created in the last 15 minutes, so a message that outlived the window could never be timed out again: a sweep outage longer than (window − threshold) stranded every message it missed, and their parents with them | no creation-time ceiling by default (`ars_timeout_scan_window_sec = 0`); bounded by `ars_timeout_scan_limit` rows per pass, oldest first |
+| `check_parent_completion` guarded the completion branch with a read-then-act status check. It runs from the server and four workers, so two children going terminal at once double-fired every completion notification and synthesized two empty merged messages | the flip to `'D'` is an atomic conditional UPDATE (`claim_terminal_transition`); losers return without re-notifying, and the empty branch discards the merged message it had built |
+| — (Shepherd-native) The merge lock's 45s TTL was shorter than a large fold, so a lapsed lock let two `ars_merge` tasks fold the same parent and the later UPDATE dropped the other ARA's merge | the lock is refreshed every 15s for as long as it is held |
+| — (Shepherd-native) Ready cache entries never expired, and a live entry exempts its whole tree from the payload purge, so the cache pinned the payloads of every distinct query it had ever seen | `ars_cache_ready_max_age_sec` (7 days) retires them; expired entries stop answering immediately and the watchdog purges them |
+| — (Shepherd-native) The cache key covered only the query graph and `workflow`, but the fanout forwards `parameters` verbatim to every ARA, so two submits differing only there shared an entry and one got the other's answer | `parameters` is part of the key (minus `overwrite_cache`, which steers the cache, not the query); `CACHE_KEY_VERSION` bumped to `2` |
+
+### Endpoints
+
+| Upstream | Port |
+|---|---|
+| `GET /ars/api/block/<pk>` ran the blocklist cascade over an arbitrary stored message and saved the result in place — an unauthenticated destructive edit of a shared tree, which also 500s on any response without `auxiliary_graphs` | **not served**, and dropped from the `api/` index. Blocklist removal still runs where it belongs, in `ars_postprocess` over each merged message |
+| `GET /ars/api/messages/<pk>?compress` read only Redis, so it 404'd once the Redis TTL lapsed on a message still readable through every other endpoint | falls back to the durable `ars_message.data` copy and re-warms Redis |
+| `GET /ars/api/health` answered a non-GET with `Only POST is permitted!` | `Only GET is permitted!` |
+| `GET /ars/api/filter/<pk>` ran `ast.literal_eval` on raw query-string values, so a malformed literal escaped as an unstyled 500 | 400 naming the filter and value |
+| `GET /ars/api/latest_pk/<n>` took `n` unbounded as both a day count and a row limit, walking one response entry per day | clamped to 1..365 |
+| `GET /ars/api/reports/<inforesid>` interpolated the path segment into a `LIKE` pattern unescaped | metacharacters escaped |
 
 ## Not ported (documented drops)
 

@@ -7,6 +7,7 @@ one POST per subscribed client with an HMAC-SHA256 x-event-signature over
 the compact sorted-key JSON body, retried on failure.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -82,6 +83,7 @@ async def test_notification_posted_with_valid_hmac(env, mocker):
         _task(env, {"event_type": "merged_version_begun", "complete": False}),
         LOGGER,
     )
+    await notify_worker.drain_deliveries()
     call = post.await_args
     assert call.kwargs["url"] == "https://ui.example/notify"
     body = call.kwargs["content"]
@@ -114,6 +116,7 @@ async def test_last_merged_completed_forces_code_200(env, mocker):
         ),
         LOGGER,
     )
+    await notify_worker.drain_deliveries()
     notification = json.loads(post.await_args.kwargs["content"])
     assert notification["code"] == 200
 
@@ -131,6 +134,7 @@ async def test_failed_delivery_retries(env, mocker):
     await notify_worker.ars_notify(
         _task(env, {"event_type": "admin", "complete": True}), LOGGER
     )
+    await notify_worker.drain_deliveries()
     assert post.await_count == 2
 
 
@@ -140,6 +144,7 @@ async def test_no_clients_no_posts(env, mocker):
     await notify_worker.ars_notify(
         _task(env, {"event_type": "admin", "complete": True}), LOGGER
     )
+    await notify_worker.drain_deliveries()
     post.assert_not_awaited()
 
 
@@ -160,6 +165,7 @@ async def test_client_pks_in_task_are_used_instead_of_the_subscriber_list(env, m
     task = _task(env, {"event_type": "admin", "complete": True}, code="200")
     task[1]["client_pks"] = json.dumps(["1"])
     await notify_worker.ars_notify(task, LOGGER)
+    await notify_worker.drain_deliveries()
     assert posted == ["https://ui.example/notify"]
     env["get_client_by_pk"].assert_awaited_once_with(1)
     env["get_subscribed_clients"].assert_not_awaited()
@@ -171,8 +177,10 @@ async def test_unknown_or_empty_client_pks_post_nothing(env, mocker):
     task = _task(env, {"event_type": "admin", "complete": True}, code="200")
     task[1]["client_pks"] = json.dumps(["99"])
     await notify_worker.ars_notify(task, LOGGER)
+    await notify_worker.drain_deliveries()
     task[1]["client_pks"] = json.dumps([])
     await notify_worker.ars_notify(task, LOGGER)
+    await notify_worker.drain_deliveries()
     post.assert_not_awaited()
     env["get_subscribed_clients"].assert_not_awaited()
 
@@ -188,5 +196,50 @@ async def test_task_without_client_pks_falls_back_to_subscriber_list(env, mocker
     await notify_worker.ars_notify(
         _task(env, {"event_type": "admin"}, code="200"), LOGGER
     )
+    await notify_worker.drain_deliveries()
     assert posted == ["https://ui.example/notify"]
     env["get_subscribed_clients"].assert_awaited_once()
+
+
+async def test_delivery_is_detached_from_the_task(env, mocker):
+    """A slow or unreachable callback must not hold the stream task (and its
+    TASK_LIMIT slot) open: ars_notify returns as soon as the deliveries are
+    handed off."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_post(self, url, content=None, headers=None):
+        started.set()
+        await release.wait()
+        return httpx.Response(200)
+
+    mocker.patch.object(httpx.AsyncClient, "post", slow_post)
+    await asyncio.wait_for(
+        notify_worker.ars_notify(
+            _task(env, {"event_type": "admin", "complete": True}), LOGGER
+        ),
+        timeout=1,
+    )
+    # the POST is in flight but ars_notify has already returned
+    await asyncio.wait_for(started.wait(), timeout=1)
+    release.set()
+    await notify_worker.drain_deliveries(timeout=5)
+
+
+async def test_delivery_budget_stops_the_retry_ladder(env, mocker):
+    """Retries stop at the delivery budget instead of sleeping through the
+    whole backoff ladder."""
+    post = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=AsyncMock,
+        return_value=httpx.Response(
+            500, request=httpx.Request("POST", "https://ui.example/notify")
+        ),
+    )
+    mocker.patch.object(settings, "ars_notify_max_delivery_sec", 0.0)
+    await notify_worker.ars_notify(
+        _task(env, {"event_type": "admin", "complete": True}), LOGGER
+    )
+    await notify_worker.drain_deliveries(timeout=5)
+    # one attempt, then the budget check refuses to sleep
+    assert post.await_count == 1

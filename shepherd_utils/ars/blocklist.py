@@ -5,9 +5,22 @@ remove_blocked, restructured to operate purely on the data dict (the Django
 Message save side effects are hoisted to the ars_postprocess worker). The
 removal cascade -- nodes, their edges, aux graphs whose edges vanished,
 support_graph attribute pruning (an edge losing its last support graph is
-itself removed), result/analysis/binding pruning including the pathfinder
-path_bindings handling and the quirk that analysis-level support_graphs are
-checked against removed EDGE ids -- is byte-faithful and golden-tested.
+itself removed), and result/analysis/binding pruning -- follows upstream.
+
+Deliberate divergences from upstream (see docs/ARS_PARITY_REGISTER.md):
+  - every accumulator is bound before use. Upstream declared
+    ``aux_graphs_to_remove`` / ``nodes_to_remove`` / ``results_to_remove``
+    inside the branches that populate them and read them unconditionally at
+    the end, so any response without ``auxiliary_graphs`` -- an ordinary
+    shape -- died on an UnboundLocalError, and a missing knowledge graph or
+    a null ``edges`` map did the same.
+  - pathfinder ``path_bindings`` are pruned per path id. Upstream's removal
+    loop was dedented out of the per-path loop and shadowed the dict with
+    its own values, so it pruned only the last path id and raised on an
+    empty ``path_bindings``.
+  - analysis-level ``support_graphs`` are matched against removed AUX GRAPH
+    ids. Upstream compared them to removed EDGE ids, which never matches, so
+    support graphs that really had been removed stayed on the analysis.
 
 The bundled blocklist.json is the upstream config/blocklist.json copied
 verbatim from the pinned commit.
@@ -43,60 +56,66 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
         aux_graphs = get_safe(data, "message", "auxiliary_graphs")
         analyses_count = 0
         removed_nodes = []
-        if nodes is not None:
+        # Bound up front: upstream declared these inside the branches that
+        # populate them and then read them unconditionally, so a response
+        # with no knowledge graph -- or, far more common, one with no
+        # auxiliary_graphs -- died on an UnboundLocalError.
+        nodes_to_remove = []
+        edges_to_remove = []
+        aux_graphs_to_remove = []
+        results_to_remove = []
+        if nodes:
             nodes_to_remove = list(set(blocklist.keys()) & set(nodes.keys()))
             for node in nodes_to_remove:
                 removed_nodes.append(nodes[node])
                 del nodes[node]
 
-            edges_to_remove = []
-            for edge_id, edge in edges.items():
-                if (
-                    edge["subject"] in nodes_to_remove
-                    or edge["object"] in nodes_to_remove
-                ):
-                    edges_to_remove.append(edge_id)
+            if edges:
+                for edge_id, edge in edges.items():
+                    if (
+                        edge.get("subject") in nodes_to_remove
+                        or edge.get("object") in nodes_to_remove
+                    ):
+                        edges_to_remove.append(edge_id)
 
-            if aux_graphs is not None:
-                aux_graphs_to_remove = []
+            if aux_graphs:
                 for aux_id, aux_graph in aux_graphs.items():
                     aux_edges = get_safe(aux_graph, "edges")
+                    if aux_edges is None:
+                        continue
                     overlap = list(set(aux_edges) & set(edges_to_remove))
                     if len(overlap) == len(aux_edges):
                         aux_graphs_to_remove.append(aux_id)
-                    if len(overlap) > 0:
-                        for edge_id in overlap:
-                            aux_edges.remove(edge_id)
+                    for edge_id in overlap:
+                        aux_edges.remove(edge_id)
                 for aux_id in aux_graphs_to_remove:
                     del aux_graphs[aux_id]
 
-                for edge_id, edge in edges.items():
-                    if "attributes" in edge.keys() and edge["attributes"] is not None:
-                        attributes = get_safe(edge, "attributes")
-                        for attribute in attributes:
-                            if "attribute_type_id" in attribute.keys():
-                                type_id = attribute["attribute_type_id"]
-                                if (
-                                    type_id is not None
-                                    and type_id == "biolink:support_graphs"
-                                ):
-                                    overlap = list(
-                                        set(attribute["value"])
-                                        & set(aux_graphs_to_remove)
-                                    )
-                                    if len(overlap) > 0:
-                                        for graph in overlap:
-                                            attribute["value"].remove(graph)
-                                        if (
-                                            len(attribute["value"]) == 0
-                                            and edge_id not in edges_to_remove
-                                        ):
-                                            edges_to_remove.append(edge_id)
+                # an edge whose last support graph just vanished goes too
+                for edge_id, edge in (edges or {}).items():
+                    attributes = get_safe(edge, "attributes")
+                    if attributes is None:
+                        continue
+                    for attribute in attributes:
+                        if (
+                            attribute.get("attribute_type_id")
+                            != "biolink:support_graphs"
+                        ):
+                            continue
+                        value = attribute.get("value")
+                        if not isinstance(value, list):
+                            continue
+                        overlap = list(set(value) & set(aux_graphs_to_remove))
+                        if not overlap:
+                            continue
+                        for graph in overlap:
+                            value.remove(graph)
+                        if not value and edge_id not in edges_to_remove:
+                            edges_to_remove.append(edge_id)
             for edge_id in edges_to_remove:
                 del edges[edge_id]
 
             if results is not None:
-                results_to_remove = []
                 for result in results:
                     node_bindings = get_safe(result, "node_bindings")
                     if node_bindings is not None:
@@ -127,30 +146,37 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
                                     for br in bindings_to_remove:
                                         bindings.remove(br)
 
-                            # pathfinder path bindings (upstream MDW 08/17/26)
+                            # pathfinder path bindings (upstream MDW 08/17/26).
+                            # Upstream's removal loop sat OUTSIDE the per-path
+                            # loop and reused the loop variable's name, so it
+                            # pruned only the last path id -- and raised an
+                            # UnboundLocalError when path_bindings was empty.
                             path_bindings = get_safe(analysis, "path_bindings")
                             if path_bindings is not None:
-                                for path_id, path_bindings in path_bindings.items():
+                                for path_id, bindings in path_bindings.items():
                                     path_bindings_to_remove = []
-                                    for path_binding in path_bindings:
+                                    for path_binding in bindings:
                                         if path_binding["id"] in aux_graphs_to_remove:
-                                            if len(path_bindings) > 1:
+                                            if len(bindings) > 1:
                                                 path_bindings_to_remove.append(
                                                     path_binding
                                                 )
                                             elif analysis not in analyses_to_remove:
                                                 analyses_to_remove.append(analysis)
-                                for pr in path_bindings_to_remove:
-                                    path_bindings.remove(pr)
+                                    for pr in path_bindings_to_remove:
+                                        bindings.remove(pr)
 
+                            # analysis-level support_graphs are AUX GRAPH ids;
+                            # upstream checked them against removed EDGE ids,
+                            # so a support graph that actually went away was
+                            # left dangling on the analysis.
                             support_graphs = get_safe(analysis, "support_graphs")
-                            support_graphs_to_remove = []
-                            if support_graphs is not None and len(support_graphs) > 0:
-                                # upstream checks against removed EDGE ids
-                                for sg in support_graphs:
-                                    if sg in edges_to_remove:
-                                        support_graphs_to_remove.append(sg)
-                                for sg in support_graphs_to_remove:
+                            if support_graphs:
+                                for sg in [
+                                    sg
+                                    for sg in support_graphs
+                                    if sg in aux_graphs_to_remove
+                                ]:
                                     support_graphs.remove(sg)
                         for analysis in analyses_to_remove:
                             analyses_count += 1
@@ -174,16 +200,11 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
             ],
         )
 
-        aux_count = len(aux_graphs_to_remove)
-        nodes_count = len(nodes_to_remove)
-        edges_count = len(edges_to_remove)
-        results_count = len(results_to_remove)
-
         log_json = {
-            "nodes": nodes_count,
-            "edges": edges_count,
-            "results": results_count,
-            "auxiliary_graphs": aux_count,
+            "nodes": len(nodes_to_remove),
+            "edges": len(edges_to_remove),
+            "results": len(results_to_remove),
+            "auxiliary_graphs": len(aux_graphs_to_remove),
             "analyses": analyses_count,
         }
         add_log_entry(

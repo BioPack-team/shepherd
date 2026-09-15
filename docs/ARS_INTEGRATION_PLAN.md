@@ -145,7 +145,7 @@ Port of `notify_subscribers_task` + `notify_one_client_task`: payload base `{"pk
 
 ### 3.3 Server sub-app (`shepherd_server/aras/ars.py`)
 
-Mounted in `server.py` at `/ars` (the ARS is a peer of the ARA sub-apps, not an `ARATargetEnum` member — it never enters the TRAPI-workflow pipeline). Routes and behaviors, all matching §7.3's contract table: `api/` index, `api/submit/`, `api/messages/` (GET recent 10 / POST create), `api/messages/{pk}` (GET + `?trace=y`; POST = ARA callback), `api/agents/`, `api/agents/{name}`, `api/actors/`, `api/channels/`, `api/filters/`, `api/filter/{pk}`, `api/reports/{inforesid}`, `api/retain/{pk}`, `api/block/{pk}`, `api/latest_pk/{n}`, `api/query_event_subscribe/`, `api/query_event_unsubscribe/`, `api/post_process/{pk}`, `api/health/`, `api/get_status/`, `api/timeoutTest/`, `api/merge/{pk}` (N4).
+Mounted in `server.py` at `/ars` (the ARS is a peer of the ARA sub-apps, not an `ARATargetEnum` member — it never enters the TRAPI-workflow pipeline). Routes and behaviors, all matching §7.3's contract table: `api/` index, `api/submit/`, `api/messages/` (GET recent 10 / POST create), `api/messages/{pk}` (GET + `?trace=y`; POST = ARA callback), `api/agents/`, `api/agents/{name}`, `api/actors/`, `api/channels/`, `api/filters/`, `api/filter/{pk}`, `api/reports/{inforesid}`, `api/retain/{pk}`, `api/latest_pk/{n}`, `api/query_event_subscribe/`, `api/query_event_unsubscribe/`, `api/post_process/{pk}`, `api/health/`, `api/get_status/`, `api/timeoutTest/`, `api/merge/{pk}` (N4). `api/block/{pk}` is deliberately not served -- see the divergences section of docs/ARS_PARITY_REGISTER.md.
 
 Two handlers do real work:
 

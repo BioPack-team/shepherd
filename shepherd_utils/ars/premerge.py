@@ -100,7 +100,9 @@ def scrub_null_attributes(data):
                             )
                             edgeAttribute["attributes"] = []
 
-            edgeSources = get_safe(edgeStuff, "sources")
+            # upstream iterated this straight off get_safe, so an edge
+            # without a "sources" key raised TypeError on None
+            edgeSources = get_safe(edgeStuff, "sources") or []
             sources_to_remove = {}
             for edge_source in edgeSources:
                 if (
@@ -138,44 +140,53 @@ def scrub_null_attributes(data):
                 logger.info("scrubnull: Found bad attributes in aux graphs")
 
 
+def _self_source(inforesid, role):
+    """A fresh retrieval source for this agent.
+
+    Built per edge on purpose. Upstream reused one dict for the whole graph,
+    so a later edge flipping the role mutated the source already appended to
+    every earlier edge -- the last edge to need a role decided the role every
+    edge reported.
+    """
+    return {
+        "resource_id": inforesid,
+        "resource_role": role,
+        "source_record_urls": None,
+        "upstream_resource_ids": [],
+    }
+
+
 def decorate_edges_with_infores(data, inforesid):
     edges = get_safe(data, "message", "knowledge_graph", "edges")
     if inforesid is None:
         inforesid = "infores:unknown"
-    # NOTE: deliberately shared across every edge, like upstream -- a later
-    # edge's role flip mutates the same dict already appended to an earlier
-    # edge's sources.
-    self_source = {
-        "resource_id": inforesid,
-        "resource_role": "primary_knowledge_source",
-        "source_record_urls": None,
-        "upstream_resource_ids": [],
-    }
     if edges is not None:
         for key, edge in edges.items():
             has_self = False
+            # upstream only ever assigned has_primary inside the loop below,
+            # so a non-empty sources list with no primary_knowledge_source
+            # raised UnboundLocalError and failed the whole callback
+            has_primary = False
             if (
                 "sources" not in edge.keys()
                 or edge["sources"] is None
                 or len(edge["sources"]) == 0
             ):
-                edge["sources"] = [self_source]
+                edge["sources"] = [_self_source(inforesid, "primary_knowledge_source")]
             else:
                 for source in edge["sources"]:
-                    if source["resource_id"] == inforesid:
+                    if source.get("resource_id") == inforesid:
                         has_self = True
-                    if source["resource_role"] == "primary_knowledge_source":
+                    if source.get("resource_role") == "primary_knowledge_source":
                         has_primary = True
                 if not has_self:
                     logger.info("decorateEdges: found lacking self")
-                    # upstream: has_primary is only ever assigned above, so a
-                    # non-empty sources list with no primary raises
-                    # UnboundLocalError here -- kept for parity.
-                    if has_primary:  # noqa: F821
-                        self_source["resource_role"] = "aggregator_knowledge_source"
-                    else:
-                        self_source["resource_role"] = "primary_knowledge_source"
-                    edge["sources"].append(self_source)
+                    role = (
+                        "aggregator_knowledge_source"
+                        if has_primary
+                        else "primary_knowledge_source"
+                    )
+                    edge["sources"].append(_self_source(inforesid, role))
 
 
 def ScoreStatCalc(results):
@@ -188,6 +199,7 @@ def ScoreStatCalc(results):
                 and res["analyses"] != []
                 and res["analyses"] is not None
             ):
+                score = None
                 if len(res["analyses"]) > 1:
                     temp_score = []
                     for analysis in res["analyses"]:
@@ -226,6 +238,7 @@ def ScoreStatCalc(results):
 
 def normalizeScores(results):
     scoreList = []
+    scoredResults = []
     if results is not None and len(results) > 0:
         for res in results:
             if (
@@ -233,6 +246,7 @@ def normalizeScores(results):
                 and res["analyses"] != []
                 and res["analyses"] is not None
             ):
+                score = None
                 if len(res["analyses"]) > 1:
                     temp_score = []
                     for analysis in res["analyses"]:
@@ -262,6 +276,7 @@ def normalizeScores(results):
 
                 if score is not None:
                     scoreList.append(score)
+                    scoredResults.append(res)
             else:
                 logger.error("Results dont have the required fields")
                 return results
@@ -272,15 +287,16 @@ def normalizeScores(results):
         ranked = (
             (rankdata(scoreList) * 100 / len(scoreList)).tolist() if scoreList else []
         )
-        if len(ranked) != len(scoreList):
+        if len(ranked) != len(scoredResults):
             logger.debug("Score normalization aborted. Score list lengths not equal")
             return results
-        if ranked:
-            # upstream pops one rank per RESULT while only score-bearing
-            # results were ranked -- a mixed corpus raises IndexError, and
-            # that error-parity is intentional (the callback errors out).
-            for result in results:
-                result["normalized_score"] = ranked.pop(0)
+        # Assign each rank back to the result it was computed from. Upstream
+        # popped one rank per RESULT while ranking only the score-bearing
+        # ones, so any response mixing scored and unscored results ran the
+        # list dry and raised IndexError, failing the whole callback -- and
+        # before it did, it handed the wrong result each score.
+        for result, rank in zip(scoredResults, ranked):
+            result["normalized_score"] = rank
     return results
 
 

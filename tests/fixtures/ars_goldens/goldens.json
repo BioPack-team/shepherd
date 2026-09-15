@@ -1,4 +1,13 @@
 {
+  "_divergences": {
+    "entries": {
+      "decorate/no_primary": "upstream raised UnboundLocalError (has_primary was only ever assigned inside the loop); the port appends a primary_knowledge_source for itself, which is what the unreachable branch intended",
+      "merge_ba.message.knowledge_graph.edges.e1.qualifiers": "upstream returned out of mergeDicts' attributes branch, abandoning every key it had not reached yet -- here, qualifiers",
+      "mergedicts/node_bindings": "upstream's else hung off the for, so current-only bindings were dropped (all but the last, into a map it never wrote back); the port unions them per query-graph node",
+      "scores/mixed": "upstream popped one rank per result while ranking only the score-bearing ones, so a mixed corpus raised IndexError after misassigning the ranks it did hand out; the port assigns each rank to the result it was computed from"
+    },
+    "note": "Entries listed here were recorded by running this port, not the pinned upstream Relay code: each is a place where the port deliberately fixes an upstream bug. Everything else in this file still comes from scripts/ars_parity/generate_goldens.py run against Relay @ 3e65975db287a73afa4388b7dbaf3c64d0d218c4. See docs/ARS_PARITY_REGISTER.md."
+  },
   "_relay_commit": "3e65975db287a73afa4388b7dbaf3c64d0d218c4",
   "appraise_confidence": [
     {
@@ -366,8 +375,31 @@
       }
     },
     {
-      "name": "no_primary_raises",
-      "raises": "UnboundLocalError"
+      "name": "no_primary",
+      "output": {
+        "message": {
+          "knowledge_graph": {
+            "edges": {
+              "e1": {
+                "object": "b",
+                "sources": [
+                  {
+                    "resource_id": "infores:x",
+                    "resource_role": "aggregator_knowledge_source"
+                  },
+                  {
+                    "resource_id": "infores:aragorn",
+                    "resource_role": "primary_knowledge_source",
+                    "source_record_urls": null,
+                    "upstream_resource_ids": []
+                  }
+                ],
+                "subject": "a"
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "filters": {
@@ -911,6 +943,12 @@
             ],
             "object": "MONDO:0005148",
             "predicate": "biolink:treats",
+            "qualifiers": [
+              {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "decreased"
+              }
+            ],
             "sources": [
               {
                 "resource_id": "infores:ctd",
@@ -1735,6 +1773,9 @@
           "n1": [
             {
               "id": "C"
+            },
+            {
+              "id": "B"
             }
           ]
         }
@@ -2960,7 +3001,51 @@
   "scores": [
     {
       "name": "mixed",
-      "normalized_raises": "IndexError",
+      "normalized": [
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ],
+          "normalized_score": 87.5
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.1
+            },
+            {
+              "score": 0.3
+            }
+          ],
+          "normalized_score": 25.0
+        },
+        {
+          "analyses": [
+            {
+              "score": 0
+            },
+            {
+              "score": 0.5
+            }
+          ],
+          "normalized_score": 50.0
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.9
+            }
+          ],
+          "normalized_score": 87.5
+        },
+        {
+          "analyses": [
+            {}
+          ]
+        }
+      ],
       "stat": {
         "maximum": 0.9,
         "mean": 0.625,

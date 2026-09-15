@@ -358,9 +358,16 @@ class Settings(BaseSettings):
     # The code's behavior is what parity is measured against.
     ars_timeout_pathfinder_sec: float = 300.0  # 5 min
     ars_timeout_merge_sec: float = 480.0  # 8 min
-    # Only messages updated within this window are examined by the sweep,
-    # matching the upstream 15-minute scan window.
-    ars_timeout_scan_window_sec: float = 900.0
+    # Upper bound on how far back the timeout sweep looks (by creation time).
+    # 0 -- the default -- means no bound. Upstream capped this at 15 minutes,
+    # which made a message unreapable forever once it aged past the window:
+    # a sweep outage longer than (window - threshold) left it Running with no
+    # path to a terminal status, and its parent never completed. The sweep is
+    # bounded by ars_timeout_scan_limit instead.
+    ars_timeout_scan_window_sec: float = 0.0
+    # Most rows one sweep will examine, oldest first. Keeps a backlog from
+    # turning a single pass into an unbounded scan.
+    ars_timeout_scan_limit: int = 2000
     # Days after which non-retained message payload blobs are purged from
     # Postgres (row metadata is kept). Upstream has no purge job of its own --
     # only the retain flag honored by out-of-band cleanup -- so this is the
@@ -392,9 +399,24 @@ class Settings(BaseSettings):
     # watchdog deletes them; only then do their source trees become
     # eligible for the ars_data_retention_days purge.
     ars_cache_stale_grace_sec: float = 86400.0
+    # How long a ready entry keeps answering before it is retired and its
+    # source tree becomes purgeable again. Nothing else retires a
+    # current-generation entry, and a live entry exempts its whole tree from
+    # the payload purge, so without a ceiling the cache pins every distinct
+    # query it has ever seen. 0 disables expiry (unbounded growth).
+    ars_cache_ready_max_age_sec: float = 7 * 86400.0
     # Bearer token for the cache admin routes (GET /ars/api/cache,
     # POST /ars/api/cache/invalidate). Empty disables the routes (403); the
     # upstream ARS has no admin auth, so nothing else on the surface uses it.
+    # ars_notify delivers each client callback detached from the stream task
+    # it came off, so one unreachable callback cannot pin a task slot. These
+    # bound that: how many deliveries may be in flight per worker process,
+    # and how long any single one may keep retrying.
+    ars_notify_max_inflight: int = 50
+    ars_notify_max_delivery_sec: float = 600.0
+    # how long a shutting-down ars_notify waits for in-flight deliveries
+    ars_notify_drain_sec: float = 15.0
+
     ars_admin_token: str = ""
     # SmartAPI registry cache refresh interval (upstream 3600s, 30s retry after
     # a failed refresh).
