@@ -22,7 +22,7 @@ import logging
 import uuid
 
 import shepherd_utils.ars.db as ars_db
-import shepherd_utils.ars.lifecycle as lifecycle
+from shepherd_utils.ars import aras
 from shepherd_utils.ars.merge import (
     TranslatorMessage,
     get_msg_stats,
@@ -132,9 +132,8 @@ async def ars_merge(task, logger: logging.Logger):
             logger.error(f"Merge: parent {parent_pk} does not exist; skipping")
             return
         await ars_db.update_message(parent_pk, merge_semaphore=True)
-        ars_actor = await lifecycle.ensure_ars_actor()
         merged_shell = await ars_db.create_message(
-            actor_id=ars_actor["id"], status="Running", code=202, ref=parent_pk
+            agent=aras.MERGE_AGENT, status="Running", code=202, ref=parent_pk
         )
         new_pk = merged_shell["id"]
         current_pk = parent.get("merged_version")

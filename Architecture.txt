@@ -1,7 +1,7 @@
 # Shepherd Workflow
 
-- The ARS sends queries to Shepherd, one query for each ARA, and the endpoint is /{ara_target}/asyncquery (or /{ara_target}/query for synchronous queries)
-- These queries go to the FastAPI server
+- A query reaches Shepherd either directly at /{ara_target}/asyncquery (or /{ara_target}/query for synchronous queries), or through Shepherd's own hosted ARS at /ars/api/submit, whose ars_fanout worker enqueues one query per hosted ARA straight onto the broker (no HTTP hop) and receives each response back over the broker when the finish_query worker sees the ARS handoff callback
+- Direct queries go to the FastAPI server
   - Each query will be received, unique query and response ids are created
   - Query state is saved in PostgreSQL
   - The original query graph and response (that will be modified during querying) are saved in Redis

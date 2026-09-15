@@ -1,49 +1,32 @@
 """ARS fan-out worker.
 
-Broadcasts a submitted query to every actor whose channels intersect the
-parent's, creating one child message per actor and dispatching the query to
-the remote ARA/KP. Port of NCATSTranslator/Relay @ 3e65975:
-  - signals.py message_post_save (actor matching)
-  - pubsub.py send_messages (skip rules: self, empty path, empty agent uri,
-    inactive)
-  - tasks.py send_message (child creation, callback injection, and the full
-    response state machine)
-
-Differences from upstream, all behavior-preserving (see the parity
-register): the query is POSTed directly to the remote resolved via SmartAPI
-instead of bouncing through the ARS's own /ara-*/api/runquery proxy view
-(the remote sees the same body), and the async-200 self-GET race check is
-dropped (upstream persists nothing on that path either way).
-
-Shepherd-hosted ARAs (infores:shepherd-*) skip HTTP entirely: their worker
-task is enqueued directly with an internal sentinel callback, so the query
-and its response never cross the network (documented deviation; gated by
-settings.ars_internal_dispatch).
+Broadcasts a submitted query to every ARA the ARS is configured to use,
+creating one child message per ARA and dispatching the query. Port of
+NCATSTranslator/Relay @ 3e65975 signals.py message_post_save +
+pubsub.py send_messages + tasks.py send_message, reduced to what a
+de-federated ARS needs: the roster is the static set of Shepherd-hosted ARAs
+(shepherd_utils/ars/aras.py) rather than actors matched on channels, and
+there is no HTTP. Dispatch does what POSTing to /{ara}/asyncquery would have
+done -- persist the query record and enqueue the ARA's worker task -- with
+the callback set to the broker-handoff sentinel, so finish_query hands the
+response straight to ars.premerge. The child stays R/202 exactly like an
+async accept; a dispatch failure is the same E/500 shape upstream recorded
+for a failed POST.
 """
 
 import asyncio
 import copy
-import html
 import json
 import logging
 import uuid
 
-import httpx
 from opentelemetry.propagate import inject
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.db as shepherd_db
-import shepherd_utils.smartapi as smartapi
-from shepherd_utils.ars.internal import internal_callback_url, internal_target
-from shepherd_utils.ars.premerge import (
-    ScoreStatCalc,
-    get_safe,
-    pre_merge_process,
-    remove_phantom_support_graphs,
-)
-from shepherd_utils.ars.statuses import coerce_status
-from shepherd_utils.ars.trapi import validate
+from shepherd_utils.ars import aras
+from shepherd_utils.ars.handoff import handoff_callback_url
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
 from shepherd_utils.db import save_logs
@@ -60,30 +43,6 @@ tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
 
-def _matching_actors(parent_actor, actors):
-    """signals.py: any actor with a channel entry present in the parent's."""
-    matching = []
-    for actor in actors:
-        for ch in actor.get("channel") or []:
-            if ch in (parent_actor.get("channel") or []):
-                matching.append(actor)
-                break
-    return matching
-
-
-def _skip_actor(actor, parent_actor) -> bool:
-    """pubsub.send_messages skip rules."""
-    if actor["id"] == parent_actor["id"]:
-        return True
-    if len(actor.get("path") or "") == 0:
-        return True
-    if len(actor.get("agent_uri") or "") == 0:
-        return True
-    if not actor.get("active") or actor.get("active") == "0":
-        return True
-    return False
-
-
 async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
     """Persist a child transition; run the completion check when terminal."""
     if payload is not None:
@@ -94,17 +53,15 @@ async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
         await lifecycle.check_parent_completion(parent_pk, logger)
 
 
-async def dispatch_internal(target, child_pk, parent, data, logger):
-    """Dispatch a query to a Shepherd-hosted ARA without the HTTP hop.
+async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
+    """Enqueue the query on the ARA's worker stream.
 
-    Does what POSTing to /{target}/asyncquery would have done -- persist the
-    query record and enqueue the ARA's worker task -- with the callback set
-    to the internal sentinel so finish_query hands the response straight to
-    ars.premerge (documented deviation in the parity register). The child
-    stays R/202 exactly like an async accept; a dispatch failure is the same
-    E/500 shape as a failed POST.
+    Persists the same query record ``POST /{ara}/asyncquery`` would have,
+    with the handoff sentinel as its callback so the finished response comes
+    back over the broker. The child stays R/202 like an async accept; a
+    failure here is the child's E/500.
     """
-    callback = internal_callback_url(child_pk)
+    callback = handoff_callback_url(child_pk)
     data["callback"] = callback
     query_id = str(uuid.uuid4())[:8]
     response_id = str(uuid.uuid4())[:8]
@@ -115,11 +72,11 @@ async def dispatch_internal(target, child_pk, parent, data, logger):
     inject(carrier)
     try:
         await shepherd_db.add_query(
-            query_id, response_id, data, callback, logger, target=target
+            query_id, response_id, data, callback, logger, target=ara.name
         )
         deadline = query_deadline(data)
         await add_task(
-            target,
+            ara.name,
             {
                 "query_id": query_id,
                 "response_id": response_id,
@@ -132,10 +89,10 @@ async def dispatch_internal(target, child_pk, parent, data, logger):
             logger,
             raise_on_failure=True,
         )
-        logger.info(f"[{child_pk}] dispatched internally to {target} as {query_id}")
+        logger.info(f"[{child_pk}] dispatched to {ara.name} as {query_id}")
     except Exception as e:
         logger.error(
-            f"Internal dispatch to {target} failed for pk: {child_pk}: {e}",
+            f"Dispatch to {ara.name} failed for pk: {child_pk}: {e}",
             exc_info=True,
         )
         await _finalize_child(
@@ -143,144 +100,18 @@ async def dispatch_internal(target, child_pk, parent, data, logger):
         )
 
 
-async def send_to_actor(actor, parent, parent_data, logger, otel="{}"):
-    """tasks.send_message, one actor."""
+async def send_to_ara(ara: aras.ARA, parent, parent_data, logger):
+    """tasks.send_message, one ARA: create the child, dispatch the query."""
     child = await ars_db.create_message(
-        actor_id=actor["id"],
+        agent=ara.agent,
         status="Running",
         code=202,
         name=parent.get("name", ""),
         ref=parent["id"],
         params=parent.get("params"),
     )
-    child_pk = child["id"]
-    inforesid = actor.get("inforesid")
-    agent_name = str(actor.get("agent_name"))
     data = copy.deepcopy(parent_data) if parent_data else {}
-    actor_url = f"{actor.get('agent_uri', '')}{actor.get('path', '')}"
-    callback = None
-    if not actor_url.startswith("/ara-explanatory/api/runquery"):
-        callback = f"{settings.ars_public_host}/ars/api/messages/{child_pk}"
-        data["callback"] = callback
-
-    target = internal_target(inforesid)
-    if target is not None:
-        await dispatch_internal(target, child_pk, parent, data, logger)
-        return
-
-    endpoint = smartapi.endpoint(inforesid)
-    url = smartapi.url_remote_from_inforesid(inforesid)
-    rdata = data
-    status = "U"
-    try:
-        if url is None:
-            # upstream's proxy view 500s when the remote can't be resolved,
-            # which send_message records as an error
-            logger.warning(f"could not configure inforesid={inforesid}")
-            await _finalize_child(
-                child_pk, parent["id"], rdata, {"status": "E", "code": 500}, logger
-            )
-            return
-        async with httpx.AsyncClient(timeout=settings.ars_query_timeout) as client:
-            resp = await client.post(url, json=data)
-        status_code = resp.status_code
-        final_url = str(resp.url)
-        if resp.status_code == 200:
-            try:
-                rdata = resp.json()
-            except json.decoder.JSONDecodeError:
-                rdata = {}
-            if endpoint == "asyncquery":
-                # results arrive on the callback; upstream persists nothing
-                # here and the child stays R/202 from creation
-                logger.info(f"[{child_pk}] {inforesid} accepted async query")
-                return
-            # synchronous (query) actor: process the response inline
-            results = get_safe(rdata, "message", "results")
-            result_count = None
-            result_stat = None
-            if results is not None and len(results) > 0:
-                result_count = len(rdata["message"]["results"])
-                result_stat = ScoreStatCalc(results)
-                await asyncio.to_thread(
-                    pre_merge_process, rdata, str(child_pk), agent_name, inforesid
-                )
-            updates = {"status": "D", "code": 200, "url": final_url}
-            if result_count is not None:
-                updates["result_count"] = result_count
-                updates["result_stat"] = result_stat
-            await ars_db.save_message_data(child_pk, rdata, logger)
-            if results is not None and len(results) > 0:
-                params = parent.get("params") or {}
-                if "validate" in params.keys() and not params["validate"]:
-                    valid = True
-                else:
-                    await asyncio.to_thread(remove_phantom_support_graphs, rdata)
-                    valid = await asyncio.to_thread(validate, rdata)
-                if valid:
-                    if agent_name.startswith("ara-"):
-                        await ars_db.save_message_data(child_pk, rdata, logger)
-                        await add_task(
-                            "ars.merge",
-                            {
-                                "parent_pk": str(parent["id"]),
-                                "child_pk": str(child_pk),
-                                "agent_name": agent_name,
-                                "query_id": str(parent["id"]),
-                                "otel": otel,
-                            },
-                            logger,
-                        )
-                else:
-                    logger.debug(
-                        f"Validation problem found for agent {agent_name} "
-                        f"with pk {parent['id']}"
-                    )
-                    updates = {
-                        "status": "E",
-                        "code": 422,
-                        "url": final_url,
-                        "result_count": result_count,
-                        "result_stat": result_stat,
-                    }
-            updated = await ars_db.update_message(child_pk, **updates)
-            if updated and updated["status"] in ("D", "S", "E", "U"):
-                await ars_db.persist_data_copy(child_pk, logger)
-                await lifecycle.check_parent_completion(parent["id"], logger)
-            return
-        if resp.status_code == 202:
-            aresponse_url = (
-                final_url[: final_url.rfind("/")] + "/aresponse/" + resp.text
-            )
-            await ars_db.save_message_data(child_pk, rdata, logger)
-            await ars_db.update_message(
-                child_pk, status="R", code=202, url=aresponse_url
-            )
-            return
-        # >= 400 (and any other unexpected status)
-        if "tr_ars.message.status" in resp.headers:
-            # remote-controlled; anything unrecognized stays 'U'
-            status = coerce_status(resp.headers["tr_ars.message.status"], "U")
-        if resp.status_code >= 400:
-            if resp.status_code != 503:
-                status = "E"
-            rdata["logs"] = []
-            rdata["logs"].append(html.escape(resp.text))
-        await _finalize_child(
-            child_pk,
-            parent["id"],
-            rdata,
-            {"status": status, "code": status_code, "url": final_url},
-            logger,
-        )
-    except Exception as e:
-        logger.error(
-            f"Can't send message to actor {url} for pk: {child_pk}: {e}",
-            exc_info=True,
-        )
-        await _finalize_child(
-            child_pk, parent["id"], rdata, {"status": "E", "code": 500}, logger
-        )
+    await dispatch(ara, child["id"], parent, data, logger)
 
 
 async def ars_fanout(task, logger: logging.Logger):
@@ -289,25 +120,21 @@ async def ars_fanout(task, logger: logging.Logger):
     if parent is None:
         logger.error(f"Fanout: parent {parent_pk} not found")
         return
-    parent_actor = await ars_db.get_actor(parent["actor"])
-    if parent_actor is None:
-        logger.error(f"Fanout: actor {parent['actor']} not found")
-        return
-    actors = await ars_db.list_actors()
-    matching = _matching_actors(parent_actor, actors)
-    parent_data = await ars_db.load_message_data(parent_pk, logger)
-    targets = [a for a in matching if not _skip_actor(a, parent_actor)]
+    targets = aras.enabled_aras()
     logger.info(
-        f"Fanning out {parent_pk} to {len(targets)} actor(s): "
-        f"{[a['agent_name'] for a in targets]}"
+        f"Fanning out {parent_pk} to {len(targets)} ARA(s): "
+        f"{[a.name for a in targets]}"
     )
+    if not targets:
+        # Nothing will ever answer, and parents are watchdog-exempt: run the
+        # completion check now so the query finishes as an empty result
+        # instead of sitting Running forever.
+        logger.warning(f"No ARAs enabled; completing {parent_pk} empty")
+        await lifecycle.check_parent_completion(parent["id"], logger)
+        return
+    parent_data = await ars_db.load_message_data(parent_pk, logger)
     await asyncio.gather(
-        *(
-            send_to_actor(
-                actor, parent, parent_data, logger, otel=task[1].get("otel", "{}")
-            )
-            for actor in targets
-        )
+        *(send_to_ara(ara, parent, parent_data, logger) for ara in targets)
     )
 
 

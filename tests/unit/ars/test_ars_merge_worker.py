@@ -34,7 +34,7 @@ def env(mocker, redis_mock):
         "id": parent_pk,
         "status": "R",
         "code": 202,
-        "actor": 1,
+        "agent": "ars-default-agent",
         "merged_version": None,
         "merged_versions_list": None,
         "params": {"query_type": "standard"},
@@ -71,12 +71,6 @@ def env(mocker, redis_mock):
         "load_message_data": _patch("load_message_data", side_effect=_load),
         "notify": mocker.patch.object(
             merge_worker, "notify_subscribers", new_callable=AsyncMock
-        ),
-        "ensure_ars_actor": mocker.patch.object(
-            merge_worker.lifecycle,
-            "ensure_ars_actor",
-            new_callable=AsyncMock,
-            return_value={"id": 3, "agent_name": "ars-ars-agent"},
         ),
         "try_lock": mocker.patch.object(
             merge_worker, "acquire_lock", new_callable=AsyncMock, return_value=True
@@ -116,9 +110,9 @@ async def test_first_merge(env, redis_mock):
     }
     await merge_worker.ars_merge(_task(env), LOGGER)
 
-    # merge child created under the ars actor, ref = parent
+    # merge child created under the ars agent, ref = parent
     kw = env["create_message"].await_args.kwargs
-    assert kw["actor_id"] == 3
+    assert kw["agent"] == "ars-ars-agent"
     assert str(kw["ref"]) == str(env["parent_pk"])
 
     # the pool merge got no current merged pk (first merge)

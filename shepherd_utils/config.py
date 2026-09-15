@@ -319,25 +319,11 @@ class Settings(BaseSettings):
     # upstream env vars (TR_ENV, TR_NORMALIZER, ...) so a deployment can move
     # its existing configuration over unchanged.
     # ------------------------------------------------------------------
-    # Externally reachable base URL of this Shepherd deployment, used to build
-    # the callback URLs handed to remote ARAs (POST {ars_public_host}/ars/api/
-    # messages/<child_pk>) and the notification payloads. Unlike callback_host
-    # (internal, for the KG retrieval loop) this must be reachable from the
-    # public internet where the ARAs run.
-    ars_public_host: str = "http://shepherd_server:5439"
-    # Dispatch queries to Shepherd's own ARAs (infores:shepherd-*) by
-    # enqueueing their worker tasks directly, and deliver their responses
-    # straight onto the ars.premerge queue, instead of POSTing multi-MB
-    # bodies through the server's HTTP endpoints. The public endpoints stay
-    # up either way; this only short-circuits the in-cluster hops. Disable
-    # to force every actor through HTTP like an external ARA.
-    ars_internal_dispatch: bool = True
-    # SmartAPI maturity filter, upstream env TR_ENV: production / development /
-    # staging / testing.
-    tr_env: str = "production"
-    # TRAPI version filter for SmartAPI discovery, upstream env TR_VER.
-    # Empty means no version filter (upstream leaves TR_VER unset -> None).
-    tr_ver: str = ""
+    # Which of the Shepherd-hosted ARAs (shepherd_utils/ars/aras.py) a
+    # submitted query fans out to, as a comma-separated list of Shepherd
+    # target names ("aragorn,arax"). Empty means every hosted ARA. A name
+    # that is not a hosted ARA is logged and ignored.
+    ars_enabled_aras: str = ""
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
     # Node annotation runs the biothings_annotator package in-process (as
     # upstream); its backend host is overridable via the package's own
@@ -345,9 +331,6 @@ class Settings(BaseSettings):
     # AES key for decrypting stored notification-client secrets (upstream env
     # AES_MASTER_KEY). Empty disables signed notifications.
     aes_master_key: str = ""
-    # Timeout (seconds) for each ARA query dispatch, matching upstream
-    # tasks.send_message(timeout=300).
-    ars_query_timeout: int = 300
     # Timeout sweep (upstream celery beat catch_timeout ran every 180s; the
     # watchdog loop runs more often -- parity is on the age thresholds, which
     # are per message kind and match upstream exactly).
@@ -418,11 +401,6 @@ class Settings(BaseSettings):
     ars_notify_drain_sec: float = 15.0
 
     ars_admin_token: str = ""
-    # SmartAPI registry cache refresh interval (upstream 3600s, 30s retry after
-    # a failed refresh).
-    smartapi_refresh_sec: int = 3600
-    smartapi_retry_sec: int = 30
-    smartapi_url: str = "http://smart-api.info/api/query"
 
     # Monitor (dashboard) worker
     monitor_port: int = 5440

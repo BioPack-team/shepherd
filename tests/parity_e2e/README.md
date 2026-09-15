@@ -16,6 +16,11 @@ checkout are available.
   NodeNorm, and a notification sink. Journals every inbound request.
 - **Shepherd stack**: `compose.yml` + this directory's overlay
   (`compose.parity.yml`) repointing external URLs at the mockworld.
+  Since de-federation the Shepherd ARS fans out only to its own hosted
+  ARAs over the broker, so the stub ARAs and stub registry are used by the
+  Relay stack only; the Shepherd side of a scenario exercises the
+  post-response pipeline (merge / post-process / notify), and the
+  per-ARA fan-out comparison (journal entry 4 below) applies to Relay.
 - **Relay stack**: the pinned checkout's own `docker-compose.yml`, with env
   `TR_NORMALIZER` pointed at the mockworld and its
   `tr_smartapi_client.smart_api_discover.urlSmartapi` patched to the stub

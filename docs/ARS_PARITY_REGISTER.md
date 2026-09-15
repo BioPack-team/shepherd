@@ -51,10 +51,10 @@ accept each behavioral change.
 | Layer | What it pins | Where |
 |---|---|---|
 | 1. Golden function parity | merge/premerge/scoring/blocklist/validation outputs, byte-compared to upstream runs | `tests/unit/ars/test_golden_parity.py` |
-| 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_merge_worker.py`, `test_ars_postprocess.py`, `test_ars_watchdog.py`, `test_ars_notify.py` |
+| 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines, the ARA roster + broker handoff | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_premerge.py`, `test_ars_merge_worker.py`, `test_ars_postprocess.py`, `test_ars_watchdog.py`, `test_ars_notify.py`, `test_aras.py` |
 | 3. API contract | paths, methods, status codes, error bodies, envelope shapes | `test_envelope.py`, `test_ars_api_contract.py` |
 | 3b. Deliberate divergences | the upstream bugs the port does NOT reproduce | `test_upstream_bugfixes.py` |
-| 4. Differential end-to-end | both stacks against the same mocked world | `tests/parity_e2e/` (run on demand; see its README) |
+| 4. Differential end-to-end | both stacks against the same mocked world | `tests/parity_e2e/` (run on demand; see its README -- since de-federation it compares the post-response pipeline only, as Shepherd's fan-out no longer reaches the mock ARAs) |
 
 ## Invariant index (register rows referenced from tests)
 
@@ -63,7 +63,8 @@ accept each behavioral change.
   `_skip_post_save` escape hatch.
 - **P-ENV-1..6** — Django-serializer envelopes: DjangoJSONEncoder datetime
   format, exact model field order, long-form statuses, inline-decompressed
-  `data`, FK/pk shapes.
+  `data`, FK/pk shapes (with `fields.agent` in place of upstream's
+  `fields.actor`, deviation 16).
 - **P-LC-1..6** — parent-completion counting verbatim from
   `message_post_save`: `finished` over the terminal set;
   `orig_count`/`merge_count` from result-bearing `ar*` agents; the
@@ -77,10 +78,11 @@ accept each behavioral change.
   emitted and carried in the `ars.notify` task (`client_pks`): the
   completion path clears the parent's subscriptions immediately after its
   final events, so a worker resolving them later would deliver to nobody.
-- **Callback guard order** — dup-Done → 200 text; repeated results → 409;
-  errored child → 400; decode failure → 500 `Can not decode json...`;
-  validation failure → 422 `Problem with TRAPI Validation` with the child
-  E/422; header `tr_ars.message.status` override; `results: null` → 
+- **Callback guard order** — applied by the `ars.premerge` intake to every
+  response that comes back over the broker (deviation 16): dup-Done,
+  repeated results, and errored child are skips (upstream's 200 text /
+  409 / 400); validation failure flips the child E/422 (upstream's inline
+  422 `Problem with TRAPI Validation`); `results: null` →
   `result_count = 0` while `results: []` leaves it None.
 - **Timeouts** — parents exempt; merge children 8 min; everything else
   **5 min including pathfinder** (upstream's code, not its log message);
@@ -107,7 +109,8 @@ Infrastructure substitutions (behavior-preserving by definition):
 | MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + `ars_message.data` bytea (durable, written at terminal status) |
 | `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent (semaphore column still maintained for envelope parity) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
-| self-proxy views `/ara-*/api/runquery` | direct POST to the SmartAPI-resolved remote (same body; proxy endpoints not served) |
+| self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |
+| `Agent` / `Channel` / `Actor` tables, seeded from the `tr_ara_*` apps and `config.yaml`, with `/agents` + `/actors` to list and add to them | a static roster (`shepherd_utils/ars/aras.py`); `ars_message.agent` records the agent name a row belongs to instead of an actor FK; `GET /ars/api/aras` lists the roster with each ARA's live worker count |
 
 Behavioral deviations:
 
@@ -237,30 +240,44 @@ Behavioral deviations:
     server runs 4 uvicorn worker processes (`WEB_CONCURRENCY` in
     `shepherd_server/Dockerfile`) vs. upstream's 8 gunicorn workers x 4
     threads.
-16. **Shepherd-hosted ARAs are dispatched internally** (post-parity change,
-    accepted 2026-09-10): for actors in
-    `shepherd_utils/ars/internal.INTERNAL_ARA_TARGETS` (infores:shepherd-*),
-    ars_fanout enqueues the ARA's worker task directly -- persisting the
-    same query record `POST /{ara}/asyncquery` would have -- with a
-    `shepherd-ars://callback/<child_pk>` sentinel callback, and
-    finish_query recognizes the sentinel and enqueues
-    `{intake_child_pk, response_id}` on `ars.premerge` instead of POSTing
-    the response to `/ars/api/messages/<child_pk>`. The premerge worker's
-    `intake_internal_response` then runs the callback endpoint's exact
-    state machine (guard order, result_count/result_stat, the
-    `ara_response_complete` notification, the no-results terminal rules,
-    the generic-failure E/500 with its log entry) before premerging in the
-    same task, so no multi-MB body crosses the network in either
-    direction. Differences in kind: HTTP-level answers nobody read (the
-    dup-200 text, the 409, the 400) become logged skips; a dispatch
-    failure is the same child E/500 as a failed POST; an intake whose
-    response blob is missing leaves the child Running for the watchdog
-    (the shape of a callback that never arrived); and a `get_logs` failure
-    delivers the response without spliced logs instead of failing
-    delivery. External actors, external callers, and both public endpoint
-    surfaces are unchanged; `settings.ars_internal_dispatch=false`
-    restores HTTP dispatch for everything (already-issued sentinels still
-    deliver internally, since they are not POSTable).
+16. **The ARS is de-federated** (post-parity change; the broker handoff
+    was accepted 2026-09-10 as an internal short-circuit for the
+    Shepherd-hosted actors, and on 2026-09-15 became the only path). The
+    ARS fans out solely to the ARAs this Shepherd deployment hosts, a
+    static roster in `shepherd_utils/ars/aras.py` (Aragorn, ARAX, BTE;
+    `settings.ars_enabled_aras` narrows it). For each, ars_fanout creates
+    the child under the ARA's agent name and enqueues the ARA's worker
+    task directly -- persisting the same query record
+    `POST /{ara}/asyncquery` would have -- with a
+    `shepherd-ars://callback/<child_pk>` sentinel callback
+    (`shepherd_utils/ars/handoff.py`). finish_query recognizes the
+    sentinel and enqueues `{intake_child_pk, response_id}` on
+    `ars.premerge`, whose `intake_internal_response` runs the upstream
+    callback view's exact state machine (guard order,
+    result_count/result_stat, the `ara_response_complete` notification,
+    the no-results terminal rules, the generic-failure E/500 with its log
+    entry) before premerging in the same task. So: no SmartAPI lookup, no
+    channel matching (every hosted ARA takes standard and workflow
+    queries alike, so the workflow actor is gone and every parent is
+    `ars-default-agent`), no HTTP in either direction, and no
+    `ars_public_host`. Differences in kind: the HTTP-level answers nobody
+    read (the callback's dup-200 text, 409, 400, 422) become logged skips
+    or asynchronous terminal states; a dispatch failure is the same child
+    E/500 upstream recorded for a failed POST; an intake whose response
+    blob is missing leaves the child Running for the watchdog (the shape
+    of a callback that never arrived); a `get_logs` failure delivers the
+    response without spliced logs; and a submit with no enabled ARA
+    completes empty at fan-out time instead of sitting Running forever.
+    Schema: `ars_message.actor` (FK) became `ars_message.agent` (the
+    agent name), and the `ars_agent`/`ars_channel`/`ars_actor` tables are
+    dropped -- `shepherd_utils.db._migrate_ars_registry` backfills and
+    migrates a pre-existing volume at startup. The message envelope's
+    `fields.actor` (an int pk) is now `fields.agent` (the name), and a
+    trace node's `actor` block is `{agent, inforesid, ara}` (the Shepherd
+    target, for an ARA's child) instead of the actor row's pk/channels/
+    path. `GET /ars/api/latest_pk/<n>` and `/retain/<pk>` treat every
+    submitted query as a parent (upstream keyed both on the default
+    actor, which excluded workflow parents).
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 
@@ -316,9 +333,10 @@ failure is the prompt to re-decide each one, not a bug).
 | `GET /ars/api/merge/<pk>` called `utils.merge.apply_async`, which does not exist. Before dying it created a Running merge child under the parent — never a terminal status, so that parent could never complete again | **not served** |
 | `GET /ars/api/post_process/<pk>` passed a dict where a `Message` was expected → 500; `/ars/api/timeoutTest` returned `None` → 500 | **not served** (neither ever did anything else) |
 | `POST /ars/api/messages` looked the actor up in the Agent table and assigned the result to the actor FK → 500 | `405 Only GET is permitted!`. The collection is read-only: nothing can depend on a route that never succeeded, and unauthenticated out-of-band message creation is not a surface worth adding |
-| `POST /ars/api/actors` created the actor and *then* evaluated `actor.channel.name` on a list, so every caller got `400 Not a valid json format` for an actor that had in fact been created. It also tested the posted envelope against `tr_ars.agent` in an actor endpoint | returns the actor envelope with `201`/`302`, like `POST /agents`; accepts `tr_ars.actor` (and still `tr_ars.agent`); missing `agent`/`path` is a 400 that names them, an unknown agent or channel is 404, and only a real failure is 500 |
+| `GET`/`POST /ars/api/agents`, `GET /ars/api/agents/<name>`, `GET`/`POST /ars/api/actors` -- the federation registry, with `POST /actors` 400-ing after creating the actor | **not served** (404). The de-federated ARS talks only to the ARAs this deployment hosts and nothing registers at runtime; `GET /ars/api/aras` (Shepherd-native) lists that roster with each ARA's `enabled` flag and live worker count |
+| `POST /ars/api/messages/<pk>` -- the result callback an external ARA delivered its response to | `405 Only GET is permitted!` (so are PUT/DELETE/PATCH, which upstream answered 400). Responses arrive over the broker; see deviation 16 |
 | `GET /ars/api/filters` and `GET /ars/api/filter/<pk>` — the filter path read a stored message, rewrote its results, and saved new message rows for the filtered copy | **not served**, and `shepherd_utils/ars/filters.py` is removed with them. Unused in practice, and the endpoint was a write path into stored trees dressed as a query |
-| `GET`/`POST /ars/api/channels` exposed channels as a standalone resource | **not served**. Channels are not independently useful: an actor's channels are what the fanout matches on, they are created implicitly by registry seeding, and each actor reports its own under `fields.channel`. `get_or_create_channel` stays (it backs `get_or_create_actor`); `list_channels` and `channel_envelope` are removed with the route |
+| `GET`/`POST /ars/api/channels` exposed channels as a standalone resource | **not served**. Channels went with the registry (above): there is no channel matching in a de-federated fan-out |
 | `GET /ars/api/messages` rendered a full envelope per message with its whole stored payload inline, so listing the last ten queries could mean serving hundreds of MB to answer "what has come through recently" | returns `[{"pk", "timestamp"}, ...]`, newest first; fetch a listed pk to get its payload. Timestamps keep the DjangoJSONEncoder spelling |
 | `GET /ars/api/messages/<pk>?compress` read only Redis, so it 404'd once the Redis TTL lapsed on a message still readable through every other endpoint | falls back to the durable `ars_message.data` copy and re-warms Redis |
 | `GET /ars/api/health` answered a non-GET with `Only POST is permitted!` | `Only GET is permitted!` |

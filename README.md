@@ -85,19 +85,30 @@ permission error rather than silently continuing.
 
 ### Translator ARS
 
-Shepherd also hosts a full port of the NCATS Translator ARS
+Shepherd also hosts a port of the NCATS Translator ARS
 ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)) at
 `/ars/...` -- the same `/ars/api/submit` / `messages/<pk>?trace=y` /
-`get_status` surface the Translator UI uses, backed by five workers
-(`ars_fanout`, `ars_merge`, `ars_postprocess`, `ars_watchdog`, `ars_notify`)
-on the shared Redis Streams fabric instead of Celery/RabbitMQ, and `ars_*`
-Postgres tables instead of MySQL. Behavior is pinned against the upstream
-codebase by a four-layer parity suite; see `docs/ARS_PARITY_REGISTER.md`
-for the invariants, the golden-regeneration procedure, and every documented
-deviation, and `tests/parity_e2e/README.md` for the side-by-side
-differential harness. Deployment knobs live in `shepherd_utils/config.py`
-under the "Translator ARS" block (`ARS_PUBLIC_HOST` must be reachable by
-remote ARAs for their result callbacks).
+`get_status` surface the Translator UI uses, backed by six workers
+(`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_postprocess`,
+`ars_watchdog`, `ars_notify`) on the shared Redis Streams fabric instead of
+Celery/RabbitMQ, and `ars_*` Postgres tables instead of MySQL.
+
+The ARS is **de-federated**: it talks only to the ARAs this same Shepherd
+deployment hosts (`shepherd_utils/ars/aras.py` -- Aragorn, ARAX, BTE), and
+every hop goes through the broker. A submitted query is fanned out by
+enqueueing each ARA's own worker task, and when an ARA pipeline finishes,
+`finish_query` hands the response back onto the `ars.premerge` queue. There
+is no SmartAPI registry lookup, no HTTP round trip to an ARA, and no HTTP
+result callback; the upstream `/agents` and `/actors` registry endpoints are
+not served. `GET /ars/api/aras` lists the hosted ARAs instead, with whether
+each is enabled for fan-out (`ARS_ENABLED_ARAS`, empty = all) and how many
+of its workers are currently alive, so it shows what the ARS can reach right
+now.
+
+Behavior is pinned against the upstream codebase by a parity suite; see
+`docs/ARS_PARITY_REGISTER.md` for the invariants, the golden-regeneration
+procedure, and every documented deviation. Deployment knobs live in
+`shepherd_utils/config.py` under the "Translator ARS" block.
 
 #### ARS response cache
 

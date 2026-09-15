@@ -1,1 +1,1 @@
-scipy
+# Everything the fan-out needs ships with shepherd_utils (pyproject.toml).

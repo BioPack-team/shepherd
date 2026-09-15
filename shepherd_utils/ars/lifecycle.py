@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 import shepherd_utils.db as shepherd_db
 
+from . import aras
 from . import cache
 from . import db as ars_db
 from .completion import evaluate_completion
@@ -18,68 +19,7 @@ from .notify import notify_subscribers
 
 logger = logging.getLogger(__name__)
 
-# The three built-in actors (api.py DEFAULT_ACTOR / WORKFLOW_ACTOR /
-# ARS_ACTOR). get_or_create semantics match upstream's lazy creation.
-DEFAULT_ACTOR = {
-    "channel": ["general"],
-    "agent": {"name": "ars-default-agent", "uri": ""},
-    "path": "",
-    "inforesid": "",
-}
-WORKFLOW_ACTOR = {
-    "channel": ["workflow"],
-    "agent": {"name": "ars-workflow-agent", "uri": ""},
-    "path": "",
-    "inforesid": "",
-}
-ARS_ACTOR = {
-    "channel": [],
-    "agent": {"name": "ars-ars-agent", "uri": ""},
-    "path": "",
-    "inforesid": "infores:ars",
-}
-
-MERGE_AGENT_NAME = "ars-ars-agent"
-
-
-async def seed_registry(task_logger: logging.Logger) -> None:
-    """Idempotently upsert the built-in actors + every registered app actor.
-
-    The Shepherd equivalent of the tr_ara_*/tr_kp_* AppConfig.ready() hooks
-    and the lazy DEFAULT/WORKFLOW/ARS actor creation. Run at server startup;
-    everything here is get_or_create, so concurrent boots converge.
-    """
-    from .registry_config import inactive_clients, seed_actor_specs
-
-    try:
-        await ensure_default_actor()
-        await ensure_workflow_actor()
-        await ensure_ars_actor()
-        inactive = inactive_clients()
-        for spec in seed_actor_specs():
-            try:
-                await ars_db.get_or_create_actor(spec, inactive_list=inactive)
-            except Exception as e:
-                task_logger.error(f"Failed to seed actor {spec['agent']['name']}: {e}")
-    except Exception as e:
-        # a seeding failure must never keep the server from starting; the
-        # lazy get_or_create paths cover the built-ins on first use
-        task_logger.error(f"ARS registry seeding failed: {e}")
-
-
-async def ensure_default_actor() -> Dict[str, Any]:
-    actor, _ = await ars_db.get_or_create_actor(DEFAULT_ACTOR)
-    return actor
-
-
-async def ensure_workflow_actor() -> Dict[str, Any]:
-    actor, _ = await ars_db.get_or_create_actor(WORKFLOW_ACTOR)
-    return actor
-
-
-async def ensure_ars_actor() -> Dict[str, Any]:
-    actor, _ = await ars_db.get_or_create_actor(ARS_ACTOR)
-    return actor
+MERGE_AGENT_NAME = aras.MERGE_AGENT
 
 
 def _child_record(child: Dict[str, Any]) -> Dict[str, Any]:
@@ -133,9 +73,8 @@ async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> Non
             # merged_version already set -- a reader must never catch it 'D'
             # but unmerged. A caller that then loses the claim drops the
             # message it just built.
-            ars_actor = await ensure_ars_actor()
             empty = await ars_db.create_message(
-                actor_id=ars_actor["id"],
+                agent=aras.MERGE_AGENT,
                 status="Running",
                 code=202,
                 ref=parent_pk,

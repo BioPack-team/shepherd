@@ -1,18 +1,21 @@
-"""Postgres persistence for the ARS message tree and registry.
+"""Postgres persistence for the ARS message tree.
 
-Ported from NCATSTranslator/Relay @ 3e65975 (tr_sys/tr_ars/models.py,
-api.py get_or_create_agent/get_or_create_actor, apps.py seeding). Uses the
-shared Shepherd Postgres pool; payload blobs ride Shepherd's Redis data store
-(keyed by ``str(message_pk)``) with a durable zstd copy in
+Ported from NCATSTranslator/Relay @ 3e65975 (tr_sys/tr_ars/models.py). Uses
+the shared Shepherd Postgres pool; payload blobs ride Shepherd's Redis data
+store (keyed by ``str(message_pk)``) with a durable zstd copy in
 ``ars_message.data`` once a message goes terminal, so the UI can fetch
 merged results long after the Redis TTL.
+
+Upstream's Agent/Channel/Actor registry is not persisted: the de-federated
+ARS only talks to the ARAs this Shepherd deployment hosts, a static roster in
+``shepherd_utils.ars.aras``. A message row records the agent name it belongs
+to (``ars_message.agent``) instead of pointing at an actor row.
 """
 
 import asyncio
 import gzip
 import json
 import logging
-import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -23,6 +26,7 @@ from psycopg.types.json import Jsonb
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.config import settings
 
+from . import aras
 from .statuses import coerce_code, to_letter, validate_letter
 
 MESSAGE_COLUMNS = (
@@ -30,7 +34,7 @@ MESSAGE_COLUMNS = (
     "name",
     "code",
     "status",
-    "actor",
+    "agent",
     "ref",
     "ts",
     "updated_at",
@@ -44,20 +48,6 @@ MESSAGE_COLUMNS = (
     "params",
 )
 _MESSAGE_SELECT = ", ".join(f"m.{c}" for c in MESSAGE_COLUMNS)
-
-AGENT_COLUMNS = (
-    "id",
-    "name",
-    "description",
-    "uri",
-    "contact",
-    "registered",
-    "updated",
-)
-_AGENT_SELECT = ", ".join(AGENT_COLUMNS)
-
-ACTOR_COLUMNS = ("id", "agent", "channel", "path", "inforesid", "active")
-_ACTOR_SELECT = ", ".join(f"a.{c}" for c in ACTOR_COLUMNS)
 
 CLIENT_COLUMNS = (
     "id",
@@ -86,325 +76,12 @@ async def _conn():
 
 
 # ---------------------------------------------------------------------------
-# Channels / Agents / Actors (the registry)
-# ---------------------------------------------------------------------------
-
-
-async def get_or_create_channel(
-    name: str,
-    description: Optional[str] = None,
-) -> Tuple[Dict[str, Any], bool]:
-    """get_or_create by unique name. Returns (row, created)."""
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            "SELECT id, name, description FROM ars_channel WHERE name = %s",
-            (name,),
-        )
-        row = await cur.fetchone()
-        if row is not None:
-            return _row_dict(("id", "name", "description"), row), False
-        cur = await conn.execute(
-            """
-            INSERT INTO ars_channel (name, description) VALUES (%s, %s)
-            ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-            RETURNING id, name, description
-            """,
-            (name, description),
-        )
-        row = await cur.fetchone()
-        await conn.commit()
-        return _row_dict(("id", "name", "description"), row), True
-
-
-async def get_or_create_agent(data: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
-    """Upstream api.get_or_create_agent: (agent envelope-ready row, status).
-
-    201 on creation, 302 when it already existed (updating the uri in place
-    when it changed, exactly like upstream).
-    """
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"SELECT {_AGENT_SELECT} FROM ars_agent WHERE name = %s",
-            (data["name"],),
-        )
-        row = await cur.fetchone()
-        if row is not None:
-            agent = _row_dict(AGENT_COLUMNS, row)
-            if data.get("uri") is not None and data["uri"] != agent["uri"]:
-                await conn.execute(
-                    "UPDATE ars_agent SET uri = %s, updated = NOW() WHERE id = %s",
-                    (data["uri"], agent["id"]),
-                )
-                await conn.commit()
-                agent["uri"] = data["uri"]
-            return agent, 302
-        cur = await conn.execute(
-            f"""
-            INSERT INTO ars_agent (name, uri, description, contact)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-            RETURNING {_AGENT_SELECT}
-            """,
-            (
-                data["name"],
-                data.get("uri", ""),
-                data.get("description"),
-                data.get("contact"),
-            ),
-        )
-        row = await cur.fetchone()
-        await conn.commit()
-        return _row_dict(AGENT_COLUMNS, row), 201
-
-
-async def get_agent_by_name(name: str) -> Optional[Dict[str, Any]]:
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"SELECT {_AGENT_SELECT} FROM ars_agent WHERE name = %s", (name,)
-        )
-        row = await cur.fetchone()
-    return _row_dict(AGENT_COLUMNS, row) if row is not None else None
-
-
-async def list_agents() -> List[Dict[str, Any]]:
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(f"SELECT {_AGENT_SELECT} FROM ars_agent ORDER BY name")
-        rows = await cur.fetchall()
-    return [_row_dict(AGENT_COLUMNS, r) for r in rows]
-
-
-def serialize_channels(channel_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The Django-serialized channel list stored on Actor.channel.
-
-    Upstream stores json.loads(serializers.serialize('json', channels)) --
-    a list of {"model": "tr_ars.channel", "pk": <int>, "fields": {...}}.
-    """
-    return [
-        {
-            "model": "tr_ars.channel",
-            "pk": row["id"],
-            "fields": {
-                "name": row["name"],
-                "description": row.get("description"),
-            },
-        }
-        for row in channel_rows
-    ]
-
-
-async def get_or_create_actor(
-    data: Dict[str, Any],
-    inactive_list: Optional[List[str]] = None,
-) -> Tuple[Dict[str, Any], int]:
-    """Upstream api.get_or_create_actor semantics.
-
-    ``data`` = {"channel": [names or pks], "agent": name|pk|{"name","uri"},
-    "path": str, "inforesid": str}. Existing actors get their inforesid
-    updated when changed, are deactivated when the inforesid is on the
-    inactive list, and get their serialized channel list refreshed. Returns
-    (actor row, 302|201).
-    """
-    inactive = inactive_list if inactive_list is not None else []
-    # resolve channels -> serialized list
-    channel_rows = []
-    for item in data.get("channel", []):
-        if isinstance(item, int) or (isinstance(item, str) and item.isnumeric()):
-            async with shepherd_db.pool.connection(
-                settings.postgres_pool_timeout
-            ) as conn:
-                cur = await conn.execute(
-                    "SELECT id, name, description FROM ars_channel WHERE id = %s",
-                    (int(item),),
-                )
-                row = await cur.fetchone()
-            if row is None:
-                raise KeyError(f"Unknown channel: {item}")
-            channel_rows.append(_row_dict(("id", "name", "description"), row))
-        else:
-            row, _ = await get_or_create_channel(item)
-            channel_rows.append(row)
-    serialized_channel = serialize_channels(channel_rows)
-
-    # resolve agent
-    agent = data["agent"]
-    if isinstance(agent, dict):
-        agent_row, _ = await get_or_create_agent(agent)
-    elif isinstance(agent, int) or (isinstance(agent, str) and agent.isnumeric()):
-        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-            cur = await conn.execute(
-                f"SELECT {_AGENT_SELECT} FROM ars_agent WHERE id = %s",
-                (int(agent),),
-            )
-            row = await cur.fetchone()
-        if row is None:
-            raise KeyError(f"Unknown agent: {agent}")
-        agent_row = _row_dict(AGENT_COLUMNS, row)
-    else:
-        agent_row = await get_agent_by_name(agent)
-        if agent_row is None:
-            raise KeyError(f"Unknown agent: {agent}")
-
-    inforesid = data.get("inforesid", "")
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"""
-            SELECT {_ACTOR_SELECT} FROM ars_actor a
-            WHERE a.agent = %s AND a.path = %s
-            """,
-            (agent_row["id"], data["path"]),
-        )
-        row = await cur.fetchone()
-        if row is not None:
-            actor = _row_dict(ACTOR_COLUMNS, row)
-            updates = {}
-            if inforesid in inactive:
-                updates["active"] = False
-            if actor["inforesid"] is None or actor["inforesid"] != inforesid:
-                updates["inforesid"] = inforesid
-            if actor["channel"] != serialized_channel:
-                updates["channel"] = _jsonb(serialized_channel)
-            if updates:
-                sets = ", ".join(f"{k} = %s" for k in updates)
-                await conn.execute(
-                    f"UPDATE ars_actor SET {sets} WHERE id = %s",
-                    (*updates.values(), actor["id"]),
-                )
-                await conn.commit()
-                actor.update(
-                    {
-                        k: (serialized_channel if k == "channel" else v)
-                        for k, v in updates.items()
-                    }
-                )
-            actor["agent_name"] = agent_row["name"]
-            actor["agent_uri"] = agent_row["uri"]
-            invalidate_actor_cache()
-            await bump_actor_cache_epoch()
-            return actor, 302
-        cur = await conn.execute(
-            f"""
-            INSERT INTO ars_actor (agent, channel, path, inforesid, active)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (agent, path) DO UPDATE SET inforesid = EXCLUDED.inforesid
-            RETURNING {", ".join(ACTOR_COLUMNS)}
-            """,
-            (
-                agent_row["id"],
-                _jsonb(serialized_channel),
-                data["path"],
-                inforesid,
-                inforesid not in inactive,
-            ),
-        )
-        row = await cur.fetchone()
-        await conn.commit()
-        actor = _row_dict(ACTOR_COLUMNS, row)
-        actor["agent_name"] = agent_row["name"]
-        actor["agent_uri"] = agent_row["uri"]
-        invalidate_actor_cache()
-        await bump_actor_cache_epoch()
-        return actor, 201
-
-
-async def list_actors(exclude_empty_path: bool = False) -> List[Dict[str, Any]]:
-    """Actors joined with their agent (name + uri), for fan-out/rendering."""
-    where = "WHERE a.path <> ''" if exclude_empty_path else ""
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(f"""
-            SELECT {_ACTOR_SELECT}, g.name, g.uri FROM ars_actor a
-            JOIN ars_agent g ON g.id = a.agent
-            {where}
-            ORDER BY a.id
-            """)
-        rows = await cur.fetchall()
-    actors = []
-    for r in rows:
-        actor = _row_dict(ACTOR_COLUMNS, r[: len(ACTOR_COLUMNS)])
-        actor["agent_name"] = r[len(ACTOR_COLUMNS)]
-        actor["agent_uri"] = r[len(ACTOR_COLUMNS) + 1]
-        actors.append(actor)
-    return actors
-
-
-# Actor rows only change through registry seeding at boot and the rare
-# agents/actors POST, yet every message GET and trace poll resolves one.
-# A short in-process cache keeps those off Postgres.
-#
-# The cache is per process, and Shepherd runs several server workers plus a
-# worker process per stream, so clearing the local dict on a write leaves
-# every OTHER process serving its stale copy until its own TTL runs out. A
-# write therefore also bumps a shared epoch in Redis, which each process
-# re-reads at most once per ACTOR_EPOCH_RECHECK_SEC -- one cheap GET, not the
-# Postgres round trip this cache exists to avoid.
-ACTOR_CACHE_TTL_SEC = 60.0
-ACTOR_EPOCH_RECHECK_SEC = 5.0
-ACTOR_EPOCH_KEY = "ars:actor-cache-epoch"
-_actor_cache: Dict[int, Tuple[float, Optional[Dict[str, Any]]]] = {}
-_actor_epoch: Tuple[float, Optional[bytes]] = (0.0, None)
-
-
-def invalidate_actor_cache() -> None:
-    _actor_cache.clear()
-
-
-async def bump_actor_cache_epoch() -> None:
-    """Tell every process that the actor registry changed."""
-    try:
-        await shepherd_db.data_db_client.incr(ACTOR_EPOCH_KEY)
-    except Exception:
-        # best effort: each process still expires its own entries by TTL
-        pass
-
-
-async def _check_actor_epoch() -> None:
-    """Clear the local cache if another process changed the registry."""
-    global _actor_epoch
-    now = time.monotonic()
-    checked_at, epoch = _actor_epoch
-    if checked_at > now:
-        return
-    try:
-        current = await shepherd_db.data_db_client.get(ACTOR_EPOCH_KEY)
-    except Exception:
-        _actor_epoch = (now + ACTOR_EPOCH_RECHECK_SEC, epoch)
-        return
-    if epoch is not None and current != epoch:
-        _actor_cache.clear()
-    _actor_epoch = (now + ACTOR_EPOCH_RECHECK_SEC, current)
-
-
-async def get_actor(actor_id: int) -> Optional[Dict[str, Any]]:
-    await _check_actor_epoch()
-    cached = _actor_cache.get(actor_id)
-    now = time.monotonic()
-    if cached is not None and cached[0] > now:
-        return cached[1]
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            f"""
-            SELECT {_ACTOR_SELECT}, g.name, g.uri
-            FROM ars_actor a JOIN ars_agent g ON g.id = a.agent
-            WHERE a.id = %s
-            """,
-            (actor_id,),
-        )
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    actor = _row_dict(ACTOR_COLUMNS, row[: len(ACTOR_COLUMNS)])
-    actor["agent_name"] = row[len(ACTOR_COLUMNS)]
-    actor["agent_uri"] = row[len(ACTOR_COLUMNS) + 1]
-    _actor_cache[actor_id] = (now + ACTOR_CACHE_TTL_SEC, actor)
-    return actor
-
-
-# ---------------------------------------------------------------------------
 # Messages
 # ---------------------------------------------------------------------------
 
 
 async def create_message(
-    actor_id: int,
+    agent: str,
     status: str,
     code: int,
     name: str = "",
@@ -414,14 +91,15 @@ async def create_message(
 ) -> Dict[str, Any]:
     """Insert a message row. Mirrors Message.create + the post_save coercion:
     the long status name maps to its letter and the code is coerced
-    ('R'->202, 'D'->200) at write time."""
+    ('R'->202, 'D'->200) at write time. ``agent`` is the name the row is
+    recorded under (see shepherd_utils.ars.aras)."""
     letter = validate_letter(to_letter(status))
     coerced = coerce_code(letter, code)
     pk = uuid.UUID(str(message_id)) if message_id else uuid.uuid4()
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
-            INSERT INTO ars_message (id, name, code, status, actor, ref, params)
+            INSERT INTO ars_message (id, name, code, status, agent, ref, params)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING {_MESSAGE_SELECT.replace("m.", "")}
             """,
@@ -430,7 +108,7 @@ async def create_message(
                 name,
                 coerced,
                 letter,
-                actor_id,
+                agent,
                 uuid.UUID(str(ref)) if ref else None,
                 _jsonb(params),
             ),
@@ -467,15 +145,13 @@ async def get_message_row(
 async def get_children(
     parent_id: Union[str, uuid.UUID],
 ) -> List[Dict[str, Any]]:
-    """All children of a parent, joined with actor + agent details."""
+    """All children of a parent, oldest first, each with its ``agent_name``
+    and the ``inforesid`` that agent stands for."""
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
-            SELECT {_MESSAGE_SELECT}, a.inforesid, a.channel, a.path,
-                   g.name, a.id
+            SELECT {_MESSAGE_SELECT}
             FROM ars_message m
-            JOIN ars_actor a ON a.id = m.actor
-            JOIN ars_agent g ON g.id = a.agent
             WHERE m.ref = %s
             ORDER BY m.ts
             """,
@@ -483,14 +159,10 @@ async def get_children(
         )
         rows = await cur.fetchall()
     children = []
-    n = len(MESSAGE_COLUMNS)
     for r in rows:
-        child = _row_dict(MESSAGE_COLUMNS, r[:n])
-        child["inforesid"] = r[n]
-        child["actor_channel"] = r[n + 1]
-        child["actor_path"] = r[n + 2]
-        child["agent_name"] = r[n + 3]
-        child["actor_id"] = r[n + 4]
+        child = _row_dict(MESSAGE_COLUMNS, r)
+        child["agent_name"] = child["agent"]
+        child["inforesid"] = aras.inforesid_for(child["agent"])
         children.append(child)
     return children
 
@@ -636,28 +308,22 @@ async def retain_tree(parent_id: Union[str, uuid.UUID]) -> None:
         await conn.commit()
 
 
-def _like_literal(value: str) -> str:
-    """Escape LIKE metacharacters so a path segment matches literally."""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
 async def get_report_rows(inforesid: str) -> List[Dict[str, Any]]:
-    """24-hour per-message report for an infores (iendswith match).
-
-    ``inforesid`` comes straight off the URL, so its LIKE metacharacters are
-    escaped -- unescaped, a '%' turned the endswith match into a much broader
-    scan.
-    """
+    """24-hour per-message report for an infores (iendswith match, as
+    upstream), resolved against the static ARA roster: the rows of every
+    agent whose infores ends with ``inforesid``."""
+    agents = aras.agents_for_inforesid_suffix(inforesid)
+    if not agents:
+        return []
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
-            r"""
+            """
             SELECT m.code, m.id, m.ts, m.updated_at, m.result_count
             FROM ars_message m
-            JOIN ars_actor a ON a.id = m.actor
             WHERE m.ts > NOW() - INTERVAL '24 hours'
-              AND LOWER(a.inforesid) LIKE LOWER(%s) ESCAPE '\'
+              AND m.agent = ANY(%s)
             """,
-            (f"%{_like_literal(inforesid)}",),
+            (agents,),
         )
         rows = await cur.fetchall()
     return [
@@ -672,44 +338,49 @@ async def get_report_rows(inforesid: str) -> List[Dict[str, Any]]:
     ]
 
 
-async def get_parent_message_counts(actor_id: int, days: int) -> Dict[str, int]:
+# A parent is a submitted query: the only kind of row with no ``ref``.
+# (Upstream counted the rows of its default actor, which left the workflow
+# actor's parents out of latest_pk; every submitted query counts here.)
+_PARENT_WHERE = "ref IS NULL"
+
+
+async def get_parent_message_counts(days: int) -> Dict[str, int]:
     """Per-day counts of parent messages for latest_pk."""
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
-            """
+            f"""
             SELECT (ts AT TIME ZONE 'UTC')::date AS day, COUNT(*)
-            FROM ars_message WHERE actor = %s
+            FROM ars_message WHERE {_PARENT_WHERE}
               AND ts >= NOW() - make_interval(days => %s)
             GROUP BY day
             """,
-            (actor_id, days),
+            (days,),
         )
         rows = await cur.fetchall()
     return {str(r[0]): int(r[1]) for r in rows}
 
 
-async def get_latest_parent_pks(actor_id: int, limit: int) -> List[str]:
+async def get_latest_parent_pks(limit: int) -> List[str]:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
-            """
-            SELECT id FROM ars_message WHERE actor = %s
+            f"""
+            SELECT id FROM ars_message WHERE {_PARENT_WHERE}
             ORDER BY ts DESC LIMIT %s
             """,
-            (actor_id, limit),
+            (limit,),
         )
         rows = await cur.fetchall()
     return [str(r[0]) for r in rows]
 
 
-async def get_running_parent_pks_24h(actor_id: int) -> List[str]:
+async def get_running_parent_pks_24h() -> List[str]:
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
-            """
+            f"""
             SELECT id FROM ars_message
-            WHERE actor = %s AND status = 'R'
+            WHERE {_PARENT_WHERE} AND status = 'R'
               AND ts > NOW() - INTERVAL '24 hours'
             """,
-            (actor_id,),
         )
         rows = await cur.fetchall()
     return [str(r[0]) for r in rows]
@@ -741,10 +412,8 @@ async def get_running_messages(
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
-            SELECT m.id, m.ts, m.params, g.name, m.ref
+            SELECT m.id, m.ts, m.params, m.agent, m.ref
             FROM ars_message m
-            JOIN ars_actor a ON a.id = m.actor
-            JOIN ars_agent g ON g.id = a.agent
             WHERE {" AND ".join(clauses)}
             ORDER BY m.ts
             LIMIT %s

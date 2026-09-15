@@ -163,12 +163,6 @@ def orchestration(mocker):
             "clear_subscriptions",
             new_callable=AsyncMock,
         ),
-        "ensure_ars_actor": mocker.patch.object(
-            lifecycle,
-            "ensure_ars_actor",
-            new_callable=AsyncMock,
-            return_value={"id": 42, "agent_name": "ars-ars-agent"},
-        ),
         "notify": mocker.patch.object(
             lifecycle,
             "notify_subscribers",
@@ -248,10 +242,10 @@ async def test_completion_empty_synthesizes_merged_message(orchestration):
     ]
     await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
 
-    # empty merged message created under the ars actor
+    # empty merged message created under the ars agent
     orchestration["create_message"].assert_awaited_once()
     create_kwargs = orchestration["create_message"].await_args.kwargs
-    assert create_kwargs.get("actor_id") == 42
+    assert create_kwargs.get("agent") == "ars-ars-agent"
 
     # its payload is the parent's data with results/aux/kg emptied
     saved_pk, saved_payload = orchestration["save_message_data"].await_args.args[:2]

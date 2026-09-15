@@ -11,12 +11,7 @@ Behavior register rows: P-ENV-1 .. P-ENV-6.
 import datetime
 import uuid
 
-from shepherd_utils.ars.envelope import (
-    actor_envelope,
-    agent_envelope,
-    django_datetime,
-    message_envelope,
-)
+from shepherd_utils.ars.envelope import django_datetime, message_envelope
 
 UTC = datetime.timezone.utc
 
@@ -27,7 +22,7 @@ def _message_row(**overrides):
         "name": "ars-default-agent",
         "code": 202,
         "status": "R",
-        "actor": 7,
+        "agent": "ara-shepherd-aragorn",
         "ts": datetime.datetime(2026, 9, 1, 12, 34, 56, 789012, tzinfo=UTC),
         "updated_at": datetime.datetime(2026, 9, 1, 12, 35, 0, 0, tzinfo=UTC),
         "url": None,
@@ -73,7 +68,7 @@ def test_message_envelope_shape():
         "name",
         "code",
         "status",
-        "actor",
+        "agent",
         "timestamp",
         "updated_at",
         "data",
@@ -111,8 +106,9 @@ def test_message_envelope_data_none_and_inline():
 
 
 def test_message_envelope_fk_and_misc_fields():
-    """P-ENV-5: actor is the int pk; ref/merged_version are str(uuid) or None;
-    timestamps are Django-encoded strings; clients is a list of int pks."""
+    """P-ENV-5: agent is the row's agent name (where upstream carried the
+    actor's int pk); ref/merged_version are str(uuid) or None; timestamps
+    are Django-encoded strings; clients is a list of int pks."""
     ref = uuid.uuid4()
     mv = uuid.uuid4()
     env = message_envelope(
@@ -128,7 +124,7 @@ def test_message_envelope_fk_and_misc_fields():
         )
     )
     fields = env["fields"]
-    assert fields["actor"] == 7
+    assert fields["agent"] == "ara-shepherd-aragorn"
     assert fields["ref"] == str(ref)
     assert fields["merged_version"] == str(mv)
     assert fields["merged_versions_list"] == [[str(mv), "ara-aragorn"]]
@@ -139,61 +135,3 @@ def test_message_envelope_fk_and_misc_fields():
     assert fields["result_stat"] == {"mean": 0.5}
     assert fields["retain"] is True
     assert fields["merge_semaphore"] is True
-
-
-def test_agent_envelope():
-    """P-ENV-6a: agents serialize with int pk and Django field order."""
-    env = agent_envelope(
-        {
-            "id": 4,
-            "name": "ara-aragorn",
-            "description": None,
-            "uri": "/ara-aragorn/api/",
-            "contact": None,
-            "registered": datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
-            "updated": datetime.datetime(2026, 1, 2, 0, 0, 0, tzinfo=UTC),
-        }
-    )
-    assert env == {
-        "model": "tr_ars.agent",
-        "pk": 4,
-        "fields": {
-            "name": "ara-aragorn",
-            "description": None,
-            "uri": "/ara-aragorn/api/",
-            "contact": None,
-            "registered": "2026-01-01T00:00:00Z",
-            "updated": "2026-01-02T00:00:00Z",
-        },
-    }
-
-
-def test_actor_envelope_includes_url():
-    """P-ENV-6c: Actor.to_dict adds fields.url = agent.uri + path, and the
-    channel field carries the stored serialized-channel list."""
-    serialized_channels = [
-        {
-            "model": "tr_ars.channel",
-            "pk": 1,
-            "fields": {"name": "general", "description": None},
-        }
-    ]
-    env = actor_envelope(
-        {
-            "id": 7,
-            "channel": serialized_channels,
-            "agent": 4,
-            "path": "runquery",
-            "inforesid": "infores:aragorn",
-            "active": True,
-        },
-        agent_uri="/ara-aragorn/api/",
-    )
-    assert env["model"] == "tr_ars.actor"
-    assert env["pk"] == 7
-    assert env["fields"]["channel"] == serialized_channels
-    assert env["fields"]["agent"] == 4
-    assert env["fields"]["path"] == "runquery"
-    assert env["fields"]["inforesid"] == "infores:aragorn"
-    assert env["fields"]["active"] is True
-    assert env["fields"]["url"] == "/ara-aragorn/api/runquery"

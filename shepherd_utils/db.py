@@ -204,6 +204,56 @@ ARS_SCHEMA_MARKER_INDEX = "idx_ars_message_ref"
 # The response-cache tables landed after the first ARS release; their own
 # marker keeps volumes that already carry the ars_* block from skipping them.
 ARS_CACHE_SCHEMA_MARKER_INDEX = "idx_ars_response_cache_source"
+# The de-federated ARS keys messages by agent name instead of an actor row;
+# this marker is what makes a volume still carrying the registry tables run
+# ``_migrate_ars_registry`` below.
+ARS_AGENT_SCHEMA_MARKER_INDEX = "idx_ars_message_agent"
+
+
+async def _migrate_ars_registry(conn) -> None:
+    """Retire the ARS registry tables on a volume that predates de-federation.
+
+    The ARS used to mirror upstream's Agent/Channel/Actor tables and point
+    ``ars_message.actor`` at an actor row; it now records the agent name on
+    the message itself (``ars_message.agent``) and keeps the roster of ARAs it
+    talks to in code (shepherd_utils.ars.aras). On such a volume this adds
+    the column, backfills it from the old join so every existing tree keeps
+    its agent names (trace, completion, and merge bookkeeping all read
+    them), drops the FK column, and drops the three tables. A volume that
+    never had them -- fresh, or pre-ARS -- passes straight through, and the
+    bundled DDL then creates ``ars_message`` in its current shape.
+    """
+    cursor = await conn.execute("""
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'ars_message' AND column_name = 'actor'
+        )
+        """)
+    row = await cursor.fetchone()
+    if row is not None and row[0]:
+        await conn.execute(
+            "ALTER TABLE ars_message ADD COLUMN IF NOT EXISTS agent TEXT"
+        )
+        cursor = await conn.execute(
+            "SELECT to_regclass('ars_actor') IS NOT NULL "
+            "AND to_regclass('ars_agent') IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        if row is not None and row[0]:
+            await conn.execute("""
+                UPDATE ars_message m SET agent = g.name
+                FROM ars_actor a JOIN ars_agent g ON g.id = a.agent
+                WHERE a.id = m.actor AND m.agent IS NULL
+                """)
+        await conn.execute("UPDATE ars_message SET agent = '' WHERE agent IS NULL")
+        await conn.execute("ALTER TABLE ars_message ALTER COLUMN agent SET NOT NULL")
+        await conn.execute("ALTER TABLE ars_message ALTER COLUMN agent SET DEFAULT ''")
+        await conn.execute("ALTER TABLE ars_message DROP COLUMN actor")
+    # the column (and its FK) is gone, so the registry tables can follow
+    await conn.execute("DROP TABLE IF EXISTS ars_actor")
+    await conn.execute("DROP TABLE IF EXISTS ars_channel")
+    await conn.execute("DROP TABLE IF EXISTS ars_agent")
+
 
 # Arbitrary-but-fixed advisory lock id serializing the upgrades across the
 # whole fleet booting at once: IF NOT EXISTS alone still races when two
@@ -226,6 +276,7 @@ async def apply_schema_upgrades() -> None:
         marker_names = [name for name, _ in _SCHEMA_UPGRADES] + [
             ARS_SCHEMA_MARKER_INDEX,
             ARS_CACHE_SCHEMA_MARKER_INDEX,
+            ARS_AGENT_SCHEMA_MARKER_INDEX,
         ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",
@@ -239,6 +290,9 @@ async def apply_schema_upgrades() -> None:
         )
         for _, ddl in _SCHEMA_UPGRADES:
             await conn.execute(ddl)
+        # Retire the ARS registry tables on a volume that still has them
+        # (before the DDL below, which describes the current shape only).
+        await _migrate_ars_registry(conn)
         # Bring pre-ARS volumes up to date with the ars_* tables. Everything
         # in the bundled DDL is IF NOT EXISTS, so this is free once applied.
         for ddl in _ars_schema_statements():

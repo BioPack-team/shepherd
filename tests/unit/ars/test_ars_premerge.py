@@ -42,7 +42,7 @@ def env(mocker, redis_mock):
         "id": child_pk,
         "status": "R",
         "code": 202,
-        "actor": 7,
+        "agent": "ara-shepherd-aragorn",
         "ref": parent_pk,
         "result_count": 2,
         "params": {"query_type": "standard"},
@@ -51,7 +51,7 @@ def env(mocker, redis_mock):
         "id": parent_pk,
         "status": "R",
         "code": 202,
-        "actor": 1,
+        "agent": "ars-default-agent",
         "result_count": None,
     }
     data = load_corpus("response_aragorn.json")
@@ -234,14 +234,8 @@ def _intake_task(env, response_id="resp1"):
 
 @pytest.fixture
 def intake(env, mocker):
-    """Arm the blob-store and actor mocks for an internal delivery."""
+    """Arm the blob-store mocks for a broker delivery."""
     env["child_row"]["result_count"] = None
-    mocker.patch.object(
-        ars_db,
-        "get_actor",
-        new_callable=AsyncMock,
-        return_value={"inforesid": "infores:aragorn", "agent_name": "ara-aragorn"},
-    )
     logs = [{"message": "ara log line", "level": "INFO"}]
     return {
         "get_message": mocker.patch.object(
@@ -257,9 +251,11 @@ def intake(env, mocker):
 async def test_intake_happy_path_premerges_and_merges(env, intake, redis_mock):
     await pm.ars_premerge(_intake_task(env), LOGGER)
 
-    # ara_response_complete went out, as the callback endpoint sends it
+    # ara_response_complete went out, as the upstream callback view sent it,
+    # naming the ARA by the infores its agent stands for
     notified = env["notify"].await_args_list[0].args[1]
     assert notified["event_type"] == "ara_response_complete"
+    assert notified["ara_name"] == "infores:shepherd-aragorn"
     assert notified["child_uuid"] == str(env["child_pk"])
     assert notified["ara_n_results"] == 2
 
@@ -288,7 +284,7 @@ async def test_intake_happy_path_premerges_and_merges(env, intake, redis_mock):
     tasks = await _merge_tasks()
     assert len(tasks) == 1
     assert tasks[0][1]["parent_pk"] == str(env["parent_pk"])
-    assert tasks[0][1]["agent_name"] == "ara-aragorn"
+    assert tasks[0][1]["agent_name"] == "ara-shepherd-aragorn"
     assert tasks[0][1]["otel"] == '{"traceparent": "00-fin"}'
 
 
@@ -362,11 +358,9 @@ async def test_intake_missing_blob_leaves_child_running(env, intake, redis_mock)
 
 
 async def test_intake_crash_is_500_with_log_entry(env, intake, mocker, redis_mock):
-    """An intake failure reproduces the endpoint's generic handler: E/500
-    with the 'Internal ARS Server Error' log entry."""
-    mocker.patch.object(
-        ars_db, "get_actor", new_callable=AsyncMock, side_effect=RuntimeError("boom")
-    )
+    """An intake failure reproduces the upstream view's generic handler:
+    E/500 with the 'Internal ARS Server Error' log entry."""
+    env["notify"].side_effect = RuntimeError("boom")
     await pm.ars_premerge(_intake_task(env), LOGGER)
     final = next(
         c.kwargs for c in env["update_message"].await_args_list if "status" in c.kwargs

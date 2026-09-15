@@ -22,8 +22,9 @@ superseded cache generations.
 
 Intent-level deviations, register-documented: upstream resolves the agent by
 indexing the Agent table with the ACTOR's pk (a latent bug whose outcome
-depends on row-id coincidence); this port joins actor->agent properly. It
-also exempts ars-workflow-agent parents alongside ars-default-agent
+depends on row-id coincidence); this port reads the agent name recorded on
+the message row. It also exempts the ars-workflow-agent parents a volume
+from before de-federation may still carry, alongside ars-default-agent
 (upstream exempts only the latter, which would 598 workflow parents).
 """
 

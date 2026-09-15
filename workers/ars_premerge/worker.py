@@ -19,12 +19,13 @@ Outcomes, exactly as upstream's view produced them:
   - pipeline crash    -> child E/500 with the "Internal ARS Server Error"
                          log entry, upstream's generic handler behavior
 
-Tasks come in two shapes. The server's callback endpoint enqueues
-{child_pk, parent_pk, agent_name, ...} after running the intake itself.
-finish_query enqueues {intake_child_pk, response_id} for responses from
-Shepherd-hosted ARAs, and intake_internal_response runs the endpoint's
-intake state machine here first (documented deviation: no HTTP hop, same
-guards, counts, notifications, and terminal shapes).
+finish_query enqueues {intake_child_pk, response_id} when an ARA pipeline
+finishes an ARS-originated query (the de-federated ARS receives every
+response over the broker; there is no callback endpoint), and
+intake_internal_response runs the upstream callback view's intake state
+machine here first -- same guards, counts, notifications, and terminal
+shapes -- before filling in the {child_pk, parent_pk, agent_name, ...}
+fields the premerge stage reads.
 """
 
 import asyncio
@@ -33,6 +34,7 @@ import uuid
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
+from shepherd_utils.ars import aras
 from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
@@ -74,12 +76,12 @@ async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
 
 
 async def intake_internal_response(fields, logger: logging.Logger):
-    """Receive a Shepherd-hosted ARA's response off the queue.
+    """Receive an ARA's response off the queue.
 
-    finish_query enqueues {intake_child_pk, response_id} instead of POSTing
-    the payload to the /ars/api/messages/<child_pk> endpoint; this runs that
-    endpoint's state machine (documented deviation: same guards, counts,
-    notification, and terminal shapes, minus the HTTP responses nobody read).
+    finish_query enqueues {intake_child_pk, response_id}; this runs the
+    upstream callback view's state machine over the stored response (same
+    guards, counts, notification, and terminal shapes, minus the HTTP
+    answers nobody read).
 
     On the result-bearing path it fills the standard premerge task fields
     into ``fields`` and returns the payload so ``ars_premerge`` continues in
@@ -111,11 +113,10 @@ async def intake_internal_response(fields, logger: logging.Logger):
         except Exception as e:
             logger.warning(f"Intake: proceeding without logs for {response_id}: {e}")
 
-        status = "D"  # internal deliveries carry no tr_ars.message.status
+        status = "D"  # broker deliveries carry no tr_ars.message.status
         res = get_safe(data, "message", "results")
-        actor = await ars_db.get_actor(mesg["actor"]) or {}
-        inforesid = actor.get("inforesid")
-        agent_name = str(actor.get("agent_name"))
+        agent_name = str(mesg.get("agent"))
+        inforesid = aras.inforesid_for(agent_name)
         parent = await ars_db.get_message_row(mesg["ref"]) if mesg.get("ref") else None
         if parent is None:
             logger.error(f"Intake: unknown parent for child {child_pk}")
@@ -133,7 +134,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
             logger,
         )
         logger.info(
-            f"received internal msg from agent: {inforesid} with parent pk: "
+            f"received msg from agent: {inforesid} with parent pk: "
             f"{mesg['ref']} and result: {result_length}"
         )
         # the callback endpoint's guard order: dup-Done, repeated results,

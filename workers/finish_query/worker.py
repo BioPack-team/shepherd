@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from opentelemetry.propagate import inject
 from opentelemetry.trace import Status, StatusCode, get_current_span
 
-from shepherd_utils.ars.internal import parse_internal_callback
+from shepherd_utils.ars.handoff import parse_handoff_callback
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.db import (
     cleanup_callbacks,
@@ -262,10 +262,10 @@ async def finish_query(task, logger: logging.Logger):
         logger.error(f"Query id {query_id} not found in db.")
     else:
         callback_url = query_state[8]
-        ars_child_pk = parse_internal_callback(callback_url)
+        ars_child_pk = parse_handoff_callback(callback_url)
         if ars_child_pk is not None:
-            # The caller is this deployment's own ARS: hand the response over
-            # on the queue instead of POSTing it back through the server. The
+            # The caller is this deployment's ARS: hand the response over on
+            # the queue (the ARS has no HTTP callback endpoint). The
             # intake in ars_premerge loads the payload and logs from the blob
             # store by response_id itself, so nothing large is even resident
             # here. If the enqueue fails after its retries, the child stays

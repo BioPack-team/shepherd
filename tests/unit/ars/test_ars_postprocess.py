@@ -35,7 +35,7 @@ def env(mocker, redis_mock):
         "id": merged_pk,
         "status": "R",
         "code": 202,
-        "actor": 3,
+        "agent": "ars-ars-agent",
         "ref": parent_pk,
         "result_count": None,
         "params": None,
@@ -44,7 +44,7 @@ def env(mocker, redis_mock):
         "id": parent_pk,
         "status": "R",
         "code": 202,
-        "actor": 1,
+        "agent": "ars-default-agent",
         "result_count": None,
         "merged_versions_list": [[str(merged_pk), "ara-x"]],
     }
