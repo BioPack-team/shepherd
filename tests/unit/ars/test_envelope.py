@@ -14,7 +14,6 @@ import uuid
 from shepherd_utils.ars.envelope import (
     actor_envelope,
     agent_envelope,
-    channel_envelope,
     django_datetime,
     message_envelope,
 )
@@ -166,16 +165,6 @@ def test_agent_envelope():
             "registered": "2026-01-01T00:00:00Z",
             "updated": "2026-01-02T00:00:00Z",
         },
-    }
-
-
-def test_channel_envelope():
-    """P-ENV-6b: channels serialize with int pk, name + description fields."""
-    env = channel_envelope({"id": 1, "name": "general", "description": "d"})
-    assert env == {
-        "model": "tr_ars.channel",
-        "pk": 1,
-        "fields": {"name": "general", "description": "d"},
     }
 
 

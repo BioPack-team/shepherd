@@ -196,7 +196,6 @@ def db(mocker):
         ),
         "get_agent_by_name": _patch("get_agent_by_name", return_value=None),
         "list_agents": _patch("list_agents", return_value=[]),
-        "list_channels": _patch("list_channels", return_value=[]),
         "list_actors": _patch("list_actors", return_value=[ara_actor]),
         "get_or_create_channel": _patch(
             "get_or_create_channel",
@@ -758,23 +757,13 @@ async def test_actors_post_unknown_agent_is_404(client, db, redis_mock):
     assert resp.text.startswith("Unknown ")
 
 
-async def test_channels_get_and_post(client, db, redis_mock):
-    resp = await client.get("/api/channels")
-    assert resp.status_code == 200
-    db["get_or_create_channel"].return_value = (
-        {"id": 9, "name": "new", "description": None},
-        True,
-    )
-    resp = await client.post("/api/channels", json={"name": "new"})
-    assert resp.status_code == 201
-    db["get_or_create_channel"].return_value = (
-        {"id": 9, "name": "new", "description": "d"},
-        False,
-    )
-    resp = await client.post("/api/channels", json={"name": "new", "description": "d"})
-    assert resp.status_code == 302
-    resp = await client.post("/api/channels", json={"nope": 1})
-    assert resp.status_code == 400
+async def test_channels_endpoint_is_gone(client, db, redis_mock):
+    """Channels are not an independently useful resource: the fanout matches
+    on an actor's channels, seeding creates them implicitly, and each actor
+    reports its own under fields.channel."""
+    assert (await client.get("/api/channels")).status_code == 404
+    assert (await client.post("/api/channels", json={"name": "x"})).status_code == 404
+    db["get_or_create_channel"].assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -864,7 +853,14 @@ async def test_index_does_not_advertise_dropped_routes(client, db, redis_mock):
     """The index is the ARS's own route directory: it must not point at
     endpoints this port does not serve."""
     entries = (await client.get("/api/")).json()["entries"]
-    for dropped in ("block/", "merge/", "post_process/", "timeoutTest", "filter"):
+    for dropped in (
+        "block/",
+        "merge/",
+        "post_process/",
+        "timeoutTest",
+        "filter",
+        "channels",
+    ):
         assert not any(dropped in e for e in entries), dropped
 
 

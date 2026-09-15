@@ -86,17 +86,6 @@ def agent_envelope(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def channel_envelope(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "model": "tr_ars.channel",
-        "pk": row["id"],
-        "fields": {
-            "name": row.get("name"),
-            "description": row.get("description"),
-        },
-    }
-
-
 def actor_envelope(
     row: Dict[str, Any],
     agent_uri: str = "",

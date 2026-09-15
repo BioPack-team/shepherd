@@ -173,15 +173,6 @@ async def list_agents() -> List[Dict[str, Any]]:
     return [_row_dict(AGENT_COLUMNS, r) for r in rows]
 
 
-async def list_channels() -> List[Dict[str, Any]]:
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            "SELECT id, name, description FROM ars_channel ORDER BY name"
-        )
-        rows = await cur.fetchall()
-    return [_row_dict(("id", "name", "description"), r) for r in rows]
-
-
 def serialize_channels(channel_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The Django-serialized channel list stored on Actor.channel.
 

@@ -41,7 +41,6 @@ from shepherd_utils.ars import crypto
 from shepherd_utils.ars.envelope import (
     actor_envelope,
     agent_envelope,
-    channel_envelope,
     django_datetime,
     message_envelope,
 )
@@ -159,7 +158,6 @@ _API_PATTERNS = [
     ("messages/", True),
     ("agents/", True),
     ("actors/", True),
-    ("channels/", True),
     ("agents/<name>", False),
     ("messages/<uuid:key>", False),
     ("reports/<inforesid>", False),
@@ -596,7 +594,14 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# agents / actors / channels
+# agents / actors
+#
+# /api/channels is not served. Channels are not an independently useful
+# resource: an actor's channels are what the fanout matches on, they are
+# created implicitly by registry seeding (get_or_create_channel, still used
+# by get_or_create_actor), and each actor reports its own under
+# fields.channel. Nothing consumed the collection, and POSTing a bare
+# channel no actor references does nothing.
 # ---------------------------------------------------------------------------
 
 
@@ -678,34 +683,6 @@ async def actors(request: Request) -> Response:
         logger.error(f"actors POST failed: {e}", exc_info=True)
         return text("Internal server error", 500)
     return dj_json(actor_envelope(actor, actor.get("agent_uri", "")), status)
-
-
-@route("/api/channels", ["GET", "POST"])
-async def channels(request: Request) -> Response:
-    if request.method == "GET":
-        return Response(
-            content=json.dumps(
-                [channel_envelope(c) for c in await ars_db.list_channels()],
-                default=str,
-            ),
-            media_type="application/json",
-        )
-    try:
-        data = json.loads(await request.body())
-        if "model" in data and "tr_ars.channel" == data["model"]:
-            data = data["fields"]
-        if "name" not in data:
-            return text('JSON does not contain "name" field', 400)
-        channel, created = await ars_db.get_or_create_channel(
-            data["name"], data.get("description")
-        )
-        status = 201
-        if not created:
-            status = 302
-        return dj_json(channel_envelope(channel), status)
-    except Exception as e:
-        logger.error(f"channels POST failed: {e}")
-        return text("Internal server error", 500)
 
 
 # ---------------------------------------------------------------------------
