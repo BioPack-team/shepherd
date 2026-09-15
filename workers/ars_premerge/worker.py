@@ -28,7 +28,6 @@ guards, counts, notifications, and terminal shapes).
 """
 
 import asyncio
-import json
 import logging
 import uuid
 
@@ -41,6 +40,7 @@ from shepherd_utils.ars.premerge import (
     pre_merge_process,
     remove_phantom_support_graphs,
 )
+from shepherd_utils.ars.statuses import coerce_status
 from shepherd_utils.ars.trapi import validate
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.db import get_logs, get_message, save_logs
@@ -186,7 +186,9 @@ async def ars_premerge(task, logger: logging.Logger):
     parent_pk = task[1]["parent_pk"]
     agent_name = task[1]["agent_name"]
     inforesid = task[1].get("inforesid") or None
-    status = task[1].get("status", "D")
+    # carried from the callback's tr_ars.message.status header; re-clamped
+    # here because the task payload is just as untrusted as the header was
+    status = coerce_status(task[1].get("status", "D"), "D")
 
     mesg = await ars_db.get_message_row(child_pk)
     if mesg is None:

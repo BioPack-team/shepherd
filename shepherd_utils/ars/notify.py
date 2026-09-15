@@ -20,6 +20,28 @@ from shepherd_utils.broker import add_task
 logger = logging.getLogger(__name__)
 
 
+def _aux_graph_count(parent_row: Dict[str, Any], data: Optional[Dict[str, Any]]) -> int:
+    """The auxiliary_graphs count for a stats notification.
+
+    Prefers an explicitly supplied payload, then the merge stats ars_merge
+    already recorded on the parent (``params.stats``, from
+    ``merge.get_msg_stats``). No caller ever passed ``data``, so this used to
+    report 0 for every notification it appeared in -- and reading the merged
+    payload here just to count its aux graphs would put a multi-MB parse on
+    the notification path for a single integer.
+    """
+    if data is not None:
+        try:
+            aux_graphs = data["message"]["auxiliary_graphs"]
+            return len(aux_graphs) if aux_graphs is not None else 0
+        except Exception:
+            logger.debug("Problem getting aux graphs for stats notification")
+            return 0
+    stats = (parent_row.get("params") or {}).get("stats") or {}
+    count = stats.get("auxiliary_graphs")
+    return count if isinstance(count, int) else 0
+
+
 def build_notification(
     parent_row: Dict[str, Any],
     additional_fields: Optional[Dict[str, Any]],
@@ -35,19 +57,13 @@ def build_notification(
             "complete": True,
         }
     if parent_row.get("result_count") is not None:
-        try:
-            aux_graphs = data["message"]["auxiliary_graphs"]
-            aux_count = len(aux_graphs) if aux_graphs is not None else 0
-        except Exception:
-            logger.debug("Problem getting aux graphs for stats notification")
-            aux_count = 0
         if additional_fields is None:
             # upstream raises a TypeError here; be tolerant and carry the
             # stats alone (documented deviation, see the parity register).
             additional_fields = {}
         additional_fields["stats"] = {
             "results": parent_row["result_count"],
-            "auxiliary_graphs": aux_count,
+            "auxiliary_graphs": _aux_graph_count(parent_row, data),
         }
     return additional_fields
 

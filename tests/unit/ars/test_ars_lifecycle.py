@@ -112,6 +112,23 @@ def orchestration(mocker):
             new_callable=AsyncMock,
             side_effect=lambda pk, **kw: {**parent, **kw, "id": pk},
         ),
+        "claim": mocker.patch.object(
+            lifecycle.ars_db,
+            "claim_terminal_transition",
+            new_callable=AsyncMock,
+            side_effect=lambda pk, status, code, **kw: {
+                **parent,
+                **kw,
+                "id": pk,
+                "status": status,
+                "code": code,
+            },
+        ),
+        "delete_message": mocker.patch.object(
+            lifecycle.ars_db,
+            "delete_message",
+            new_callable=AsyncMock,
+        ),
         "create_message": mocker.patch.object(
             lifecycle.ars_db,
             "create_message",
@@ -171,6 +188,7 @@ async def test_completion_noop_while_child_running(orchestration):
         _child("R", "ara-aragorn"),
     ]
     await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
+    orchestration["claim"].assert_not_awaited()
     orchestration["update_message"].assert_not_awaited()
     orchestration["notify"].assert_not_awaited()
 
@@ -180,6 +198,7 @@ async def test_completion_noop_when_counts_mismatch(orchestration):
         _child("D", "ara-aragorn", result_count=5),
     ]
     await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
+    orchestration["claim"].assert_not_awaited()
     orchestration["update_message"].assert_not_awaited()
 
 
@@ -198,9 +217,10 @@ async def test_completion_nonempty(orchestration):
     ]
     await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
 
-    # parent flipped to Done/200
-    update_call = orchestration["update_message"].await_args_list[0]
-    assert update_call.kwargs.get("status") == "D"
+    # parent flipped to Done/200 through the atomic claim
+    orchestration["claim"].assert_awaited_once()
+    claim_call = orchestration["claim"].await_args
+    assert claim_call.args[1:] == ("D", 200)
 
     # two notifications: last_merged_completed first (parent still 'R' so
     # custom fields survive), then the save-time admin notification
@@ -239,20 +259,49 @@ async def test_completion_empty_synthesizes_merged_message(orchestration):
     assert saved_payload["message"]["auxiliary_graphs"] == {}
     assert saved_payload["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
 
-    # parent got merged_version + merged_versions_list [(pk, "ars")]
-    parent_updates = [
-        c.kwargs
-        for c in orchestration["update_message"].await_args_list
-        if c.args and c.args[0] == orchestration["parent_pk"]
-    ]
-    final = parent_updates[-1]
-    assert final.get("status") == "D"
-    mvl = final.get("merged_versions_list")
+    # the parent goes Done and gains its merged_version in ONE claim, so no
+    # reader can catch it 'D' with nothing merged
+    orchestration["claim"].assert_awaited_once()
+    claim_call = orchestration["claim"].await_args
+    assert claim_call.args[1:] == ("D", 200)
+    assert claim_call.kwargs.get("merged_version") is not None
+    mvl = claim_call.kwargs.get("merged_versions_list")
     assert mvl is not None and mvl[0][1] == "ars"
 
     # only the save-time admin notification; no unsubscribe in the empty path
     assert len(orchestration["notify"].await_args_list) == 1
     orchestration["clear_subscriptions"].assert_not_awaited()
+
+
+async def test_completion_lost_claim_does_not_renotify(orchestration):
+    """Two callers can evaluate the same complete decision at once; only the
+    one that wins the conditional UPDATE emits the completion events."""
+    orchestration["get_children"].return_value = [
+        _child("D", "ara-aragorn", result_count=5),
+        _child("D", "ars-ars-agent", result_count=5),
+    ]
+    orchestration["claim"].side_effect = None
+    orchestration["claim"].return_value = None
+    await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
+    orchestration["claim"].assert_awaited_once()
+    orchestration["notify"].assert_not_awaited()
+    orchestration["clear_subscriptions"].assert_not_awaited()
+
+
+async def test_completion_lost_claim_discards_empty_merge(orchestration):
+    """The empty branch builds its merged message before claiming, so a
+    caller that loses the claim has to drop what it just built."""
+    orchestration["get_children"].return_value = [
+        _child("D", "ara-aragorn", result_count=0),
+        _child("E", "ara-arax", code=598),
+    ]
+    orchestration["claim"].side_effect = None
+    orchestration["claim"].return_value = None
+    await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
+    empty_pk = orchestration["create_message"].await_args.kwargs.get("ref")
+    assert empty_pk is not None
+    orchestration["delete_message"].assert_awaited_once()
+    orchestration["notify"].assert_not_awaited()
 
 
 async def test_parent_error_unsubscribes(orchestration):
@@ -263,6 +312,7 @@ async def test_parent_error_unsubscribes(orchestration):
     ]
     await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
     orchestration["clear_subscriptions"].assert_awaited_once()
+    orchestration["claim"].assert_not_awaited()
     orchestration["update_message"].assert_not_awaited()
 
 

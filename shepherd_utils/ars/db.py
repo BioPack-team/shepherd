@@ -23,7 +23,7 @@ from psycopg.types.json import Jsonb
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.config import settings
 
-from .statuses import coerce_code, to_letter
+from .statuses import coerce_code, to_letter, validate_letter
 
 MESSAGE_COLUMNS = (
     "id",
@@ -173,15 +173,6 @@ async def list_agents() -> List[Dict[str, Any]]:
     return [_row_dict(AGENT_COLUMNS, r) for r in rows]
 
 
-async def list_channels() -> List[Dict[str, Any]]:
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        cur = await conn.execute(
-            "SELECT id, name, description FROM ars_channel ORDER BY name"
-        )
-        rows = await cur.fetchall()
-    return [_row_dict(("id", "name", "description"), r) for r in rows]
-
-
 def serialize_channels(channel_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The Django-serialized channel list stored on Actor.channel.
 
@@ -288,6 +279,7 @@ async def get_or_create_actor(
             actor["agent_name"] = agent_row["name"]
             actor["agent_uri"] = agent_row["uri"]
             invalidate_actor_cache()
+            await bump_actor_cache_epoch()
             return actor, 302
         cur = await conn.execute(
             f"""
@@ -310,6 +302,7 @@ async def get_or_create_actor(
         actor["agent_name"] = agent_row["name"]
         actor["agent_uri"] = agent_row["uri"]
         invalidate_actor_cache()
+        await bump_actor_cache_epoch()
         return actor, 201
 
 
@@ -335,16 +328,53 @@ async def list_actors(exclude_empty_path: bool = False) -> List[Dict[str, Any]]:
 
 # Actor rows only change through registry seeding at boot and the rare
 # agents/actors POST, yet every message GET and trace poll resolves one.
-# A short in-process cache keeps those off Postgres; writes invalidate it.
+# A short in-process cache keeps those off Postgres.
+#
+# The cache is per process, and Shepherd runs several server workers plus a
+# worker process per stream, so clearing the local dict on a write leaves
+# every OTHER process serving its stale copy until its own TTL runs out. A
+# write therefore also bumps a shared epoch in Redis, which each process
+# re-reads at most once per ACTOR_EPOCH_RECHECK_SEC -- one cheap GET, not the
+# Postgres round trip this cache exists to avoid.
 ACTOR_CACHE_TTL_SEC = 60.0
+ACTOR_EPOCH_RECHECK_SEC = 5.0
+ACTOR_EPOCH_KEY = "ars:actor-cache-epoch"
 _actor_cache: Dict[int, Tuple[float, Optional[Dict[str, Any]]]] = {}
+_actor_epoch: Tuple[float, Optional[bytes]] = (0.0, None)
 
 
 def invalidate_actor_cache() -> None:
     _actor_cache.clear()
 
 
+async def bump_actor_cache_epoch() -> None:
+    """Tell every process that the actor registry changed."""
+    try:
+        await shepherd_db.data_db_client.incr(ACTOR_EPOCH_KEY)
+    except Exception:
+        # best effort: each process still expires its own entries by TTL
+        pass
+
+
+async def _check_actor_epoch() -> None:
+    """Clear the local cache if another process changed the registry."""
+    global _actor_epoch
+    now = time.monotonic()
+    checked_at, epoch = _actor_epoch
+    if checked_at > now:
+        return
+    try:
+        current = await shepherd_db.data_db_client.get(ACTOR_EPOCH_KEY)
+    except Exception:
+        _actor_epoch = (now + ACTOR_EPOCH_RECHECK_SEC, epoch)
+        return
+    if epoch is not None and current != epoch:
+        _actor_cache.clear()
+    _actor_epoch = (now + ACTOR_EPOCH_RECHECK_SEC, current)
+
+
 async def get_actor(actor_id: int) -> Optional[Dict[str, Any]]:
+    await _check_actor_epoch()
     cached = _actor_cache.get(actor_id)
     now = time.monotonic()
     if cached is not None and cached[0] > now:
@@ -385,7 +415,7 @@ async def create_message(
     """Insert a message row. Mirrors Message.create + the post_save coercion:
     the long status name maps to its letter and the code is coerced
     ('R'->202, 'D'->200) at write time."""
-    letter = to_letter(status)
+    letter = validate_letter(to_letter(status))
     coerced = coerce_code(letter, code)
     pk = uuid.UUID(str(message_id)) if message_id else uuid.uuid4()
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
@@ -481,7 +511,7 @@ async def update_message(
         return await get_message_row(message_id)
     values = dict(fields)
     if "status" in values:
-        values["status"] = to_letter(values["status"])
+        values["status"] = validate_letter(to_letter(values["status"]))
         if not skip_coercion:
             status = values["status"]
             if status == "R":
@@ -508,26 +538,66 @@ async def update_message(
     return _row_dict(MESSAGE_COLUMNS, row) if row is not None else None
 
 
-async def get_recent_messages(limit: int = 10) -> List[Dict[str, Any]]:
+async def claim_terminal_transition(
+    message_id: Union[str, uuid.UUID],
+    status: str,
+    code: int,
+    **fields: Any,
+) -> Optional[Dict[str, Any]]:
+    """Move a message to a terminal status, but only if it is not there yet.
+
+    ``check_parent_completion`` runs from the server and from four workers,
+    and two children reaching a terminal status at the same moment make two
+    of them evaluate the same complete decision. A plain read-then-write
+    guard lets both through, which double-fires the completion notifications
+    (and, on the empty branch, synthesizes two merged messages). This does
+    the check and the write in one statement: the winner gets the updated
+    row, every loser gets ``None`` and stops.
+
+    Only the ``status <> new status`` predicate is conditional; the other
+    fields are written exactly as ``update_message`` would.
+    """
+    letter = validate_letter(to_letter(status))
+    values: Dict[str, Any] = {"status": letter, "code": coerce_code(letter, code)}
+    values.update(fields)
+    for key in ("result_stat", "merged_versions_list", "params"):
+        if key in values:
+            values[key] = _jsonb(values[key])
+    if values.get("merged_version") is not None:
+        values["merged_version"] = uuid.UUID(str(values["merged_version"]))
+    sets = ", ".join(f"{k} = %s" for k in values)
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
-            SELECT {_MESSAGE_SELECT},
-                   COALESCE(
-                     (SELECT array_agg(s.client_id ORDER BY s.client_id)
-                      FROM ars_subscription s WHERE s.message_id = m.id),
-                     ARRAY[]::int[]) AS clients
-            FROM ars_message m ORDER BY m.ts DESC LIMIT %s
+            UPDATE ars_message SET {sets}, updated_at = NOW()
+            WHERE id = %s AND status <> %s
+            RETURNING {_MESSAGE_SELECT.replace("m.", "")}
+            """,
+            (*values.values(), uuid.UUID(str(message_id)), letter),
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+    return _row_dict(MESSAGE_COLUMNS, row) if row is not None else None
+
+
+async def get_recent_message_pks(limit: int = 10) -> List[Dict[str, Any]]:
+    """The most recently created messages as ``{"id", "ts"}``, newest first.
+
+    Only what ``GET /ars/api/messages`` renders. It used to select every
+    column plus a correlated subquery for each row's subscribers, and the
+    endpoint then loaded and spliced in each message's stored payload --
+    tens of MB per row for a listing that is only ever used to see what has
+    come through recently.
+    """
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            SELECT id, ts FROM ars_message ORDER BY ts DESC LIMIT %s
             """,
             (limit,),
         )
         rows = await cur.fetchall()
-    out = []
-    for row in rows:
-        record = _row_dict(MESSAGE_COLUMNS, row[: len(MESSAGE_COLUMNS)])
-        record["clients"] = list(row[len(MESSAGE_COLUMNS)] or [])
-        out.append(record)
-    return out
+    return [{"id": r[0], "ts": r[1]} for r in rows]
 
 
 async def get_status_rows(pks: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -566,18 +636,28 @@ async def retain_tree(parent_id: Union[str, uuid.UUID]) -> None:
         await conn.commit()
 
 
+def _like_literal(value: str) -> str:
+    """Escape LIKE metacharacters so a path segment matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def get_report_rows(inforesid: str) -> List[Dict[str, Any]]:
-    """24-hour per-message report for an infores (iendswith match)."""
+    """24-hour per-message report for an infores (iendswith match).
+
+    ``inforesid`` comes straight off the URL, so its LIKE metacharacters are
+    escaped -- unescaped, a '%' turned the endswith match into a much broader
+    scan.
+    """
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
-            """
+            r"""
             SELECT m.code, m.id, m.ts, m.updated_at, m.result_count
             FROM ars_message m
             JOIN ars_actor a ON a.id = m.actor
             WHERE m.ts > NOW() - INTERVAL '24 hours'
-              AND LOWER(a.inforesid) LIKE LOWER(%s)
+              AND LOWER(a.inforesid) LIKE LOWER(%s) ESCAPE '\'
             """,
-            (f"%{inforesid}",),
+            (f"%{_like_literal(inforesid)}",),
         )
         rows = await cur.fetchall()
     return [
@@ -635,19 +715,41 @@ async def get_running_parent_pks_24h(actor_id: int) -> List[str]:
     return [str(r[0]) for r in rows]
 
 
-async def get_running_messages(window_sec: float) -> List[Dict[str, Any]]:
-    """Running messages created within the scan window, for the watchdog."""
+async def get_running_messages(
+    window_sec: float,
+    min_age_sec: float = 0.0,
+    limit: int = 2000,
+) -> List[Dict[str, Any]]:
+    """Running messages the watchdog should consider, oldest first.
+
+    ``min_age_sec`` skips rows too young to have timed out under any
+    threshold; ``window_sec`` caps how far back to look, and **0 means no
+    cap**. Upstream's 15-minute ceiling on creation time meant a message that
+    stayed Running past it could never be timed out again -- so a watchdog
+    outage longer than the gap between the timeout threshold and the ceiling
+    stranded every message it missed, and their parents with them.
+    """
+    clauses = ["m.status = 'R'"]
+    params: List[Any] = []
+    if min_age_sec > 0:
+        clauses.append("m.ts < NOW() - make_interval(secs => %s)")
+        params.append(float(min_age_sec))
+    if window_sec > 0:
+        clauses.append("m.ts > NOW() - make_interval(secs => %s)")
+        params.append(float(window_sec))
+    params.append(int(limit))
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
-            """
+            f"""
             SELECT m.id, m.ts, m.params, g.name, m.ref
             FROM ars_message m
             JOIN ars_actor a ON a.id = m.actor
             JOIN ars_agent g ON g.id = a.agent
-            WHERE m.status = 'R'
-              AND m.ts > NOW() - make_interval(secs => %s)
+            WHERE {" AND ".join(clauses)}
+            ORDER BY m.ts
+            LIMIT %s
             """,
-            (float(window_sec),),
+            tuple(params),
         )
         rows = await cur.fetchall()
     return [
@@ -861,12 +963,16 @@ async def load_otel_carrier(
     return "{}"
 
 
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+GZIP_MAGIC = b"\x1f\x8b"
+
+
 def _decompress_payload_bytes(blob: bytes) -> bytes:
     """Message.decompress_dict codec, bytes out: zstd magic, gzip fallback,
     else the blob is taken as already-plain JSON."""
-    if blob[:4] == b"\x28\xb5\x2f\xfd":
+    if blob[:4] == ZSTD_MAGIC:
         return shepherd_db.decompress_zstd(blob)
-    if blob[:2] == b"\x1f\x8b":
+    if blob[:2] == GZIP_MAGIC:
         return gzip.decompress(blob)
     return blob
 
@@ -999,7 +1105,7 @@ async def load_message_bytes(
     except Exception as e:
         logger.error(f"Undecodable durable payload for {message_id}: {e}")
         return None
-    if stored[:4] == b"\x28\xb5\x2f\xfd":
+    if stored[:4] == ZSTD_MAGIC:
         try:  # re-warm with the same zstd frame Redis normally holds
             await shepherd_db.data_db_client.set(
                 str(message_id), stored, ex=settings.redis_ttl
@@ -1007,6 +1113,54 @@ async def load_message_bytes(
         except Exception:
             pass
     return raw
+
+
+async def load_message_compressed(
+    message_id: Union[str, uuid.UUID],
+    logger: logging.Logger,
+) -> Optional[bytes]:
+    """The payload as the compressed frame clients get from ``?compress``.
+
+    Redis first, then the durable ``ars_message.data`` copy -- which outlives
+    the Redis TTL by ``ars_data_retention_days``. Serving only from Redis (as
+    this path used to) made ``?compress`` 404 on messages that were still
+    perfectly readable through every other endpoint. A durable copy stored in
+    some other codec is re-compressed as zstd so the response always matches
+    the advertised ``X-Content-Compression``.
+    """
+    try:
+        blob = await shepherd_db.data_db_client.get(str(message_id))
+        if blob is not None:
+            return blob
+    except Exception as e:
+        logger.warning(f"Redis read failed for {message_id}: {e}")
+    try:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute(
+                "SELECT data FROM ars_message WHERE id = %s",
+                (uuid.UUID(str(message_id)),),
+            )
+            row = await cur.fetchone()
+    except Exception as e:
+        logger.error(f"Postgres blob read failed for {message_id}: {e}")
+        return None
+    if row is None or row[0] is None:
+        return None
+    stored = bytes(row[0])
+    if stored[:4] == ZSTD_MAGIC:
+        try:  # re-warm with the same frame Redis normally holds
+            await shepherd_db.data_db_client.set(
+                str(message_id), stored, ex=settings.redis_ttl
+            )
+        except Exception:
+            pass
+        return stored
+    try:
+        raw = await asyncio.to_thread(_decompress_payload_bytes, stored)
+        return await asyncio.to_thread(zstandard.compress, raw)
+    except Exception as e:
+        logger.error(f"Undecodable durable payload for {message_id}: {e}")
+        return None
 
 
 async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
@@ -1284,6 +1438,37 @@ async def purge_stale_cache_entries(
             )
             """,
             (current_generation, float(grace_sec), batch),
+        )
+        deleted = cur.rowcount or 0
+        await conn.commit()
+    return deleted
+
+
+async def purge_expired_ready_cache_entries(
+    max_age_sec: float, batch: int = 1000
+) -> int:
+    """Delete ready entries older than ``max_age_sec``, a batch at a time.
+
+    Without this nothing ever retires a current-generation entry short of an
+    explicit invalidation, and because ``purge_old_message_data`` exempts any
+    tree a live entry points at, every distinct query ever cached pinned its
+    payloads in ``ars_message.data`` forever. Returns rows deleted.
+    """
+    if max_age_sec <= 0:
+        return 0
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            DELETE FROM ars_response_cache
+            WHERE (generation, cache_key) IN (
+              SELECT generation, cache_key FROM ars_response_cache
+              WHERE state = 'ready'
+                AND COALESCE(ready_at, created_at)
+                    < NOW() - make_interval(secs => %s)
+              LIMIT %s
+            )
+            """,
+            (float(max_age_sec), batch),
         )
         deleted = cur.rowcount or 0
         await conn.commit()

@@ -33,6 +33,7 @@ from shepherd_utils.broker import (
     acquire_lock,
     add_task,
     mark_task_as_complete,
+    refresh_lock,
     remove_lock,
 )
 from shepherd_utils.config import settings
@@ -86,6 +87,28 @@ def _lock_key(parent_pk) -> str:
     return f"ars-merge:{parent_pk}"
 
 
+# ``acquire_lock`` sets a 45s TTL. A fold of two multi-MB messages routinely
+# runs longer than that, and a lapsed lock lets a second ars_merge task start
+# folding the same parent: both read the same ``merged_version``, both write a
+# new one, and whichever UPDATE lands last silently drops the other ARA's
+# merge. Keep the lock alive for as long as we actually hold it.
+LOCK_TTL_MS = 45_000
+LOCK_REFRESH_SEC = 15.0
+
+
+async def _keep_lock_alive(key: str, logger: logging.Logger):
+    """Refresh our own lock every LOCK_REFRESH_SEC until cancelled."""
+    while True:
+        await asyncio.sleep(LOCK_REFRESH_SEC)
+        try:
+            if not await refresh_lock(key, CONSUMER, LOCK_TTL_MS, logger):
+                # someone else holds it now -- nothing we can do but say so
+                logger.warning(f"Lost the merge lock {key} before finishing")
+                return
+        except Exception as e:  # never let the keep-alive kill the merge
+            logger.debug(f"Lock refresh for {key} failed: {e}")
+
+
 async def ars_merge(task, logger: logging.Logger):
     parent_pk = task[1]["parent_pk"]
     child_pk = task[1]["child_pk"]
@@ -102,7 +125,7 @@ async def ars_merge(task, logger: logging.Logger):
         )
         return
 
-    merged_created = None
+    keepalive = asyncio.create_task(_keep_lock_alive(_lock_key(parent_pk), logger))
     try:
         parent = await ars_db.get_message_row(parent_pk)
         if parent is None:
@@ -110,10 +133,10 @@ async def ars_merge(task, logger: logging.Logger):
             return
         await ars_db.update_message(parent_pk, merge_semaphore=True)
         ars_actor = await lifecycle.ensure_ars_actor()
-        merged_created = await ars_db.create_message(
+        merged_shell = await ars_db.create_message(
             actor_id=ars_actor["id"], status="Running", code=202, ref=parent_pk
         )
-        new_pk = merged_created["id"]
+        new_pk = merged_shell["id"]
         current_pk = parent.get("merged_version")
         logger.info(
             f"Beginning merge for agent {agent_name} with current_pk: {current_pk}"
@@ -172,6 +195,11 @@ async def ars_merge(task, logger: logging.Logger):
             f"returning new_merged_message to be post processed with pk: {new_pk}"
         )
     finally:
+        keepalive.cancel()
+        try:
+            await keepalive
+        except asyncio.CancelledError:
+            pass
         await remove_lock(_lock_key(parent_pk), CONSUMER, logger)
 
 

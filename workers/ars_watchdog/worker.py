@@ -2,13 +2,19 @@
 
 Port of NCATSTranslator/Relay @ 3e65975 tasks.py catch_timeout_async (celery
 beat, every 3 minutes) as a self-scheduling loop. Parity is on the age
-thresholds, which match upstream's code exactly: only Running messages
-created within the last 15 minutes are examined; parents are exempt; merge
+thresholds, which match upstream's code exactly: parents are exempt; merge
 messages (ars-ars-agent) time out after 8 minutes; everything else after 5
 minutes (including pathfinder -- upstream's log line says 10 but its code
 compares against now-5min). Timed-out messages get code 598 / status 'E',
 and, since 'E' is terminal, the parent completion check runs (upstream got
 this via the post_save signal).
+
+Upstream also examined ONLY messages created in the last 15 minutes, which
+made a stuck message unreapable forever once it aged out of that window --
+a sweep outage longer than (window - threshold) stranded every message it
+missed, and their parents stayed Running with no path to completion. The
+ceiling is off by default here (ars_timeout_scan_window_sec = 0); the sweep
+is bounded by ars_timeout_scan_limit rows per pass instead, oldest first.
 
 The loop also hosts the response-cache repair sweep (shepherd_utils.ars.cache
 .repair_sweep): pending entries whose leader is finished or gone, and
@@ -56,7 +62,19 @@ def _age_seconds(row) -> float:
 
 async def sweep(logger: logging.Logger) -> int:
     """One catch_timeout pass. Returns the number of messages timed out."""
-    rows = await ars_db.get_running_messages(settings.ars_timeout_scan_window_sec)
+    # The floor is the cheapest threshold any row could trip, so the query
+    # skips rows that cannot have timed out yet; there is deliberately no
+    # ceiling by default (see get_running_messages).
+    min_age = min(
+        settings.ars_timeout_standard_sec,
+        settings.ars_timeout_pathfinder_sec,
+        settings.ars_timeout_merge_sec,
+    )
+    rows = await ars_db.get_running_messages(
+        settings.ars_timeout_scan_window_sec,
+        min_age_sec=min_age,
+        limit=settings.ars_timeout_scan_limit,
+    )
     timed_out = 0
     for row in rows:
         agent_name = row.get("agent_name")
@@ -85,7 +103,8 @@ async def sweep(logger: logging.Logger) -> int:
 
 async def run_forever():
     await initialize_db()
-    heartbeat = Heartbeat(STREAM, CONSUMER, 1).start()  # noqa: F841
+    # kept alive for the process lifetime; the loop below never returns
+    Heartbeat(STREAM, CONSUMER, 1).start()
     last_purge = 0.0
     loop = asyncio.get_running_loop()
     while True:

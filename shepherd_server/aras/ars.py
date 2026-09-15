@@ -3,10 +3,14 @@
 A port of NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/api.py + urls.py onto
 FastAPI. Paths, methods, status codes, error bodies, and the Django
 serializer envelope are reproduced exactly (parity: tests/unit/ars/
-test_ars_api_contract.py and the differential harness). Known-broken
-upstream endpoints (POST /messages, POST /actors, GET /merge/<pk>,
-timeoutTest) reproduce their observable failures, including side effects
-that happen before the upstream crash.
+test_ars_api_contract.py and the differential harness).
+
+Upstream routes that only ever failed are not reproduced: POST /messages
+answers 405 instead of 500, POST /actors returns the actor it creates
+instead of 400-ing after creating it, and /block, /merge, /post_process and
+/timeoutTest are not served at all. /filters and /filter/<pk> are dropped
+as well -- unused, and the filter path rewrote and re-saved stored messages.
+See the divergences section of docs/ARS_PARITY_REGISTER.md.
 
 Background work rides Shepherd's Redis Streams instead of Celery: submit
 enqueues ``ars.fanout``; a result-bearing callback enqueues ``ars.premerge``
@@ -15,7 +19,6 @@ upstream does -- documented deviation, the CPU work saturated the server),
 which enqueues ``ars.merge`` on success.
 """
 
-import ast
 import asyncio
 import hmac
 import json
@@ -35,21 +38,15 @@ import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.broker as broker
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars import crypto
-from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
 from shepherd_utils.ars.envelope import (
+    actor_envelope,
     agent_envelope,
-    channel_envelope,
+    django_datetime,
     message_envelope,
-)
-from shepherd_utils.ars.filters import (
-    hop_level_filter,
-    node_type_filter,
-    score_filter,
-    specific_node_filter,
 )
 from shepherd_utils.ars.notify import notify_subscribers, replay_completion
 from shepherd_utils.ars.premerge import ScoreStatCalc, get_safe
-from shepherd_utils.ars.statuses import to_name
+from shepherd_utils.ars.statuses import coerce_status, to_letter, to_name
 from shepherd_utils.config import settings
 from shepherd_utils.logger import resolve_log_level
 
@@ -135,7 +132,15 @@ async def _envelope_bytes(row, task_logger=logger) -> bytes:
     sentinel = f"__ARS_DATA_{row['id']}__"
     env["fields"]["data"] = sentinel
     head = orjson.dumps(env, default=str)
-    return head.replace(b'"' + sentinel.encode() + b'"', raw, 1)
+    # Anchored on the member, not just the value: a bare first-occurrence
+    # replace would splice into whichever field happened to serialize first
+    # if its text ever matched (``name`` precedes ``data`` in the envelope).
+    marker = b'"data":"' + sentinel.encode() + b'"'
+    if head.count(marker) != 1:
+        # cannot splice safely -- fall back to a parsed payload
+        env["fields"]["data"] = await ars_db.load_message_data(row["id"], task_logger)
+        return orjson.dumps(env, default=str)
+    return head.replace(marker, b'"data":' + raw, 1)
 
 
 def _host_base(request: Request) -> str:
@@ -153,20 +158,13 @@ _API_PATTERNS = [
     ("messages/", True),
     ("agents/", True),
     ("actors/", True),
-    ("channels/", True),
     ("agents/<name>", False),
     ("messages/<uuid:key>", False),
-    ("filters/", True),
-    ("filter/<uuid:key>", False),
     ("reports/<inforesid>", False),
-    ("timeoutTest/", True),
-    ("merge/<uuid:key>", False),
     ("retain/<uuid:key>", False),
-    ("block/<uuid:key>", False),
     ("latest_pk/<int:n>", False),
     ("query_event_subscribe/", True),
     ("query_event_unsubscribe/", True),
-    ("post_process/<uuid:key>", False),
     ("health/", True),
     ("get_status/", True),
 ]
@@ -296,19 +294,30 @@ async def submit(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
+# How many recent messages GET /api/messages lists, as upstream.
+RECENT_MESSAGE_LIMIT = 10
+
+
 @route("/api/messages", ["GET", "POST"])
 async def messages(request: Request) -> Response:
     if request.method == "GET":
-        bodies = []
-        for row in await ars_db.get_recent_messages(10):
-            bodies.append(await _envelope_bytes(row))
-        return Response(
-            content=b"[" + b",".join(bodies) + b"]",
-            media_type="application/json",
+        # Identifiers only. Upstream rendered a full envelope per message
+        # with its whole stored payload inline, so listing the last ten
+        # queries could mean serving hundreds of MB to answer "what has come
+        # through recently". Fetch a listed message by pk to get its
+        # payload. Timestamps keep the DjangoJSONEncoder spelling the rest
+        # of the API uses.
+        return dj_json(
+            [
+                {"pk": str(row["id"]), "timestamp": django_datetime(row["ts"])}
+                for row in await ars_db.get_recent_message_pks(RECENT_MESSAGE_LIMIT)
+            ]
         )
-    # POST /messages is broken upstream (looks the actor up in the Agent
-    # table, then assigns it to the actor FK) -- observable result: 500.
-    return text("Internal server error", 500)
+    # Upstream looked the actor up in the Agent table and then assigned the
+    # result to the actor FK, so this has always been a 500. Rather than
+    # reproduce that, or invent an unauthenticated message-creation endpoint
+    # nothing has ever been able to use, the collection is read-only.
+    return text("Only GET is permitted!", 405)
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +424,7 @@ async def message(key: str, request: Request) -> Response:
         if mesg is None:
             return text(f"Unknown message: {key}", 404)
         if request.query_params.get("compress", False):
-            blob = await shepherd_db.data_db_client.get(str(pk))
+            blob = await ars_db.load_message_compressed(pk, logger)
             if blob is not None:
                 return Response(
                     content=blob,
@@ -455,7 +464,17 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
         status = "D"
         code = 200
         if "tr_ars.message.status" in request.headers:
-            status = request.headers["tr_ars.message.status"]
+            # Caller-controlled: an unrecognized value used to be written
+            # straight into the CHAR(1) status column, where a one-character
+            # nonsense status is never terminal (so the parent never
+            # completes) and never 'R' (so the watchdog never reaps it).
+            raw_status = request.headers["tr_ars.message.status"]
+            status = coerce_status(raw_status, "D")
+            if status != to_letter(raw_status):
+                logger.warning(
+                    f"Ignoring unrecognized tr_ars.message.status "
+                    f"{raw_status!r} on callback for {key}; using 'D'"
+                )
         res = get_safe(data, "message", "results")
         actor = await ars_db.get_actor(mesg["actor"]) or {}
         inforesid = actor.get("inforesid")
@@ -575,7 +594,14 @@ async def _result_callback(key: uuid.UUID, request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# agents / actors / channels
+# agents / actors
+#
+# /api/channels is not served. Channels are not an independently useful
+# resource: an actor's channels are what the fanout matches on, they are
+# created implicitly by registry seeding (get_or_create_channel, still used
+# by get_or_create_actor), and each actor reports its own under
+# fields.channel. Nothing consumed the collection, and POSTing a bare
+# channel no actor references does nothing.
 # ---------------------------------------------------------------------------
 
 
@@ -631,177 +657,53 @@ async def actors(request: Request) -> Response:
             actor["fields"]["inforesid"] = a["inforesid"]
             out.append(actor)
         return dj_json(out)
+    # Upstream created the actor and THEN evaluated actor.channel.name on a
+    # list, so the AttributeError landed in its generic handler and every
+    # caller got 400 "Not a valid json format" for an actor that had in fact
+    # been created. Nothing could ever have consumed a success here, so this
+    # returns the envelope the endpoint was always meant to return.
     try:
         data = json.loads(await request.body())
-        if "model" in data and "tr_ars.agent" == data["model"]:
-            data = data["fields"]
+    except json.JSONDecodeError:
+        return text("Not a valid json format", 400)
+    if not isinstance(data, dict):
+        return text("Not a valid json format", 400)
+    # upstream compared against "tr_ars.agent" here, in an actor endpoint
+    if data.get("model") in ("tr_ars.actor", "tr_ars.agent"):
+        data = data.get("fields")
+        if not isinstance(data, dict):
+            return text('JSON does not contain a "fields" object', 400)
+    if "agent" not in data or "path" not in data:
+        return text('JSON does not contain "agent" and "path" fields', 400)
+    try:
         actor, status = await ars_db.get_or_create_actor(data)
-        # Upstream then evaluates actor.channel.name (channel is a list) and
-        # the AttributeError lands in the generic handler -> 400. The actor
-        # creation side effect above is real, as it is upstream.
-        raise AttributeError("'list' object has no attribute 'name'")
     except KeyError as e:
         return text(f"Unknown {str(e)}", 404)
     except Exception as e:
-        logger.error(f"actors POST failed: {e}")
-        return text("Not a valid json format", 400)
-
-
-@route("/api/channels", ["GET", "POST"])
-async def channels(request: Request) -> Response:
-    if request.method == "GET":
-        return Response(
-            content=json.dumps(
-                [channel_envelope(c) for c in await ars_db.list_channels()],
-                default=str,
-            ),
-            media_type="application/json",
-        )
-    try:
-        data = json.loads(await request.body())
-        if "model" in data and "tr_ars.channel" == data["model"]:
-            data = data["fields"]
-        if "name" not in data:
-            return text('JSON does not contain "name" field', 400)
-        channel, created = await ars_db.get_or_create_channel(
-            data["name"], data.get("description")
-        )
-        status = 201
-        if not created:
-            status = 302
-        return dj_json(channel_envelope(channel), status)
-    except Exception as e:
-        logger.error(f"channels POST failed: {e}")
+        logger.error(f"actors POST failed: {e}", exc_info=True)
         return text("Internal server error", 500)
+    return dj_json(actor_envelope(actor, actor.get("agent_uri", "")), status)
 
 
 # ---------------------------------------------------------------------------
-# filters
-# ---------------------------------------------------------------------------
-
-
-@route("/api/filters", ["GET"])
-async def filters_doc() -> Response:
-    filters = {
-        "hop_level": {
-            "default": int(3),
-            "description": "Returns a new message pk with results that contain N nodes or less. Takes one Int parameter, the number of nodes desired",
-            "example_url": "https://ars-prod.transltr.io/ars/api/filter/{pk}?hop=3",
-        },
-        "score_level": {
-            "default": [20, 80],
-            "description": "Returns a new message pk with results that have normalized scores between a desired range. Takes a list of min and max values to filter on",
-            "example_url": "https://ars-prod.transltr.io/ars/api/filter/{pk}?score=[20,80]",
-        },
-        "node_type": {
-            "default": ["ChemicalEntity", "BiologicalEntity"],
-            "description": "Returns a new message pk with results that dont hold the given node category. Takes a list of node categories to be eliminated",
-            "example_url": 'https://ars-prod.transltr.io/ars/api/filter/{pk}?node_type=["ChemicalEntity","BiologicalEntity"]',
-        },
-        "spec_node": {
-            "default": ["NCBIGene:2064", "MONDO:0005147"],
-            "description": "Returns a new message pk with results that dont hold the given node Curie. Takes a list of node Curies to be eliminated",
-            "example_url": 'https://ars-prod.transltr.io/ars/api/filter/{pk}?spec_node=["NCBIGene:2064","MONDO:0005147"]',
-        },
-        "multi-filtering": {
-            "example_url": 'https://ars-prod.transltr.io/ars/api/filter/{pk}?hop=3&score=[20,80]&node_type=["ChemicalEntity","BiologicalEntity"]&spec_node=["NCBIGene:2064","MONDO:0005147"]'
-        },
-    }
-    return dj_json(filters)
-
-
-def _filter_message_deepfirst(rdata, filter_name, arg):
-    results = rdata["message"]["results"]
-    kg_nodes = rdata["message"]["knowledge_graph"]["nodes"]
-    if filter_name == "hop":
-        filter_response = hop_level_filter(results, arg)
-    elif filter_name == "score":
-        filter_response = score_filter(results, arg)
-    elif filter_name == "node_type":
-        filter_response = node_type_filter(kg_nodes, results, arg)
-    elif filter_name == "spec_node":
-        filter_response = specific_node_filter(results, arg)
-    else:
-        raise KeyError(filter_name)
-    rdata["message"]["results"] = filter_response
-    return rdata, len(filter_response)
-
-
-@route("/api/filter/{key}", ["GET", "POST"])
-async def filter_endpoint(key: str, request: Request) -> Response:
-    if request.method != "GET":
-        return text("Only GET & POST are permitted!", 405)
-    pk = _parse_uuid(key)
-    if pk is None:
-        return text(f"Unknown message: {key}", 404)
-    filter_arg_list = []
-    for filter_type in request.query_params.keys():
-        value = request.query_params.getlist(filter_type)[0]
-        filter_value = ast.literal_eval(value)
-        filter_arg_list.append([filter_type, filter_value])
-
-    mesg = await ars_db.get_message_row(pk)
-    if mesg is None:
-        return text(f"Unknown message: {key}", 404)
-    actor = await ars_db.get_actor(mesg["actor"]) or {}
-    if str(actor.get("agent_name")) == "ars-default-agent":
-        default_actor = await lifecycle.ensure_default_actor()
-        new_mesg = await ars_db.create_message(
-            actor_id=default_actor["id"], status="Done", code=200
-        )
-        parent_data = await ars_db.load_message_data(pk, logger)
-        await ars_db.save_message_data(new_mesg["id"], parent_data, logger)
-        for child in await ars_db.get_children(pk):
-            if (
-                child["status"] == "D"
-                and child.get("result_count") != 0
-                and child.get("result_count") is not None
-            ):
-                rdata = await ars_db.load_message_data(child["id"], logger)
-                final_result_count = 0
-                for fil in filter_arg_list:
-                    rdata, final_result_count = _filter_message_deepfirst(
-                        rdata, fil[0], fil[1]
-                    )
-                child_mesg = await ars_db.create_message(
-                    actor_id=child["actor_id"],
-                    ref=new_mesg["id"],
-                    status="Done",
-                    code=200,
-                )
-                await ars_db.update_message(
-                    child_mesg["id"], result_count=final_result_count
-                )
-                await ars_db.save_message_data(child_mesg["id"], rdata, logger)
-        return RedirectResponse(
-            url="/ars/api/messages/" + str(new_mesg["id"]) + "?trace=y",
-            status_code=302,
-        )
-    else:
-        if mesg["status"] == "D" and mesg.get("result_count") != 0:
-            rdata = await ars_db.load_message_data(pk, logger)
-            final_result_count = 0
-            for fil in filter_arg_list:
-                rdata, final_result_count = _filter_message_deepfirst(
-                    rdata, fil[0], fil[1]
-                )
-            child_mesg = await ars_db.create_message(
-                actor_id=mesg["actor"], status="Done", code=200
-            )
-            await ars_db.update_message(
-                child_mesg["id"], result_count=final_result_count
-            )
-            await ars_db.save_message_data(child_mesg["id"], rdata, logger)
-            new_id = child_mesg["id"]
-        else:
-            return text('message doesnt have results or marked as "Done"', 400)
-        return RedirectResponse(
-            url="/ars/api/messages/" + str(new_id) + "?trace=y", status_code=302
-        )
-
-
-# ---------------------------------------------------------------------------
-# retain / block / merge / post_process / timeoutTest
+# retain
+#
+# Four upstream routes are deliberately not served here (see the divergences
+# section of docs/ARS_PARITY_REGISTER.md):
+#
+#   GET /api/block/<pk>        ran the blocklist cascade over an arbitrary
+#                              stored message and saved the result in place:
+#                              a destructive, unauthenticated edit of a
+#                              shared tree. Blocklist removal still runs
+#                              where it belongs, in ars_postprocess.
+#   GET /api/merge/<pk>        called a task that does not exist. Before
+#                              dying it created a Running merge child under
+#                              the parent -- which is never terminal, so the
+#                              parent could never complete again.
+#   GET /api/post_process/<pk> passed a dict where a Message was expected.
+#   /api/timeoutTest           returned None.
+#
+# The last three never did anything but 500, so nothing can depend on them.
 # ---------------------------------------------------------------------------
 
 
@@ -838,58 +740,6 @@ async def retain(key: str) -> Response:
     return dj_json(json_response)
 
 
-@route("/api/block/{key}", ["GET"])
-async def block(key: str) -> Response:
-    pk = _parse_uuid(key)
-    if pk is None:
-        return text(f"Unknown message: {key}", 404)
-    mesg = await ars_db.get_message_row(pk)
-    if mesg is None:
-        return text(f"Unknown message: {key}", 404)
-    data = await ars_db.load_message_data(pk, logger) or {}
-    report = remove_blocked(data, load_blocklist(), str(mesg["id"]))
-    await ars_db.save_message_data(pk, data, logger)
-    await ars_db.persist_data_copy(pk, logger)
-    httpjson = {
-        "pk": report[0],
-        "blocked_nodes": report[1],
-        "removed_results": report[2],
-    }
-    return dj_json(httpjson)
-
-
-@route("/api/merge/{key}", ["GET"])
-async def merge_debug(key: str) -> Response:
-    """Broken upstream (calls a nonexistent utils.merge task): the shell
-    merged message is created, then the request dies -> 500."""
-    pk = _parse_uuid(key)
-    if pk is None:
-        return text(f"Unknown message: {key}", 404)
-    parent = await ars_db.get_message_row(pk)
-    if parent is None:
-        return text(f"Unknown message: {key}", 404)
-    ars_actor = await lifecycle.ensure_ars_actor()
-    merged = await ars_db.create_message(
-        actor_id=ars_actor["id"], status="Running", code=202, ref=pk
-    )
-    data = await ars_db.load_message_data(pk, logger)
-    if data is not None:
-        await ars_db.save_message_data(merged["id"], data, logger)
-    return text("", 500)
-
-
-@route("/api/post_process/{key}", ["GET"])
-async def post_process_debug(key: str) -> Response:
-    """Upstream passes a dict where a Message is expected -> 500."""
-    return text("", 500)
-
-
-@route("/api/timeoutTest", ["GET", "POST"])
-async def timeout_test() -> Response:
-    """Upstream view returns None -> Django 500."""
-    return text("", 500)
-
-
 # ---------------------------------------------------------------------------
 # reports / latest_pk / get_status / health
 # ---------------------------------------------------------------------------
@@ -910,10 +760,21 @@ async def get_report(inforesid: str) -> Response:
     return JSONResponse(content=json.loads(json.dumps(report, default=str)))
 
 
+# latest_pk's path parameter is both a day count and a row limit; it walks a
+# dict entry per day, so an unbounded value is a cheap way to make the server
+# build an enormous response.
+MAX_LATEST_PK_N = 365
+
+
 @route("/api/latest_pk/{n}", ["GET"])
 async def latest_pk(n: int) -> Response:
     import datetime
 
+    if n < 1 or n > MAX_LATEST_PK_N:
+        return text(
+            f"n must be between 1 and {MAX_LATEST_PK_N}",
+            400,
+        )
     response: Dict[str, Any] = {}
     response[f"pk_count_last_{n}_days"] = {}
     response[f"latest_{n}_pks"] = []
@@ -1038,7 +899,7 @@ async def _broker_available() -> bool:
 @route("/api/health", ["GET", "POST"])
 async def health(request: Request) -> Response:
     if request.method != "GET":
-        return text("Only POST is permitted!", 405)
+        return text("Only GET is permitted!", 405)
     health_body: Dict[str, Any] = {"status": "ok"}
     code = 200
     if await _database_available():

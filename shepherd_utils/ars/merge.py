@@ -2,12 +2,21 @@
 tr_sys/tr_ars/utils.py (TranslatorMessage & co, mergeMessages,
 mergeMessagesRecursive, mergeDicts, get_msg_stats).
 
-This is a deliberately faithful port: control flow, special-cased keys, the
-early returns inside mergeDicts, the ``for``/``else`` in the node_bindings
-branch, and the swallow-and-continue exception handling are all upstream
-behavior that the golden parity suite (tests/unit/ars/test_golden_parity.py)
-pins against the original implementation. Do not "fix" oddities here without
-regenerating goldens and consciously accepting the divergence.
+Control flow, special-cased keys and the swallow-and-continue exception
+handling follow upstream, and the golden parity suite
+(tests/unit/ars/test_golden_parity.py) pins the outputs. Three upstream bugs
+are deliberately NOT reproduced (see docs/ARS_PARITY_REGISTER.md):
+
+  - ``mergeDicts`` returned out of the ``attributes`` and ``analyses``
+    branches, abandoning every key it had not reached yet;
+  - the ``node_bindings`` branch hung its ``else`` off the ``for`` instead
+    of the ``if``, so it kept only the last current-only binding -- in a
+    local map it never wrote back -- and ignored bindings past the first;
+  - ``TranslatorMessage.to_dict`` emitted ``"results": {}`` for a message
+    with no results, which is not valid TRAPI.
+
+Any further change here needs the goldens re-recorded and the divergence
+written down.
 """
 
 import copy
@@ -20,12 +29,13 @@ logger = logging.getLogger(__name__)
 
 class QueryGraph:
     def __init__(self, qg):
-        if qg is None:
-            return
-        self.__rawGraph = qg
-        self.__nodes = qg["nodes"]
-        self.__edges = qg["edges"] if "edges" in qg else []
-        self.__paths = qg["paths"] if "paths" in qg else []
+        # upstream returned early on None, leaving every attribute unset so
+        # the next getter raised AttributeError instead of reading empty
+        self.__rawGraph = qg if qg is not None else {}
+        qg = self.__rawGraph
+        self.__nodes = qg.get("nodes", {})
+        self.__edges = qg.get("edges", [])
+        self.__paths = qg.get("paths", [])
 
     def getEdges(self):
         return self.__edges
@@ -53,11 +63,11 @@ class QueryGraph:
 
 class KnowledgeGraph:
     def __init__(self, kg):
-        if kg is None:
-            return
-        self.rawGraph = kg
-        self.__nodes = kg["nodes"]
-        self.__edges = kg["edges"]
+        # as QueryGraph: empty rather than unset
+        self.rawGraph = kg if kg is not None else {"nodes": {}, "edges": {}}
+        kg = self.rawGraph
+        self.__nodes = kg.get("nodes", {})
+        self.__edges = kg.get("edges", {})
 
     def getEdges(self):
         return self.__edges
@@ -91,9 +101,8 @@ class KnowledgeGraph:
 
 class Results:
     def __init__(self, results):
-        if results is None:
-            return
-        self.__results = results
+        # as QueryGraph: empty rather than unset
+        self.__results = results if results is not None else []
 
     def getEdgeBindings(self):
         edgeBindings = []
@@ -197,7 +206,8 @@ class TranslatorMessage:
         if self.getResults() is not None:
             d["results"] = self.getResults().getRaw()
         else:
-            d["results"] = {}
+            # upstream emitted {} here -- results is a TRAPI array
+            d["results"] = []
         if self.getAuxiliaryGraphs() is not None:
             d["auxiliary_graphs"] = self.getAuxiliaryGraphs()
         else:
@@ -265,38 +275,34 @@ def mergeDicts(dcurrent, dmerged):
         if key in dmerged.keys():
             mv = dmerged[key]
             if key == "node_bindings":
-                cvv = [
-                    {node_key: node_value[0]}
-                    for node_key, node_value in cv.items()
-                    if "id" in node_value[0]
-                ]
-                mvv = [
-                    {node_key: node_value[0]}
-                    for node_key, node_value in mv.items()
-                    if "id" in node_value[0]
-                ]
-                if all(isinstance(x, dict) for x in mvv) and all(
-                    isinstance(y, dict) for y in cvv
-                ):
-                    cmap = {}
-                    mmap = {}
-                    for cd in cvv:
-                        for cd_key, cd_val in cd.items():
-                            if "id" in cd_val:
-                                cmap[cd_val["id"]] = cd_val
-                    for md in mvv:
-                        for md_key, md_val in md.items():
-                            if "id" in md_val:
-                                mmap[md_val["id"]] = md_val
-
-                    # NOTE: upstream has a for/else here (the else belongs to
-                    # the for loop, not the if) -- after the loop finishes,
-                    # the LAST ck is re-assigned into mmap. Faithfully kept.
-                    for ck in cmap.keys():
-                        if ck in mmap.keys():
-                            mmap[ck] = mergeDicts(cmap[ck], mmap[ck])
-                    else:
-                        mmap[ck] = cmap[ck]  # noqa: F821 -- upstream for/else
+                # Union the two results' bindings per query-graph node.
+                #
+                # Upstream built parallel {node: first_binding} maps, merged
+                # the ids present in both, and then -- because its ``else``
+                # hung off the ``for`` rather than the ``if`` -- copied only
+                # the LAST current-only id, into a local dict it never wrote
+                # back. So bindings past the first were ignored and
+                # current-only bindings were dropped.
+                for node_key, current_bindings in cv.items():
+                    merged_bindings = mv.get(node_key)
+                    if merged_bindings is None:
+                        mv[node_key] = current_bindings
+                        continue
+                    by_id = {
+                        b["id"]: b
+                        for b in merged_bindings
+                        if isinstance(b, dict) and "id" in b
+                    }
+                    for binding in current_bindings:
+                        if not isinstance(binding, dict) or "id" not in binding:
+                            continue
+                        existing = by_id.get(binding["id"])
+                        if existing is not None:
+                            mergeDicts(binding, existing)
+                        else:
+                            merged_bindings.append(binding)
+                            by_id[binding["id"]] = binding
+                dmerged[key] = mv
 
             # attributes are another special case. We largely want to append,
             # but combine values of matching attributes whose value are lists.
@@ -342,12 +348,15 @@ def mergeDicts(dcurrent, dmerged):
                             except Exception as e:
                                 logger.error(f"attribute merge failure: {e}")
 
-                # upstream returns early here, skipping any remaining keys
-                return dmerged
+                # upstream returned here, abandoning every key it had not
+                # reached yet -- so whatever followed "attributes" in the
+                # current dict was silently never merged
+                continue
             # analyses are a special case: append at the result level
             elif key == "analyses":
+                # likewise: upstream returned instead of continuing
                 dmerged[key] = mv + cv
-                return dmerged
+                continue
             elif isinstance(cv, dict) and isinstance(mv, dict):
                 dmerged[key] = mergeDicts(cv, mv)
             elif isinstance(mv, list) and not isinstance(cv, list):

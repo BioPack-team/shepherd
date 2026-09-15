@@ -708,50 +708,6 @@ def ordering_cases():
     ]
 
 
-def filters_input():
-    results = [
-        {
-            "node_bindings": {
-                "n0": [{"id": "CHEBI:6801"}],
-                "n1": [{"id": "MONDO:0005148"}],
-            },
-            "normalized_score": 90.0,
-        },
-        {
-            "node_bindings": {
-                "n0": [{"id": "NCBIGene:5468"}],
-                "n1": [{"id": "MONDO:0005148"}],
-                "n2": [{"id": "CHEBI:17234"}],
-            },
-            "normalized_score": 50.0,
-        },
-        {
-            "node_bindings": {
-                "n0": [{"id": "CHEBI:17234"}],
-                "n1": [{"id": "MONDO:0005148"}],
-                "n2": [{"id": "NCBIGene:5468"}],
-                "n3": [{"id": "CHEBI:6801"}],
-            },
-            "normalized_score": 25.0,
-        },
-        {
-            "node_bindings": {
-                "n0": [{"id": "UMLS:C0004096"}],
-                "n1": [{"id": "MONDO:0005148"}],
-            }
-            # no normalized_score
-        },
-    ]
-    kg_nodes = {
-        "CHEBI:6801": {"categories": ["biolink:ChemicalEntity", "biolink:Drug"]},
-        "MONDO:0005148": {"categories": ["biolink:Disease"]},
-        "NCBIGene:5468": {"categories": ["biolink:Gene"]},
-        "CHEBI:17234": {"categories": ["ChemicalEntity"]},  # no prefix
-        "UMLS:C0004096": {"categories": ["biolink:DiseaseOrPhenotypicFeature"]},
-    }
-    return {"results": results, "kg_nodes": kg_nodes}
-
-
 def mergedicts_cases():
     return [
         {"name": "disjoint", "dcurrent": {"a": 1}, "dmerged": {"b": 2}},
@@ -1077,7 +1033,6 @@ def main():
         "decorate_cases.json": decorate_cases(),
         "scores_cases.json": scores_cases(),
         "ordering_cases.json": ordering_cases(),
-        "filters_input.json": filters_input(),
         "mergedicts_cases.json": mergedicts_cases(),
     }
     for name, data in fixtures.items():

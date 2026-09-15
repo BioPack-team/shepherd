@@ -1,10 +1,15 @@
 """Parity tests for the ars_watchdog timeout sweep.
 
 Upstream reference: NCATSTranslator/Relay @ 3e65975 tasks.py
-catch_timeout_async: scan Running messages created within the last 15
-minutes; exempt parents; merge messages (ars-ars-agent) time out after 8
-minutes; everything else after 5 (the pathfinder log line says 10 but the
-code compares against now-5min); timed-out messages get code 598 / status E.
+catch_timeout_async: exempt parents; merge messages (ars-ars-agent) time out
+after 8 minutes; everything else after 5 (the pathfinder log line says 10 but
+the code compares against now-5min); timed-out messages get code 598 /
+status E.
+
+Upstream additionally scanned only messages created in the last 15 minutes.
+That ceiling is off by default here -- it made a message that outlived the
+window permanently unreapable -- so the sweep is bounded by a row limit
+instead (see get_running_messages and ars_timeout_scan_window_sec).
 """
 
 import datetime
@@ -15,6 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import shepherd_utils.ars.db as ars_db
+from shepherd_utils.config import settings
 from workers.ars_watchdog import worker as watchdog
 
 LOGGER = logging.getLogger(__name__)
@@ -93,3 +99,36 @@ async def test_kp_child_times_out_like_standard(env):
     env["get_running_messages"].return_value = [running("kp-genetics", 360)]
     await watchdog.sweep(LOGGER)
     assert env["update_message"].await_args.kwargs["code"] == 598
+
+
+# ---------------------------------------------------------------------------
+# scan bounds
+# ---------------------------------------------------------------------------
+
+
+async def test_sweep_queries_without_a_creation_ceiling_by_default(env, monkeypatch):
+    """The upper bound is off, and the query still skips rows too young to
+    have tripped any threshold."""
+    monkeypatch.setattr(settings, "ars_timeout_scan_window_sec", 0.0)
+    await watchdog.sweep(LOGGER)
+    call = env["get_running_messages"].await_args
+    assert call.args[0] == 0.0
+    assert call.kwargs["min_age_sec"] == min(
+        settings.ars_timeout_standard_sec,
+        settings.ars_timeout_pathfinder_sec,
+        settings.ars_timeout_merge_sec,
+    )
+    assert call.kwargs["limit"] == settings.ars_timeout_scan_limit
+
+
+async def test_long_stuck_message_is_still_reaped(env):
+    """A message far older than upstream's 15-minute window -- the case that
+    used to be stranded Running forever -- still times out."""
+    row = running("ara-aragorn", 86_400)
+    env["get_running_messages"].return_value = [row]
+    await watchdog.sweep(LOGGER)
+    call = env["update_message"].await_args
+    assert str(call.args[0]) == str(row["id"])
+    assert call.kwargs["code"] == 598
+    assert call.kwargs["status"] == "E"
+    env["completion"].assert_awaited_once()

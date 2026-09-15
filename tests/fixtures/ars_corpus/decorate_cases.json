@@ -94,7 +94,7 @@
     }
   },
   {
-    "name": "no_primary_raises",
+    "name": "no_primary",
     "inforesid": "infores:aragorn",
     "data": {
       "message": {

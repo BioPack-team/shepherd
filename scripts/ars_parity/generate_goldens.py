@@ -9,6 +9,11 @@ Usage:
     PYTHONHASHSEED=0 .venv-relay/bin/python scripts/ars_parity/generate_goldens.py \
         [--relay /path/to/relay/checkout]
 
+NOTE: a few golden entries deliberately record what the PORT does, not what
+upstream does -- the places where the port fixes an upstream bug. They are
+listed in the file's ``_divergences`` block; this script carries that block
+forward and prints a warning naming each entry it has just overwritten.
+
 PYTHONHASHSEED=0 keeps the handful of set-order-dependent upstream code paths
 (list(set(...)) unions) deterministic; the comparison harness additionally
 falls back to order-insensitive list comparison, so the seed is belt and
@@ -273,33 +278,6 @@ def main():
     utils.remove_phantom_support_graphs(intact)
     out["remove_phantom_intact"] = jsonable(intact)
 
-    # ---------------- filters ----------------
-    fin = load("filters_input.json")
-    out["filters"] = {
-        "hop_3": jsonable(utils.hop_level_filter(copy.deepcopy(fin["results"]), 3)),
-        "hop_4": jsonable(utils.hop_level_filter(copy.deepcopy(fin["results"]), 4)),
-        "score_20_80": jsonable(
-            utils.score_filter(copy.deepcopy(fin["results"]), [20, 80])
-        ),
-        "node_type_gene": jsonable(
-            utils.node_type_filter(
-                copy.deepcopy(fin["kg_nodes"]),
-                copy.deepcopy(fin["results"]),
-                ["Gene"],
-            )
-        ),
-        "node_type_chemical": jsonable(
-            utils.node_type_filter(
-                copy.deepcopy(fin["kg_nodes"]),
-                copy.deepcopy(fin["results"]),
-                ["ChemicalEntity"],
-            )
-        ),
-        "spec_node": jsonable(
-            utils.specific_node_filter(copy.deepcopy(fin["results"]), ["NCBIGene:5468"])
-        ),
-    }
-
     # ---------------- validate (verdict parity) ----------------
     verdicts = {}
     verdicts["aragorn"] = utils.validate(copy.deepcopy(aragorn))
@@ -356,6 +334,29 @@ def main():
     out["validate"] = verdicts
 
     path = GOLDENS / "goldens.json"
+    previous = {}
+    if path.exists():
+        previous = json.loads(path.read_text())
+    divergences = previous.get("_divergences")
+    if divergences:
+        # Carry the block forward so the declaration survives, but do NOT
+        # carry the values: these entries record what the PORT does, and
+        # this run has just overwritten them with what upstream does. The
+        # golden tests will fail until each one is re-applied deliberately.
+        out["_divergences"] = divergences
+        print(
+            "\nWARNING: this file carries deliberate divergences from upstream.\n"
+            "The entries below were just overwritten with upstream's output and\n"
+            "must be re-recorded from the port (or consciously reverted to\n"
+            "upstream parity) before the golden suite will pass again:\n"
+        )
+        for name, reason in sorted(divergences.get("entries", {}).items()):
+            print(f"  - {name}\n      {reason}")
+        print(
+            "\nSee docs/ARS_PARITY_REGISTER.md, "
+            '"Deliberate divergences from upstream".\n'
+        )
+
     path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
     print(f"wrote {path} ({path.stat().st_size} bytes)")
 

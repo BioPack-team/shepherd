@@ -262,6 +262,8 @@ def test_workflow_included_when_non_empty():
 
 
 def test_irrelevant_body_fields_excluded():
+    """Body members that never reach an ARA as query input must not
+    fragment the cache."""
     assert key(QG) == key(
         QG,
         submitter="me",
@@ -269,8 +271,31 @@ def test_irrelevant_body_fields_excluded():
         log_level="DEBUG",
         name="q",
         bypass_cache=True,
-        parameters={"overwrite_cache": True, "timeout": 30},
         validate=False,
+    )
+
+
+def test_parameters_included():
+    """``parameters`` is forwarded verbatim to every ARA by the fanout, so
+    two submits that differ there are different queries."""
+    assert key(QG) != key(QG, parameters={"timeout": 30})
+    assert key(QG, parameters={"timeout": 30}) != key(QG, parameters={"timeout": 60})
+    assert key(QG, parameters={"timeout": 30}) == key(QG, parameters={"timeout": 30})
+    # key order within parameters is not meaningful
+    assert key(QG, parameters={"a": 1, "b": 2}) == key(QG, parameters={"b": 2, "a": 1})
+
+
+def test_empty_parameters_matches_absent():
+    assert key(QG) == key(QG, parameters={})
+    assert key(QG) == key(QG, parameters=None)
+
+
+def test_cache_control_parameters_excluded():
+    """overwrite_cache steers the cache, not the query: an overwrite run has
+    to hash to the same key as the entry it is replacing."""
+    assert key(QG) == key(QG, parameters={"overwrite_cache": True})
+    assert key(QG, parameters={"timeout": 30}) == key(
+        QG, parameters={"timeout": 30, "overwrite_cache": True}
     )
 
 
