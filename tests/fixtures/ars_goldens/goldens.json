@@ -3,7 +3,9 @@
     "entries": {
       "decorate/no_primary": "upstream raised UnboundLocalError (has_primary was only ever assigned inside the loop); the port appends a primary_knowledge_source for itself, which is what the unreachable branch intended",
       "merge_ba.message.knowledge_graph.edges.e1.qualifiers": "upstream returned out of mergeDicts' attributes branch, abandoning every key it had not reached yet -- here, qualifiers",
+      "mergedicts/attributes_unhashable_dict_values": "upstream deduped the merged value list with set(), which raises on a list of objects; the generic except swallowed it, the break never ran, and the current agent's values were dropped from the attribute entirely",
       "mergedicts/node_bindings": "upstream's else hung off the for, so current-only bindings were dropped (all but the last, into a map it never wrote back); the port unions them per query-graph node",
+      "mergedicts/unhashable_lists_concat": "upstream keyed a list of objects on resource_id / qualifier_type_id and dropped every object carrying neither -- from both sides, since it replaced the merged list with the keyed map's values -- so such a list merged to []",
       "scores/mixed": "upstream popped one rank per result while ranking only the score-bearing ones, so a mixed corpus raised IndexError after misassigning the ranks it did hand out; the port assigns each rank to the result it was computed from"
     },
     "note": "Entries listed here were recorded by running this port, not the pinned upstream Relay code: each is a place where the port deliberately fixes an upstream bug. Everything else in this file still comes from scripts/ars_parity/generate_goldens.py run against Relay @ 3e65975db287a73afa4388b7dbaf3c64d0d218c4. See docs/ARS_PARITY_REGISTER.md."
@@ -1473,6 +1475,10 @@
               {
                 "pub": "PMID:1",
                 "sentence": "a"
+              },
+              {
+                "pub": "PMID:9",
+                "sentence": "b"
               }
             ]
           }
@@ -1575,7 +1581,14 @@
     {
       "name": "unhashable_lists_concat",
       "output": {
-        "a": []
+        "a": [
+          {
+            "y": 2
+          },
+          {
+            "x": 1
+          }
+        ]
       }
     }
   ],

@@ -13,7 +13,13 @@ are deliberately NOT reproduced (see docs/ARS_PARITY_REGISTER.md):
     of the ``if``, so it kept only the last current-only binding -- in a
     local map it never wrote back -- and ignored bindings past the first;
   - ``TranslatorMessage.to_dict`` emitted ``"results": {}`` for a message
-    with no results, which is not valid TRAPI.
+    with no results, which is not valid TRAPI;
+  - the ``attributes`` branch deduped a merged value list with ``set()``,
+    which raises on a list of objects and silently dropped the current
+    agent's values for that attribute (see ``_union_values``);
+  - the list-of-objects branch keyed entries on ``resource_id`` /
+    ``qualifier_type_id`` and dropped every object carrying neither, from
+    both sides, so such a list merged to ``[]``.
 
 Any further change here needs the goldens re-recorded and the divergence
 written down.
@@ -265,6 +271,58 @@ def mergeMessagesRecursive(mergedMessage, messageList, pk):
         return mergeMessagesRecursive(mergedMessage, messageList, pk)
 
 
+def _object_key(item):
+    """What mergeDicts matches two objects in a list on, or None."""
+    for field in ("resource_id", "qualifier_type_id"):
+        if field in item:
+            return (field, item[field])
+    return None
+
+
+def _value_key(value):
+    """A stable identity for one attribute value, hashable or not.
+
+    Scalars are keyed by (type, value) so 1, True and "1" stay distinct;
+    anything else is keyed by its sorted-key serialization, which gives
+    dicts and lists an identity a set can hold.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return (type(value).__name__, value)
+    try:
+        return ("json", json.dumps(value, sort_keys=True, default=repr))
+    except Exception:
+        return ("repr", repr(value))
+
+
+def _as_value_list(value):
+    if isinstance(value, list):
+        return value
+    return [] if value is None else [value]
+
+
+def _union_values(merged_value, current_value):
+    """Union two attribute value lists, preserving order and dropping repeats.
+
+    Upstream did ``list(set(merged + current))``. A value list of OBJECTS --
+    publications carrying metadata, for instance -- raised
+    ``TypeError: unhashable type: 'dict'``; the generic except swallowed it,
+    the ``break`` never ran, and because this is the else-branch of "append
+    the whole attribute", the current agent's values were dropped from the
+    merged message entirely. Serializing unhashable members gives them an
+    identity to dedupe on, and keeping insertion order makes the result
+    independent of the hash seed (upstream's set union was not).
+    """
+    out = []
+    seen = set()
+    for value in _as_value_list(merged_value) + _as_value_list(current_value):
+        key = _value_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
 def mergeDicts(dcurrent, dmerged):
     if dcurrent is None:
         dcurrent = {}
@@ -331,22 +389,25 @@ def mergeDicts(dcurrent, dmerged):
                         ):
                             mv.append(current_attribute)
                         else:
+                            folded = False
                             try:
                                 for merged_attribute in mv:
                                     if (
-                                        merged_attribute["attribute_type_id"]
+                                        merged_attribute.get("attribute_type_id")
                                         == current_type_id
                                     ):
-                                        new_value = list(
-                                            set(
-                                                merged_attribute["value"]
-                                                + current_attribute["value"]
-                                            )
+                                        merged_attribute["value"] = _union_values(
+                                            merged_attribute.get("value"),
+                                            current_attribute["value"],
                                         )
-                                        merged_attribute["value"] = new_value
+                                        folded = True
                                         break
                             except Exception as e:
                                 logger.error(f"attribute merge failure: {e}")
+                            if not folded:
+                                # never silently drop a contribution: if the
+                                # fold did not happen, keep the attribute
+                                mv.append(current_attribute)
 
                 # upstream returned here, abandoning every key it had not
                 # reached yet -- so whatever followed "attributes" in the
@@ -366,29 +427,31 @@ def mergeDicts(dcurrent, dmerged):
                     if all(isinstance(x, dict) for x in mv) and all(
                         isinstance(y, dict) for y in cv
                     ):
-                        cmap = {}
+                        # Objects are matched on resource_id / qualifier_type_id.
+                        # Upstream dropped every object carrying NEITHER field --
+                        # from both sides, since it replaced the merged list with
+                        # the keyed map's values -- so a list of objects of any
+                        # other shape merged to []. They are carried through here
+                        # instead, deduped, after the keyed ones.
                         mmap = {}
-                        for cd in cv:
-                            if "resource_id" in cd.keys():
-                                cmap[cd["resource_id"]] = cd
-                            elif "qualifier_type_id" in cd.keys():
-                                cmap[cd["qualifier_type_id"]] = cd
-                            else:
-                                pass
+                        unkeyed = []
                         for md in mv:
-                            if "resource_id" in md.keys():
-                                mmap[md["resource_id"]] = md
-                            elif "qualifier_type_id" in md.keys():
-                                mmap[md["qualifier_type_id"]] = md
+                            mkey = _object_key(md)
+                            if mkey is None:
+                                unkeyed.append(md)
                             else:
-                                pass
-
-                        for ck in cmap.keys():
-                            if ck in mmap.keys():
-                                mmap[ck] = mergeDicts(cmap[ck], mmap[ck])
+                                mmap[mkey] = md
+                        for cd in cv:
+                            ckey = _object_key(cd)
+                            if ckey is None:
+                                unkeyed.append(cd)
+                            elif ckey in mmap:
+                                mmap[ckey] = mergeDicts(cd, mmap[ckey])
                             else:
-                                mmap[ck] = cmap[ck]
-                        dmerged[key] = list(mmap.values())
+                                mmap[ckey] = cd
+                        dmerged[key] = list(mmap.values()) + _union_values(
+                            None, unkeyed
+                        )
 
                     elif all(isinstance(x, typing.Hashable) for x in mv) and all(
                         isinstance(y, typing.Hashable) for y in cv
