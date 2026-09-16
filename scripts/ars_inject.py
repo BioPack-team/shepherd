@@ -189,7 +189,7 @@ async def wait_for_merge_count(client, base, parent_pk, count) -> None:
         if time.perf_counter() > deadline:
             raise TimeoutError(
                 f"merge #{count} never landed ({len(merged)} in "
-                f"{MERGE_WAIT_SECONDS:.0f}s) -- check ars_merge/ars_postprocess logs"
+                f"{MERGE_WAIT_SECONDS:.0f}s) -- check ars_premerge/ars_merge logs"
             )
         await asyncio.sleep(2)
 

@@ -16,6 +16,7 @@ import asyncio
 import gzip
 import json
 import logging
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -595,8 +596,81 @@ async def save_message_data(
     )
 
 
+# ---------------------------------------------------------------------------
+# The merge-ready index: which validated ARA children of a parent still have
+# to be folded into its merged message. ars_premerge adds a child here and
+# then wakes ars.merge; the merge worker that holds the parent's lock drains
+# the index in arrival order (a sorted set scored by arrival time), so a wake
+# task is only a hint and a child is never merged twice or skipped because a
+# second worker lost the lock. Lives in the data store next to the payloads,
+# under the same TTL.
+# ---------------------------------------------------------------------------
+
+READY_CHILDREN_PREFIX = "ars:merge-ready:"
+
+
+def _ready_children_key(parent_pk) -> str:
+    return f"{READY_CHILDREN_PREFIX}{parent_pk}"
+
+
+async def add_ready_child(parent_pk, child_pk, logger: logging.Logger) -> None:
+    """Record a validated child as ready to fold into its parent's merge.
+
+    The index is the merge worker's only source of work -- a child missing
+    from it is never merged and its results silently vanish from the final
+    answer, while the completion arithmetic keeps waiting for a merge child
+    that never comes. So this retries through transient Redis pressure
+    (ZADD is idempotent) and RAISES if it still cannot land, so the caller
+    can fail the child instead of stranding the parent.
+    """
+    key = _ready_children_key(parent_pk)
+    last_error: Optional[Exception] = None
+    for attempt in range(3):
+        if attempt:
+            await asyncio.sleep(0.1 * (2**attempt))
+        try:
+            async with shepherd_db.data_db_client.pipeline(transaction=True) as pipe:
+                pipe.zadd(key, {str(child_pk): time.time()}, nx=True)
+                pipe.expire(key, settings.redis_ttl)
+                await pipe.execute()
+            return
+        except Exception as e:
+            last_error = e
+            logger.error(
+                f"Failed to record merge-ready child {child_pk} of {parent_pk} "
+                f"(attempt {attempt}): {e}"
+            )
+    raise RuntimeError(
+        f"Could not record merge-ready child {child_pk} of {parent_pk}"
+    ) from last_error
+
+
+async def get_ready_children(parent_pk, logger: logging.Logger) -> List[str]:
+    """Child pks waiting to be folded into ``parent_pk``, oldest first."""
+    try:
+        members = await shepherd_db.data_db_client.zrange(
+            _ready_children_key(parent_pk), 0, -1
+        )
+    except Exception as e:
+        logger.error(f"Failed to read merge-ready children of {parent_pk}: {e}")
+        return []
+    return [m.decode() if isinstance(m, bytes) else m for m in members]
+
+
+async def clear_ready_child(parent_pk, child_pk, logger: logging.Logger) -> None:
+    """Drop a folded (or abandoned) child from its parent's merge-ready index."""
+    try:
+        await shepherd_db.data_db_client.zrem(
+            _ready_children_key(parent_pk), str(child_pk)
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to clear merge-ready child {child_pk} of {parent_pk}: {e}"
+        )
+
+
 # The query's root OTel trace context, stored at submit so callback-side
-# stages (merge/postprocess/notify) can rejoin the submit trace even when
+# stages (premerge/merge/notify) can rejoin the submit trace even when
 # an ARA doesn't propagate traceparent into its async callback POST.
 # Telemetry only: failures are logged at debug and never break the pipeline.
 OTEL_CARRIER_TTL_SECONDS = 7 * 24 * 3600

@@ -2,7 +2,7 @@
 
 Ported from NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/utils.py
 remove_blocked, restructured to operate purely on the data dict (the Django
-Message save side effects are hoisted to the ars_postprocess worker). The
+Message save side effects are hoisted to the ars_merge worker). The
 removal cascade -- nodes, their edges, aux graphs whose edges vanished,
 support_graph attribute pruning (an edge losing its last support graph is
 itself removed), and result/analysis/binding pruning -- follows upstream.

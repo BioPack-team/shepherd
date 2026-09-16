@@ -88,10 +88,14 @@ permission error rather than silently continuing.
 Shepherd also hosts a port of the NCATS Translator ARS
 ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)) at
 `/ars/...` -- the same `/ars/api/submit` / `messages/<pk>?trace=y` /
-`get_status` surface the Translator UI uses, backed by six workers
-(`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_postprocess`,
-`ars_watchdog`, `ars_notify`) on the shared Redis Streams fabric instead of
-Celery/RabbitMQ, and `ars_*` Postgres tables instead of MySQL.
+`get_status` surface the Translator UI uses, backed by five workers
+(`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_watchdog`, `ars_notify`)
+on the shared Redis Streams fabric instead of Celery/RabbitMQ, and `ars_*`
+Postgres tables instead of MySQL. `ars_premerge` validates each ARA response
+in a process pool; `ars_merge` folds each validated response into the
+query's merged message and post-processes the new version in the same
+pool child, draining every response that is ready for a query under one
+lock (the merge_message worker's pattern).
 
 The ARS is **de-federated**: it talks only to the ARAs this same Shepherd
 deployment hosts (`shepherd_utils/ars/aras.py` -- Aragorn, ARAX, BTE), and

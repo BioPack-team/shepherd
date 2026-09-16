@@ -247,7 +247,7 @@ async def submit(request: Request) -> Response:
             message["id"], data, logger, raise_on_failure=True
         )
         # Root the query's trace here and remember the carrier: every later
-        # stage (fanout now; merge/postprocess/notify from the callback side)
+        # stage (fanout now; premerge/merge/notify from the response side)
         # rejoins this trace, giving one end-to-end trace per query even when
         # an ARA doesn't propagate traceparent into its callback.
         carrier: Dict[str, str] = {}
@@ -466,7 +466,8 @@ async def list_aras(request: Request) -> Response:
 #                              stored message and saved the result in place:
 #                              a destructive, unauthenticated edit of a
 #                              shared tree. Blocklist removal still runs
-#                              where it belongs, in ars_postprocess.
+#                              where it belongs, in ars_merge's
+#                              post-process stage.
 #   GET /api/merge/<pk>        called a task that does not exist. Before
 #                              dying it created a Running merge child under
 #                              the parent -- which is never terminal, so the

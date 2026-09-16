@@ -51,7 +51,7 @@ accept each behavioral change.
 | Layer | What it pins | Where |
 |---|---|---|
 | 1. Golden function parity | merge/premerge/scoring/blocklist/validation outputs, byte-compared to upstream runs | `tests/unit/ars/test_golden_parity.py` |
-| 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines, the ARA roster + broker handoff | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_premerge.py`, `test_ars_merge_worker.py`, `test_ars_postprocess.py`, `test_ars_watchdog.py`, `test_ars_notify.py`, `test_aras.py` |
+| 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines, the ARA roster + broker handoff | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_premerge.py`, `test_ars_merge_worker.py` (fold + post-process), `test_ars_watchdog.py`, `test_ars_notify.py`, `test_aras.py` |
 | 3. API contract | paths, methods, status codes, error bodies, envelope shapes | `test_envelope.py`, `test_ars_api_contract.py` |
 | 3b. Deliberate divergences | the upstream bugs the port does NOT reproduce | `test_upstream_bugfixes.py` |
 | 4. Differential end-to-end | both stacks against the same mocked world | `tests/parity_e2e/` (run on demand; see its README -- since de-federation it compares the post-response pipeline only, as Shepherd's fan-out no longer reaches the mock ARAs) |
@@ -105,9 +105,9 @@ Infrastructure substitutions (behavior-preserving by definition):
 
 | Upstream | Port |
 |---|---|
-| Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.postprocess`, `ars.notify`) + the `ars_watchdog` loop |
+| Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.notify`) + the `ars_watchdog` loop |
 | MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + `ars_message.data` bytea (durable, written at terminal status) |
-| `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent (semaphore column still maintained for envelope parity) |
+| `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent, lock-and-drain: `ars_premerge` records each validated child in a merge-ready index and wakes `ars.merge`; the worker that wins the parent's lock folds every ready child in arrival order and a loser simply acks (the semaphore column is still maintained for envelope parity; see deviation 17) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
 | self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |
 | `Agent` / `Channel` / `Actor` tables, seeded from the `tr_ara_*` apps and `config.yaml`, with `/agents` + `/actors` to list and add to them | a static roster (`shepherd_utils/ars/aras.py`); `ars_message.agent` records the agent name a row belongs to instead of an actor FK; `GET /ars/api/aras` lists the roster with each ARA's live worker count |
@@ -122,12 +122,13 @@ Behavioral deviations:
    upstream, with two deltas. (a) *Version pinning*: Relay installs the
    package as an unpinned git dependency off master, so its annotation
    logic shifts per image build; the port pins commit `82d3acc` in
-   `workers/ars_postprocess/requirements.txt` and `test-requirements.txt`
-   -- bump deliberately when re-pinning. (b) *Invocation*: the async
-   worker awaits `annotate_curie_list` directly. Upstream's event-loop
-   dance has two branches: celery's sync workers always take
-   `run_until_complete` (to which the direct await is equivalent), while
-   the `loop.is_running()` branch would hand back a Future and crash the
+   `workers/ars_merge/requirements.txt` and `test-requirements.txt`
+   -- bump deliberately when re-pinning. (b) *Invocation*: the
+   post-process runs in `ars_merge`'s process-pool child under
+   `asyncio.run`, which awaits `annotate_curie_list` directly. Upstream's
+   event-loop dance has two branches: celery's sync workers always take
+   `run_until_complete` (to which this is equivalent), while the
+   `loop.is_running()` branch would hand back a Future and crash the
    consumption loop -- a branch a sync celery worker never takes, not
    reproduced. The consumption loop itself is verbatim (notfound-list
    skip, empty-dict skip, direct node indexing, quirky crash modes ->
@@ -278,6 +279,36 @@ Behavioral deviations:
     path. `GET /ars/api/latest_pk/<n>` and `/retain/<pk>` treat every
     submitted query as a parent (upstream keyed both on the default
     actor, which excluded workflow parents).
+17. **Merge and post-process run together, draining a ready index**
+    (post-parity change, accepted 2026-09-16). Upstream ran the fold and
+    `post_process` in one Celery task; the port had split them across
+    `ars_merge` and an `ars_postprocess` worker, which loaded, decoded,
+    and re-saved the merged message a second time and let two versions of
+    one parent post-process concurrently. They are one worker again:
+    `ars_merge` folds a child and post-processes the new version in the
+    same process-pool child that already holds it (blocklist, scrub,
+    annotation, confidence, stats, with the same 444/422 stage codes).
+    Work arrives through a per-parent merge-ready index (a sorted set in
+    the data store) that `ars_premerge` writes before waking the stream;
+    the worker that wins the parent's lock (`try_lock`, non-blocking)
+    drains the index in arrival order, one merged version per child, and
+    a worker that loses the lock acks without waiting or re-enqueueing
+    (the previous port waited up to a minute on the lock and then
+    re-enqueued itself with no backoff). Every merged version still gets
+    its own row, its own `merged_versions_list` entry, its own post-process
+    pass, and its own `merged_version_available` notification, so the
+    completion arithmetic (one Done merge child per result-bearing ARA
+    child) and every subscriber-visible shape are unchanged. Two timing
+    differences: `merged_version_begun` is emitted after the fold and
+    post-process have both finished (immediately before
+    `merged_version_available`) instead of between them, and
+    `parent.merged_version` is only ever advanced to a version that is
+    already post-processed, so a reader never fetches a 202 merged
+    version through it. `ars_premerge` likewise runs its stages in a
+    process pool (they ran in threads under the GIL before) and, if a
+    validated child cannot be recorded in the index, fails that child
+    E/500 rather than leaving its parent waiting on a merge that never
+    comes.
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 
@@ -312,7 +343,7 @@ failure is the prompt to re-decide each one, not a bug).
 | `TranslatorMessage.to_dict` emitted `"results": {}` for a message with no results | `[]`, as TRAPI requires |
 | `remove_blocked` pruned pathfinder `path_bindings` for only the last path id (its removal loop was dedented out of the per-path loop and shadowed the dict with its own values) | every path id is pruned |
 | `remove_blocked` matched analysis-level `support_graphs` (aux graph ids) against removed EDGE ids — never a match — so support graphs that really had gone away stayed on the analysis | matched against removed aux graph ids |
-| The notification `stats` block keyed off the parent's `result_count`, which nothing ever set, and counted aux graphs from a `data` argument no caller passed — so stats were never attached, and would have read 0 if they had been | `ars_postprocess` carries the merge's result count up to the parent; the aux count comes from the `params.stats` the merge already recorded |
+| The notification `stats` block keyed off the parent's `result_count`, which nothing ever set, and counted aux graphs from a `data` argument no caller passed — so stats were never attached, and would have read 0 if they had been | `ars_merge` carries the merge's result count up to the parent after post-processing; the aux count comes from the `params.stats` the merge already recorded |
 
 ### Stuck or unbounded state
 
@@ -329,7 +360,7 @@ failure is the prompt to re-decide each one, not a bug).
 
 | Upstream | Port |
 |---|---|
-| `GET /ars/api/block/<pk>` ran the blocklist cascade over an arbitrary stored message and saved the result in place — an unauthenticated destructive edit of a shared tree, which also 500s on any response without `auxiliary_graphs` | **not served**, and dropped from the `api/` index. Blocklist removal still runs where it belongs, in `ars_postprocess` over each merged message |
+| `GET /ars/api/block/<pk>` ran the blocklist cascade over an arbitrary stored message and saved the result in place — an unauthenticated destructive edit of a shared tree, which also 500s on any response without `auxiliary_graphs` | **not served**, and dropped from the `api/` index. Blocklist removal still runs where it belongs, in `ars_merge`'s post-process stage over each merged message |
 | `GET /ars/api/merge/<pk>` called `utils.merge.apply_async`, which does not exist. Before dying it created a Running merge child under the parent — never a terminal status, so that parent could never complete again | **not served** |
 | `GET /ars/api/post_process/<pk>` passed a dict where a `Message` was expected → 500; `/ars/api/timeoutTest` returned `None` → 500 | **not served** (neither ever did anything else) |
 | `POST /ars/api/messages` looked the actor up in the Agent table and assigned the result to the actor FK → 500 | `405 Only GET is permitted!`. The collection is read-only: nothing can depend on a route that never succeeded, and unauthenticated out-of-band message creation is not a surface worth adding |
