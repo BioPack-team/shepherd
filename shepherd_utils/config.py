@@ -78,7 +78,12 @@ class Settings(BaseSettings):
     # OOMing the server buffering it and, once merged, the downstream CPU-bound
     # workers. Anything larger is rejected with 413 before it is read into
     # memory. Accepts Kubernetes-style sizes ("100MB", "512Mi", ...) or a plain
-    # byte count; 0 (or unparseable) disables the limit.
+    # byte count; 0 (or unparseable) disables the limit. A zstd-encoded body
+    # is checked against the same cap *decompressed*, since that is what has
+    # to be held in memory. A rejected callback fails its whole query as
+    # RESPONSE_TOO_LARGE (see shepherd_utils/response_limit.py): the query
+    # ends with an empty response saying why rather than a partial one that
+    # silently omits the rejected data.
     callback_max_request_size: str = "0"
     kg_retrieval_url: str = "http://host.docker.internal:8080/asyncquery"
     sync_kg_retrieval_url: str = "http://host.docker.internal:8080/query"
@@ -194,6 +199,17 @@ class Settings(BaseSettings):
     # queue for hours. Kept above 1 so a genuine transient (a one-off broker blip
     # or a rollout that interrupts a task mid-flight) still gets retried. 0
     # disables the breaker (unbounded retries -- the old behavior).
+    #
+    # The same number bounds the merge_message worker's per-query crash
+    # counter (shepherd_utils/db.py, bump_merge_crashes): each merge pass is
+    # counted in Redis before it starts and cleared when it returns, so a pass
+    # that took the process down with it -- child or whole container -- is
+    # still counted on the next pod. Once a response's merge has crashed this
+    # many times without completing, the query is failed RESPONSE_TOO_LARGE
+    # instead of being retried again. This is what actually stops a merge OOM
+    # crash loop: the stream-message delivery count above can't, because a
+    # query has one wake message per callback and every one re-drains the
+    # same ready set.
     max_task_deliveries: int = 3
 
     # Pre-flight response-size guard for the message-processing workers. Loading a
@@ -212,6 +228,19 @@ class Settings(BaseSettings):
     # (tune from the size of a known-bad response). Accepts Kubernetes-style sizes
     # ("250MB", "256Mi", ...) or a plain byte count; 0 (or unparseable) disables
     # the guard -- the delivery-count breaker above is the always-on backstop.
+    #
+    # Enforced in two places. Every standard worker checks the response before
+    # loading it (run_task_lifecycle), and finish_query checks it before
+    # delivering. The merge_message worker treats it as the budget for the
+    # accumulated response: a single callback over it, an accumulator already
+    # over it, or an accumulator that ends a merge pass over it all fail the
+    # query. Merge passes are sized so the accumulator plus the callbacks
+    # folded in one pass stay within the cap (one callback is always folded, so
+    # the overshoot within a pass is at most one callback, itself under the
+    # cap): budget peak memory for the merge pod at roughly 2 x this x 6-7.
+    # A breach never produces a partial answer -- the whole response is
+    # discarded and the query finishes RESPONSE_TOO_LARGE with an empty
+    # message saying so (shepherd_utils/response_limit.py).
     max_response_size: str = "0"
 
     # Graceful shutdown. On SIGTERM/SIGINT (Kubernetes sends SIGTERM on every

@@ -149,14 +149,55 @@ def decode_message(blob: bytes) -> Any:
     return orjson.loads(zstandard.decompress(blob))
 
 
-def decompress_zstd(blob: bytes) -> bytes:
+class DecompressedTooLargeError(Exception):
+    """Raised by ``decompress_zstd`` when a frame's output exceeds the cap."""
+
+
+# Chunk size for the bounded streaming decompress below.
+_DECOMPRESS_CHUNK_BYTES = 1 << 20
+
+
+def decompress_zstd(blob: bytes, max_bytes: int = 0) -> bytes:
     """Decompress a zstd frame into raw bytes.
 
     Uses a streaming reader so it handles both frames with an embedded content
     size and streaming frames that omit it (unlike the one-shot
     ``zstandard.decompress``).
+
+    ``max_bytes`` bounds the *decompressed* output: zstd routinely packs TRAPI
+    JSON 10-20x, so a body cap measured on the wire says little about what a
+    compressed body will expand to in memory. The frame header's content size
+    is checked first so an honest frame is rejected before any output is
+    produced; the stream is then read in chunks and abandoned the moment the
+    running total crosses the cap, so a frame that omits (or lies about) its
+    content size can't expand unboundedly either. Raises
+    ``DecompressedTooLargeError`` when the cap is exceeded; 0 disables it.
     """
-    return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)).read()
+    reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob))
+    if max_bytes <= 0:
+        return reader.read()
+    try:
+        declared = zstandard.frame_content_size(blob)
+    except zstandard.ZstdError:
+        declared = -1
+    if declared is not None and declared > max_bytes:
+        raise DecompressedTooLargeError(
+            f"zstd frame declares {declared} decompressed bytes, over the "
+            f"{max_bytes}-byte limit"
+        )
+    chunks = []
+    total = 0
+    while True:
+        chunk = reader.read(_DECOMPRESS_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise DecompressedTooLargeError(
+                f"zstd frame decompresses past the {max_bytes}-byte limit"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # Idempotent DDL applied on every startup. The image's init_db.sql only runs
@@ -553,6 +594,70 @@ async def clear_ready_callback(
         await data_db_client.srem(key, callback_id)
     except Exception as e:
         logger.error(f"Failed to clear ready callback {callback_id}: {e}")
+
+
+async def clear_ready_callbacks(
+    response_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Drop every ready callback for ``response_id`` in one go.
+
+    Used when a query is being failed outright (see
+    ``shepherd_utils.response_limit``): nothing that has arrived for it will be
+    merged, so the whole index goes rather than one member at a time.
+    """
+    key = _ready_callbacks_key(response_id)
+    try:
+        await data_db_client.delete(key)
+    except Exception as e:
+        logger.error(f"Failed to clear ready callbacks for {response_id}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Per-query merge crash counter
+#
+# The merge_message worker's in-process retry counter rides in the wake task's
+# fields, and the Redis Streams delivery count the reclaim breaker reads is per
+# stream message -- but a query has one wake message per callback, and every
+# one of them re-drains the same ready set. So neither survives the failure
+# mode that matters: a merge so large the *whole container* is OOM-killed.
+# The count of times a merge for this response was started and never came
+# back has to live outside the process, in Redis, keyed by the response.
+# ---------------------------------------------------------------------------
+
+MERGE_CRASHES_PREFIX = "merge_crashes:"
+
+
+def _merge_crashes_key(response_id: str) -> str:
+    return f"{MERGE_CRASHES_PREFIX}{response_id}"
+
+
+async def bump_merge_crashes(response_id: str) -> int:
+    """Record that a merge pass for ``response_id`` is starting; returns the
+    number of passes started without finishing, this one included."""
+    key = _merge_crashes_key(response_id)
+    async with data_db_client.pipeline(transaction=True) as pipe:
+        pipe.incr(key)
+        pipe.expire(key, settings.redis_ttl)
+        count, _ = await pipe.execute()
+    return int(count)
+
+
+async def get_merge_crashes(response_id: str) -> int:
+    """How many merge passes for ``response_id`` started and never finished."""
+    raw = await data_db_client.get(_merge_crashes_key(response_id))
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def clear_merge_crashes(response_id: str) -> None:
+    """A merge pass for ``response_id`` came back (success or a Python error),
+    so it didn't crash the process: forget the count."""
+    await data_db_client.delete(_merge_crashes_key(response_id))
 
 
 # ---------------------------------------------------------------------------

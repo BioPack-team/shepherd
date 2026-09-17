@@ -23,10 +23,16 @@ from .broker import (
     mark_task_as_complete,
 )
 from .config import settings
-from .db import initialize_db, save_logs
+from .db import (
+    ResponseTooLargeError,
+    enforce_response_size_limit,
+    initialize_db,
+    save_logs,
+)
 from .heartbeat import Heartbeat
 from .logger import attach_query_handler, resolve_log_level, setup_logging
 from .reclaim import reclaim_orphaned
+from .response_limit import fail_response_too_large
 from .task_deadline import (
     TIMEOUT_STATUS,
     carry_deadline,
@@ -791,6 +797,40 @@ async def handle_task_failure(
 _tracer = trace.get_tracer(__name__)
 
 
+async def _guard_response_size(
+    stream: str,
+    task: Tuple[str, dict],
+    logger: logging.Logger,
+) -> None:
+    """Refuse to run an operation on a response too large to load.
+
+    Every standard worker begins by loading the query's response and parsing
+    it into a Python object tree several times the size of its JSON; one big
+    enough is OOM-killed mid-load, an uncatchable SIGKILL that no worker-level
+    try/except can turn into a clean failure. So the size is checked here,
+    once for all of them, from the zstd frame header (no load, no decompress)
+    before ``worker_fn`` is called. A response over ``max_response_size`` is
+    discarded outright (``fail_response_too_large``: empty message, marker,
+    callbacks cleared, CRITICAL log) and the error re-raised so the lifecycle
+    routes the task to ``finish_query``, which records ``RESPONSE_TOO_LARGE``.
+
+    A cap of 0 (the default) disables the check without touching the
+    datastore.
+    """
+    if settings.max_response_size_bytes <= 0:
+        return
+    fields = task[1] if len(task) > 1 and isinstance(task[1], dict) else {}
+    response_id = fields.get("response_id")
+    query_id = fields.get("query_id")
+    if not response_id or not query_id:
+        return
+    try:
+        await enforce_response_size_limit(response_id, logger)
+    except ResponseTooLargeError as e:
+        await fail_response_too_large(query_id, response_id, f"{stream}: {e}", logger)
+        raise
+
+
 async def run_task_lifecycle(
     stream: str,
     group: str,
@@ -814,6 +854,7 @@ async def run_task_lifecycle(
     start = time.time()
     with _tracer.start_as_current_span(stream, context=parent_ctx) as span:
         try:
+            await _guard_response_size(stream, task, logger)
             await worker_fn(task, logger)
             # Always wrap up the task to ACK it in the broker
             try:

@@ -14,12 +14,20 @@ from opentelemetry.trace import Status, StatusCode, get_current_span
 
 from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import (
+    ResponseTooLargeError,
     cleanup_callbacks,
+    enforce_response_size_limit,
     get_logs,
     get_message,
     get_query_state,
     save_logs,
     set_query_completed,
+)
+from shepherd_utils.response_limit import (
+    TOO_LARGE_STATUS,
+    fail_response_too_large,
+    get_too_large_reason,
+    write_too_large_response,
 )
 from shepherd_utils.shared import get_tasks
 from shepherd_utils.logger import get_worker_logger
@@ -248,6 +256,28 @@ async def send_callback(
     return delivered
 
 
+async def _too_large_reason(
+    query_id: str, response_id: str, logger: logging.Logger
+) -> "str | None":
+    """Why this response was (or is now) discarded as too large, else None.
+
+    A response an earlier stage already discarded carries a marker. One that
+    nobody checked -- the merge is the usual grower, but it only checks when
+    the cap is on -- is checked here from the zstd header before the raw load
+    below, so this worker can't be OOM-killed holding it either.
+    """
+    reason = await get_too_large_reason(response_id)
+    if reason is not None:
+        return reason
+    try:
+        await enforce_response_size_limit(response_id, logger)
+    except ResponseTooLargeError as e:
+        reason = f"finish_query: {e}"
+        await fail_response_too_large(query_id, response_id, reason, logger)
+        return reason
+    return None
+
+
 async def finish_query(task, logger: logging.Logger):
     """Do all the wrap up necessary for a query."""
     start = time.time()
@@ -260,10 +290,28 @@ async def finish_query(task, logger: logging.Logger):
     if query_state is None:
         logger.error(f"Query id {query_id} not found in db.")
     else:
+        too_large = await _too_large_reason(query_id, response_id, logger)
+        if too_large is not None:
+            # The response was discarded as too large somewhere along the way.
+            # Whatever the task says, that is the status the query ends with,
+            # and what gets delivered is the empty message saying so. It is
+            # rewritten here rather than trusted: a merge pass that was
+            # already in flight when the query was failed can have saved the
+            # big accumulator over the top of it.
+            status = TOO_LARGE_STATUS
+            logger.error(
+                f"Query {query_id} finishing with status {status}: {too_large}"
+            )
+            too_large_response = await write_too_large_response(
+                query_id, response_id, too_large, logger
+            )
         callback_url = query_state[8]
         if callback_url is not None:
             # this was an async query, need to send message back
-            message_bytes = await get_message(response_id, logger, raw=True)
+            if too_large is not None:
+                message_bytes = orjson.dumps(too_large_response)
+            else:
+                message_bytes = await get_message(response_id, logger, raw=True)
             logs = await get_logs(response_id, logger)
             logs_bytes = orjson.dumps(logs)
             # Splice logs into the raw JSON bytes to avoid deserializing and

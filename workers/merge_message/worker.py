@@ -10,7 +10,7 @@ import uuid
 from collections import defaultdict
 from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 from shepherd_utils.broker import (
     add_task,
@@ -22,9 +22,13 @@ from shepherd_utils.broker import (
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import (
+    bump_merge_crashes,
+    clear_merge_crashes,
     clear_ready_callback,
+    get_merge_crashes,
     get_message_sync,
     get_ready_callbacks,
+    get_response_size,
     message_exists,
     remove_callback_id,
     save_logs,
@@ -39,6 +43,10 @@ from shepherd_utils.logger import (
 )
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
+from shepherd_utils.response_limit import (
+    fail_response_too_large,
+    get_too_large_reason,
+)
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
 
 # Queue name
@@ -886,6 +894,85 @@ async def _handle_merge_failure(task, response_id, ready, logger):
     await _reenqueue_wake_task(task, logger, attempt)
 
 
+def _too_many_crashes(crashes: int) -> bool:
+    """Whether a merge that has crashed ``crashes`` times gets another try.
+
+    Bounded by ``max_task_deliveries``, the same number the reclaim breaker
+    uses for a stream message; 0 disables it.
+    """
+    limit = int(settings.max_task_deliveries)
+    return 0 < limit <= crashes
+
+
+def _crash_reason(crashes: int) -> str:
+    return (
+        f"merging this response has crashed the merge worker {crashes} time(s) "
+        f"in a row (max_task_deliveries={settings.max_task_deliveries}); that "
+        "is almost always an out-of-memory kill from a response too large to "
+        "hold in memory"
+    )
+
+
+def _over_cap_reason(what: str, size: int, max_bytes: int) -> str:
+    return (
+        f"{what} is {size} uncompressed bytes, over the {max_bytes}-byte "
+        f"max_response_size ({settings.max_response_size})"
+    )
+
+
+async def _fit_batch_to_budget(
+    response_id: str,
+    ready: list[str],
+    logger: logging.Logger,
+) -> tuple[list[str], Optional[str]]:
+    """Size a merge pass to ``max_response_size``, or say why it can't be run.
+
+    Sizes are read from each blob's zstd frame header (``get_response_size``:
+    a few bytes, no load), so this costs one round trip per callback and never
+    materializes anything. Returns ``(batch, None)`` with the longest prefix
+    of ``ready`` whose uncompressed sizes fit alongside the accumulator within
+    the cap -- always at least one callback, so a pass can only overshoot by a
+    single callback and the merge always makes progress -- or ``([], reason)``
+    when the query has to be failed instead: the accumulator is already over
+    the cap, or a single callback is (a callback bigger than the whole allowed
+    response can never fit). A cap of 0 disables all of this.
+    """
+    max_bytes = settings.max_response_size_bytes
+    if max_bytes <= 0:
+        return ready, None
+    accumulated = await get_response_size(response_id)
+    if accumulated > max_bytes:
+        return [], _over_cap_reason("the accumulated response", accumulated, max_bytes)
+    batch: list[str] = []
+    total = accumulated
+    for callback_id in ready:
+        size = await get_response_size(callback_id)
+        if size > max_bytes:
+            return [], _over_cap_reason(f"callback {callback_id}", size, max_bytes)
+        if batch and total + size > max_bytes:
+            logger.debug(
+                f"Folding {len(batch)} of {len(ready)} ready callback(s) this "
+                f"pass to stay within max_response_size; the rest wait."
+            )
+            break
+        batch.append(callback_id)
+        total += size
+    return batch, None
+
+
+async def _check_response_budget(response_id: str) -> Optional[str]:
+    """After a pass: the reason the merged response is over the cap, or None."""
+    max_bytes = settings.max_response_size_bytes
+    if max_bytes <= 0:
+        return None
+    accumulated = await get_response_size(response_id)
+    if accumulated > max_bytes:
+        return _over_cap_reason(
+            "after merging, the accumulated response", accumulated, max_bytes
+        )
+    return None
+
+
 async def _reenqueue_wake_task(task, logger, attempt: int = 0):
     """Put a fresh merge_message wake task back on the stream.
 
@@ -989,6 +1076,45 @@ async def poll_for_tasks():
                     await remove_lock(response_id, CONSUMER, logger)
                     return
 
+                async def _give_up(reason: str) -> None:
+                    """Fail the query as too large and release the lock.
+
+                    ``fail_response_too_large`` replaces the stored response
+                    with an empty message saying why, marks it so no later
+                    callback is merged, and clears the query's callbacks so
+                    the workflow runs on to ``finish_query``.
+                    """
+                    span.set_attribute("merge.drained_callbacks", drained)
+                    span.set_attribute("merge.too_large", True)
+                    await fail_response_too_large(query_id, response_id, reason, logger)
+                    await clear_merge_crashes(response_id)
+                    await remove_lock(response_id, CONSUMER, logger)
+
+                # A query already discarded as too large keeps nothing that
+                # arrives afterwards: drop the ready callbacks instead of
+                # growing the discarded response again.
+                already = await get_too_large_reason(response_id)
+                if already is not None:
+                    logger.warning(
+                        f"[{callback_id}] Response {response_id} was discarded as "
+                        f"too large ({already}); dropping its ready callbacks."
+                    )
+                    orphans = await get_ready_callbacks(response_id, logger)
+                    await _clear_batch(response_id, orphans, logger)
+                    await remove_lock(response_id, CONSUMER, logger)
+                    return
+
+                # Durable crash breaker. A pass is counted in Redis before it
+                # starts and cleared when it returns, so a pass that took the
+                # process down -- the pool child, or this whole container --
+                # is still on the books when the next attempt gets here. A
+                # merge that keeps doing that is not going to succeed; stop
+                # feeding it pods.
+                crashes = await get_merge_crashes(response_id)
+                if _too_many_crashes(crashes):
+                    await _give_up(_crash_reason(crashes))
+                    return
+
                 lock_time = time.time()
                 # Bound before the try: the failure handler reports the batch
                 # that failed, and get_ready_callbacks itself can raise.
@@ -1004,27 +1130,58 @@ async def poll_for_tasks():
                             break
                         if settings.merge_max_fold > 0:
                             ready = ready[: settings.merge_max_fold]
-                        merged, merge_logs = await pool.run(
-                            loop,
-                            merge_messages_by_ids,
-                            target,
-                            query_id,
-                            response_id,
-                            ready,
-                            log_level,
+                        # Size the pass to the response budget; a batch that
+                        # can't fit means the query is failed, not trimmed.
+                        ready, too_large = await _fit_batch_to_budget(
+                            response_id, ready, logger
                         )
+                        if too_large is not None:
+                            await _give_up(too_large)
+                            return
+                        await bump_merge_crashes(response_id)
+                        try:
+                            merged, merge_logs = await pool.run(
+                                loop,
+                                merge_messages_by_ids,
+                                target,
+                                query_id,
+                                response_id,
+                                ready,
+                                log_level,
+                            )
+                        except (BrokenProcessPool, asyncio.TimeoutError):
+                            # The child died or was killed: leave the crash
+                            # count in place for the next attempt to read.
+                            raise
+                        except Exception:
+                            # The child came back with a Python error. That
+                            # isn't a crash; the task-field retry counter in
+                            # _handle_merge_failure owns that case.
+                            await clear_merge_crashes(response_id)
+                            raise
+                        await clear_merge_crashes(response_id)
                         _ingest_merge_logs(logger, merge_logs)
                         await _clear_batch(response_id, ready, logger)
                         drained += len(merged)
+                        too_large = await _check_response_budget(response_id)
+                        if too_large is not None:
+                            await _give_up(too_large)
+                            return
                         # Keep our lock alive across a long multi-pass drain.
                         await refresh_lock(response_id, CONSUMER, 45000, logger)
                 except BrokenProcessPool:
-                    # pool.run already swapped in a fresh executor; here we just
-                    # release the lock and retry the batch. Counted like any
-                    # other failure: a child that is OOM-killed (or timed out)
-                    # by one particular batch is killed by it again on every
-                    # retry, so that batch has to age out too.
+                    # pool.run already swapped in a fresh executor. If this
+                    # response has now crashed the merge too many times, fail
+                    # it here rather than handing it to yet another pod;
+                    # otherwise release the lock and retry the batch. Counted
+                    # like any other failure too: a child that is OOM-killed
+                    # (or timed out) by one particular batch is killed by it
+                    # again on every retry, so that batch has to age out.
                     logger.error(f"[{callback_id}] Process pool broken; re-enqueuing.")
+                    crashes = await get_merge_crashes(response_id)
+                    if _too_many_crashes(crashes):
+                        await _give_up(_crash_reason(crashes))
+                        return
                     await remove_lock(response_id, CONSUMER, logger)
                     span.set_attribute("merge.drained_callbacks", drained)
                     await _handle_merge_failure(task, response_id, ready, logger)
