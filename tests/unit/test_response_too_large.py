@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 from concurrent.futures.process import BrokenProcessPool
+from unittest.mock import AsyncMock
 
 import orjson
 import pytest
@@ -402,6 +403,13 @@ async def _drive_merge(mocker, pool, task_fields):
     mocker.patch.object(merge_worker, "ProcessPoolManager", lambda *a, **k: pool)
     mocker.patch.object(merge_worker, "resolve_pool_workers", lambda *a, **k: 1)
     mocker.patch.object(merge_worker, "remove_callback_id", new=mocker.AsyncMock())
+    # Every ready callback is still wanted unless a test patched this first.
+    if not isinstance(merge_worker.get_existing_callback_ids, AsyncMock):
+        mocker.patch.object(
+            merge_worker,
+            "get_existing_callback_ids",
+            new=mocker.AsyncMock(side_effect=lambda ids, logger: set(ids)),
+        )
     mocker.patch.object(merge_worker, "mark_task_as_complete", new=mocker.AsyncMock())
     # fakeredis has no EVALSHA, which the real unlock script needs; record the
     # release instead so the tests can assert the lock is always let go.
@@ -687,3 +695,63 @@ async def test_finish_query_is_unchanged_for_a_normal_response(
     completed.assert_awaited_once_with("q1", "OK", logger)
     body = orjson.loads(sent.await_args.args[1])
     assert len(body["message"]["knowledge_graph"]["nodes"]) == 2000
+
+
+# --- merge_message: callbacks the query is no longer waiting for --------------
+
+
+async def test_merge_drops_callbacks_the_query_no_longer_waits_for(
+    merge_query, mocker, monkeypatch
+):
+    """The lookup timed out (or the query finished) and cleared the callback
+    rows: a ready callback with no row is dropped, not merged into a response
+    that has already been delivered."""
+    monkeypatch.setattr(settings, "max_response_size", "0")
+    mocker.patch.object(
+        merge_worker,
+        "get_existing_callback_ids",
+        new=mocker.AsyncMock(side_effect=lambda ids, logger: {"cb1"}),
+    )
+    pool = _FakePool([_fold_all])
+
+    await _drive_merge(mocker, pool, _wake_task())
+
+    assert pool.calls == [["cb1"]]
+    assert await get_ready_callbacks("r1", logger) == []
+
+
+async def test_merge_does_nothing_when_no_callback_is_wanted(
+    merge_query, mocker, monkeypatch
+):
+    monkeypatch.setattr(settings, "max_response_size", "0")
+    mocker.patch.object(
+        merge_worker,
+        "get_existing_callback_ids",
+        new=mocker.AsyncMock(side_effect=lambda ids, logger: set()),
+    )
+    pool = _FakePool([])
+
+    await _drive_merge(mocker, pool, _wake_task())
+
+    assert pool.calls == [], "nothing is loaded for a query nobody is waiting on"
+    assert await get_ready_callbacks("r1", logger) == []
+    assert (
+        await get_message("r1", logger)
+    ) == QUERY, "the stored response is untouched"
+
+
+async def test_merge_keeps_everything_when_the_row_check_fails(
+    merge_query, mocker, monkeypatch
+):
+    """A datastore blip must not drop callbacks: an unreadable table fails open."""
+    monkeypatch.setattr(settings, "max_response_size", "0")
+    mocker.patch.object(
+        merge_worker,
+        "get_existing_callback_ids",
+        new=mocker.AsyncMock(side_effect=lambda ids, logger: None),
+    )
+    pool = _FakePool([_fold_all])
+
+    await _drive_merge(mocker, pool, _wake_task())
+
+    assert sorted(pool.calls[0]) == ["cb1", "cb2"]

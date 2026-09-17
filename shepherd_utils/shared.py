@@ -438,7 +438,9 @@ async def _discard_unprocessable_task(
 # ``merge_message`` sits off the workflow chain -- its tasks are enqueued by the
 # /callback endpoint for work an upstream service has already done and paid for,
 # and dropping one would strand that callback in the ready index rather than
-# saving anything.
+# saving anything. It has its own notion of "nobody is waiting for this": a
+# callback whose row is gone from the callbacks table (the lookup timed out or
+# the query finished) is dropped by the merge worker itself.
 _DEADLINE_EXEMPT_STREAMS = frozenset({"finish_query", "merge_message"})
 
 
@@ -578,7 +580,16 @@ async def get_tasks(
     level_number = resolve_log_level(settings.log_level)
     worker_logger = logging.getLogger(f"shepherd.{stream}.{consumer}")
     worker_logger.setLevel(level_number)
-    attach_query_handler(worker_logger)
+    # Deliberately NO query log handler on this logger. The per-task loggers
+    # built in _build_task_context are its children, and logging propagates
+    # every record they emit up to the handlers of every ancestor -- so a
+    # handler here received a copy of every record of every task this worker
+    # ever ran, and nothing ever drained it (save_logs only drains the task
+    # logger's own handler). That was an unbounded per-pod leak, formatted
+    # dicts and all; in a retry loop that logged a traceback per iteration it
+    # was gigabytes in the merge_message parent. What this logger emits itself
+    # is operational (reclaim sweeps, poison pills, shutdown) and only needs
+    # the console, which it still reaches via root.
     # allow ops to tune concurrency per Deployment without a code change
     task_limit = _resolve_task_limit(stream, task_limit, worker_logger)
     # initialize opens the db connection

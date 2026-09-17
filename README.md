@@ -174,6 +174,19 @@ the sync endpoint, `Failed` from `/asyncquery_status`). Every breach is logged
 at **CRITICAL** with a `RESPONSE_TOO_LARGE` marker, both in the worker's output
 and in the query's own log list, so it shows up in the delivered response too.
 
+Two more bounds, both always on:
+
+- **Per-query logs are capped** (`QUERY_MAX_LOG_ENTRIES`, default 10000, `0`
+  disables). A query's log list is loaded whole by everything that reads it,
+  including the status endpoint the ARS polls, so it is trimmed to the newest
+  N entries on every append. The last thing logged, such as the CRITICAL line
+  a failed query ends with, always survives.
+- **`merge_message` only merges callbacks the query is still waiting for.** A
+  callback's row in the callbacks table is cleared when the lookup times out,
+  when the query finishes, or once it is merged; a ready callback with no row
+  is dropped instead of being merged into (and logging against) a response
+  that has already been delivered.
+
 Independently of the caps, `merge_message` keeps a per-query crash counter in
 Redis: each merge pass is counted before it starts and cleared when it returns,
 so a pass that took the pod down with it is still counted on the next pod. Once

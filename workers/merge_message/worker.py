@@ -25,6 +25,7 @@ from shepherd_utils.db import (
     bump_merge_crashes,
     clear_merge_crashes,
     clear_ready_callback,
+    get_existing_callback_ids,
     get_merge_crashes,
     get_message_sync,
     get_ready_callbacks,
@@ -960,6 +961,39 @@ async def _fit_batch_to_budget(
     return batch, None
 
 
+async def _drop_unwanted_callbacks(
+    response_id: str,
+    ready: list[str],
+    logger: logging.Logger,
+) -> list[str]:
+    """Keep only the ready callbacks the query is still waiting for.
+
+    A callback's row in the callbacks table is what says someone is waiting
+    for it. The lookup worker deletes every row for the query when it times
+    out waiting, and finish_query deletes them when the query ends -- but
+    neither tells this worker, whose ready index and wake tasks live in Redis.
+    So a merge that failed and was retried kept retrying after the query had
+    finished: the four callbacks that had arrived in time were scored,
+    filtered and delivered, while the fifth was merged into, and appended
+    logs to, a response nobody would read again -- and a late merge that
+    succeeds overwrites the delivered response with an unscored, unfiltered
+    one. Anything without a row is cleared from the ready index here instead.
+    A table that can't be read fails open: everything is kept.
+    """
+    existing = await get_existing_callback_ids(ready, logger)
+    if existing is None:
+        return ready
+    stale = [cb for cb in ready if cb not in existing]
+    if not stale:
+        return ready
+    logger.warning(
+        f"Dropping {len(stale)} callback(s) the query is no longer waiting for "
+        f"(the lookup timed out or the query finished): {', '.join(stale)}"
+    )
+    await _clear_batch(response_id, stale, logger)
+    return [cb for cb in ready if cb in existing]
+
+
 async def _check_response_budget(response_id: str) -> Optional[str]:
     """After a pass: the reason the merged response is over the cap, or None."""
     max_bytes = settings.max_response_size_bytes
@@ -1130,6 +1164,16 @@ async def poll_for_tasks():
                             break
                         if settings.merge_max_fold > 0:
                             ready = ready[: settings.merge_max_fold]
+                        ready = await _drop_unwanted_callbacks(
+                            response_id, ready, logger
+                        )
+                        if not ready:
+                            # Nothing wanted in this slice. Stop rather than
+                            # re-read: if clearing the stale entries failed
+                            # they would come straight back and this loop
+                            # would spin. The post-drain check below kicks
+                            # one wake for anything still ready.
+                            break
                         # Size the pass to the response budget; a batch that
                         # can't fit means the query is failed, not trimmed.
                         ready, too_large = await _fit_batch_to_budget(

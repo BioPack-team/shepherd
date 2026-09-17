@@ -154,6 +154,18 @@ class Settings(BaseSettings):
     # the oldest (nearest-expiry) blobs first if the cap is still reached.
     redis_ttl: int = 259200  # 3 days
 
+    # Cap on the number of log entries kept per query. Each query's logs are a
+    # Redis list that every stage appends to, and every reader -- finish_query
+    # when it delivers, the sync /query and /response endpoints, and the
+    # /asyncquery_status endpoint the ARS polls -- loads the whole list and
+    # parses every entry. Nothing bounded it: a retry loop that logged a
+    # traceback per iteration for hours left one query with 781k entries and a
+    # 1GB log list, which every one of those readers then loaded into several
+    # GB of memory. Appends now trim the list to the newest N entries in the
+    # same round trip, so the most recent entries (including the CRITICAL line
+    # a failed query ends with) always survive. 0 disables the cap.
+    query_max_log_entries: int = 10000
+
     # Retention for the durable query-state table (``shepherd_brain``). Postgres
     # has no native row TTL, so the monitor janitor purges terminal queries
     # (COMPLETED/ABANDONED) -- and any leftover callbacks -- this many days after

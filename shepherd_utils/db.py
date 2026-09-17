@@ -688,13 +688,19 @@ def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
 
 
 async def _append_logs(response_id: str, entries: List[dict]) -> None:
-    """Append log entries to a query's list and (re)set the key's TTL.
+    """Append log entries to a query's list, cap it, and (re)set the TTL.
 
-    Both in one round trip, so a crash can't leave the key without an
-    expiration.
+    All in one round trip, so a crash can't leave the key without an
+    expiration. The cap (``settings.query_max_log_entries``) keeps the newest
+    entries: ``LTRIM -N -1`` drops from the head, so however many times a
+    stage re-runs and re-logs, the list can never outgrow what every reader
+    of it can afford to load, and the last thing logged is always there.
     """
     pipe = logs_db_client.pipeline()
     pipe.rpush(response_id, *(orjson.dumps(entry) for entry in entries))
+    max_entries = int(settings.query_max_log_entries)
+    if max_entries > 0:
+        pipe.ltrim(response_id, -max_entries, -1)
     pipe.expire(response_id, settings.redis_ttl)
     await pipe.execute()
 
@@ -894,6 +900,49 @@ async def get_running_callbacks(
             logger.error(f"Failed to get running lookups: {e}")
             raise
     return running_lookups
+
+
+async def get_existing_callback_ids(
+    callback_ids: List[str],
+    logger: logging.Logger,
+) -> Union[set, None]:
+    """Which of ``callback_ids`` still have a row in the callbacks table.
+
+    A callback's row is what says the query is still waiting for it: the
+    lookup worker deletes every row for the query when it gives up waiting,
+    ``finish_query`` deletes them when the query ends, and a merge deletes a
+    callback's row once it is folded in. So a ready callback with no row is one
+    nobody wants any more, and the merge worker uses this to drop it instead of
+    merging it into a response that has already moved on. Returns ``None`` if
+    the table couldn't be read, so a datastore blip fails open (callers keep
+    everything) rather than dropping callbacks.
+    """
+    if not callback_ids:
+        return set()
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT callback_id FROM callbacks WHERE callback_id = ANY(%s)
+                """,
+                    (list(callback_ids),),
+                )
+                rows = await cursor.fetchall()
+            return {row[0] for row in rows}
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_existing_callback_ids", e)
+                break
+            logger.error(
+                f"Connection error checking callbacks after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to check which callbacks still exist: {e}")
+            break
+    return None
 
 
 async def cleanup_callbacks(
