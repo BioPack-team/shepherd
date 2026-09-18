@@ -23,10 +23,16 @@ from .broker import (
     mark_task_as_complete,
 )
 from .config import settings
-from .db import initialize_db, save_logs
+from .db import (
+    ResponseTooLargeError,
+    enforce_response_size_limit,
+    initialize_db,
+    save_logs,
+)
 from .heartbeat import Heartbeat
 from .logger import attach_query_handler, resolve_log_level, setup_logging
 from .reclaim import reclaim_orphaned
+from .response_limit import fail_response_too_large
 from .task_deadline import (
     TIMEOUT_STATUS,
     carry_deadline,
@@ -432,7 +438,9 @@ async def _discard_unprocessable_task(
 # ``merge_message`` sits off the workflow chain -- its tasks are enqueued by the
 # /callback endpoint for work an upstream service has already done and paid for,
 # and dropping one would strand that callback in the ready index rather than
-# saving anything.
+# saving anything. It has its own notion of "nobody is waiting for this": a
+# callback whose row is gone from the callbacks table (the lookup timed out or
+# the query finished) is dropped by the merge worker itself.
 _DEADLINE_EXEMPT_STREAMS = frozenset({"finish_query", "merge_message"})
 
 
@@ -572,7 +580,16 @@ async def get_tasks(
     level_number = resolve_log_level(settings.log_level)
     worker_logger = logging.getLogger(f"shepherd.{stream}.{consumer}")
     worker_logger.setLevel(level_number)
-    attach_query_handler(worker_logger)
+    # Deliberately NO query log handler on this logger. The per-task loggers
+    # built in _build_task_context are its children, and logging propagates
+    # every record they emit up to the handlers of every ancestor -- so a
+    # handler here received a copy of every record of every task this worker
+    # ever ran, and nothing ever drained it (save_logs only drains the task
+    # logger's own handler). That was an unbounded per-pod leak, formatted
+    # dicts and all; in a retry loop that logged a traceback per iteration it
+    # was gigabytes in the merge_message parent. What this logger emits itself
+    # is operational (reclaim sweeps, poison pills, shutdown) and only needs
+    # the console, which it still reaches via root.
     # allow ops to tune concurrency per Deployment without a code change
     task_limit = _resolve_task_limit(stream, task_limit, worker_logger)
     # initialize opens the db connection
@@ -791,6 +808,40 @@ async def handle_task_failure(
 _tracer = trace.get_tracer(__name__)
 
 
+async def _guard_response_size(
+    stream: str,
+    task: Tuple[str, dict],
+    logger: logging.Logger,
+) -> None:
+    """Refuse to run an operation on a response too large to load.
+
+    Every standard worker begins by loading the query's response and parsing
+    it into a Python object tree several times the size of its JSON; one big
+    enough is OOM-killed mid-load, an uncatchable SIGKILL that no worker-level
+    try/except can turn into a clean failure. So the size is checked here,
+    once for all of them, from the zstd frame header (no load, no decompress)
+    before ``worker_fn`` is called. A response over ``max_response_size`` is
+    discarded outright (``fail_response_too_large``: empty message, marker,
+    callbacks cleared, CRITICAL log) and the error re-raised so the lifecycle
+    routes the task to ``finish_query``, which records ``RESPONSE_TOO_LARGE``.
+
+    A cap of 0 (the default) disables the check without touching the
+    datastore.
+    """
+    if settings.max_response_size_bytes <= 0:
+        return
+    fields = task[1] if len(task) > 1 and isinstance(task[1], dict) else {}
+    response_id = fields.get("response_id")
+    query_id = fields.get("query_id")
+    if not response_id or not query_id:
+        return
+    try:
+        await enforce_response_size_limit(response_id, logger)
+    except ResponseTooLargeError as e:
+        await fail_response_too_large(query_id, response_id, f"{stream}: {e}", logger)
+        raise
+
+
 async def run_task_lifecycle(
     stream: str,
     group: str,
@@ -814,6 +865,7 @@ async def run_task_lifecycle(
     start = time.time()
     with _tracer.start_as_current_span(stream, context=parent_ctx) as span:
         try:
+            await _guard_response_size(stream, task, logger)
             await worker_fn(task, logger)
             # Always wrap up the task to ACK it in the broker
             try:

@@ -6,7 +6,10 @@ oversized payload can OOM the server (and, once merged, the downstream workers).
 413 before the whole body is read.
 """
 
+import logging
+
 import pytest
+import zstandard
 from starlette.requests import Request
 
 from shepherd_server import base_routes
@@ -81,38 +84,9 @@ async def test_zero_limit_disables_the_cap():
     assert await _read_body_within_limit(request, 0) == body
 
 
-async def test_callback_returns_413_and_drops_callback_for_oversized_payload(
-    monkeypatch,
-):
-    monkeypatch.setattr(settings, "callback_max_request_size", "1000")
-    removed = []
-
-    async def _fake_remove(callback_id, logger):
-        removed.append(callback_id)
-
-    # Patch the name as imported into base_routes.
-    monkeypatch.setattr(base_routes, "remove_callback_id", _fake_remove)
-
-    body = b"x" * 5000
-    request = _make_request(body, {"content-length": len(body)})
-
-    response = await callback(ARATargetEnum.ARAGORN, "cb-1", request)
-
-    assert response.status_code == 413
-    # The rejected callback must be dropped from the running set so the lookup
-    # worker doesn't hang waiting for it until its timeout.
-    assert removed == ["cb-1"]
-
-
-async def test_callback_413_persists_logs_before_dropping(monkeypatch):
-    """The oversized-payload rejection must still land in the query's log list.
-
-    The response_id isn't known (we refused to read the body), so it's resolved
-    from the callback->query mapping -- which must happen *before*
-    remove_callback_id deletes that mapping.
-    """
-    monkeypatch.setattr(settings, "callback_max_request_size", "1000")
-    calls = []
+def _resolve_query(monkeypatch, calls):
+    """Point the callback->query mapping at q-1 / resp-1 and capture the
+    query-failure call, so the tests can assert on it without Postgres."""
 
     async def _fake_get_callback_query_id(callback_id, logger):
         calls.append(("resolve_query", callback_id))
@@ -122,18 +96,25 @@ async def test_callback_413_persists_logs_before_dropping(monkeypatch):
         # response_id lives at index 7 of the shepherd_brain row.
         return [None, None, None, None, None, None, None, "resp-1"]
 
-    async def _fake_save_logs(response_id, logger):
-        calls.append(("save_logs", response_id))
-
-    async def _fake_remove(callback_id, logger):
-        calls.append(("remove", callback_id))
+    async def _fake_fail(query_id, response_id, reason, logger):
+        calls.append(("fail", query_id, response_id, reason))
 
     monkeypatch.setattr(
         base_routes, "get_callback_query_id", _fake_get_callback_query_id
     )
     monkeypatch.setattr(base_routes, "get_query_state", _fake_get_query_state)
-    monkeypatch.setattr(base_routes, "save_logs", _fake_save_logs)
-    monkeypatch.setattr(base_routes, "remove_callback_id", _fake_remove)
+    monkeypatch.setattr(base_routes, "fail_response_too_large", _fake_fail)
+
+
+async def test_callback_returns_413_and_fails_the_query_for_oversized_payload(
+    monkeypatch,
+):
+    """An oversized callback is a response too big to build: the whole query
+    is failed as RESPONSE_TOO_LARGE rather than just this callback dropped,
+    which would have delivered an answer silently missing most of its data."""
+    monkeypatch.setattr(settings, "callback_max_request_size", "1000")
+    calls = []
+    _resolve_query(monkeypatch, calls)
 
     body = b"x" * 5000
     request = _make_request(body, {"content-length": len(body)})
@@ -141,10 +122,61 @@ async def test_callback_413_persists_logs_before_dropping(monkeypatch):
     response = await callback(ARATargetEnum.ARAGORN, "cb-1", request)
 
     assert response.status_code == 413
-    # The rejection log was persisted under the resolved response_id...
-    assert ("save_logs", "resp-1") in calls
-    # ...and that happened before the callback->query mapping was deleted.
-    assert calls.index(("save_logs", "resp-1")) < calls.index(("remove", "cb-1"))
+    fails = [c for c in calls if c[0] == "fail"]
+    assert len(fails) == 1
+    _, query_id, response_id, reason = fails[0]
+    assert (query_id, response_id) == ("q-1", "resp-1")
+    # The reason names the callback and the cap, so the log line and the
+    # delivered description say what happened.
+    assert "cb-1" in reason
+    assert "1000" in reason
+
+
+async def test_callback_413_logs_critical_when_query_is_unknown(monkeypatch, caplog):
+    """With no callback->query mapping there is no query to fail, but the
+    rejection must still be impossible to miss: CRITICAL, with the marker."""
+    monkeypatch.setattr(settings, "callback_max_request_size", "1000")
+
+    async def _no_mapping(callback_id, logger):
+        return None
+
+    monkeypatch.setattr(base_routes, "get_callback_query_id", _no_mapping)
+
+    body = b"x" * 5000
+    request = _make_request(body, {"content-length": len(body)})
+
+    with caplog.at_level(logging.CRITICAL):
+        response = await callback(ARATargetEnum.ARAGORN, "cb-1", request)
+
+    assert response.status_code == 413
+    critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert critical, "the rejection must be logged at CRITICAL"
+    assert "RESPONSE_TOO_LARGE" in critical[0].getMessage()
+    assert "cb-1" in critical[0].getMessage()
+
+
+async def test_callback_413_for_zstd_body_that_decompresses_past_the_cap(
+    monkeypatch,
+):
+    """The cap is about what has to be held in memory, so a small compressed
+    body that expands past it is rejected on its decompressed size."""
+    monkeypatch.setattr(settings, "callback_max_request_size", "1000")
+    calls = []
+    _resolve_query(monkeypatch, calls)
+
+    # 100KB of a single byte compresses to well under the 1000-byte wire cap.
+    body = zstandard.compress(b"x" * 100_000)
+    assert len(body) < 1000
+    request = _make_request(
+        body, {"content-length": len(body), "content-encoding": "zstd"}
+    )
+
+    response = await callback(ARATargetEnum.ARAGORN, "cb-1", request)
+
+    assert response.status_code == 413
+    fails = [c for c in calls if c[0] == "fail"]
+    assert len(fails) == 1
+    assert "decompresses" in fails[0][3]
 
 
 async def test_callback_422_persists_logs_on_invalid_body(monkeypatch):
