@@ -3,13 +3,16 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
 
 import httpx
 from biolink_helper_pkg import BiolinkHelper
+from opentelemetry import context as otel_context
 from pathfinder.Pathfinder import Pathfinder
+from pathfinder.telemetry import child_bootstrap, flush_child, inject_context
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
@@ -39,6 +42,23 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
+
+# pathfinder.telemetry.child_bootstrap() (run inside the process-pool child, and
+# again inside pathfinder's own nested BFS-leg pool) reads this raw env var
+# directly -- it has no visibility into shepherd_utils.config. Derive it here
+# from the same jaeger_host/jaeger_port settings.setup_tracer() uses instead of
+# duplicating the endpoint as a literal in compose.yml, and gate it on
+# otel_enabled so that switch controls pathfinder's tracing too, not just
+# shepherd's. os.environ set here (in the parent, before ProcessPoolManager
+# spawns children) is inherited by every child spawn -- including the nested
+# one pathfinder's own BidirectionalPathFinder spins up -- so this one line
+# covers both child_bootstrap() call sites. setdefault leaves room for an
+# operator to point pathfinder at a different collector via a real
+# OTEL_EXPORTER_OTLP_ENDPOINT env var.
+if settings.otel_enabled:
+    os.environ.setdefault(
+        "OTEL_EXPORTER_OTLP_ENDPOINT", f"{settings.jaeger_host}:{settings.jaeger_port}"
+    )
 
 NUM_TOTAL_HOPS = 4
 MAX_HOPS_TO_EXPLORE = 4
@@ -213,7 +233,7 @@ def execute_pathfinding(
 
 
 def arax_pathfinder_task(
-    query_id: str, response_id: str, logger: logging.Logger
+    query_id: str, response_id: str, otel_carrier: dict, logger: logging.Logger
 ) -> None:
     """Process-pool entrypoint: load, search, rehydrate, and save in the child.
 
@@ -227,15 +247,28 @@ def arax_pathfinder_task(
     aragorn_score / arax_rank).
     """
     start = time.time()
-    message = get_message_sync(query_id)
-    parameters = message.get("parameters") or {}
-    parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
-    parameters["tiers"] = parameters.get("tiers") or [0]
-    message["parameters"] = parameters
+    _, parent_ctx = child_bootstrap(otel_carrier)
+    otel_token = otel_context.attach(parent_ctx)
+    try:
+        _arax_pathfinder_task(query_id, response_id, logger, start)
+    finally:
+        otel_context.detach(otel_token)
+        flush_child()
 
-    pinned_node_keys, pinned_node_ids, intermediate_categories = parse_query_graph(
-        message["message"]["query_graph"]
-    )
+
+def _arax_pathfinder_task(
+    query_id: str, response_id: str, logger: logging.Logger, start: float
+) -> None:
+    with tracer.start_as_current_span("arax_pathfinder.load_message"):
+        message = get_message_sync(query_id)
+        parameters = message.get("parameters") or {}
+        parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
+        parameters["tiers"] = parameters.get("tiers") or [0]
+        message["parameters"] = parameters
+
+        pinned_node_keys, pinned_node_ids, intermediate_categories = parse_query_graph(
+            message["message"]["query_graph"]
+        )
 
     try:
         result, aux_graphs, knowledge_graph = execute_pathfinding(
@@ -244,8 +277,11 @@ def arax_pathfinder_task(
             intermediate_categories,
             logger,
         )
-        logger.info("Rehydrating knowledge graph with retriever")
-        knowledge_graph = rehydrate(knowledge_graph, settings.kg_rehydrate_url, logger)
+        with tracer.start_as_current_span("arax_pathfinder.rehydrate"):
+            logger.info("Rehydrating knowledge graph with retriever")
+            knowledge_graph = rehydrate(
+                knowledge_graph, settings.kg_rehydrate_url, logger
+            )
     except Exception as e:
         # Let the failure reach run_task_lifecycle, which records it on the span
         # and routes the query to finish_query with an ERROR status. Previously
@@ -257,27 +293,28 @@ def arax_pathfinder_task(
         )
         raise
 
-    res = []
-    if result is not None:
-        res.append(
-            {
-                "id": result["id"],
-                "analyses": result["analyses"],
-                "node_bindings": result["node_bindings"],
-                "essence": "result",
-            }
-        )
-    if aux_graphs is None:
-        aux_graphs = {}
-    if knowledge_graph is None:
-        knowledge_graph = {}
-    message["message"]["knowledge_graph"] = knowledge_graph
-    message["message"]["auxiliary_graphs"] = aux_graphs
-    message["message"]["results"] = res
+    with tracer.start_as_current_span("arax_pathfinder.save_response"):
+        res = []
+        if result is not None:
+            res.append(
+                {
+                    "id": result["id"],
+                    "analyses": result["analyses"],
+                    "node_bindings": result["node_bindings"],
+                    "essence": "result",
+                }
+            )
+        if aux_graphs is None:
+            aux_graphs = {}
+        if knowledge_graph is None:
+            knowledge_graph = {}
+        message["message"]["knowledge_graph"] = knowledge_graph
+        message["message"]["auxiliary_graphs"] = aux_graphs
+        message["message"]["results"] = res
 
-    message = add_shepherd_arax_to_edge_sources(message)
+        message = add_shepherd_arax_to_edge_sources(message)
 
-    save_message_sync(response_id, message)
+        save_message_sync(response_id, message)
     logger.info(f"Task took {time.time() - start}")
 
 
@@ -295,11 +332,13 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
     """
 
     async def _run(task, logger):
+        otel_carrier = inject_context()
         await pool.run(
             loop,
             arax_pathfinder_task,
             task[1]["query_id"],
             task[1]["response_id"],
+            otel_carrier,
             logger,
         )
 

@@ -102,7 +102,7 @@ class Settings(BaseSettings):
 
     # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
-    arax_biolink_version: str = "4.2.5"
+    arax_biolink_version: str = "v4.2.5"
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
         "code/ARAX/KnowledgeSources/general_concepts.json"
