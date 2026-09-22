@@ -23,6 +23,24 @@ if "pathfinder" not in sys.modules:
     sys.modules["pathfinder"] = _pathfinder_pkg
     sys.modules["pathfinder.Pathfinder"] = _pathfinder_mod
 
+if "pathfinder.telemetry" not in sys.modules:
+    # child_bootstrap()'s return value is unpacked as (tracer, ctx) and ctx is
+    # attached/detached via the real opentelemetry.context API, so it has to be
+    # a real Context -- an arbitrary Mock would raise inside otel_context.attach.
+    import opentelemetry.context as _otel_context
+
+    _pathfinder_telemetry_mod = types.ModuleType("pathfinder.telemetry")
+    _pathfinder_telemetry_mod.inject_context = MagicMock(
+        name="inject_context", return_value={}
+    )
+    _pathfinder_telemetry_mod.child_bootstrap = MagicMock(
+        name="child_bootstrap",
+        return_value=(MagicMock(name="child_tracer"), _otel_context.get_current()),
+    )
+    _pathfinder_telemetry_mod.flush_child = MagicMock(name="flush_child")
+    sys.modules["pathfinder"].telemetry = _pathfinder_telemetry_mod
+    sys.modules["pathfinder.telemetry"] = _pathfinder_telemetry_mod
+
 if "biolink_helper_pkg" not in sys.modules:
     _biolink_mod = types.ModuleType("biolink_helper_pkg")
     _biolink_mod.BiolinkHelper = MagicMock(name="BiolinkHelper")
@@ -79,7 +97,7 @@ def test_pathfinder_task_searches_rehydrates_and_saves(mocker):
     )
     save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
 
-    pf_worker.arax_pathfinder_task("query-1", "resp-1", LOGGER)
+    pf_worker.arax_pathfinder_task("query-1", "resp-1", {}, LOGGER)
 
     search.assert_called_once()
     rehydrate.assert_called_once()
@@ -113,7 +131,7 @@ def test_pathfinder_task_saves_empty_graphs_when_no_paths_found(mocker):
     mocker.patch("workers.arax_pathfinder.worker.rehydrate", return_value=None)
     save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
 
-    pf_worker.arax_pathfinder_task("query-2", "resp-2", LOGGER)
+    pf_worker.arax_pathfinder_task("query-2", "resp-2", {}, LOGGER)
 
     _, message = save.call_args.args
     assert message["message"]["results"] == []
@@ -187,7 +205,7 @@ def test_unanswerable_query_graph_raises(mocker, qgraph, expected):
     search = mocker.patch("workers.arax_pathfinder.worker.execute_pathfinding")
 
     with pytest.raises(ValueError, match=expected):
-        pf_worker.arax_pathfinder_task("query-3", "resp-3", LOGGER)
+        pf_worker.arax_pathfinder_task("query-3", "resp-3", {}, LOGGER)
 
     search.assert_not_called()
     save.assert_not_called()
@@ -208,7 +226,7 @@ def test_search_failure_propagates_instead_of_saving_error_blob(mocker):
     save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
 
     with pytest.raises(RuntimeError, match="sqlite is on fire"):
-        pf_worker.arax_pathfinder_task("query-4", "resp-4", LOGGER)
+        pf_worker.arax_pathfinder_task("query-4", "resp-4", {}, LOGGER)
 
     save.assert_not_called()
 
@@ -227,7 +245,7 @@ def test_rehydrate_failure_propagates(mocker):
     save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
 
     with pytest.raises(RuntimeError, match="retriever unreachable"):
-        pf_worker.arax_pathfinder_task("query-5", "resp-5", LOGGER)
+        pf_worker.arax_pathfinder_task("query-5", "resp-5", {}, LOGGER)
 
     save.assert_not_called()
 
