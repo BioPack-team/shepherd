@@ -387,24 +387,31 @@ async def run_query(
 def sync_timeout(query: dict) -> float:
     """How long /query waits for ``query``, in seconds.
 
-    TRAPI 2.0's ``parameters.timeout`` when it is a positive number. A
-    negative one asks the server to drop its own default timeout, but a
-    synchronous connection can't be held open forever, so it (like an absent
-    or unusable value) gets the default.
+    TRAPI 2.0's ``parameters.timeout`` when it is a non-negative number: the
+    time the client is willing to wait, so ``0`` means "don't wait" (as it did
+    before 2.0). A negative one asks the server to drop its own default
+    timeout, but a synchronous connection can't be held open forever, so it
+    (like an absent or unusable value) gets the default.
 
     >>> sync_timeout({"parameters": {"timeout": 30}})
     30.0
+    >>> sync_timeout({"parameters": {"timeout": 0}})
+    0.0
     >>> sync_timeout({"parameters": {"timeout": -1}}) == DEFAULT_SYNC_TIMEOUT
     True
     >>> sync_timeout({"parameters": None}) == DEFAULT_SYNC_TIMEOUT
     True
     """
     requested = query_parameters(query).get("timeout")
+    if requested is None or isinstance(requested, bool):
+        return float(DEFAULT_SYNC_TIMEOUT)
     try:
-        timeout = float(requested) if requested is not None else 0.0
+        timeout = float(requested)
     except (TypeError, ValueError):
-        timeout = 0.0
-    return timeout if timeout > 0 else float(DEFAULT_SYNC_TIMEOUT)
+        return float(DEFAULT_SYNC_TIMEOUT)
+    if timeout != timeout or timeout < 0:  # NaN or negative
+        return float(DEFAULT_SYNC_TIMEOUT)
+    return timeout
 
 
 def query_status_code(status: Optional[str]) -> int:

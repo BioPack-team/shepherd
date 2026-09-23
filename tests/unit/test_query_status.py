@@ -244,3 +244,51 @@ async def test_query_returns_unavailable_when_intake_fails(mocker):
 )
 def test_query_status_code_mapping(status, code):
     assert query_status_code(status) == code
+
+
+@pytest.mark.asyncio
+async def test_sync_query_response_is_finalized_as_trapi_2(mocker):
+    """/query answers with a TRAPI 2.0 Response: version stamps, the query's
+    parameters echoed back, the query's logs attached, and forbidden empties
+    (here an empty auxiliary_graphs) pruned."""
+    from translator_tom import Response
+
+    log = {"timestamp": "2024-01-01T00:00:00+00:00", "level": "INFO", "message": "hi"}
+    _patch_sync_query(
+        mocker,
+        _row(state="COMPLETED", status="OK"),
+        response={
+            "message": {
+                "knowledge_graph": {"nodes": {}, "edges": {}},
+                "results": [],
+                "auxiliary_graphs": {},
+            },
+            "submitter": "infores:someone",
+        },
+    )
+    mocker.patch(
+        "shepherd_server.base_routes.get_logs",
+        new_callable=mocker.AsyncMock,
+        return_value=[log],
+    )
+    response = await run_sync_query(
+        ARATargetEnum.ARAX,
+        _query_request({"message": {}, "parameters": {"timeout": 30}}),
+    )
+    assert response.status_code == 200
+    body = _body(response)
+    Response.from_dict(body)
+    assert body["schema_version"] == "2.0.0"
+    assert body["parameters"] == {"timeout": 30}
+    assert body["logs"] == [log]
+    assert "auxiliary_graphs" not in body["message"]
+    assert "submitter" not in body
+
+
+def test_sync_timeout_honours_zero_and_defaults_otherwise():
+    from shepherd_server.base_routes import DEFAULT_SYNC_TIMEOUT, sync_timeout
+
+    assert sync_timeout({"parameters": {"timeout": 0}}) == 0.0
+    assert sync_timeout({"parameters": {"timeout": 12.5}}) == 12.5
+    for parameters in ({"timeout": -1}, {"timeout": "soon"}, {}, None):
+        assert sync_timeout({"parameters": parameters}) == DEFAULT_SYNC_TIMEOUT
