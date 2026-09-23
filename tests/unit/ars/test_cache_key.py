@@ -268,9 +268,7 @@ def test_irrelevant_body_fields_excluded():
         QG,
         submitter="me",
         callback="http://x",
-        log_level="DEBUG",
         name="q",
-        bypass_cache=True,
         validate=False,
     )
 
@@ -278,11 +276,41 @@ def test_irrelevant_body_fields_excluded():
 def test_parameters_included():
     """``parameters`` is forwarded verbatim to every ARA by the fanout, so
     two submits that differ there are different queries."""
-    assert key(QG) != key(QG, parameters={"timeout": 30})
-    assert key(QG, parameters={"timeout": 30}) != key(QG, parameters={"timeout": 60})
-    assert key(QG, parameters={"timeout": 30}) == key(QG, parameters={"timeout": 30})
+    assert key(QG) != key(QG, parameters={"max_results": 30})
+    assert key(QG, parameters={"max_results": 30}) != key(
+        QG, parameters={"max_results": 60}
+    )
+    assert key(QG, parameters={"max_results": 30}) == key(
+        QG, parameters={"max_results": 30}
+    )
     # key order within parameters is not meaningful
     assert key(QG, parameters={"a": 1, "b": 2}) == key(QG, parameters={"b": 2, "a": 1})
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"log_level": "DEBUG"},
+        {"timeout": 30},
+        {"bypass_cache": True},
+        {"bypass_cache": False},
+        {"log_level": "ERROR", "timeout": 600, "overwrite_cache": True},
+    ],
+)
+def test_run_control_parameters_excluded(parameters):
+    """TRAPI 2.0 moved log_level / bypass_cache into ``parameters`` (next to
+    the new timeout). They steer how the query runs, not what it asks, so
+    they must not fragment the cache -- alone or beside a real parameter."""
+    assert key(QG) == key(QG, parameters=parameters)
+    assert key(QG, parameters={"max_results": 5}) == key(
+        QG, parameters={"max_results": 5, **parameters}
+    )
+
+
+def test_cache_key_version_is_bumped_for_trapi2():
+    """The 2.0 key material differs from the 1.x one (parameters.log_level
+    and friends excluded), so every 1.x-era entry is orphaned."""
+    assert cache.CACHE_KEY_VERSION == "3"
 
 
 def test_empty_parameters_matches_absent():
@@ -294,8 +322,8 @@ def test_cache_control_parameters_excluded():
     """overwrite_cache steers the cache, not the query: an overwrite run has
     to hash to the same key as the entry it is replacing."""
     assert key(QG) == key(QG, parameters={"overwrite_cache": True})
-    assert key(QG, parameters={"timeout": 30}) == key(
-        QG, parameters={"timeout": 30, "overwrite_cache": True}
+    assert key(QG, parameters={"max_results": 30}) == key(
+        QG, parameters={"max_results": 30, "overwrite_cache": True}
     )
 
 
@@ -307,8 +335,14 @@ def test_version_bump_changes_every_key(monkeypatch):
 
 def test_resolve_mode():
     assert cache.resolve_mode(body(QG)) == cache.MODE_NORMAL
-    assert cache.resolve_mode(body(QG, bypass_cache=True)) == cache.MODE_BYPASS
-    assert cache.resolve_mode(body(QG, bypass_cache="true")) == cache.MODE_NORMAL
+    assert (
+        cache.resolve_mode(body(QG, parameters={"bypass_cache": True}))
+        == cache.MODE_BYPASS
+    )
+    assert (
+        cache.resolve_mode(body(QG, parameters={"bypass_cache": "true"}))
+        == cache.MODE_NORMAL
+    )
     assert (
         cache.resolve_mode(body(QG, parameters={"overwrite_cache": True}))
         == cache.MODE_OVERWRITE
@@ -316,11 +350,18 @@ def test_resolve_mode():
     # bypass wins when both are set
     assert (
         cache.resolve_mode(
-            body(QG, bypass_cache=True, parameters={"overwrite_cache": True})
+            body(QG, parameters={"bypass_cache": True, "overwrite_cache": True})
         )
         == cache.MODE_BYPASS
     )
     assert cache.resolve_mode(None) == cache.MODE_NORMAL
+
+
+def test_resolve_mode_ignores_the_trapi1_top_level_bypass_cache():
+    """1.x put bypass_cache at the top of the query; 2.0 reads only
+    parameters.bypass_cache (submit rejects the 1.x spelling with a 400
+    before the cache is consulted)."""
+    assert cache.resolve_mode(body(QG, bypass_cache=True)) == cache.MODE_NORMAL
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +375,11 @@ def test_append_log():
     assert len(payload["logs"]) == 2
     assert payload["logs"][-1]["message"] == "hello"
     assert payload["logs"][-1]["level"] == "INFO"
+    # a valid TRAPI 2.0 LogEntry: no null code, zoned RFC 3339 timestamp
+    from translator_tom import LogEntry
+
+    assert "code" not in payload["logs"][-1]
+    LogEntry.from_dict(payload["logs"][-1])
     payload = {"logs": "garbage"}
     cache.append_log(payload, "x")
     assert [e["message"] for e in payload["logs"]] == ["x"]

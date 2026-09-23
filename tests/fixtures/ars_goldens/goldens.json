@@ -3,14 +3,25 @@
     "entries": {
       "decorate/no_primary": "upstream raised UnboundLocalError (has_primary was only ever assigned inside the loop); the port appends a primary_knowledge_source for itself, which is what the unreachable branch intended",
       "merge_ba.message.knowledge_graph.edges.e1.qualifiers": "upstream returned out of mergeDicts' attributes branch, abandoning every key it had not reached yet -- here, qualifiers",
+      "merge_pipeline_ab.message.results.1.analyses.0": "as premerged_inputs.arax.message.results.1.analyses.0, carried through the merge",
       "mergedicts/attributes_unhashable_dict_values": "upstream deduped the merged value list with set(), which raises on a list of objects; the generic except swallowed it, the break never ran, and the current agent's values were dropped from the attribute entirely",
       "mergedicts/node_bindings": "upstream's else hung off the for, so current-only bindings were dropped (all but the last, into a map it never wrote back); the port unions them per query-graph node",
+      "mergedicts/qualifier_lists_conflicting_values": "TRAPI 2.0 port: a conflict on a single-valued TRAPI member (Qualifier.qualifier_value, Edge.knowledge_level / agent_type / predicate, ...) keeps the first value (dcurrent: in the ARS fold, the one earlier merged versions already served), except that a provided knowledge_level / agent_type beats not_provided -- instead of upstream's [merged, current] list, which is not a valid 2.0 string (merge._resolve_scalar_conflict)",
+      "mergedicts/qualifier_lists_disjoint_types": "TRAPI 2.0 port: as mergedicts/qualifier_lists_conflicting_values (the object_direction_qualifier values conflict)",
       "mergedicts/unhashable_lists_concat": "upstream keyed a list of objects on resource_id / qualifier_type_id and dropped every object carrying neither -- from both sides, since it replaced the merged list with the keyed map's values -- so such a list merged to []",
+      "premerged_inputs.arax.message.results.1.analyses.0": "TRAPI 2.0 has no null score: the 1.5 corpus's `score: null` translates to an absent score (and premerge strips any null an ARA sends), so normalizeScores has no null to coerce to 0 and the analysis stays unscored (upstream wrote `score: 0`)",
+      "scores/empty_analyses_list": "TRAPI 2.0 port: as scores/missing_analyses_key -- a result with no analyses is skipped, not a reason to abandon the batch",
+      "scores/missing_analyses_key": "TRAPI 2.0 port: Result.analyses is optional in 2.0, so a result without analyses is skipped by normalizeScores / ScoreStatCalc rather than aborting the whole batch (upstream, 1.5: analyses required, batch abandoned with 'Results dont have the required fields')",
       "scores/mixed": "upstream popped one rank per result while ranking only the score-bearing ones, so a mixed corpus raised IndexError after misassigning the ranks it did hand out; the port assigns each rank to the result it was computed from"
     },
-    "note": "Entries listed here were recorded by running this port, not the pinned upstream Relay code: each is a place where the port deliberately fixes an upstream bug. Everything else in this file still comes from scripts/ars_parity/generate_goldens.py run against Relay @ 2b2121df740a4c8bc47bb2e6bafa9e52f748f028. See docs/ARS_PARITY_REGISTER.md."
+    "note": "Relay @ 2b2121df740a4c8bc47bb2e6bafa9e52f748f028 ran on the TRAPI 1.5 corpus (goldens_trapi15.json); this file is its TRAPI 2.0 translation (upconvert_goldens.py). The entries below are recorded from the Shepherd port instead, each for the reason given."
   },
   "_relay_commit": "2b2121df740a4c8bc47bb2e6bafa9e52f748f028",
+  "_trapi2_verdicts": {
+    "kg_missing_edges": "KnowledgeGraph.edges is optional in TRAPI 2.0 (TOM's KnowledgeGraph); 1.5 required it",
+    "pathfinder_qg_with_edges": "QueryGraph.edges has minProperties 1 in TRAPI 2.0, so the empty edges object beside the paths is invalid; 1.5's PathfinderQueryGraph arm ignored it"
+  },
+  "_trapi_version": "2.0",
   "appraise_confidence": [
     {
       "name": "mixed",
@@ -266,13 +277,13 @@
           "knowledge_graph": {
             "edges": {
               "e1": {
+                "agent_type": "not_provided",
+                "knowledge_level": "not_provided",
                 "object": "b",
                 "sources": [
                   {
                     "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source",
-                    "source_record_urls": null,
-                    "upstream_resource_ids": []
+                    "resource_role": "primary_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -289,13 +300,13 @@
           "knowledge_graph": {
             "edges": {
               "e1": {
+                "agent_type": "not_provided",
+                "knowledge_level": "not_provided",
                 "object": "b",
                 "sources": [
                   {
                     "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source",
-                    "source_record_urls": null,
-                    "upstream_resource_ids": []
+                    "resource_role": "primary_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -312,6 +323,8 @@
           "knowledge_graph": {
             "edges": {
               "e1": {
+                "agent_type": "not_provided",
+                "knowledge_level": "not_provided",
                 "object": "b",
                 "sources": [
                   {
@@ -320,9 +333,7 @@
                   },
                   {
                     "resource_id": "infores:aragorn",
-                    "resource_role": "aggregator_knowledge_source",
-                    "source_record_urls": null,
-                    "upstream_resource_ids": []
+                    "resource_role": "aggregator_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -339,6 +350,8 @@
           "knowledge_graph": {
             "edges": {
               "e1": {
+                "agent_type": "not_provided",
+                "knowledge_level": "not_provided",
                 "object": "b",
                 "sources": [
                   {
@@ -360,13 +373,13 @@
           "knowledge_graph": {
             "edges": {
               "e1": {
+                "agent_type": "not_provided",
+                "knowledge_level": "not_provided",
                 "object": "b",
                 "sources": [
                   {
                     "resource_id": "infores:unknown",
-                    "resource_role": "primary_knowledge_source",
-                    "source_record_urls": null,
-                    "upstream_resource_ids": []
+                    "resource_role": "primary_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -383,6 +396,8 @@
           "knowledge_graph": {
             "edges": {
               "e1": {
+                "agent_type": "not_provided",
+                "knowledge_level": "not_provided",
                 "object": "b",
                 "sources": [
                   {
@@ -391,9 +406,7 @@
                   },
                   {
                     "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source",
-                    "source_record_urls": null,
-                    "upstream_resource_ids": []
+                    "resource_role": "primary_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -415,14 +428,12 @@
     "message": {
       "auxiliary_graphs": {
         "aux1": {
-          "attributes": [],
           "edges": [
             "e1",
             "e3"
           ]
         },
         "aux9": {
-          "attributes": [],
           "edges": [
             "e9"
           ]
@@ -431,6 +442,7 @@
       "knowledge_graph": {
         "edges": {
           "e1": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:publications",
@@ -441,6 +453,7 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:treats",
             "qualifiers": [
@@ -452,8 +465,7 @@
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               },
               {
                 "resource_id": "infores:arax",
@@ -473,6 +485,7 @@
             "subject": "CHEBI:6801"
           },
           "e2": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:support_graphs",
@@ -481,39 +494,41 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "NCBIGene:5468",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:aragorn",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
           },
           "e3": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:gene_associated_with_condition",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
           },
           "e9": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "CHEBI:17234",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:arax",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
@@ -591,114 +606,102 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:arax",
               "score": 0.91
             },
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.83
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:6801"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:6801"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         },
         {
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e9"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e9"
+                  ]
+                }
               },
-              "resource_id": "infores:arax",
-              "score": null
+              "resource_id": "infores:arax"
             },
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e9"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e9"
+                  ]
+                }
               },
               "resource_id": "infores:arax-second",
               "score": 0.2
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:17234"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:17234"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         },
         {
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e3"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e3"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.41
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "NCBIGene:5468"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "NCBIGene:5468"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         }
       ]
@@ -708,14 +711,12 @@
     "message": {
       "auxiliary_graphs": {
         "aux1": {
-          "attributes": [],
           "edges": [
             "e1",
             "e3"
           ]
         },
         "aux9": {
-          "attributes": [],
           "edges": [
             "e9"
           ]
@@ -724,6 +725,7 @@
       "knowledge_graph": {
         "edges": {
           "e1": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:publications",
@@ -734,13 +736,19 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:treats",
+            "qualifiers": [
+              {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "decreased"
+              }
+            ],
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               },
               {
                 "resource_id": "infores:aragorn",
@@ -757,15 +765,10 @@
                 ]
               }
             ],
-            "subject": "CHEBI:6801",
-            "qualifiers": [
-              {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "decreased"
-              }
-            ]
+            "subject": "CHEBI:6801"
           },
           "e2": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:support_graphs",
@@ -774,39 +777,41 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "NCBIGene:5468",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:aragorn",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
           },
           "e3": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:gene_associated_with_condition",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
           },
           "e9": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "CHEBI:17234",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:arax",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
@@ -884,114 +889,102 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.83
             },
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:arax",
               "score": 0.91
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:6801"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:6801"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         },
         {
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e3"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e3"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.41
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "NCBIGene:5468"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "NCBIGene:5468"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         },
         {
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e9"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e9"
+                  ]
+                }
               },
-              "resource_id": "infores:arax",
-              "score": null
+              "resource_id": "infores:arax"
             },
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e9"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e9"
+                  ]
+                }
               },
               "resource_id": "infores:arax-second",
               "score": 0.2
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:17234"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:17234"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         }
       ]
@@ -1001,14 +994,12 @@
     "message": {
       "auxiliary_graphs": {
         "aux1": {
-          "attributes": [],
           "edges": [
             "e1",
             "e3"
           ]
         },
         "aux9": {
-          "attributes": [],
           "edges": [
             "e9"
           ]
@@ -1017,6 +1008,7 @@
       "knowledge_graph": {
         "edges": {
           "e1": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:publications",
@@ -1027,6 +1019,7 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:treats",
             "qualifiers": [
@@ -1038,8 +1031,7 @@
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               },
               {
                 "resource_id": "infores:arax",
@@ -1059,6 +1051,7 @@
             "subject": "CHEBI:6801"
           },
           "e2": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:support_graphs",
@@ -1067,45 +1060,45 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "NCBIGene:5468",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:aragorn",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
           },
           "e3": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:gene_associated_with_condition",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               },
               {
                 "resource_id": "infores:aragorn",
-                "resource_role": "aggregator_knowledge_source",
-                "source_record_urls": null,
-                "upstream_resource_ids": []
+                "resource_role": "aggregator_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
           },
           "e9": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "CHEBI:17234",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:arax",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
@@ -1183,42 +1176,38 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:arax",
               "score": 0.91
             },
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.83
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:6801"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:6801"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           },
           "normalized_score": 100.0
         },
@@ -1226,42 +1215,37 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e9"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e9"
+                  ]
+                }
               },
-              "resource_id": "infores:arax",
-              "score": 0
+              "resource_id": "infores:arax"
             },
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e9"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e9"
+                  ]
+                }
               },
               "resource_id": "infores:arax-second",
               "score": 0.2
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:17234"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:17234"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           },
           "normalized_score": 50.0
         },
@@ -1269,30 +1253,27 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e3"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e3"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.41
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "NCBIGene:5468"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "NCBIGene:5468"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           },
           "normalized_score": 50.0
         }
@@ -1424,10 +1405,7 @@
         "qualifiers": [
           {
             "qualifier_type_id": "biolink:object_direction_qualifier",
-            "qualifier_value": [
-              "down",
-              "up"
-            ]
+            "qualifier_value": "up"
           },
           {
             "qualifier_type_id": "biolink:object_aspect_qualifier",
@@ -1442,10 +1420,7 @@
         "qualifiers": [
           {
             "qualifier_type_id": "biolink:object_direction_qualifier",
-            "qualifier_value": [
-              "down",
-              "up"
-            ]
+            "qualifier_value": "up"
           }
         ]
       }
@@ -1561,20 +1536,17 @@
       "name": "node_bindings",
       "output": {
         "node_bindings": {
-          "n0": [
-            {
-              "attributes": [],
-              "id": "A"
-            }
-          ],
-          "n1": [
-            {
-              "id": "C"
-            },
-            {
-              "id": "B"
-            }
-          ]
+          "n0": {
+            "ids": [
+              "A"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "C",
+              "B"
+            ]
+          }
         }
       }
     },
@@ -1603,7 +1575,6 @@
     "message": {
       "auxiliary_graphs": {
         "aux1": {
-          "attributes": [],
           "edges": [
             "e1",
             "e3"
@@ -1613,6 +1584,7 @@
       "knowledge_graph": {
         "edges": {
           "e1": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:publications",
@@ -1622,13 +1594,13 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:treats",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               },
               {
                 "resource_id": "infores:aragorn",
@@ -1641,6 +1613,7 @@
             "subject": "CHEBI:6801"
           },
           "e2": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:support_graphs",
@@ -1649,26 +1622,27 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "NCBIGene:5468",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:aragorn",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
           },
           "e3": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:gene_associated_with_condition",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
@@ -1737,30 +1711,27 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.83
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:6801"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:6801"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           },
           "normalized_score": 100.0
         },
@@ -1768,30 +1739,27 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e3"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e3"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.41
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "NCBIGene:5468"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "NCBIGene:5468"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           },
           "normalized_score": 50.0
         }
@@ -1810,7 +1778,6 @@
       "message": {
         "auxiliary_graphs": {
           "aux1": {
-            "attributes": [],
             "edges": [
               "e1",
               "e3"
@@ -1820,6 +1787,7 @@
         "knowledge_graph": {
           "edges": {
             "e1": {
+              "agent_type": "not_provided",
               "attributes": [
                 {
                   "attribute_type_id": "biolink:publications",
@@ -1829,13 +1797,13 @@
                   ]
                 }
               ],
+              "knowledge_level": "not_provided",
               "object": "MONDO:0005148",
               "predicate": "biolink:treats",
               "sources": [
                 {
                   "resource_id": "infores:ctd",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 },
                 {
                   "resource_id": "infores:aragorn",
@@ -1848,6 +1816,7 @@
               "subject": "CHEBI:6801"
             },
             "e2": {
+              "agent_type": "not_provided",
               "attributes": [
                 {
                   "attribute_type_id": "biolink:support_graphs",
@@ -1856,32 +1825,31 @@
                   ]
                 }
               ],
+              "knowledge_level": "not_provided",
               "object": "NCBIGene:5468",
               "predicate": "biolink:affects",
               "sources": [
                 {
                   "resource_id": "infores:aragorn",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 }
               ],
               "subject": "CHEBI:6801"
             },
             "e3": {
+              "agent_type": "not_provided",
               "attributes": [],
+              "knowledge_level": "not_provided",
               "object": "MONDO:0005148",
               "predicate": "biolink:gene_associated_with_condition",
               "sources": [
                 {
                   "resource_id": "infores:ctd",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 },
                 {
                   "resource_id": "infores:aragorn",
-                  "resource_role": "aggregator_knowledge_source",
-                  "source_record_urls": null,
-                  "upstream_resource_ids": []
+                  "resource_role": "aggregator_knowledge_source"
                 }
               ],
               "subject": "NCBIGene:5468"
@@ -1950,30 +1918,27 @@
             "analyses": [
               {
                 "edge_bindings": {
-                  "t_edge": [
-                    {
-                      "attributes": [],
-                      "id": "e1"
-                    }
-                  ]
+                  "t_edge": {
+                    "ids": [
+                      "e1"
+                    ]
+                  }
                 },
                 "resource_id": "infores:aragorn",
                 "score": 0.83
               }
             ],
             "node_bindings": {
-              "on": [
-                {
-                  "attributes": [],
-                  "id": "CHEBI:6801"
-                }
-              ],
-              "sn": [
-                {
-                  "attributes": [],
-                  "id": "MONDO:0005148"
-                }
-              ]
+              "on": {
+                "ids": [
+                  "CHEBI:6801"
+                ]
+              },
+              "sn": {
+                "ids": [
+                  "MONDO:0005148"
+                ]
+              }
             },
             "normalized_score": 100.0
           },
@@ -1981,30 +1946,27 @@
             "analyses": [
               {
                 "edge_bindings": {
-                  "t_edge": [
-                    {
-                      "attributes": [],
-                      "id": "e3"
-                    }
-                  ]
+                  "t_edge": {
+                    "ids": [
+                      "e3"
+                    ]
+                  }
                 },
                 "resource_id": "infores:aragorn",
                 "score": 0.41
               }
             ],
             "node_bindings": {
-              "on": [
-                {
-                  "attributes": [],
-                  "id": "NCBIGene:5468"
-                }
-              ],
-              "sn": [
-                {
-                  "attributes": [],
-                  "id": "MONDO:0005148"
-                }
-              ]
+              "on": {
+                "ids": [
+                  "NCBIGene:5468"
+                ]
+              },
+              "sn": {
+                "ids": [
+                  "MONDO:0005148"
+                ]
+              }
             },
             "normalized_score": 50.0
           }
@@ -2012,11 +1974,9 @@
       }
     },
     "arax": {
-      "logs": [],
       "message": {
         "auxiliary_graphs": {
           "aux9": {
-            "attributes": [],
             "edges": [
               "e9"
             ]
@@ -2025,6 +1985,7 @@
         "knowledge_graph": {
           "edges": {
             "e1": {
+              "agent_type": "not_provided",
               "attributes": [
                 {
                   "attribute_type_id": "biolink:publications",
@@ -2034,6 +1995,7 @@
                   ]
                 }
               ],
+              "knowledge_level": "not_provided",
               "object": "MONDO:0005148",
               "predicate": "biolink:treats",
               "qualifiers": [
@@ -2045,8 +2007,7 @@
               "sources": [
                 {
                   "resource_id": "infores:ctd",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 },
                 {
                   "resource_id": "infores:arax",
@@ -2059,14 +2020,15 @@
               "subject": "CHEBI:6801"
             },
             "e9": {
+              "agent_type": "not_provided",
               "attributes": [],
+              "knowledge_level": "not_provided",
               "object": "CHEBI:17234",
               "predicate": "biolink:affects",
               "sources": [
                 {
                   "resource_id": "infores:arax",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 }
               ],
               "subject": "CHEBI:6801"
@@ -2136,30 +2098,27 @@
             "analyses": [
               {
                 "edge_bindings": {
-                  "t_edge": [
-                    {
-                      "attributes": [],
-                      "id": "e1"
-                    }
-                  ]
+                  "t_edge": {
+                    "ids": [
+                      "e1"
+                    ]
+                  }
                 },
                 "resource_id": "infores:arax",
                 "score": 0.91
               }
             ],
             "node_bindings": {
-              "on": [
-                {
-                  "attributes": [],
-                  "id": "CHEBI:6801"
-                }
-              ],
-              "sn": [
-                {
-                  "attributes": [],
-                  "id": "MONDO:0005148"
-                }
-              ]
+              "on": {
+                "ids": [
+                  "CHEBI:6801"
+                ]
+              },
+              "sn": {
+                "ids": [
+                  "MONDO:0005148"
+                ]
+              }
             },
             "normalized_score": 100.0
           },
@@ -2167,42 +2126,37 @@
             "analyses": [
               {
                 "edge_bindings": {
-                  "t_edge": [
-                    {
-                      "attributes": [],
-                      "id": "e9"
-                    }
-                  ]
+                  "t_edge": {
+                    "ids": [
+                      "e9"
+                    ]
+                  }
                 },
-                "resource_id": "infores:arax",
-                "score": 0
+                "resource_id": "infores:arax"
               },
               {
                 "edge_bindings": {
-                  "t_edge": [
-                    {
-                      "attributes": [],
-                      "id": "e9"
-                    }
-                  ]
+                  "t_edge": {
+                    "ids": [
+                      "e9"
+                    ]
+                  }
                 },
                 "resource_id": "infores:arax-second",
                 "score": 0.2
               }
             ],
             "node_bindings": {
-              "on": [
-                {
-                  "attributes": [],
-                  "id": "CHEBI:17234"
-                }
-              ],
-              "sn": [
-                {
-                  "attributes": [],
-                  "id": "MONDO:0005148"
-                }
-              ]
+              "on": {
+                "ids": [
+                  "CHEBI:17234"
+                ]
+              },
+              "sn": {
+                "ids": [
+                  "MONDO:0005148"
+                ]
+              }
             },
             "normalized_score": 50.0
           }
@@ -2227,13 +2181,11 @@
       "message": {
         "auxiliary_graphs": {
           "aux_clean": {
-            "attributes": [],
             "edges": [
               "clean2"
             ]
           },
           "aux_partial": {
-            "attributes": [],
             "edges": [
               "clean1"
             ]
@@ -2242,32 +2194,35 @@
         "knowledge_graph": {
           "edges": {
             "clean1": {
+              "agent_type": "not_provided",
               "attributes": [],
+              "knowledge_level": "not_provided",
               "object": "MONDO:0005148",
               "predicate": "biolink:treats",
               "sources": [
                 {
                   "resource_id": "infores:test-kp",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 }
               ],
               "subject": "CHEBI:6801"
             },
             "clean2": {
+              "agent_type": "not_provided",
               "attributes": [],
+              "knowledge_level": "not_provided",
               "object": "MONDO:0005148",
               "predicate": "biolink:affects",
               "sources": [
                 {
                   "resource_id": "infores:test-kp",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 }
               ],
               "subject": "NCBIGene:5468"
             },
             "support_partial": {
+              "agent_type": "not_provided",
               "attributes": [
                 {
                   "attribute_type_id": "biolink:support_graphs",
@@ -2276,13 +2231,13 @@
                   ]
                 }
               ],
+              "knowledge_level": "not_provided",
               "object": "NCBIGene:5468",
               "predicate": "biolink:affects",
               "sources": [
                 {
                   "resource_id": "infores:test-kp",
-                  "resource_role": "primary_knowledge_source",
-                  "upstream_resource_ids": []
+                  "resource_role": "primary_knowledge_source"
                 }
               ],
               "subject": "CHEBI:6801"
@@ -2344,59 +2299,54 @@
             "analyses": [
               {
                 "edge_bindings": {
-                  "t_edge": [
-                    {
-                      "attributes": [],
-                      "id": "clean1"
-                    }
-                  ]
+                  "t_edge": {
+                    "ids": [
+                      "clean1"
+                    ]
+                  }
                 },
                 "resource_id": "infores:x",
                 "score": 0.7
               }
             ],
             "node_bindings": {
-              "on": [
-                {
-                  "attributes": [],
-                  "id": "CHEBI:6801"
-                }
-              ],
-              "sn": [
-                {
-                  "attributes": [],
-                  "id": "MONDO:0005148"
-                }
-              ]
+              "on": {
+                "ids": [
+                  "CHEBI:6801"
+                ]
+              },
+              "sn": {
+                "ids": [
+                  "MONDO:0005148"
+                ]
+              }
             }
           },
           {
             "analyses": [
               {
                 "path_bindings": {
-                  "p0": [
-                    {
-                      "id": "aux_clean"
-                    }
-                  ]
+                  "p0": {
+                    "ids": [
+                      "aux_clean"
+                    ]
+                  }
                 },
                 "resource_id": "infores:x",
                 "score": 0.9
               }
             ],
             "node_bindings": {
-              "on": [
-                {
-                  "attributes": [],
-                  "id": "CHEBI:6801"
-                }
-              ],
-              "sn": [
-                {
-                  "attributes": [],
-                  "id": "MONDO:0005148"
-                }
-              ]
+              "on": {
+                "ids": [
+                  "CHEBI:6801"
+                ]
+              },
+              "sn": {
+                "ids": [
+                  "MONDO:0005148"
+                ]
+              }
             }
           }
         ]
@@ -2422,6 +2372,7 @@
       "knowledge_graph": {
         "edges": {
           "e1": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:publications",
@@ -2431,13 +2382,13 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:treats",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               },
               {
                 "resource_id": "infores:aragorn",
@@ -2450,27 +2401,29 @@
             "subject": "CHEBI:6801"
           },
           "e2": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "NCBIGene:5468",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:aragorn",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
           },
           "e3": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:gene_associated_with_condition",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
@@ -2539,60 +2492,54 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.83
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:6801"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:6801"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         },
         {
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e3"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e3"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.41
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "NCBIGene:5468"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "NCBIGene:5468"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         }
       ]
@@ -2609,7 +2556,6 @@
     "message": {
       "auxiliary_graphs": {
         "aux1": {
-          "attributes": [],
           "edges": [
             "e1",
             "e3"
@@ -2619,6 +2565,7 @@
       "knowledge_graph": {
         "edges": {
           "e1": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:publications",
@@ -2628,13 +2575,13 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:treats",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               },
               {
                 "resource_id": "infores:aragorn",
@@ -2647,6 +2594,7 @@
             "subject": "CHEBI:6801"
           },
           "e2": {
+            "agent_type": "not_provided",
             "attributes": [
               {
                 "attribute_type_id": "biolink:support_graphs",
@@ -2655,26 +2603,27 @@
                 ]
               }
             ],
+            "knowledge_level": "not_provided",
             "object": "NCBIGene:5468",
             "predicate": "biolink:affects",
             "sources": [
               {
                 "resource_id": "infores:aragorn",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "CHEBI:6801"
           },
           "e3": {
+            "agent_type": "not_provided",
             "attributes": [],
+            "knowledge_level": "not_provided",
             "object": "MONDO:0005148",
             "predicate": "biolink:gene_associated_with_condition",
             "sources": [
               {
                 "resource_id": "infores:ctd",
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": []
+                "resource_role": "primary_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
@@ -2743,60 +2692,54 @@
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e1"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e1"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.83
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "CHEBI:6801"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "CHEBI:6801"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         },
         {
           "analyses": [
             {
               "edge_bindings": {
-                "t_edge": [
-                  {
-                    "attributes": [],
-                    "id": "e3"
-                  }
-                ]
+                "t_edge": {
+                  "ids": [
+                    "e3"
+                  ]
+                }
               },
               "resource_id": "infores:aragorn",
               "score": 0.41
             }
           ],
           "node_bindings": {
-            "on": [
-              {
-                "attributes": [],
-                "id": "NCBIGene:5468"
-              }
-            ],
-            "sn": [
-              {
-                "attributes": [],
-                "id": "MONDO:0005148"
-              }
-            ]
+            "on": {
+              "ids": [
+                "NCBIGene:5468"
+              ]
+            },
+            "sn": {
+              "ids": [
+                "MONDO:0005148"
+              ]
+            }
           }
         }
       ]
@@ -2866,7 +2809,8 @@
             {
               "score": 0.9
             }
-          ]
+          ],
+          "normalized_score": 100.0
         },
         {
           "node_bindings": {}
@@ -2901,7 +2845,8 @@
             {
               "score": 0.9
             }
-          ]
+          ],
+          "normalized_score": 100.0
         },
         {
           "analyses": []
@@ -3061,12 +3006,12 @@
     "blocklist": true,
     "edge_missing_predicate": false,
     "empty": true,
-    "kg_missing_edges": false,
+    "kg_missing_edges": true,
     "no_message": false,
     "pathfinder": true,
     "pathfinder_analysis_missing_path_bindings": false,
     "pathfinder_path_missing_object": false,
-    "pathfinder_qg_with_edges": true,
+    "pathfinder_qg_with_edges": false,
     "qg_categories_not_list": false,
     "result_missing_node_bindings": false,
     "results_not_list": false

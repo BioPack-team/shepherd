@@ -3,7 +3,52 @@ from pathlib import Path
 import os
 import yaml
 
+from translator_tom import AsyncQuery, AsyncQueryResponse, Query, Response
+
 from shepherd_utils.config import settings
+from shepherd_utils.trapi import BIOLINK_VERSION, SCHEMA_VERSION
+
+# The TRAPI 2.0 models whose JSON Schemas the query routes reference (see
+# ``shepherd_server.base_routes.query_openapi_extra``).
+TRAPI_SCHEMA_MODELS = (Query, AsyncQuery, Response, AsyncQueryResponse)
+_REF_TEMPLATE = "#/components/schemas/{model}"
+
+
+def trapi_component_schemas() -> dict:
+    """JSON Schemas for the TRAPI 2.0 request/response bodies, from TOM.
+
+    Every nested definition is hoisted into ``components.schemas`` so the
+    ``$ref`` s resolve inside the OpenAPI document. ``workflow`` is loosened
+    to a list of operation objects: Shepherd runs its own operations
+    (``aragorn.lookup``, ``score_paths``, ...) alongside the standard ones,
+    and checks them itself.
+    """
+    schemas: dict = {}
+    for model in TRAPI_SCHEMA_MODELS:
+        schema = model.model_json_schema(ref_template=_REF_TEMPLATE)
+        schemas.update(schema.pop("$defs", {}))
+        schemas[model.__name__] = schema
+    for name in ("Query", "AsyncQuery", "Response"):
+        properties = schemas[name].get("properties", {})
+        if "workflow" in properties:
+            properties["workflow"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                    "additionalProperties": True,
+                },
+                "description": "List of workflow operations to be executed.",
+            }
+    # Operation schemas are only reachable through the replaced ``workflow``.
+    return {
+        name: schema
+        for name, schema in schemas.items()
+        if not name.startswith("Operation")
+        and not name.endswith("Parameters")
+        or name == "QueryParameters"
+    }
 
 
 def construct_open_api_schema(app, description=None, infores=None, subpath=""):
@@ -34,15 +79,23 @@ def construct_open_api_schema(app, description=None, infores=None, subpath=""):
     if tags:
         open_api_schema["tags"] = tags
 
+    components = open_api_schema.setdefault("components", {})
+    components.setdefault("schemas", {}).update(trapi_component_schemas())
+
     if x_translator_extension:
         # if x_translator_team is defined amends schema with x_translator extension
         open_api_schema["info"]["x-translator"] = x_translator_extension
+        # Responses are stamped with the Biolink version of the TRAPI models.
+        open_api_schema["info"]["x-translator"]["biolink-version"] = BIOLINK_VERSION
         if infores is not None:
             open_api_schema["info"]["x-translator"]["infores"] = infores
 
     if x_trapi_extension:
         # if x_translator_team is defined amends schema with x_translator extension
         open_api_schema["info"]["x-trapi"] = x_trapi_extension
+        # The TRAPI version is the one the code speaks, not a second copy
+        # to keep in step by hand.
+        open_api_schema["info"]["x-trapi"]["version"] = SCHEMA_VERSION
 
     if contact_config:
         open_api_schema["info"]["contact"] = contact_config

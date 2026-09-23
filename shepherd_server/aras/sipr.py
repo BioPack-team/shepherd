@@ -22,7 +22,7 @@ async def sync_query(request: Request) -> Response:
     return response
 
 
-@SIPR.post("/asyncquery", openapi_extra=query_openapi_extra())
+@SIPR.post("/asyncquery", openapi_extra=query_openapi_extra("AsyncQuery"))
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.SIPR, request)
     return response

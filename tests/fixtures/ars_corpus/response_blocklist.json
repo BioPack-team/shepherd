@@ -73,10 +73,11 @@
           "sources": [
             {
               "resource_id": "infores:test-kp",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             }
           ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided",
           "attributes": []
         },
         "bad_obj": {
@@ -86,10 +87,11 @@
           "sources": [
             {
               "resource_id": "infores:test-kp",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             }
           ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided",
           "attributes": []
         },
         "clean1": {
@@ -99,10 +101,11 @@
           "sources": [
             {
               "resource_id": "infores:test-kp",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             }
           ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided",
           "attributes": []
         },
         "clean2": {
@@ -112,10 +115,11 @@
           "sources": [
             {
               "resource_id": "infores:test-kp",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             }
           ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided",
           "attributes": []
         },
         "support_only": {
@@ -125,8 +129,7 @@
           "sources": [
             {
               "resource_id": "infores:test-kp",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             }
           ],
           "attributes": [
@@ -136,7 +139,9 @@
                 "aux_all_bad"
               ]
             }
-          ]
+          ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided"
         },
         "support_partial": {
           "subject": "CHEBI:6801",
@@ -145,8 +150,7 @@
           "sources": [
             {
               "resource_id": "infores:test-kp",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             }
           ],
           "attributes": [
@@ -157,7 +161,9 @@
                 "aux_partial"
               ]
             }
-          ]
+          ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided"
         }
       }
     },
@@ -166,49 +172,43 @@
         "edges": [
           "bad_subj",
           "bad_obj"
-        ],
-        "attributes": []
+        ]
       },
       "aux_partial": {
         "edges": [
           "bad_obj",
           "clean1"
-        ],
-        "attributes": []
+        ]
       },
       "aux_clean": {
         "edges": [
           "clean2"
-        ],
-        "attributes": []
+        ]
       }
     },
     "results": [
       {
         "node_bindings": {
-          "sn": [
-            {
-              "id": "MONDO:0005148",
-              "attributes": []
-            }
-          ],
-          "on": [
-            {
-              "id": "LOINC:LP231631-5",
-              "attributes": []
-            }
-          ]
+          "sn": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "on": {
+            "ids": [
+              "LOINC:LP231631-5"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:x",
             "edge_bindings": {
-              "t_edge": [
-                {
-                  "id": "bad_subj",
-                  "attributes": []
-                }
-              ]
+              "t_edge": {
+                "ids": [
+                  "bad_subj"
+                ]
+              }
             },
             "score": 0.5
           }
@@ -216,45 +216,38 @@
       },
       {
         "node_bindings": {
-          "sn": [
-            {
-              "id": "MONDO:0005148",
-              "attributes": []
-            }
-          ],
-          "on": [
-            {
-              "id": "CHEBI:6801",
-              "attributes": []
-            }
-          ]
+          "sn": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "on": {
+            "ids": [
+              "CHEBI:6801"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:x",
             "edge_bindings": {
-              "t_edge": [
-                {
-                  "id": "bad_obj",
-                  "attributes": []
-                },
-                {
-                  "id": "clean1",
-                  "attributes": []
-                }
-              ]
+              "t_edge": {
+                "ids": [
+                  "bad_obj",
+                  "clean1"
+                ]
+              }
             },
             "score": 0.7
           },
           {
             "resource_id": "infores:y",
             "edge_bindings": {
-              "t_edge": [
-                {
-                  "id": "bad_obj",
-                  "attributes": []
-                }
-              ]
+              "t_edge": {
+                "ids": [
+                  "bad_obj"
+                ]
+              }
             },
             "support_graphs": [
               "bad_subj",
@@ -266,29 +259,26 @@
       },
       {
         "node_bindings": {
-          "sn": [
-            {
-              "id": "MONDO:0005148",
-              "attributes": []
-            }
-          ],
-          "on": [
-            {
-              "id": "NCBIGene:5468",
-              "attributes": []
-            }
-          ]
+          "sn": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "on": {
+            "ids": [
+              "NCBIGene:5468"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:x",
             "edge_bindings": {
-              "t_edge": [
-                {
-                  "id": "bad_subj",
-                  "attributes": []
-                }
-              ]
+              "t_edge": {
+                "ids": [
+                  "bad_subj"
+                ]
+              }
             },
             "score": 0.3
           }
@@ -296,42 +286,38 @@
       },
       {
         "node_bindings": {
-          "sn": [
-            {
-              "id": "MONDO:0005148",
-              "attributes": []
-            }
-          ],
-          "on": [
-            {
-              "id": "CHEBI:6801",
-              "attributes": []
-            }
-          ]
+          "sn": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "on": {
+            "ids": [
+              "CHEBI:6801"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:x",
             "path_bindings": {
-              "p0": [
-                {
-                  "id": "aux_all_bad"
-                },
-                {
-                  "id": "aux_clean"
-                }
-              ]
+              "p0": {
+                "ids": [
+                  "aux_all_bad",
+                  "aux_clean"
+                ]
+              }
             },
             "score": 0.9
           },
           {
             "resource_id": "infores:z",
             "path_bindings": {
-              "p0": [
-                {
-                  "id": "aux_all_bad"
-                }
-              ]
+              "p0": {
+                "ids": [
+                  "aux_all_bad"
+                ]
+              }
             },
             "score": 0.1
           }

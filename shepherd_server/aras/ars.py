@@ -47,6 +47,7 @@ from shepherd_utils.ars.notify import replay_completion
 from shepherd_utils.ars.statuses import to_name
 from shepherd_utils.config import settings
 from shepherd_utils.logger import resolve_log_level
+from shepherd_utils.trapi import TRAPIRequestError, query_log_level, validate_query
 
 logger = logging.getLogger("shepherd.ars")
 
@@ -215,6 +216,17 @@ async def submit(request: Request) -> Response:
                 raise UnboundLocalError(
                     "local variable 'message' referenced before assignment"
                 )
+        # TRAPI 2.0: every hosted ARA speaks 2.0, so a submit must be a 2.0
+        # query -- including the 1.x spellings 2.0 retired (top-level
+        # log_level / bypass_cache, qualifier_constraints ...), which the
+        # schema would otherwise let through and silently ignore. Checked
+        # after upstream's own shape checks above so their error contract
+        # is unchanged; the 400 body is upstream's submit error shape.
+        try:
+            validate_query(data)
+        except TRAPIRequestError as e:
+            logger.info(f"submit rejected: {e}")
+            return text("failing due to %s with the message %s" % (None, str(e)), 400)
         # Response cache (Shepherd-native, docs/ARS_RESPONSE_CACHE_PLAN.md):
         # there is one message tree per distinct query. A structurally
         # identical completed query answers right here with the source
@@ -265,7 +277,9 @@ async def submit(request: Request) -> Response:
                     "parent_pk": str(message["id"]),
                     # query_id keys the shared task-context builder + log store
                     "query_id": str(message["id"]),
-                    "log_level": resolve_log_level(settings.log_level),
+                    "log_level": resolve_log_level(
+                        query_log_level(data), resolve_log_level(settings.log_level)
+                    ),
                     "otel": json.dumps(carrier),
                 },
                 logger,

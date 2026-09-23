@@ -17,6 +17,7 @@ from shepherd_utils.db import (
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.trapi import make_binding, upgrade_trapi_1_response
 
 # Queue name
 STREAM = "sipr"
@@ -24,6 +25,10 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 MAX_QUERY_TIME = 2400
+#: Provenance for the edges SIPR infers, matching merge_message's
+#: ``infores:shepherd-{target}`` convention.
+SIPR_INFORES = "infores:shepherd-sipr"
+FALLBACK_CATEGORIES = ["biolink:NamedThing"]
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
@@ -59,7 +64,8 @@ def get_nodes(response, query_nodes, logger):
             }
         }
     }
-    for edge_id, edge in response["message"]["knowledge_graph"]["edges"].items():
+    response_kg = response["message"].get("knowledge_graph") or {}
+    for edge_id, edge in (response_kg.get("edges") or {}).items():
         all_nodes.add(edge["subject"])
         all_nodes.add(edge["object"])
         if (
@@ -135,15 +141,11 @@ def write_trapi(id_list, hop_num):
             }
         },
     }
+    # A TRAPI 2.0 query: just the query graph (an empty auxiliary_graphs is
+    # invalid, and a query has no business carrying results).
     query = {
         "message": {
             "query_graph": qg,
-            "knowledge_graph": {
-                "nodes": {},
-                "edges": {},
-            },
-            "results": [],
-            "auxiliary_graphs": {},
         },
         "parameters": {
             "timeout": 3600,
@@ -162,7 +164,8 @@ async def run_trapi(query, logger):
             )
 
         response.raise_for_status()
-        response = response.json()
+        # Retriever may still answer in TRAPI 1.x; read it as 2.0.
+        response = upgrade_trapi_1_response(response.json())
     except Exception as e:
         logger.error(f"Failed to get a good response from kg retrieval: {str(e)}")
     return response
@@ -171,7 +174,7 @@ async def run_trapi(query, logger):
 def distribute_weights(trapi_responses, target_nodes, logger):
     G = nx.DiGraph()
     for response in trapi_responses:
-        kg = response["message"]["knowledge_graph"]
+        kg = response["message"].get("knowledge_graph") or {"edges": {}}
 
         # %%
 
@@ -195,6 +198,35 @@ def distribute_weights(trapi_responses, target_nodes, logger):
     ppr = nx.pagerank(G, alpha=0.85, personalization=personalization)
 
     return ppr
+
+
+def make_sipr_edge(subject: str, obj: str) -> dict:
+    """A TRAPI 2.0 knowledge-graph edge for a SIPR inference.
+
+    SIPR infers the relationship from personalized PageRank over the retrieved
+    neighborhood, so the edge is a computational-model prediction, and SIPR is
+    its primary knowledge source.
+    """
+    return {
+        "subject": subject,
+        "predicate": "biolink:related_to",
+        "object": obj,
+        "knowledge_level": "prediction",
+        "agent_type": "computational_model",
+        "sources": [
+            {
+                "resource_id": SIPR_INFORES,
+                "resource_role": "primary_knowledge_source",
+            }
+        ],
+    }
+
+
+def _valid_node(kg_node: dict) -> dict:
+    """A KG node with the non-empty ``categories`` TRAPI 2.0 requires."""
+    if not kg_node.get("categories"):
+        kg_node = {**kg_node, "categories": list(FALLBACK_CATEGORIES)}
+    return kg_node
 
 
 async def sipr(task, logger: logging.Logger):
@@ -238,12 +270,11 @@ async def sipr(task, logger: logging.Logger):
                     "edges": {},
                 },
                 "results": [],
-                "auxiliary_graphs": {},
             },
         }
         for in_node in nodes:
             kg_node = {
-                "categories": [],
+                "categories": list(FALLBACK_CATEGORIES),
                 "name": in_node,
             }
             for trapi_response in trapi_responses:
@@ -256,20 +287,17 @@ async def sipr(task, logger: logging.Logger):
                         in_node
                     ]
                     break
-            final_message["message"]["knowledge_graph"]["nodes"][in_node] = kg_node
-        node_bindings = [
-            {
-                "attributes": [],
-                "id": node_id,
-            }
-            for node_id in nodes
-        ]
+            final_message["message"]["knowledge_graph"]["nodes"][in_node] = _valid_node(
+                kg_node
+            )
+        # TRAPI 2.0: one NodeBinding {"ids": [...]} per qnode.
+        input_node_binding = make_binding(nodes)
         for node, score in node_scores:
             if score < 0.001:
                 # throw out any nodes with a too low score
                 continue
             kg_node = {
-                "categories": [],
+                "categories": list(FALLBACK_CATEGORIES),
                 "name": node,
             }
             for trapi_response in trapi_responses:
@@ -282,44 +310,30 @@ async def sipr(task, logger: logging.Logger):
                         node
                     ]
                     break
-            final_message["message"]["knowledge_graph"]["nodes"][node] = kg_node
+            final_message["message"]["knowledge_graph"]["nodes"][node] = _valid_node(
+                kg_node
+            )
             new_edge_ids = []
             for in_node in nodes:
                 new_edge_id = str(uuid.uuid4())[:8]
-                final_message["message"]["knowledge_graph"]["edges"][new_edge_id] = {
-                    "subject": in_node,
-                    "predicate": "biolink:related_to",
-                    "object": node,
-                    "attributes": [],
-                }
+                final_message["message"]["knowledge_graph"]["edges"][new_edge_id] = (
+                    make_sipr_edge(in_node, node)
+                )
                 new_edge_ids.append(new_edge_id)
-            edge_bindings = [
-                {
-                    "attributes": [],
-                    "id": edge_id,
-                }
-                for edge_id in new_edge_ids
-            ]
             final_message["message"]["results"].append(
                 {
                     "analyses": [
                         {
                             "edge_bindings": {
-                                "e0": edge_bindings,
+                                "e0": make_binding(new_edge_ids),
                             },
-                            "resource_id": "infores:shepherd_sipr",
+                            "resource_id": SIPR_INFORES,
                             "score": score,
-                            "support_graphs": [],
                         }
                     ],
                     "node_bindings": {
-                        "SN": node_bindings,
-                        "ON": [
-                            {
-                                "attributes": [],
-                                "id": node,
-                            },
-                        ],
+                        "SN": deepcopy(input_node_binding),
+                        "ON": make_binding([node]),
                     },
                 }
             )

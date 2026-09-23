@@ -27,7 +27,7 @@ async def example_score(task, logger: logging.Logger):
     message = await get_message(response_id, logger)
     # give a random score to all results
     for result in message["message"].get("results", []):
-        for analysis in result["analyses"]:
+        for analysis in result.get("analyses") or []:
             analysis["score"] = random.random()
 
     await save_message(response_id, message, logger)

@@ -59,6 +59,29 @@ def normalize(obj: Any) -> Any:
     return mask_scalars(obj)
 
 
+#: Response members that name the envelope, not the answer: Shepherd's TRAPI
+#: 2.0 ARS stamps them, upstream's 1.5 one has none.
+ENVELOPE_MEMBERS = ("schema_version", "biolink_version", "parameters")
+
+
+def as_trapi2(payload: Any) -> Any:
+    """A merged payload in TRAPI 2.0 form, envelope members dropped.
+
+    Relay answers in TRAPI 1.5 and Shepherd in 2.0; a 1.x payload is
+    up-converted with TOM's 1.6 -> 2.0 transforms (the same ones the golden
+    fixtures were translated with) so the diff is of answers, not shapes.
+    Needs the Shepherd venv (translator_tom).
+    """
+    if not isinstance(payload, dict):
+        return payload
+    from shepherd_utils.trapi import upgrade_trapi_1_response
+
+    out = upgrade_trapi_1_response(json.loads(json.dumps(payload)))
+    for member in ENVELOPE_MEMBERS:
+        out.pop(member, None)
+    return out
+
+
 def canonical(obj: Any) -> str:
     return json.dumps(normalize(obj), sort_keys=True, default=str)
 

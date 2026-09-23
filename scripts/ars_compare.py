@@ -18,7 +18,7 @@ both to completion, then compares three layers:
                        stack independently, the ported (golden-tested)
                        pipeline re-folds that stack's own captured inputs in
                        its recorded merge order (merged_versions_list) --
-                       blocklist, scrub, confidence, the lot, minus the
+                       blocklist, confidence, the lot, minus the
                        external annotator -- and the result is diffed
                        against what that ARS actually stored. If the port
                        cannot reproduce the DEPLOYED ARS's answer from the
@@ -78,7 +78,9 @@ sys.path.insert(0, str(REPO))
 try:
     from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
     from shepherd_utils.ars.merge import TranslatorMessage, mergeMessages
-    from shepherd_utils.ars.premerge import appraise_confidence, scrub_null_attributes
+    from shepherd_utils.ars.premerge import appraise_confidence
+    from shepherd_utils.ars.trapi import strip_nulls
+    from shepherd_utils.trapi import finalize_response, upgrade_trapi_1_response
 
     REPLAY_AVAILABLE = True
 except ImportError as _replay_err:  # pragma: no cover
@@ -102,11 +104,27 @@ def canonical_agent(name: str) -> str:
     return out
 
 
+#: Response members that name the envelope rather than the answer: a TRAPI
+#: 1.5 ARS (upstream Relay) has none of them, Shepherd's 2.0 ARS stamps them.
+ENVELOPE_MEMBERS = ("schema_version", "biolink_version", "parameters")
+
+
 def strip_for_comparison(payload, ignore_annotations: bool, include_logs: bool):
-    """Remove content that legitimately differs between live stacks."""
+    """Remove content that legitimately differs between live stacks.
+
+    Shepherd's ARS speaks TRAPI 2.0 and a deployed upstream ARS 1.5, so a
+    1.x payload is first up-converted with TOM's 1.6 -> 2.0 transforms
+    (shepherd_utils.trapi.upgrade_trapi_1_response) and both sides lose the
+    2.0 envelope members; what remains is the answer, in one shape.
+    """
     if not isinstance(payload, dict):
         return payload
     out = json.loads(json.dumps(payload))
+    if REPLAY_AVAILABLE:
+        strip_nulls(out)
+        out = upgrade_trapi_1_response(out)
+    for member in ENVELOPE_MEMBERS:
+        out.pop(member, None)
     if not include_logs:
         out.pop("logs", None)
     if ignore_annotations:
@@ -147,9 +165,11 @@ def merge_order(trace: dict) -> list | None:
 
 def replay_side(side: dict) -> tuple:
     """Re-run the ported pipeline over this stack's own captured inputs, in
-    its own recorded merge order: fold -> blocklist -> scrub -> confidence
-    per step, exactly like merge_received + post_process minus the external
-    annotator. Returns (replayed_payload, error)."""
+    its own recorded merge order: fold -> blocklist -> confidence ->
+    finalize per step, exactly like merge_received + post_process minus the
+    external annotator (the null-attribute scrub left upstream in Relay PR
+    #885). Inputs from a TRAPI 1.x stack are up-converted to 2.0 first, as
+    the port only speaks 2.0. Returns (replayed_payload, error)."""
     if not REPLAY_AVAILABLE:
         return None, f"pipeline import failed: {_REPLAY_IMPORT_ERROR}"
     order = merge_order(side.get("trace"))
@@ -161,6 +181,7 @@ def replay_side(side: dict) -> tuple:
             child = side["children"].get(agent)
             if not isinstance(child, dict) or "message" not in child:
                 return None, f"no captured input payload for {agent}"
+            child = upgrade_trapi_1_response(strip_nulls(copy.deepcopy(child)))
             newcomer = TranslatorMessage(copy.deepcopy(child["message"]))
             if current is None:
                 # first merge: the newcomer IS the merged message
@@ -169,10 +190,10 @@ def replay_side(side: dict) -> tuple:
                 t_current = TranslatorMessage(copy.deepcopy(current["message"]))
                 merged_dict = mergeMessages([t_current, newcomer], "replay").to_dict()
             remove_blocked(merged_dict, load_blocklist(), "replay")
-            scrub_null_attributes(merged_dict)
             results = (merged_dict.get("message") or {}).get("results")
             if results is not None and len(results) > 0:
                 appraise_confidence(results)
+            finalize_response(merged_dict)
             current = merged_dict
     except Exception as e:
         return None, f"replay raised {type(e).__name__}: {e}"

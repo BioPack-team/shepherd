@@ -30,6 +30,16 @@ package version skew between the two builds (stable across reruns) or
 BioThings backend data movement between the capture and the injection
 (unstable) -- rerun to classify before treating one as a pipeline bug.
 
+TRAPI 2.0: the local ARS speaks 2.0 and a deployed upstream ARS 1.5.
+Captured 1.x payloads are up-converted with TOM's 1.6 -> 2.0 transforms
+(shepherd_utils.trapi.upgrade_trapi_1_response) before they are delivered,
+and ars_compare.strip_for_comparison does the same for the captured merged
+message, so the comparison is 2.0 against 2.0. The query templates
+(scripts/test_ars.py) are 2.0 queries; a 1.5 source ARS ignores 2.0-only
+members such as an MVP2 edge's ``constraints.qualifiers``, so an MVP2 capture
+from a 1.5 source answers an unconstrained query -- compare MVP2 runs
+against a 2.0 source.
+
 Local stack prerequisites:
   - the ARA URL overrides point every actor at this script's sink,
     e.g. http://host.docker.internal:8210/<agent> (any path; it 200s all)
@@ -302,6 +312,11 @@ async def run_injection(curie: str, args) -> str:
             if error:
                 headers["tr_ars.message.status"] = "E"
                 payload = {"message": {}}
+            elif isinstance(payload, dict) and ars_compare.REPLAY_AVAILABLE:
+                # a 1.x capture is up-converted: the local ARS validates 2.0
+                payload = ars_compare.upgrade_trapi_1_response(
+                    ars_compare.strip_nulls(json.loads(json.dumps(payload)))
+                )
             resp = await client.post(
                 f"{base}/api/messages/{kids[agent]['pk']}",
                 json=payload,

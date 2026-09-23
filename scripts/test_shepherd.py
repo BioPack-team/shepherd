@@ -51,20 +51,14 @@ def generate_query(curie: str) -> dict:
     #                     "object": "ON",
     #                     "subject": "SN",
     #                     "predicates": ["biolink:affects"],
-    #                     "qualifier_constraints": [
-    #                         {
-    #                             "qualifier_set": [
-    #                                 {
-    #                                     "qualifier_type_id": "biolink:object_aspect_qualifier",
-    #                                     "qualifier_value": "activity_or_abundance",
-    #                                 },
-    #                                 {
-    #                                     "qualifier_type_id": "biolink:object_direction_qualifier",
-    #                                     "qualifier_value": "decreased",
-    #                                 },
-    #                             ]
-    #                         }
-    #                     ],
+    #                     "constraints": {
+    #                         "qualifiers": [
+    #                             {
+    #                                 "biolink:object_aspect_qualifier": "activity_or_abundance",
+    #                                 "biolink:object_direction_qualifier": "decreased",
+    #                             }
+    #                         ]
+    #                     },
     #                     "knowledge_type": "inferred",
     #                 }
     #             },
@@ -88,9 +82,10 @@ def generate_query(curie: str) -> dict:
                 },
             },
         },
-        "parameters": {},
-        "log_level": "DEBUG",
-        # "bypass_cache": True,
+        "parameters": {
+            "log_level": "DEBUG",
+            # "bypass_cache": True,
+        },
         "submitter": "Max"
     }
 

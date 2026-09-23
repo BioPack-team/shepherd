@@ -141,3 +141,44 @@ async def test_example_score(mocker, redis_mock):
     assert len(message["message"]["results"]) == 1
     assert "score" in message["message"]["results"][0]["analyses"][0]
     assert isinstance(message["message"]["results"][0]["analyses"][0]["score"], float)
+
+
+def test_example_lookup_stub_response_is_trapi_2():
+    """The canned response example_lookup posts back must be valid TRAPI 2.0."""
+    from pathlib import Path
+
+    from translator_tom import Response
+
+    import workers.example_lookup.worker as example_lookup_worker
+
+    path = Path(example_lookup_worker.__file__).parent / "test_response.json"
+    with open(path, encoding="utf-8") as f:
+        response = json.load(f)
+    Response.from_dict(response)
+    result = response["message"]["results"][0]
+    assert all("ids" in b for b in result["node_bindings"].values())
+
+
+@pytest.mark.asyncio
+async def test_example_score_tolerates_absent_analyses(mocker, redis_mock):
+    """TRAPI 2.0: Result.analyses is optional."""
+    mock_get = mocker.patch("workers.example_score.worker.get_message")
+    mock_get.return_value = {
+        "message": {"results": [{"node_bindings": {"n0": {"ids": ["X:1"]}}}]}
+    }
+    logger = logging.getLogger(__name__)
+    await example_score(
+        [
+            "test",
+            {
+                "query_id": "test",
+                "response_id": "test_response",
+                "workflow": json.dumps([{"id": "example.score"}]),
+                "log_level": "20",
+                "otel": json.dumps({}),
+            },
+        ],
+        logger,
+    )
+    message = await get_message("test_response", logger)
+    assert "analyses" not in message["message"]["results"][0]

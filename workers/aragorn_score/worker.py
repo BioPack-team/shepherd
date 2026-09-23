@@ -18,6 +18,7 @@ from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.trapi import binding_ids, edge_support_graphs
 
 # Queue name
 STREAM = "aragorn.score"
@@ -409,7 +410,7 @@ class Ranker:
         # Decompose message
         self.kgraph = message.get("knowledge_graph", {"nodes": {}, "edges": {}})
         self.qgraph = message.get("query_graph", {"nodes": {}, "edges": {}})
-        self.agraphs = message.get("auxiliary_graphs", {})
+        self.agraphs = message.get("auxiliary_graphs") or {}
 
         # Apply profile
         (
@@ -445,7 +446,7 @@ class Ranker:
             scores_for_sort.append(
                 max(
                     analysis["score"]
-                    for analysis in answer.get("analyses", [{"score": 0}])
+                    for analysis in answer.get("analyses") or [{"score": 0}]
                 )
             )
         # order the answers by score (rank)
@@ -668,38 +669,36 @@ class Ranker:
         r_graph_shared = dict()
         r_graph_shared["nodes"] = set()
         r_graph_shared["nodes_map"] = defaultdict(list)
-        for nb_id, nbs in answer["node_bindings"].items():
+        # TRAPI 2.0: one binding {"ids": [...]} per qnode / qedge.
+        for nb_id, nb in (answer.get("node_bindings") or {}).items():
             r_graph_shared["nodes"].add(nb_id)
-            for nb in nbs:
-                r_graph_shared["nodes_map"][nb["id"]].append(nb_id)
+            for n_id in binding_ids(nb):
+                r_graph_shared["nodes_map"][n_id].append(nb_id)
 
         # Build the results KG for each analysis:
         # The nodes for the results KG are the same for all analyses
         # We can populate these node_ids by walking through all node bindings
         result_kg_shared = {"node_ids": set(), "edge_ids": set()}
-        for nb_id, nbs in answer.get("node_bindings", {}).items():
-            for nb in nbs:
-                n_id = nb.get("id", None)
-                if n_id:
-                    result_kg_shared["node_ids"].add(n_id)
+        for nb_id, nb in (answer.get("node_bindings") or {}).items():
+            for n_id in binding_ids(nb):
+                result_kg_shared["node_ids"].add(n_id)
 
         # For each analysis we need to build a KG of all nodes and edges
         analysis_r_graphs = []
-        for anal in answer["analyses"]:
+        # Result.analyses is optional in TRAPI 2.0.
+        for anal in answer.get("analyses") or []:
             # Copy this list of globally bound nodes
             anal_kg = copy.deepcopy(result_kg_shared)
 
             # Walk and find all edges in this analysis
-            for eb_id, ebs in anal["edge_bindings"].items():
-                for eb in ebs:
-                    e_id = eb.get("id", None)
-                    if e_id:
-                        anal_kg["edge_ids"].add(e_id)
+            for eb_id, eb in (anal.get("edge_bindings") or {}).items():
+                for e_id in binding_ids(eb):
+                    anal_kg["edge_ids"].add(e_id)
 
             # Parse through all support graphs used in this analysis
             # If there are support graphs on/for this analysis (not edge)
             # Does this happen anymore?
-            sg_ids = anal.get("support_graphs", [])
+            sg_ids = anal.get("support_graphs") or []
             for sg_id in sg_ids:
                 sg = self.agraphs.get(sg_id, None)
                 if sg:
@@ -737,17 +736,15 @@ class Ranker:
 
             # remove support graph edges which are already in edge bindings
             # so they are not double-counted
-            for eb_id, ebs in anal["edge_bindings"].items():
-                for eb in ebs:
-                    e_id = eb.get("id", None)
-                    if e_id and e_id in anal["support_edges"]:
+            for eb_id, eb in (anal.get("edge_bindings") or {}).items():
+                for e_id in binding_ids(eb):
+                    if e_id in anal["support_edges"]:
                         anal["support_edges"].remove(e_id)
 
             # same for nodes
-            for nb_id, nbs in answer["node_bindings"].items():
-                for nb in nbs:
-                    n_id = nb.get("id", None)
-                    if n_id and n_id in anal["support_nodes"]:
+            for nb_id, nb in (answer.get("node_bindings") or {}).items():
+                for n_id in binding_ids(nb):
+                    if n_id in anal["support_nodes"]:
                         anal["support_nodes"].remove(n_id)
 
             # It is also convenient to have a list of all edges that were bound
@@ -1124,10 +1121,11 @@ def get_edge_support_kg(edge_id, kg, aux_graphs, edge_kg=None):
     if not edge:
         return edge_kg
 
-    edge_attr = edge.get("attributes", None)
-    if not edge_attr:
-        return edge_kg
-
+    # No early return for an edge without attributes: under TRAPI 1.x every
+    # edge carried at least the biolink:knowledge_level / agent_type
+    # attributes, so the old "no attributes -> skip" check never skipped a real
+    # edge. In 2.0 those are top-level properties and attribute-less edges are
+    # normal, so skipping them would silently drop their endpoints.
     edge_kg["edge_ids"].add(edge_id)
 
     # If we have edge attrs we might be adding new nodes
@@ -1139,41 +1137,37 @@ def get_edge_support_kg(edge_id, kg, aux_graphs, edge_kg=None):
     if obj:
         edge_kg["node_ids"].add(obj)
 
-    for attr in edge_attr:
-        attr_type = attr.get("attribute_type_id", None)
-        if attr_type == "biolink:support_graphs":
-            # We actually have a biolink support graph
-            more_support_graphs = attr.get("value", [])
-            for sg_id in more_support_graphs:
-                sg = aux_graphs.get(sg_id, None)
-                if not sg:
-                    continue
+    # We might actually have biolink support graphs
+    for sg_id in edge_support_graphs(edge):
+        sg = (aux_graphs or {}).get(sg_id, None)
+        if not sg:
+            continue
 
-                sg_edges = sg.get("edges", [])
-                sg_nodes = sg.get("nodes", [])
-                for sgn in sg_nodes:
-                    edge_kg["node_ids"].add(sgn)
+        sg_edges = sg.get("edges", [])
+        # Not part of the TRAPI AuxiliaryGraph schema, but tolerated if present.
+        for sgn in sg.get("nodes", []):
+            edge_kg["node_ids"].add(sgn)
 
-                for add_edge_id in sg_edges:
-                    try:
-                        add_edge = kg["edges"][add_edge_id]
-                    except KeyError:
-                        # This shouldn't happen, but it's defending against
-                        # some malformed TRAPI
-                        continue
+        for add_edge_id in sg_edges:
+            try:
+                add_edge = kg["edges"][add_edge_id]
+            except KeyError:
+                # This shouldn't happen, but it's defending against
+                # some malformed TRAPI
+                continue
 
-                    # Get this edge and add it to the edge_kg
-                    edge_kg["edge_ids"].add(add_edge_id)
+            # Get this edge and add it to the edge_kg
+            edge_kg["edge_ids"].add(add_edge_id)
 
-                    add_edge_sub = add_edge.get("subject", None)
-                    if add_edge_sub:
-                        edge_kg["node_ids"].add(add_edge_sub)
+            add_edge_sub = add_edge.get("subject", None)
+            if add_edge_sub:
+                edge_kg["node_ids"].add(add_edge_sub)
 
-                    add_edge_object = add_edge.get("object", None)
-                    if add_edge_object:
-                        edge_kg["node_ids"].add(add_edge_object)
+            add_edge_object = add_edge.get("object", None)
+            if add_edge_object:
+                edge_kg["node_ids"].add(add_edge_object)
 
-                    edge_kg = get_edge_support_kg(add_edge_id, kg, aux_graphs, edge_kg)
+            edge_kg = get_edge_support_kg(add_edge_id, kg, aux_graphs, edge_kg)
 
     return edge_kg
 
@@ -1192,14 +1186,11 @@ def aragorn_score(response_id: str, logger: logging.Logger) -> None:
     """
     in_message = get_message_sync(response_id)
 
-    # save the logs for the response (if any)
-    if "logs" not in in_message or in_message["logs"] is None:
-        in_message["logs"] = []
-    else:
-        # these timestamps are causing json serialization issues
-        # so here we convert them to strings.
-        for log in in_message["logs"]:
-            log["timestamp"] = str(log["timestamp"])
+    # these timestamps are causing json serialization issues so here we
+    # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
+    # empty list is never created.
+    for log in in_message.get("logs") or []:
+        log["timestamp"] = str(log["timestamp"])
 
     message = in_message["message"]
     if ("results" not in message) or (message["results"] is None):

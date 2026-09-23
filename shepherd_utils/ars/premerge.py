@@ -6,16 +6,22 @@ decorate_edges_with_infores, normalizeScores, ScoreStatCalc,
 normalize_scores, remove_phantom_support_graphs, pre_merge_process,
 appraise_confidence, get_confidence.
 
-Faithful port -- upstream quirks (the UnboundLocalError when an edge has
-non-empty sources but no primary_knowledge_source, the IndexError when only
-some results carry scores) are pinned by the golden parity tests. Node
-normalization is intentionally absent from pre_merge_process, matching
+Faithful port, minus the upstream crashes (the UnboundLocalError when an
+edge has non-empty sources but no primary_knowledge_source, the IndexError
+when only some results carry scores) -- see docs/ARS_PARITY_REGISTER.md.
+Node normalization is intentionally absent from pre_merge_process, matching
 upstream master (Relay PR #871 removed the call).
+
+TRAPI 2.0 (Shepherd speaks 2.0; upstream is 1.5): nothing here emits a null
+or a forbidden empty (``add_attribute``, ``_self_source``), log timestamps
+are RFC 3339 (``log_timestamp``), and a result without analyses -- optional
+in 2.0 -- is skipped by the score passes instead of aborting them.
 """
 
 import logging
 import statistics
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 from scipy.stats import rankdata
 
@@ -52,24 +58,33 @@ def add_log_entry(data, log_tuple):
         data["logs"] = [log_entry]
 
 
+#: The TRAPI Attribute members add_attribute copies across. Upstream built a
+#: template with every one of them set to None and overwrote the ones the
+#: caller supplied, so every attribute it added carried explicit nulls --
+#: invalid in TRAPI 2.0, which has no nullable members. Only the members the
+#: caller actually supplied (non-null) are copied now.
+_ATTRIBUTE_MEMBERS = (
+    "value",
+    "value_url",
+    "attributes",
+    "description",
+    "value_type_id",
+    "attribute_source",
+    "attribute_type_id",
+    "original_attribute_name",
+)
+
+
 def add_attribute(node_or_edge, attribute_json):
-    template_attribute = {
-        "value": None,
-        "value_url": None,
-        "attributes": None,
-        "description": None,
-        "value_type_id": None,
-        "attribute_source": None,
-        "attribute_type_id": None,
-        "original_attribute_name": None,
+    attribute = {
+        key: attribute_json[key]
+        for key in _ATTRIBUTE_MEMBERS
+        if attribute_json.get(key) is not None
     }
-    for key in attribute_json.keys():
-        if key is not None and key in template_attribute.keys():
-            template_attribute[key] = attribute_json[key]
-    if "attributes" in node_or_edge.keys():
-        node_or_edge["attributes"].append(template_attribute)
+    if isinstance(node_or_edge.get("attributes"), list):
+        node_or_edge["attributes"].append(attribute)
     else:
-        node_or_edge["attributes"] = [template_attribute]
+        node_or_edge["attributes"] = [attribute]
 
 
 def _self_source(inforesid, role):
@@ -79,13 +94,13 @@ def _self_source(inforesid, role):
     so a later edge flipping the role mutated the source already appended to
     every earlier edge -- the last edge to need a role decided the role every
     edge reported.
+
+    Upstream also set ``source_record_urls: None`` and
+    ``upstream_resource_ids: []``; TRAPI 2.0 forbids both (no nulls, and
+    ``upstream_resource_ids`` has minItems 1), so the source carries only
+    what it knows.
     """
-    return {
-        "resource_id": inforesid,
-        "resource_role": role,
-        "source_record_urls": None,
-        "upstream_resource_ids": [],
-    }
+    return {"resource_id": inforesid, "resource_role": role}
 
 
 def decorate_edges_with_infores(data, inforesid):
@@ -151,8 +166,11 @@ def ScoreStatCalc(results):
                 if score is not None:
                     scoreList.append(score)
             else:
-                logger.error("Results dont have the required fields")
-                return stat
+                # TRAPI 2.0 makes Result.analyses optional (and forbids an
+                # empty list), so a result without analyses is ordinary: it
+                # has no score to contribute. Upstream (1.5, analyses
+                # required) abandoned the whole batch here.
+                continue
 
         try:
             if len(scoreList) <= 1:
@@ -210,8 +228,8 @@ def normalizeScores(results):
                     scoreList.append(score)
                     scoredResults.append(res)
             else:
-                logger.error("Results dont have the required fields")
-                return results
+                # unscored: see ScoreStatCalc (upstream aborted the batch)
+                continue
 
         # .tolist() (not list()) so ranks are plain Python floats: rankdata
         # yields numpy.float64, which upstream's stdlib-json storage accepts
@@ -312,6 +330,15 @@ def get_confidence(result):
     return confidence_score
 
 
-def timestamp_hms() -> str:
-    """The %H:%M:%S wall-clock stamp upstream writes into TRAPI logs."""
-    return datetime.now().strftime("%H:%M:%S")
+def log_timestamp(dt: Optional[datetime] = None) -> str:
+    """An RFC 3339 UTC timestamp for a TRAPI log entry.
+
+    Upstream stamped its log entries with a bare ``%H:%M:%S`` wall-clock
+    time; TRAPI 2.0's LogEntry.timestamp is a zoned date-time. A naive
+    ``dt`` is taken to be UTC.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

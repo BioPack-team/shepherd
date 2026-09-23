@@ -18,39 +18,27 @@
         "subject": "$source",
         "object": "nA",
         "predicates": ["biolink:affects"],
-        "qualifier_constraints": [
-          {
-            "qualifier_set": [
-              {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "decreased"
-              },
-              {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity_or_abundance"
-              }
-            ]
-          }
-        ]
+        "constraints": {
+          "qualifiers": [
+            {
+              "biolink:object_direction_qualifier": "decreased",
+              "biolink:object_aspect_qualifier": "activity_or_abundance"
+            }
+          ]
+        }
       },
       "eB": {
         "subject": "nA",
         "object": "$target",
         "predicates": ["biolink:associated_with"],
-        "qualifier_constraints": [
-          {
-            "qualifier_set": [
-              {
-                "qualifier_type_id": "biolink:subject_form_or_variant_qualifier",
-                "qualifier_value": "non_loss_of_function_variant_form"
-              },
-              {
-                "qualifier_type_id": "biolink:qualified_predicate",
-                "qualifier_value": "biolink:contributes_to"
-              }
-            ]
-          }
-        ]
+        "constraints": {
+          "qualifiers": [
+            {
+              "biolink:subject_form_or_variant_qualifier": "non_loss_of_function_variant_form",
+              "biolink:qualified_predicate": "biolink:contributes_to"
+            }
+          ]
+        }
       }
     }
   }

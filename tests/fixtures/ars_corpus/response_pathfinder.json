@@ -58,6 +58,8 @@
               "resource_role": "primary_knowledge_source"
             }
           ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided",
           "attributes": []
         },
         "e1": {
@@ -70,6 +72,8 @@
               "resource_role": "primary_knowledge_source"
             }
           ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided",
           "attributes": []
         }
       }
@@ -79,41 +83,37 @@
         "edges": [
           "e0",
           "e1"
-        ],
-        "attributes": []
+        ]
       }
     },
     "results": [
       {
         "node_bindings": {
-          "n0": [
-            {
-              "id": "CHEBI:45783",
-              "attributes": []
-            }
-          ],
-          "n1": [
-            {
-              "id": "MONDO:0004979",
-              "attributes": []
-            }
-          ]
+          "n0": {
+            "ids": [
+              "CHEBI:45783"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "MONDO:0004979"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:arax",
             "path_bindings": {
-              "p0": [
-                {
-                  "id": "ag0"
-                }
-              ]
+              "p0": {
+                "ids": [
+                  "ag0"
+                ]
+              }
             },
             "score": 0.7
           }
         ]
       }
     ]
-  },
-  "logs": []
+  }
 }

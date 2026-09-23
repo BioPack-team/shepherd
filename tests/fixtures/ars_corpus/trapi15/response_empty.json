@@ -1,0 +1,37 @@
+{
+  "message": {
+    "query_graph": {
+      "nodes": {
+        "sn": {
+          "ids": [
+            "MONDO:0005148"
+          ],
+          "categories": [
+            "biolink:Disease"
+          ]
+        },
+        "on": {
+          "categories": [
+            "biolink:ChemicalEntity"
+          ]
+        }
+      },
+      "edges": {
+        "t_edge": {
+          "subject": "on",
+          "object": "sn",
+          "predicates": [
+            "biolink:treats"
+          ],
+          "knowledge_type": "inferred"
+        }
+      }
+    },
+    "knowledge_graph": {
+      "nodes": {},
+      "edges": {}
+    },
+    "results": [],
+    "auxiliary_graphs": {}
+  }
+}

@@ -286,7 +286,7 @@ def score_paths(response_id, logger):
         qpath_id, qpath = next(iter(paths.items()))
         subject_qnode = qpath["subject"]
         object_qnode = qpath["object"]
-        total_analyses = sum(len(r.get("analyses", [])) for r in results)
+        total_analyses = sum(len(r.get("analyses") or []) for r in results)
         logger.info(
             f"Scoring {response_id}: {len(results)} results, "
             f"{total_analyses} analyses, {len(auxiliary_graphs)} aux graphs"
@@ -327,15 +327,16 @@ def score_paths(response_id, logger):
         with embedding_env.begin() as txn:
             for result_ind, result in enumerate(results):
                 try:
-                    source = result["node_bindings"][subject_qnode][0]["id"]
-                    target = result["node_bindings"][object_qnode][0]["id"]
+                    # TRAPI 2.0: one binding {"ids": [...]} per qnode/qpath.
+                    source = result["node_bindings"][subject_qnode]["ids"][0]
+                    target = result["node_bindings"][object_qnode]["ids"][0]
                 except (KeyError, IndexError, TypeError):
                     continue
-                analyses = result.get("analyses", [])
+                analyses = result.get("analyses") or []
                 for analysis_ind, analysis in enumerate(analyses):
-                    path_bindings = analysis.get("path_bindings", {}).get(qpath_id, [])
+                    path_binding = (analysis.get("path_bindings") or {}).get(qpath_id)
                     try:
-                        aux_id = path_bindings[0]["id"]
+                        aux_id = path_binding["ids"][0]
                         edge_ids = auxiliary_graphs[aux_id]["edges"]
                     except (KeyError, IndexError, TypeError):
                         analysis["score"] = 0.0

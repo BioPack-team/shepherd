@@ -33,6 +33,7 @@ from .heartbeat import Heartbeat
 from .logger import attach_query_handler, resolve_log_level, setup_logging
 from .reclaim import reclaim_orphaned
 from .response_limit import fail_response_too_large
+from .trapi import binding_ids, edge_support_graphs
 from .task_deadline import (
     TIMEOUT_STATUS,
     carry_deadline,
@@ -904,19 +905,17 @@ def recursive_get_edge_support_graphs(
     edge_data = message_edges[edge]
     nodes.add(edge_data["subject"])
     nodes.add(edge_data["object"])
-    for attribute in edge_data.get("attributes", []) or []:
-        if attribute.get("attribute_type_id") == "biolink:support_graphs":
-            for auxgraph in attribute.get("value", []):
-                if auxgraph not in message_auxgraphs:
-                    raise KeyError(f"auxgraph {auxgraph} not in auxiliary_graphs")
-                edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
-                    auxgraph,
-                    edges,
-                    auxgraphs,
-                    message_edges,
-                    message_auxgraphs,
-                    nodes,
-                )
+    for auxgraph in edge_support_graphs(edge_data):
+        if auxgraph not in message_auxgraphs:
+            raise KeyError(f"auxgraph {auxgraph} not in auxiliary_graphs")
+        edges, auxgraphs, nodes = recursive_get_auxgraph_edges(
+            auxgraph,
+            edges,
+            auxgraphs,
+            message_edges,
+            message_auxgraphs,
+            nodes,
+        )
     return edges, auxgraphs, nodes
 
 
@@ -933,7 +932,7 @@ def recursive_get_auxgraph_edges(
     if auxgraph in auxgraphs:
         return edges, auxgraphs, nodes
     auxgraphs.add(auxgraph)
-    aux_edges = message_auxgraphs.get(auxgraph, {}).get("edges", [])
+    aux_edges = (message_auxgraphs.get(auxgraph) or {}).get("edges") or []
     for aux_edge in aux_edges:
         if aux_edge not in message_edges:
             raise KeyError(f"aux_edge {aux_edge} not in knowledge_graph.edges")
@@ -945,11 +944,7 @@ def recursive_get_auxgraph_edges(
 
 def is_support_edge(edge) -> bool:
     """Checks if a given edge is a support edge."""
-    # ``attributes`` is optional and may be absent or null.
-    for attribute in edge.get("attributes") or []:
-        if attribute.get("attribute_type_id") == "biolink:support_graphs":
-            return True
-    return False
+    return bool(edge_support_graphs(edge))
 
 
 def validate_message(message, logger):
@@ -960,13 +955,9 @@ def validate_message(message, logger):
             # print(f"Checking {edge_id}")
             assert edge["subject"] in message["message"]["knowledge_graph"]["nodes"]
             assert edge["object"] in message["message"]["knowledge_graph"]["nodes"]
-            for attribute in edge.get("attibutes", []):
-                if attribute["attribute_type_id"] == "biolink:support_graphs":
-                    for value in attribute["value"]:
-                        if value not in message["message"].get("auxiliary_graphs", {}):
-                            raise AssertionError(
-                                f"Aux graph {value} is not in the aux graphs."
-                            )
+            for value in edge_support_graphs(edge):
+                if value not in (message["message"].get("auxiliary_graphs") or {}):
+                    raise AssertionError(f"Aux graph {value} is not in the aux graphs.")
         except AssertionError as e:
             valid = False
             logger.error(f"Edge {edge_id} has issues: {e}")
@@ -1073,7 +1064,11 @@ def merge_kgraph(og_message, new_message, source, logger: logging.Logger):
                     sources.append(aggregator_source)
             continue
         # Overlapping edge: merge attributes and sources. Same as for nodes,
-        # read optional fields with .get() rather than subscripting.
+        # read optional fields with .get() rather than subscripting. The
+        # edge's own statement -- predicate, qualifiers and TRAPI 2.0's
+        # knowledge_level / agent_type -- stays as first seen: an overlapping
+        # edge is the same statement, and a later copy with a different
+        # knowledge level is not grounds to relabel the one already bound.
         new_attrs = value.get("attributes")
         if new_attrs:
             existing_attrs = existing.get("attributes")
@@ -1113,19 +1108,19 @@ def filter_kgraph_orphans(message, logger: logging.Logger):
         temp_edges = set()
         # 1. Result node bindings
         for result in results:
-            for _, knodes in result.get("node_bindings", {}).items():
-                nodes.update([k["id"] for k in knodes])
+            for binding in (result.get("node_bindings") or {}).values():
+                nodes.update(binding_ids(binding))
         # 2. Result.Analysis edge bindings
         for result in results:
-            for analysis in result.get("analyses", []):
-                for _, kedges in analysis.get("edge_bindings", {}).items():
-                    temp_edges.update([k["id"] for k in kedges])
-                for _, path_graphs in analysis.get("path_bindings", {}).items():
-                    temp_auxgraphs.update(a["id"] for a in path_graphs)
+            for analysis in result.get("analyses") or []:
+                for binding in (analysis.get("edge_bindings") or {}).values():
+                    temp_edges.update(binding_ids(binding))
+                for binding in (analysis.get("path_bindings") or {}).values():
+                    temp_auxgraphs.update(binding_ids(binding))
         # 3. Result.Analysis support graphs
         for result in results:
-            for analysis in result.get("analyses", []):
-                for auxgraph in analysis.get("support_graphs", []):
+            for analysis in result.get("analyses") or []:
+                for auxgraph in analysis.get("support_graphs") or []:
                     temp_auxgraphs.add(auxgraph)
         # 4. Support graphs from edges in 2
         for edge in temp_edges:
@@ -1186,11 +1181,10 @@ def filter_kgraph_orphans(message, logger: logging.Logger):
         if kg_auxgraphs:
             for auxgraph in [a for a in kg_auxgraphs if a not in auxgraphs]:
                 del kg_auxgraphs[auxgraph]
-        elif "auxiliary_graphs" not in message["message"]:
-            # Preserve the prior behavior that this key is always present after
-            # filtering (the old comprehension created an empty dict when the
-            # response carried no auxiliary graphs).
-            message["message"]["auxiliary_graphs"] = {}
+        if not kg_auxgraphs:
+            # TRAPI 2.0 gives auxiliary_graphs a minProperties of 1, so a
+            # message left with none has no auxiliary_graphs at all.
+            message["message"].pop("auxiliary_graphs", None)
         # is_invalid = validate_message(message)
         # if is_invalid:
         #     before_is_invalid = validate_message(initial_message)

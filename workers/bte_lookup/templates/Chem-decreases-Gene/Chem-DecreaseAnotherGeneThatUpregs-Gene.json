@@ -7,7 +7,7 @@
       },
       "nA": {
         "categories": ["biolink:Gene", "biolink:Protein"],
-        "is_set": true
+        "set_interpretation": "COLLATE"
       },
       "$target": {
         "ids": ["$target_id"],
@@ -19,35 +19,26 @@
         "subject": "$source",
         "object": "nA",
         "predicates": ["biolink:affects"],
-        "qualifier_constraints": [
-          {
-            "qualifier_set": [
-              {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "decreased"
-              },
-              {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity_or_abundance"
-              }
-            ]
-          }
-        ]
+        "constraints": {
+          "qualifiers": [
+            {
+              "biolink:object_direction_qualifier": "decreased",
+              "biolink:object_aspect_qualifier": "activity_or_abundance"
+            }
+          ]
+        }
       },
       "eB": {
         "subject": "nA",
         "object": "$target",
         "predicates": ["biolink:regulates"],
-        "qualifier_constraints": [
-          {
-            "qualifier_set": [
-              {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "upregulated"
-              }
-            ]
-          }
-        ]
+        "constraints": {
+          "qualifiers": [
+            {
+              "biolink:object_direction_qualifier": "upregulated"
+            }
+          ]
+        }
       }
     }
   }

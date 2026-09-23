@@ -46,6 +46,8 @@ if "biolink_helper_pkg" not in sys.modules:
     _biolink_mod.BiolinkHelper = MagicMock(name="BiolinkHelper")
     sys.modules["biolink_helper_pkg"] = _biolink_mod
 
+from translator_tom import Message  # noqa: E402
+
 from workers.arax_pathfinder import worker as pf_worker  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
@@ -57,19 +59,58 @@ QUERY = {
                 "n0": {"ids": ["MONDO:0005148"]},
                 "n1": {"ids": ["CHEBI:15365"]},
             },
-            "paths": {"p0": {"subject": "n0", "object": "n1", "constraints": []}},
+            # No "constraints": [] -- an empty list is invalid TRAPI 2.0 and
+            # is stripped from incoming queries by normalize_query_graph.
+            "paths": {"p0": {"subject": "n0", "object": "n1"}},
         }
     }
 }
 
+# What the catrax-pathfinder library returns: still TRAPI 1.x shaped.
 PATHS_RESULT = (
-    {"id": "r0", "analyses": [{"score": 1.0}], "node_bindings": {"n0": []}},
-    {"aux0": {"edges": ["e0"]}},
+    {
+        "id": "r0",
+        "analyses": [
+            {
+                "resource_id": "infores:arax",
+                "score": 1.0,
+                "path_bindings": {"p0": [{"id": "aux0", "attributes": []}]},
+            }
+        ],
+        "node_bindings": {
+            "n0": [{"id": "MONDO:0005148", "attributes": []}],
+            "n1": [{"id": "CHEBI:15365", "attributes": []}],
+        },
+    },
+    {"aux0": {"edges": ["e0"], "attributes": []}},
     {
         "nodes": {"MONDO:0005148": {}},
         "edges": {"e0": {"predicate": "biolink:related_to"}},
     },
 )
+
+# What Retriever's rehydrate endpoint returns (TRAPI 2.0).
+REHYDRATED_KG = {
+    "nodes": {
+        "MONDO:0005148": {"categories": ["biolink:Disease"]},
+        "CHEBI:15365": {"categories": ["biolink:SmallMolecule"]},
+    },
+    "edges": {
+        "e0": {
+            "subject": "CHEBI:15365",
+            "predicate": "biolink:treats",
+            "object": "MONDO:0005148",
+            "knowledge_level": "knowledge_assertion",
+            "agent_type": "manual_agent",
+            "sources": [
+                {
+                    "resource_id": "infores:x",
+                    "resource_role": "primary_knowledge_source",
+                }
+            ],
+        }
+    },
+}
 
 
 def _patch_query(mocker, query=None):
@@ -91,9 +132,9 @@ def test_pathfinder_task_searches_rehydrates_and_saves(mocker):
         "workers.arax_pathfinder.worker.execute_pathfinding",
         return_value=copy.deepcopy(PATHS_RESULT),
     )
-    rehydrated_kg = {"nodes": {}, "edges": {"e0": {"predicate": "biolink:related_to"}}}
     rehydrate = mocker.patch(
-        "workers.arax_pathfinder.worker.rehydrate", return_value=rehydrated_kg
+        "workers.arax_pathfinder.worker.rehydrate",
+        return_value=copy.deepcopy(REHYDRATED_KG),
     )
     save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
 
@@ -104,19 +145,28 @@ def test_pathfinder_task_searches_rehydrates_and_saves(mocker):
     save.assert_called_once()
     saved_id, message = save.call_args.args
     assert saved_id == "resp-1"
-    assert message["message"]["knowledge_graph"] is rehydrated_kg
+    kg = message["message"]["knowledge_graph"]
+    assert kg["nodes"] == REHYDRATED_KG["nodes"]
+    # The 2.0 edge from Retriever keeps its knowledge_level / agent_type.
+    assert kg["edges"]["e0"]["knowledge_level"] == "knowledge_assertion"
+    assert kg["edges"]["e0"]["agent_type"] == "manual_agent"
+    # 1.x aux graphs / results from the pathfinder library are now 2.0.
     assert message["message"]["auxiliary_graphs"] == {"aux0": {"edges": ["e0"]}}
     assert len(message["message"]["results"]) == 1
-    assert message["message"]["results"][0]["essence"] == "result"
+    result = message["message"]["results"][0]
+    assert result["essence"] == "result"
+    assert result["node_bindings"] == {
+        "n0": {"ids": ["MONDO:0005148"]},
+        "n1": {"ids": ["CHEBI:15365"]},
+    }
+    assert result["analyses"][0]["path_bindings"] == {"p0": {"ids": ["aux0"]}}
     # Provenance is injected before saving.
-    assert message["message"]["knowledge_graph"]["edges"]["e0"]["sources"] == [
-        {
-            "resource_id": "infores:shepherd-arax",
-            "resource_role": "aggregator_knowledge_source",
-            "source_record_urls": None,
-            "upstream_resource_ids": ["infores:arax"],
-        }
-    ]
+    assert kg["edges"]["e0"]["sources"][-1] == {
+        "resource_id": "infores:shepherd-arax",
+        "resource_role": "aggregator_knowledge_source",
+        "upstream_resource_ids": ["infores:arax"],
+    }
+    Message.from_dict(message["message"])
     # Defaults are filled in on the message that gets saved.
     assert message["parameters"]["tiers"] == [0]
 
@@ -135,8 +185,47 @@ def test_pathfinder_task_saves_empty_graphs_when_no_paths_found(mocker):
 
     _, message = save.call_args.args
     assert message["message"]["results"] == []
-    assert message["message"]["auxiliary_graphs"] == {}
-    assert message["message"]["knowledge_graph"] == {}
+    # An empty auxiliary_graphs object is invalid in TRAPI 2.0: omitted.
+    assert "auxiliary_graphs" not in message["message"]
+    assert message["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
+
+
+def test_pathfinder_1x_kg_edges_are_upgraded(mocker):
+    """A 1.x edge (knowledge_level / agent_type as attributes) is converted."""
+    _patch_query(mocker)
+    mocker.patch(
+        "workers.arax_pathfinder.worker.execute_pathfinding",
+        return_value=copy.deepcopy(PATHS_RESULT),
+    )
+    kg_1x = copy.deepcopy(REHYDRATED_KG)
+    edge = kg_1x["edges"]["e0"]
+    del edge["knowledge_level"], edge["agent_type"]
+    edge["attributes"] = [
+        {"attribute_type_id": "biolink:knowledge_level", "value": "prediction"},
+        {"attribute_type_id": "biolink:agent_type", "value": "computational_model"},
+    ]
+    kg_1x["nodes"]["CHEBI:15365"] = {"categories": [], "name": "x"}
+    mocker.patch("workers.arax_pathfinder.worker.rehydrate", return_value=kg_1x)
+    save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
+
+    pf_worker.arax_pathfinder_task("query-6", "resp-6", {}, LOGGER)
+
+    _, message = save.call_args.args
+    kg = message["message"]["knowledge_graph"]
+    assert kg["edges"]["e0"]["knowledge_level"] == "prediction"
+    assert kg["edges"]["e0"]["agent_type"] == "computational_model"
+    assert kg["nodes"]["CHEBI:15365"]["categories"] == ["biolink:NamedThing"]
+    Message.from_dict(message["message"])
+
+
+def test_parse_query_graph_reads_required_intermediate_categories():
+    qgraph = copy.deepcopy(QUERY["message"]["query_graph"])
+    qgraph["paths"]["p0"]["constraints"] = [
+        {"required_intermediate_categories": ["biolink:Gene"]}
+    ]
+    _, pinned_ids, categories = pf_worker.parse_query_graph(qgraph)
+    assert pinned_ids == ["MONDO:0005148", "CHEBI:15365"]
+    assert categories == ["biolink:Gene"]
 
 
 @pytest.mark.parametrize(
@@ -159,8 +248,8 @@ def test_pathfinder_task_saves_empty_graphs_when_no_paths_found(mocker):
                 "paths": {
                     "p0": {
                         "constraints": [
-                            {"intermediate_categories": ["biolink:Gene"]},
-                            {"intermediate_categories": ["biolink:Drug"]},
+                            {"required_intermediate_categories": ["biolink:Gene"]},
+                            {"required_intermediate_categories": ["biolink:Drug"]},
                         ]
                     }
                 },
@@ -178,7 +267,7 @@ def test_pathfinder_task_saves_empty_graphs_when_no_paths_found(mocker):
                     "p0": {
                         "constraints": [
                             {
-                                "intermediate_categories": [
+                                "required_intermediate_categories": [
                                     "biolink:Gene",
                                     "biolink:Drug",
                                 ]

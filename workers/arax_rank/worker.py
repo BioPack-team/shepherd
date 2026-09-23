@@ -49,14 +49,11 @@ def rank_message(in_message: dict, logger: logging.Logger) -> dict:
     Returns:
         Ranked message
     """
-    # save the logs for the response (if any)
-    if "logs" not in in_message or in_message["logs"] is None:
-        in_message["logs"] = []
-    else:
-        # Convert timestamps to strings for JSON serialization
-        for log in in_message.get("logs", []):
-            if "timestamp" in log:
-                log["timestamp"] = str(log["timestamp"])
+    # Convert timestamps to strings for JSON serialization. Response.logs has
+    # minItems 1 in TRAPI 2.0, so no empty list is created.
+    for log in in_message.get("logs") or []:
+        if "timestamp" in log:
+            log["timestamp"] = str(log["timestamp"])
 
     # Check if message has results to rank
     if not in_message.get("message"):

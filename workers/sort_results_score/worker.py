@@ -39,19 +39,26 @@ async def sort_results_score(task, logger: logging.Logger):
     # memory on exactly the payloads big enough to be a problem. ``results`` is
     # the same list object as message["message"]["results"], so sorting it in
     # place reorders the message too.
+    # TRAPI 2.0: ``Result.analyses`` is optional (minItems 1 when present).
     for result in results:
+        if not result.get("analyses"):
+            continue
         result["analyses"].sort(
             key=lambda x: x.get("score", 0),
             reverse=reverse,
         )
     if reverse:
         results.sort(
-            key=lambda x: x["analyses"][0].get("score", 0) if x["analyses"] else 0,
+            key=lambda x: (
+                x["analyses"][0].get("score", 0) if x.get("analyses") else 0
+            ),
             reverse=reverse,
         )
     else:
         results.sort(
-            key=lambda x: x["analyses"][-1].get("score", 0) if x["analyses"] else 0,
+            key=lambda x: (
+                x["analyses"][-1].get("score", 0) if x.get("analyses") else 0
+            ),
             reverse=reverse,
         )
     # Reattach so the key exists even when the response arrived without a

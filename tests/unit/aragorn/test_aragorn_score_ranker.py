@@ -19,7 +19,8 @@ import logging
 import numpy as np
 import pytest
 
-from tests.helpers.generate_messages import response_1
+from shepherd_utils.trapi import upgrade_trapi_1_response
+from tests.helpers.generate_messages import response_1 as _shared_response_1
 from workers.aragorn_score.worker import (
     BLENDED_PROFILE,
     CLINICAL_PROFILE,
@@ -27,6 +28,10 @@ from workers.aragorn_score.worker import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The ranker reads TRAPI 2.0 bindings; upgrade_trapi_1_response is a no-op
+# once the shared fixture is itself 2.0.
+response_1 = upgrade_trapi_1_response(copy.deepcopy(_shared_response_1))
 
 
 # --- __init__ profile selection ------------------------------------------
@@ -470,12 +475,12 @@ def test_get_rgraph_builds_one_rgraph_per_analysis():
     r = Ranker(msg, logger)
     result = {
         "node_bindings": {
-            "n0": [{"id": "K0"}],
-            "n1": [{"id": "K1"}],
+            "n0": {"ids": ["K0"]},
+            "n1": {"ids": ["K1"]},
         },
         "analyses": [
-            {"edge_bindings": {"e0": [{"id": "ke0"}]}},
-            {"edge_bindings": {"e0": [{"id": "ke0"}]}},
+            {"edge_bindings": {"e0": {"ids": ["ke0"]}}},
+            {"edge_bindings": {"e0": {"ids": ["ke0"]}}},
         ],
     }
     r_graphs = r.get_rgraph(result)
@@ -499,8 +504,8 @@ def test_get_rgraph_skips_edges_not_in_kgraph():
     }
     r = Ranker(msg, logger)
     result = {
-        "node_bindings": {"n0": [{"id": "K0"}], "n1": [{"id": "K1"}]},
-        "analyses": [{"edge_bindings": {"e0": [{"id": "missing-edge"}]}}],
+        "node_bindings": {"n0": {"ids": ["K0"]}, "n1": {"ids": ["K1"]}},
+        "analyses": [{"edge_bindings": {"e0": {"ids": ["missing-edge"]}}}],
     }
     rgs = r.get_rgraph(result)
     assert rgs[0]["edges"] == set()
@@ -531,10 +536,10 @@ def test_get_rgraph_pulls_in_support_graph_nodes_and_edges():
     }
     r = Ranker(msg, logger)
     result = {
-        "node_bindings": {"n0": [{"id": "K0"}], "n1": [{"id": "K1"}]},
+        "node_bindings": {"n0": {"ids": ["K0"]}, "n1": {"ids": ["K1"]}},
         "analyses": [
             {
-                "edge_bindings": {"e0": [{"id": "ke0"}]},
+                "edge_bindings": {"e0": {"ids": ["ke0"]}},
                 "support_graphs": ["aux1"],
             }
         ],
@@ -673,3 +678,23 @@ def test_score_jaccard_like_returns_score_over_one_minus_score():
         assert scored["analyses"][0]["score"] == pytest.approx(
             raw_score / (1 - raw_score)
         )
+
+
+def test_rank_tolerates_result_without_analyses():
+    """TRAPI 2.0: Result.analyses is optional; such a result is kept, unscored,
+    and ranks as score 0."""
+    msg = {
+        "query_graph": {
+            "nodes": {"n0": {}, "n1": {}},
+            "edges": {"e0": {"subject": "n0", "object": "n1"}},
+        },
+        "knowledge_graph": {
+            "nodes": {"K0": {}, "K1": {}},
+            "edges": {"ke0": {"subject": "K0", "object": "K1"}},
+        },
+    }
+    r = Ranker(msg, logger)
+    results = [{"node_bindings": {"n0": {"ids": ["K0"]}, "n1": {"ids": ["K1"]}}}]
+    ranked = r.rank(results)
+    assert len(ranked) == 1
+    assert "analyses" not in ranked[0]

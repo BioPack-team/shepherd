@@ -4,6 +4,48 @@
 
 Shepherd is a shared platform for ARA implementation. Incorporated ARAs have access to a plethora of shared ARA functionality while retaining the ability to implement their own custom operations.
 
+## TRAPI version
+
+Shepherd speaks **TRAPI 2.0** (`x-trapi.version` in the served OpenAPI
+document). Everything TRAPI-shaped is described by
+[`translator_tom`](https://github.com/NCATSTranslator/TRAPIObjectModeling)
+(TOM), the Translator-wide TRAPI object model that Gandalf and Retriever also
+use, rather than being re-derived here:
+
+- **Requests** are checked against TOM's TRAPI 2.0 `Query` (its lightweight
+  TypedDict validation, so the orjson fast path stays fast) and the OpenAPI
+  request/response schemas come from TOM's models. `workflow` is the exception:
+  Shepherd runs its own operations (`aragorn.lookup`, `score_paths`, ...) and
+  checks them against its own list.
+- **Internals** stay plain dicts -- responses can hold hundreds of thousands of
+  edges and are reloaded by every worker -- typed with TOM's TypedDicts where
+  it helps. The 2.0 helpers every worker shares (binding ids, query
+  parameters, response finalization, 1.x conversion) live in
+  `shepherd_utils/trapi.py`, whose module docstring lists the 2.0 rules the
+  pipeline depends on.
+- **The ARS port** validates ARA responses with TOM's 2.0 models.
+
+What changed for clients coming from TRAPI 1.x:
+
+- `log_level` and `bypass_cache` live in `parameters` (with `timeout`), and
+  the response repeats the `parameters` it was given.
+- A QEdge's `qualifier_constraints` / `attribute_constraints` are now one
+  `constraints` object; a qualifier set is a `{qualifier_type_id: value}`
+  mapping. A QPath constraint's `intermediate_categories` is now
+  `required_intermediate_categories`.
+- A query using a 1.x spelling is **rejected with HTTP 400** naming the 2.0
+  replacement, rather than being run with the filter silently ignored.
+- Responses use 2.0 bindings (one `{"ids": [...]}` object per query node /
+  edge / path), carry `knowledge_level` / `agent_type` as top-level edge
+  properties, and are stamped with `schema_version` and `biolink_version`.
+  Nulls and the empty containers 2.0 forbids (`logs`, `auxiliary_graphs`,
+  `analyses`, ...) are omitted.
+
+A service Shepherd calls that still answers in TRAPI 1.x (e.g. a callback
+posted back in the 1.x shape) is converted to 2.0 with TOM's own 1.6 -> 2.0
+transforms as it arrives, and a warning is logged, so nothing downstream reads
+two shapes.
+
 ## Local Development
 
 All Shepherd services are set up as docker containers. You can learn about docker and install here: https://www.docker.com/
@@ -143,7 +185,7 @@ after an invalidation until their payloads age out (or forever if retained).
 
 Controls:
 
-- `bypass_cache: true` (TRAPI top level) -- run fresh; neither read nor
+- `parameters.bypass_cache: true` -- run fresh; neither read nor
   write the cache.
 - `parameters.overwrite_cache: true` -- run fresh and point the cached
   entry for this query at the result.
@@ -275,7 +317,11 @@ catch.
 
 Production limits live in the Helm chart, not in `compose.yml` (which is
 dev-only). Recommended starting point for `finish_query`, which holds whole
-decompressed TRAPI payloads in memory while POSTing async callbacks:
+decompressed TRAPI payloads in memory while POSTing async callbacks. It also
+decodes each response briefly before sending it, to stamp the TRAPI 2.0
+envelope (versions, the repeated `parameters`, no forbidden empties); the
+decoded tree is released as soon as it is re-encoded, but it is the worker's
+peak, so size against `MAX_RESPONSE_SIZE` x ~7:
 
 | Setting | Value |
 | --- | --- |

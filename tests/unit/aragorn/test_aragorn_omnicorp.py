@@ -148,13 +148,13 @@ def test_omnicorp_overlay_full_path(lmdb_envs):
             "results": [
                 {
                     "node_bindings": {
-                        "n0": [{"id": "MONDO:0001"}],
-                        "n1": [{"id": "CHEBI:0001"}],
-                        "n2": [{"id": "HP:0001"}],
+                        "n0": {"ids": ["MONDO:0001"]},
+                        "n1": {"ids": ["CHEBI:0001"]},
+                        "n2": {"ids": ["HP:0001"]},
                     },
                     "analyses": [
                         {
-                            "edge_bindings": {"e0": [{"id": "kedge_0"}]},
+                            "edge_bindings": {"e0": {"ids": ["kedge_0"]}},
                         }
                     ],
                 }
@@ -282,12 +282,12 @@ def test_omnicorp_overlay_skips_overlay_above_pair_threshold(lmdb_envs, monkeypa
             "results": [
                 {
                     "node_bindings": {
-                        "n0": [{"id": "MONDO:0001"}],
-                        "n1": [{"id": "CHEBI:0001"}],
-                        "n2": [{"id": "HP:0001"}],
+                        "n0": {"ids": ["MONDO:0001"]},
+                        "n1": {"ids": ["CHEBI:0001"]},
+                        "n2": {"ids": ["HP:0001"]},
                     },
                     "analyses": [
-                        {"edge_bindings": {"e0": [{"id": "kedge_0"}]}},
+                        {"edge_bindings": {"e0": {"ids": ["kedge_0"]}}},
                     ],
                 }
             ],
@@ -304,8 +304,11 @@ def test_omnicorp_overlay_skips_overlay_above_pair_threshold(lmdb_envs, monkeypa
         if e.get("predicate") == "biolink:occurs_together_in_literature_with"
     ]
     assert co_occurrence_edges == []
-    # And no auxiliary graphs / support graphs should be wired up.
-    assert out["message"].get("auxiliary_graphs") == {}
+    # And no auxiliary graphs / support graphs should be wired up. TRAPI 2.0
+    # forbids an empty auxiliary_graphs object, so it must be absent.
+    assert "auxiliary_graphs" not in out["message"]
+    assert "support_graphs" not in out["message"]["results"][0]["analyses"][0]
+    assert "logs" not in out
 
 
 def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
@@ -348,11 +351,11 @@ def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
             "results": [
                 {
                     "node_bindings": {
-                        "n0": [{"id": "MONDO:0001"}],
-                        "n1": [{"id": "HP:0001"}],
+                        "n0": {"ids": ["MONDO:0001"]},
+                        "n1": {"ids": ["HP:0001"]},
                     },
                     "analyses": [
-                        {"edge_bindings": {"e0": [{"id": "kedge_0"}]}},
+                        {"edge_bindings": {"e0": {"ids": ["kedge_0"]}}},
                     ],
                 }
             ],
@@ -383,7 +386,7 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
     top-level ``workflow`` around the overlay.
     """
     loaded = {
-        "workflow": [{"id": "aragorn.omnicorp"}],
+        "workflow": {"ids": ["aragorn.omnicorp"]},
         "message": {
             "query_graph": {
                 "nodes": {"n0": {"set_interpretation": "BATCH"}},
@@ -415,7 +418,7 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
     out = saved["resp-1"]
 
     # The workflow is stripped before the overlay and restored afterwards.
-    assert out["workflow"] == [{"id": "aragorn.omnicorp"}]
+    assert out["workflow"] == {"ids": ["aragorn.omnicorp"]}
 
     node = out["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
     article_attrs = [
@@ -483,11 +486,11 @@ def test_omnicorp_overlay_is_idempotent_on_rerun(lmdb_envs):
             "results": [
                 {
                     "node_bindings": {
-                        "n0": [{"id": "MONDO:0001"}],
-                        "n1": [{"id": "CHEBI:0001"}],
-                        "n2": [{"id": "HP:0001"}],
+                        "n0": {"ids": ["MONDO:0001"]},
+                        "n1": {"ids": ["CHEBI:0001"]},
+                        "n2": {"ids": ["HP:0001"]},
                     },
-                    "analyses": [{"edge_bindings": {"e0": [{"id": "kedge_0"}]}}],
+                    "analyses": [{"edge_bindings": {"e0": {"ids": ["kedge_0"]}}}],
                 }
             ],
         }
@@ -526,7 +529,7 @@ def test_generate_curie_pairs_stops_at_max_pairs():
     node_ids = [f"N{i}" for i in range(50)]
     answers = [
         {
-            "node_bindings": {"qother": [{"id": nid} for nid in node_ids]},
+            "node_bindings": {"qother": {"ids": node_ids}},
             "analyses": [{"edge_bindings": {}}],
         }
     ]
@@ -542,3 +545,100 @@ def test_generate_curie_pairs_stops_at_max_pairs():
         answers, set(), node_pub_counts, message, logger, max_pairs=100
     )
     assert len(capped) == 100
+
+
+def _valid_2_0_message():
+    """A small, schema-valid TRAPI 2.0 response for the overlay."""
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["MONDO:0001"]},
+                    "n1": {"categories": ["biolink:ChemicalEntity"]},
+                    "n2": {"categories": ["biolink:PhenotypicFeature"]},
+                },
+                "edges": {"e0": {"subject": "n0", "object": "n1"}},
+            },
+            "knowledge_graph": {
+                "nodes": {
+                    "MONDO:0001": {"categories": ["biolink:Disease"]},
+                    "CHEBI:0001": {"categories": ["biolink:ChemicalEntity"]},
+                    "HP:0001": {"categories": ["biolink:PhenotypicFeature"]},
+                },
+                "edges": {
+                    "kedge_0": {
+                        "subject": "MONDO:0001",
+                        "predicate": "biolink:related_to",
+                        "object": "CHEBI:0001",
+                        "knowledge_level": "knowledge_assertion",
+                        "agent_type": "manual_agent",
+                        "sources": [
+                            {
+                                "resource_id": "infores:test",
+                                "resource_role": "primary_knowledge_source",
+                            }
+                        ],
+                    },
+                },
+            },
+            "results": [
+                {
+                    "node_bindings": {
+                        "n0": {"ids": ["MONDO:0001"]},
+                        "n1": {"ids": ["CHEBI:0001"]},
+                        "n2": {"ids": ["HP:0001"]},
+                    },
+                    "analyses": [
+                        {
+                            "resource_id": "infores:test",
+                            "edge_bindings": {"e0": {"ids": ["kedge_0"]}},
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+
+def test_omnicorp_overlay_output_is_valid_trapi_2(lmdb_envs):
+    """The overlaid message validates as TRAPI 2.0: co-occurrence edges carry
+    knowledge_level / agent_type as top-level properties (not attributes) and
+    auxiliary graphs are ``{"edges": [...]}`` only."""
+    from translator_tom import Response
+
+    out = worker.omnicorp_overlay(_valid_2_0_message(), logging.getLogger(__name__))
+    Response.from_dict(out)
+
+    co_occurrence = [
+        e
+        for e in out["message"]["knowledge_graph"]["edges"].values()
+        if e["predicate"] == "biolink:occurs_together_in_literature_with"
+    ]
+    assert len(co_occurrence) == 2
+    for edge in co_occurrence:
+        assert edge["knowledge_level"] == "statistical_association"
+        assert edge["agent_type"] == "statistical_association_pipeline"
+        assert {a["attribute_type_id"] for a in edge["attributes"]} == {
+            "biolink:has_count"
+        }
+    for aux_graph in out["message"]["auxiliary_graphs"].values():
+        assert set(aux_graph) == {"edges"}
+    assert "logs" not in out
+
+
+def test_omnicorp_overlay_tolerates_result_without_analyses(lmdb_envs):
+    """TRAPI 2.0: Result.analyses is optional."""
+    msg = _valid_2_0_message()
+    del msg["message"]["results"][0]["analyses"]
+    out = worker.omnicorp_overlay(msg, logging.getLogger(__name__))
+    assert "analyses" not in out["message"]["results"][0]
+    assert "auxiliary_graphs" not in out["message"]
+
+
+def test_create_log_entry_is_trapi_2_log_entry():
+    from translator_tom import LogEntry
+
+    entry = worker.create_log_entry("hello", "DEBUG")
+    assert "code" not in entry
+    LogEntry.from_dict(entry)
+    assert worker.create_log_entry("x", "ERROR", code="E1")["code"] == "E1"

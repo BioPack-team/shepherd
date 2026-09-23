@@ -67,8 +67,7 @@
           "sources": [
             {
               "resource_id": "infores:ctd",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             },
             {
               "resource_id": "infores:arax",
@@ -92,7 +91,9 @@
               "qualifier_type_id": "biolink:object_direction_qualifier",
               "qualifier_value": "decreased"
             }
-          ]
+          ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided"
         },
         "e9": {
           "subject": "CHEBI:6801",
@@ -101,10 +102,11 @@
           "sources": [
             {
               "resource_id": "infores:arax",
-              "resource_role": "primary_knowledge_source",
-              "upstream_resource_ids": []
+              "resource_role": "primary_knowledge_source"
             }
           ],
+          "knowledge_level": "not_provided",
+          "agent_type": "not_provided",
           "attributes": []
         }
       }
@@ -113,36 +115,32 @@
       "aux9": {
         "edges": [
           "e9"
-        ],
-        "attributes": []
+        ]
       }
     },
     "results": [
       {
         "node_bindings": {
-          "sn": [
-            {
-              "id": "MONDO:0005148",
-              "attributes": []
-            }
-          ],
-          "on": [
-            {
-              "id": "CHEBI:6801",
-              "attributes": []
-            }
-          ]
+          "sn": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "on": {
+            "ids": [
+              "CHEBI:6801"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:arax",
             "edge_bindings": {
-              "t_edge": [
-                {
-                  "id": "e1",
-                  "attributes": []
-                }
-              ]
+              "t_edge": {
+                "ids": [
+                  "e1"
+                ]
+              }
             },
             "score": 0.91
           }
@@ -150,47 +148,41 @@
       },
       {
         "node_bindings": {
-          "sn": [
-            {
-              "id": "MONDO:0005148",
-              "attributes": []
-            }
-          ],
-          "on": [
-            {
-              "id": "CHEBI:17234",
-              "attributes": []
-            }
-          ]
+          "sn": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "on": {
+            "ids": [
+              "CHEBI:17234"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:arax",
             "edge_bindings": {
-              "t_edge": [
-                {
-                  "id": "e9",
-                  "attributes": []
-                }
-              ]
-            },
-            "score": null
+              "t_edge": {
+                "ids": [
+                  "e9"
+                ]
+              }
+            }
           },
           {
             "resource_id": "infores:arax-second",
             "edge_bindings": {
-              "t_edge": [
-                {
-                  "id": "e9",
-                  "attributes": []
-                }
-              ]
+              "t_edge": {
+                "ids": [
+                  "e9"
+                ]
+              }
             },
             "score": 0.2
           }
         ]
       }
     ]
-  },
-  "logs": []
+  }
 }

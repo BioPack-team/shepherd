@@ -13,6 +13,8 @@ from biolink_helper_pkg import BiolinkHelper
 from opentelemetry import context as otel_context
 from pathfinder.Pathfinder import Pathfinder
 from pathfinder.telemetry import child_bootstrap, flush_child, inject_context
+from translator_tom import v1_6
+from translator_tom.model_dicts import dict_up_version
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
@@ -180,8 +182,9 @@ def parse_query_graph(qgraph):
         if len(constraints) > 1:
             raise ValueError("Pathfinder queries do not support multiple constraints.")
         if len(constraints) > 0:
+            # TRAPI 2.0 renamed PathConstraint.intermediate_categories.
             intermediate_categories = (
-                constraints[0].get("intermediate_categories", None) or []
+                constraints[0].get("required_intermediate_categories", None) or []
             )
         if len(intermediate_categories) > 1:
             raise ValueError(
@@ -191,6 +194,60 @@ def parse_query_graph(qgraph):
         intermediate_categories = ["biolink:NamedThing"]
 
     return pinned_node_keys, pinned_node_ids, intermediate_categories
+
+
+FALLBACK_CATEGORIES = ["biolink:NamedThing"]
+
+
+def _is_trapi_1_result(result: dict) -> bool:
+    for binding in (result.get("node_bindings") or {}).values():
+        return isinstance(binding, list)
+    for analysis in result.get("analyses") or []:
+        for key in ("edge_bindings", "path_bindings"):
+            for binding in (analysis.get(key) or {}).values():
+                return isinstance(binding, list)
+    return False
+
+
+def to_trapi_2(result, aux_graphs, knowledge_graph):
+    """Convert what the pathfinder library assembles to TRAPI 2.0, per object.
+
+    The catrax-pathfinder library still emits TRAPI 1.x results, auxiliary
+    graphs and edges, while the rehydrated knowledge graph comes from Retriever
+    and may already be 2.0. Each object is converted with TOM's 1.6 -> 2.0
+    transforms only when it is 1.x shaped: running the 1.6 Edge transform over a
+    2.0 edge would reset its knowledge_level / agent_type to ``not_provided``.
+
+    Returns ``(results, aux_graphs, knowledge_graph)``; ``aux_graphs`` is
+    ``None`` when there are none (an empty object is invalid in 2.0).
+    """
+    results = []
+    if result is not None:
+        if _is_trapi_1_result(result):
+            result = dict_up_version(result, v1_6.Result)
+        results.append(result)
+
+    upgraded_aux_graphs = {
+        aux_id: dict_up_version(aux_graph, v1_6.AuxiliaryGraph)
+        for aux_id, aux_graph in (aux_graphs or {}).items()
+    }
+
+    kg = knowledge_graph or {}
+    nodes = kg.get("nodes") or {}
+    edges = kg.get("edges") or {}
+    for node_id, node in nodes.items():
+        if not node.get("categories"):
+            node["categories"] = list(FALLBACK_CATEGORIES)
+        for key in [k for k, v in node.items() if v is None]:
+            del node[key]
+    for edge_id, edge in edges.items():
+        if "knowledge_level" not in edge or "agent_type" not in edge:
+            edges[edge_id] = dict_up_version(edge, v1_6.Edge)
+    return (
+        results,
+        upgraded_aux_graphs or None,
+        {**kg, "nodes": nodes, "edges": edges},
+    )
 
 
 def execute_pathfinding(
@@ -294,22 +351,23 @@ def _arax_pathfinder_task(
         raise
 
     with tracer.start_as_current_span("arax_pathfinder.save_response"):
-        res = []
         if result is not None:
-            res.append(
-                {
-                    "id": result["id"],
-                    "analyses": result["analyses"],
-                    "node_bindings": result["node_bindings"],
-                    "essence": "result",
-                }
-            )
-        if aux_graphs is None:
-            aux_graphs = {}
-        if knowledge_graph is None:
-            knowledge_graph = {}
+            # Result allows additional properties in 2.0, so ARAX's "id" and
+            # "essence" (used by the ARAX UI) are kept.
+            result = {
+                "id": result["id"],
+                "analyses": result["analyses"],
+                "node_bindings": result["node_bindings"],
+                "essence": "result",
+            }
+        res, aux_graphs, knowledge_graph = to_trapi_2(
+            result, aux_graphs, knowledge_graph
+        )
         message["message"]["knowledge_graph"] = knowledge_graph
-        message["message"]["auxiliary_graphs"] = aux_graphs
+        if aux_graphs:
+            message["message"]["auxiliary_graphs"] = aux_graphs
+        else:
+            message["message"].pop("auxiliary_graphs", None)
         message["message"]["results"] = res
 
         message = add_shepherd_arax_to_edge_sources(message)

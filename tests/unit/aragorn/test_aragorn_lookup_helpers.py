@@ -92,7 +92,7 @@ def test_get_infer_parameters_extracts_source_input_form():
     )
     assert input_id == "CHEBI:1"
     assert predicate == "biolink:treats"
-    assert qualifiers == {}
+    assert qualifiers == []
     assert source == "SN"
     assert target == "ON"
     assert source_input is True
@@ -109,53 +109,25 @@ def test_get_infer_parameters_extracts_target_input_form():
 
 def test_get_infer_parameters_with_qualifier_constraints():
     msg = copy.deepcopy(creative_query)
-    msg["message"]["query_graph"]["edges"]["e0"]["qualifier_constraints"] = [
-        {
-            "qualifier_set": [
-                {
-                    "qualifier_type_id": "biolink:object_aspect_qualifier",
-                    "qualifier_value": "activity",
-                }
-            ]
-        }
-    ]
-    _, _, qualifiers, _, _, _, _ = get_infer_parameters(msg)
-    assert qualifiers == {
-        "qualifier_constraints": [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    }
-                ]
-            }
-        ]
+    msg["message"]["query_graph"]["edges"]["e0"]["constraints"] = {
+        "qualifiers": [{"biolink:object_aspect_qualifier": "activity"}]
     }
+    _, _, qualifiers, _, _, _, _ = get_infer_parameters(msg)
+    assert qualifiers == [{"biolink:object_aspect_qualifier": "activity"}]
 
 
 def test_get_rule_key_no_qualifiers_returns_predicate_only():
-    key = get_rule_key("biolink:treats", {}, logger)
+    key = get_rule_key("biolink:treats", [], logger)
     assert json.loads(key) == {"predicate": "biolink:treats"}
 
 
 def test_get_rule_key_with_aspect_and_direction():
-    qualifiers = {
-        "qualifier_constraints": [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    },
-                    {
-                        "qualifier_type_id": "biolink:object_direction_qualifier",
-                        "qualifier_value": "increased",
-                    },
-                ]
-            }
-        ]
-    }
+    qualifiers = [
+        {
+            "biolink:object_aspect_qualifier": "activity",
+            "biolink:object_direction_qualifier": "increased",
+        }
+    ]
     key = get_rule_key("biolink:affects", qualifiers, logger)
     assert json.loads(key) == {
         "object_aspect_qualifier": "activity",
@@ -164,17 +136,114 @@ def test_get_rule_key_with_aspect_and_direction():
     }
 
 
-def test_get_rule_key_empty_qualifier_constraints_falls_back_to_predicate():
-    """If qualifier_constraints is an empty list, only predicate ends up in the key."""
-    key = get_rule_key("biolink:treats", {"qualifier_constraints": []}, logger)
-    assert json.loads(key) == {"predicate": "biolink:treats"}
-
-
 def test_get_rule_key_empty_qualifier_set_falls_back_to_predicate():
-    key = get_rule_key(
-        "biolink:treats", {"qualifier_constraints": [{"qualifier_set": []}]}, logger
-    )
+    key = get_rule_key("biolink:treats", [{}], logger)
     assert json.loads(key) == {"predicate": "biolink:treats"}
+
+
+def test_get_rule_key_ignores_other_qualifier_types():
+    key = get_rule_key(
+        "biolink:affects",
+        [
+            {
+                "biolink:qualified_predicate": "biolink:causes",
+                "biolink:object_direction_qualifier": "decreased",
+            }
+        ],
+        logger,
+    )
+    assert json.loads(key) == {
+        "object_direction_qualifier": "decreased",
+        "predicate": "biolink:affects",
+    }
+
+
+def _legacy_1x_rule_key(predicate, qualifier_constraints):
+    """The TRAPI 1.x get_rule_key, verbatim in behaviour, for parity checks."""
+    keydict = {"predicate": predicate}
+    if not qualifier_constraints:
+        return json.dumps(keydict)
+    qualifier_set = qualifier_constraints[0].get("qualifier_set", [])
+    if len(qualifier_set) < 1:
+        return json.dumps(keydict)
+    for qualifier in qualifier_set:
+        if qualifier.get("qualifier_type_id") == "biolink:object_aspect_qualifier":
+            keydict["object_aspect_qualifier"] = qualifier.get("qualifier_value")
+        elif qualifier.get("qualifier_type_id") == "biolink:object_direction_qualifier":
+            keydict["object_direction_qualifier"] = qualifier.get("qualifier_value")
+    return json.dumps(keydict, sort_keys=True)
+
+
+def test_rule_keys_for_2_0_qualifiers_match_rules_file_keys():
+    """Every key in the rules file must be reachable from the 2.0 query that
+    expresses it, and produce the byte-identical key the 1.x code produced
+    (the keys of rules_with_types_cleaned_finalized.json are internal and did
+    not change with TRAPI 2.0)."""
+    from pathlib import Path
+
+    import workers.aragorn_lookup.worker as lookup_worker
+
+    rules_path = (
+        Path(lookup_worker.__file__).parent / "rules_with_types_cleaned_finalized.json"
+    )
+    with open(rules_path) as f:
+        rules = json.load(f)
+    assert rules
+    for key in rules:
+        keydict = json.loads(key)
+        qualifier_set = {
+            f"biolink:{name}": value
+            for name, value in keydict.items()
+            if name != "predicate"
+        }
+        qualifiers_2_0 = [qualifier_set] if qualifier_set else []
+        qualifiers_1_x = (
+            [
+                {
+                    "qualifier_set": [
+                        {"qualifier_type_id": t, "qualifier_value": v}
+                        for t, v in qualifier_set.items()
+                    ]
+                }
+            ]
+            if qualifier_set
+            else []
+        )
+        msg = copy.deepcopy(creative_query)
+        edge = msg["message"]["query_graph"]["edges"]["e0"]
+        edge["predicates"] = [keydict["predicate"]]
+        if qualifiers_2_0:
+            edge["constraints"] = {"qualifiers": qualifiers_2_0}
+        _, predicate, qualifiers, _, _, _, _ = get_infer_parameters(msg)
+        new_key = get_rule_key(predicate, qualifiers, logger)
+        assert new_key == key
+        assert new_key == _legacy_1x_rule_key(predicate, qualifiers_1_x)
+
+
+def test_rules_file_templates_are_trapi_2_query_graphs():
+    """The AMIE templates are sent to Retriever as-is, so they must use 2.0
+    ``constraints.qualifiers`` and validate as TRAPI 2.0 query graphs."""
+    from pathlib import Path
+    from string import Template
+
+    from translator_tom import QueryGraph
+
+    import workers.aragorn_lookup.worker as lookup_worker
+
+    rules_path = (
+        Path(lookup_worker.__file__).parent / "rules_with_types_cleaned_finalized.json"
+    )
+    text = rules_path.read_text()
+    assert "qualifier_constraints" not in text
+    assert "qualifier_set" not in text
+    for rule_defs in json.loads(text).values():
+        for rule_def in rule_defs:
+            query = json.loads(
+                Template(json.dumps(rule_def["template"])).substitute(
+                    source="s", target="t", source_id="X:1", target_id="Y:1"
+                )
+            )
+            QueryGraph.from_dict(query["query_graph"])
 
 
 def test_expand_aragorn_query_includes_direct_query_with_no_expansions(mocker):
@@ -240,6 +309,41 @@ def test_expand_aragorn_query_appends_amie_rule_template(mocker):
     assert "ids" not in qg["nodes"]["SN"]
     # Source (pinned input) keeps its CURIE through template substitution.
     assert qg["nodes"]["ON"]["ids"] == ["MONDO:0001"]
+
+
+def test_expand_aragorn_query_does_not_forward_top_level_log_level(mocker):
+    """TRAPI 2.0 moved log_level into parameters; expanded queries carry the
+    parameters (and so parameters.log_level) but no top-level log_level."""
+    rule_template = {
+        "query_graph": {
+            "nodes": {
+                "$source": {"ids": ["$source_id"]},
+                "$target": {"ids": ["$target_id"]},
+            },
+            "edges": {
+                "x": {
+                    "subject": "$source",
+                    "object": "$target",
+                    "predicates": ["biolink:related_to"],
+                }
+            },
+        }
+    }
+    mocker.patch(
+        "workers.aragorn_lookup.worker.json.load",
+        return_value={
+            json.dumps({"predicate": "biolink:treats"}): [{"template": rule_template}],
+        },
+    )
+    msg = copy.deepcopy(creative_query)
+    msg["parameters"] = {"timeout": 60, "tiers": [0], "log_level": "DEBUG"}
+    msg["submitter"] = "test"
+    msg["log_level"] = "DEBUG"
+    out = expand_aragorn_query(msg, logger)
+    assert len(out) == 2
+    for expanded in out:
+        assert "log_level" not in expanded
+        assert expanded["parameters"]["log_level"] == "DEBUG"
 
 
 @pytest.mark.asyncio

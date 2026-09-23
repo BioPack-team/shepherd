@@ -35,11 +35,12 @@ def test_sources_without_a_primary_do_not_crash():
     ars_premerge.decorate_edges_with_infores(data, "infores:aragorn")
     sources = data["message"]["knowledge_graph"]["edges"]["e1"]["sources"]
     assert len(sources) == 2
+    # TRAPI 2.0: no null source_record_urls, no empty upstream_resource_ids
+    # (upstream set both; 2.0 forbids nulls and upstream_resource_ids has
+    # minItems 1)
     assert sources[1] == {
         "resource_id": "infores:aragorn",
         "resource_role": "primary_knowledge_source",
-        "source_record_urls": None,
-        "upstream_resource_ids": [],
     }
 
 
@@ -250,50 +251,57 @@ def test_keys_after_analyses_are_still_merged():
     assert out["zzz"] == [2, 1]
 
 
+def _nb(**ids):
+    """TRAPI 2.0 node bindings: one {"ids": [...]} object per query node."""
+    return {"node_bindings": {k: {"ids": list(v)} for k, v in ids.items()}}
+
+
 def test_node_bindings_union_every_current_only_binding():
     """Upstream's else hung off the for, so only the LAST current-only id was
-    carried -- and into a local map it never wrote back."""
-    current = {
-        "node_bindings": {"n0": [{"id": "A"}], "n1": [{"id": "B"}], "n2": [{"id": "D"}]}
-    }
-    merged = {
-        "node_bindings": {"n0": [{"id": "A"}], "n1": [{"id": "C"}], "n2": [{"id": "E"}]}
-    }
+    carried -- and into a local map it never wrote back. (TRAPI 2.0: the
+    union is of each query node's ``ids``, merged side first.)"""
+    current = _nb(n0=["A"], n1=["B"], n2=["D"])
+    merged = _nb(n0=["A"], n1=["C"], n2=["E"])
     out = ars_merge.mergeDicts(copy.deepcopy(current), copy.deepcopy(merged))
     nb = out["node_bindings"]
-    assert nb["n0"] == [{"id": "A"}]
-    assert {b["id"] for b in nb["n1"]} == {"B", "C"}
-    assert {b["id"] for b in nb["n2"]} == {"D", "E"}
+    assert nb["n0"] == {"ids": ["A"]}
+    assert nb["n1"] == {"ids": ["C", "B"]}
+    assert nb["n2"] == {"ids": ["E", "D"]}
 
 
 def test_node_bindings_past_the_first_are_not_ignored():
     """Upstream keyed off node_value[0] only, so a node's second binding
     onward never took part in the merge."""
-    current = {"node_bindings": {"n0": [{"id": "A"}, {"id": "B"}]}}
-    merged = {"node_bindings": {"n0": [{"id": "A"}]}}
+    current = _nb(n0=["A", "B"])
+    merged = _nb(n0=["A"])
     out = ars_merge.mergeDicts(copy.deepcopy(current), copy.deepcopy(merged))
-    assert {b["id"] for b in out["node_bindings"]["n0"]} == {"A", "B"}
+    assert out["node_bindings"]["n0"] == {"ids": ["A", "B"]}
 
 
 def test_node_bindings_for_a_node_only_the_newcomer_has():
-    current = {"node_bindings": {"n0": [{"id": "A"}], "n9": [{"id": "Z"}]}}
-    merged = {"node_bindings": {"n0": [{"id": "A"}]}}
+    current = _nb(n0=["A"], n9=["Z"])
+    merged = _nb(n0=["A"])
     out = ars_merge.mergeDicts(copy.deepcopy(current), copy.deepcopy(merged))
-    assert out["node_bindings"]["n9"] == [{"id": "Z"}]
+    assert out["node_bindings"]["n9"] == {"ids": ["Z"]}
+
+
+def test_node_binding_extra_members_are_folded_not_lost():
+    """A NodeBinding allows additional properties; the ids union must not
+    drop what else a binding carries."""
+    current = {"node_bindings": {"n0": {"ids": ["B"], "note": "cur"}}}
+    merged = {"node_bindings": {"n0": {"ids": ["A"], "other": 1}}}
+    out = ars_merge.mergeDicts(copy.deepcopy(current), copy.deepcopy(merged))
+    assert out["node_bindings"]["n0"] == {"ids": ["A", "B"], "other": 1, "note": "cur"}
 
 
 def test_empty_message_wrappers_do_not_raise():
     """QueryGraph/KnowledgeGraph/Results returned early on None, leaving
-    their attributes unset so the next getter raised AttributeError."""
+    their attributes unset so the next getter raised AttributeError. And
+    upstream's to_dict filled every absent component with {} -- an empty
+    query graph / knowledge graph (no ``nodes``) and an empty
+    auxiliary_graphs map are all invalid TRAPI 2.0, so they are omitted."""
     tm = ars_merge.TranslatorMessage({})
-    assert tm.to_dict() == {
-        "message": {
-            "query_graph": {},
-            "knowledge_graph": {},
-            "results": [],
-            "auxiliary_graphs": {},
-        }
-    }
+    assert tm.to_dict() == {"message": {"results": []}}
     assert ars_merge.QueryGraph(None).getNodes() == {}
     assert ars_merge.KnowledgeGraph(None).getEdges() == {}
     assert ars_merge.Results(None).getRaw() == []
@@ -355,12 +363,12 @@ def test_path_bindings_are_pruned_for_every_path_id():
             "auxiliary_graphs": {"gone": {"edges": ["e0"]}, "kept": {"edges": ["e9"]}},
             "results": [
                 {
-                    "node_bindings": {"n0": [{"id": "G:1"}]},
+                    "node_bindings": {"n0": {"ids": ["G:1"]}},
                     "analyses": [
                         {
                             "path_bindings": {
-                                "p0": [{"id": "gone"}, {"id": "kept"}],
-                                "p1": [{"id": "gone"}, {"id": "kept"}],
+                                "p0": {"ids": ["gone", "kept"]},
+                                "p1": {"ids": ["gone", "kept"]},
                             }
                         }
                     ],
@@ -370,7 +378,7 @@ def test_path_bindings_are_pruned_for_every_path_id():
     }
     remove_blocked(data, BLOCKED, "pk")
     pb = data["message"]["results"][0]["analyses"][0]["path_bindings"]
-    assert pb == {"p0": [{"id": "kept"}], "p1": [{"id": "kept"}]}
+    assert pb == {"p0": {"ids": ["kept"]}, "p1": {"ids": ["kept"]}}
 
 
 def test_empty_path_bindings_do_not_raise():
@@ -380,7 +388,7 @@ def test_empty_path_bindings_do_not_raise():
             "auxiliary_graphs": {},
             "results": [
                 {
-                    "node_bindings": {"n0": [{"id": "G:1"}]},
+                    "node_bindings": {"n0": {"ids": ["G:1"]}},
                     "analyses": [{"path_bindings": {}}],
                 }
             ],
@@ -402,7 +410,7 @@ def test_analysis_support_graphs_match_removed_aux_graphs():
             "auxiliary_graphs": {"gone": {"edges": ["e0"]}},
             "results": [
                 {
-                    "node_bindings": {"n0": [{"id": "G:1"}]},
+                    "node_bindings": {"n0": {"ids": ["G:1"]}},
                     "analyses": [
                         {
                             "edge_bindings": {},

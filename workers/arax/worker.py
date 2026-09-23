@@ -15,6 +15,7 @@ from shepherd_utils.db import get_message, save_message
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.trapi import normalize_query_graph, upgrade_trapi_1_response
 
 # Queue name
 STREAM = "arax"
@@ -146,6 +147,17 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
             status_code,
         ) from e
 
+    # settings.arax_url may still point at a TRAPI 1.x ARAX. Convert its
+    # response to 2.0 (a no-op on a 2.0 response) before anything reads it.
+    try:
+        result = upgrade_trapi_1_response(result)
+    except Exception as e:
+        raise ARAXServiceError(
+            f"ARAX service at {settings.arax_url} returned a TRAPI 1.x response "
+            f"that could not be converted to TRAPI 2.0: {type(e).__name__}: {e}",
+            BAD_GATEWAY,
+        ) from e
+
     return add_shepherd_arax_to_edge_sources(result)
 
 
@@ -155,17 +167,22 @@ def error_response(message: dict, error: ARAXServiceError) -> dict:
     ``status``/``description`` are TRAPI Response fields, so the status code
     lands somewhere the caller already parses rather than only in the logs. The
     query graph is carried over and the result containers are emptied, so what
-    comes back is still a valid TRAPI response for the query that was asked.
+    comes back is still a valid TRAPI 2.0 response for the query that was asked
+    (no empty ``logs`` / ``auxiliary_graphs``, no nulls, and no query graph at
+    all rather than an invalid empty one).
     """
-    query_graph = {}
+    response_message = {
+        "knowledge_graph": {"nodes": {}, "edges": {}},
+        "results": [],
+    }
+    query_graph = None
     if isinstance(message.get("message"), dict):
-        query_graph = message["message"].get("query_graph") or {}
+        query_graph = message["message"].get("query_graph")
+    if isinstance(query_graph, dict) and query_graph:
+        normalize_query_graph(query_graph)
+        response_message = {"query_graph": query_graph, **response_message}
     return {
-        "message": {
-            "query_graph": query_graph,
-            "knowledge_graph": {"nodes": {}, "edges": {}},
-            "results": [],
-        },
+        "message": response_message,
         "status": "Error",
         "description": f"[HTTP {error.status_code}] {error}",
     }

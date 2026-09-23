@@ -184,3 +184,14 @@ def test_each_inserted_source_is_an_independent_copy():
     # Same content, different identity.
     assert s1 == s2
     assert s1 is not s2
+
+
+def test_injected_source_is_valid_trapi_2_retrieval_source():
+    """TRAPI 2.0 forbids nulls: the injected source must omit
+    source_record_urls rather than carry ``None``, and validate as a
+    RetrievalSource."""
+    from translator_tom import RetrievalSource
+
+    assert "source_record_urls" not in SHEPHERD_ARAX_SOURCE
+    assert None not in SHEPHERD_ARAX_SOURCE.values()
+    RetrievalSource.from_dict(dict(SHEPHERD_ARAX_SOURCE))

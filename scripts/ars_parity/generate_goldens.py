@@ -9,6 +9,17 @@ Usage:
     PYTHONHASHSEED=0 .venv-relay/bin/python scripts/ars_parity/generate_goldens.py \
         [--relay /path/to/relay/checkout]
 
+It reads the TRAPI 1.5 corpus (tests/fixtures/ars_corpus/trapi15/, the only
+TRAPI version Relay runs on) and writes the TRAPI 1.5 record
+tests/fixtures/ars_goldens/goldens_trapi15.json. Shepherd's ARS speaks TRAPI
+2.0, so that record is not what the parity tests compare against: run
+
+    python scripts/ars_parity/upconvert_goldens.py      # Shepherd venv
+
+afterwards to translate it into tests/fixtures/ars_goldens/goldens.json (the
+2.0 goldens; see upconvert_goldens.py and trapi2.py). The whole procedure is
+in docs/ARS_PARITY_REGISTER.md, "Golden fixtures and TRAPI 2.0".
+
 NOTE: a few golden entries deliberately record what the PORT does, not what
 upstream does -- the places where the port fixes an upstream bug. They are
 listed in the file's ``_divergences`` block; this script carries that block
@@ -28,8 +39,10 @@ import sys
 import types
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-CORPUS = REPO / "tests/fixtures/ars_corpus"
+# Relay runs on TRAPI 1.5 only: the 1.5 corpus, and the 1.5 record
+CORPUS = REPO / "tests/fixtures/ars_corpus/trapi15"
 GOLDENS = REPO / "tests/fixtures/ars_goldens"
+GOLDENS_FILE = "goldens_trapi15.json"
 DEFAULT_RELAY = pathlib.Path("/home/user/ncatstranslator/relay")
 RELAY_COMMIT = "2b2121df740a4c8bc47bb2e6bafa9e52f748f028"
 
@@ -327,7 +340,7 @@ def main():
 
     out["validate"] = verdicts
 
-    path = GOLDENS / "goldens.json"
+    path = GOLDENS / GOLDENS_FILE
     previous = {}
     if path.exists():
         previous = json.loads(path.read_text())
@@ -353,6 +366,10 @@ def main():
 
     path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
     print(f"wrote {path} ({path.stat().st_size} bytes)")
+    print(
+        "Now translate it to the TRAPI 2.0 goldens the tests use (Shepherd "
+        "venv):\n    python scripts/ars_parity/upconvert_goldens.py"
+    )
 
 
 if __name__ == "__main__":

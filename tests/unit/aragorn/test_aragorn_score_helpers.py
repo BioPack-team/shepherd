@@ -177,15 +177,17 @@ def test_get_edge_support_kg_returns_empty_when_edge_missing():
     assert out == {"node_ids": set(), "edge_ids": set()}
 
 
-def test_get_edge_support_kg_returns_empty_when_edge_has_no_attributes():
-    """An edge with no attributes contributes nothing (the function bails)."""
+def test_get_edge_support_kg_collects_endpoints_of_edge_without_attributes():
+    """TRAPI 2.0 edges need no attributes (knowledge_level / agent_type are
+    top-level properties now), so an attribute-less edge still records its id
+    and both endpoints."""
     kg = {
         "edges": {
             "e1": {"subject": "A", "object": "B"},
         }
     }
     out = get_edge_support_kg("e1", kg, {})
-    assert out == {"node_ids": set(), "edge_ids": set()}
+    assert out == {"node_ids": {"A", "B"}, "edge_ids": {"e1"}}
 
 
 def test_get_edge_support_kg_collects_edge_endpoints_when_attributes_present():

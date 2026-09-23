@@ -22,6 +22,7 @@ from shepherd_utils.shared import (
     get_tasks,
     run_task_lifecycle,
 )
+from shepherd_utils.trapi import upgrade_trapi_1_response
 
 # Queue name
 STREAM = "aragorn.pathfinder"
@@ -64,7 +65,8 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     json=response,
                 )
                 rehydrated_response.raise_for_status()
-                response_json = rehydrated_response.json()
+                # Retriever may still answer in TRAPI 1.x; store it as 2.0.
+                response_json = upgrade_trapi_1_response(rehydrated_response.json())
                 await save_message(response_id, response_json, logger)
                 return json.dumps({})
 
@@ -96,8 +98,9 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         if len(constraints) > 1:
             raise Exception("Pathfinder queries do not support multiple constraints.")
         if len(constraints) > 0:
+            # TRAPI 2.0 renamed PathConstraint.intermediate_categories.
             intermediate_categories = (
-                constraints[0].get("intermediate_categories", None) or []
+                constraints[0].get("required_intermediate_categories", None) or []
             )
             if len(intermediate_categories) > 1:
                 raise Exception(

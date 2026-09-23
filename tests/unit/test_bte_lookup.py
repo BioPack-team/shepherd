@@ -62,16 +62,9 @@ def test_get_params_extracts_full_tuple():
                 "subject": "a",
                 "object": "b",
                 "predicates": ["biolink:treats"],
-                "qualifier_constraints": [
-                    {
-                        "qualifier_set": [
-                            {
-                                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                "qualifier_value": "activity",
-                            }
-                        ]
-                    }
-                ],
+                "constraints": {
+                    "qualifiers": [{"biolink:object_aspect_qualifier": "activity"}]
+                },
             }
         },
     }
@@ -158,6 +151,62 @@ def test_match_templates_strips_biolink_prefix_when_matching():
     assert {p.name for p in no_prefix} == {p.name for p in with_prefix}
 
 
+def test_match_templates_matches_prefixed_query_qualifiers():
+    """Queries carry qualifier types with the ``biolink:`` prefix while
+    template_groups.json lists them bare; they must still match (this never
+    matched before the prefix-insensitive comparison)."""
+    increases = match_templates(
+        subject_type="biolink:SmallMolecule",
+        object_type="biolink:Gene",
+        predicate="biolink:affects",
+        qualifiers={
+            "biolink:object_aspect_qualifier": "activity_or_abundance",
+            "biolink:object_direction_qualifier": "increased",
+        },
+        logger=logger,
+    )
+    assert {p.name for p in increases} == {
+        "Chem-IncreaseAnotherGeneThatUpregs-Gene.json",
+        "Chem-DecreaseAnotherGeneThatDownregs-Gene.json",
+        "Chem-physically_interacts-GeneThatUpregs-Gene.json",
+    }
+    mismatched = match_templates(
+        subject_type="biolink:SmallMolecule",
+        object_type="biolink:Gene",
+        predicate="biolink:affects",
+        qualifiers={"biolink:object_direction_qualifier": "upregulated"},
+        logger=logger,
+    )
+    assert mismatched == []
+
+
+def test_templates_are_trapi_2_query_graphs():
+    """Every template is sent to Retriever as-is, so it must be TRAPI 2.0:
+    ``constraints.qualifiers`` and ``set_interpretation`` instead of
+    ``qualifier_constraints`` and ``is_set``."""
+    from pathlib import Path
+    from string import Template
+
+    from translator_tom import QueryGraph
+
+    import workers.bte_lookup.worker as bte_lookup_worker
+
+    paths = list(
+        (Path(bte_lookup_worker.__file__).parent / "templates").rglob("*.json")
+    )
+    assert len(paths) == 10
+    for path in paths:
+        text = path.read_text()
+        assert "qualifier_constraints" not in text
+        assert "is_set" not in text
+        query = json.loads(
+            Template(text).substitute(
+                source="s", target="t", source_id="X:1", target_id="Y:1"
+            )
+        )
+        QueryGraph.from_dict(query["query_graph"])
+
+
 # --- fill_templates --------------------------------------------------------
 
 
@@ -236,6 +285,21 @@ def test_expand_bte_query_includes_direct_query_first():
     direct = out[0]
     # Direct query has had knowledge_type stripped from each edge
     assert "knowledge_type" not in direct["message"]["query_graph"]["edges"]["e0"]
+
+
+def test_expand_bte_query_does_not_forward_top_level_log_level():
+    """TRAPI 2.0 moved log_level into parameters."""
+    msg = copy.deepcopy(creative_query)
+    msg["message"]["query_graph"]["nodes"]["SN"]["categories"] = ["biolink:Drug"]
+    msg["message"]["query_graph"]["nodes"]["ON"]["categories"] = ["biolink:Disease"]
+    msg["parameters"] = {"timeout": 60, "log_level": "DEBUG"}
+    msg["submitter"] = "test"
+    msg["log_level"] = "DEBUG"
+    out = expand_bte_query(msg, logger)
+    assert len(out) > 1
+    for expanded in out:
+        assert "log_level" not in expanded
+        assert expanded["parameters"]["log_level"] == "DEBUG"
 
 
 # --- AsyncResponse dataclass ----------------------------------------------

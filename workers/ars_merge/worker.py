@@ -72,7 +72,7 @@ from shepherd_utils.ars.premerge import (
     add_log_entry,
     appraise_confidence,
     get_safe,
-    timestamp_hms,
+    log_timestamp,
 )
 from shepherd_utils.broker import (
     add_task,
@@ -88,6 +88,7 @@ from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks
+from shepherd_utils.trapi import finalize_response, query_parameters
 
 STREAM = "ars.merge"
 GROUP = "consumer"
@@ -123,11 +124,24 @@ def _fold(current_pk, child_pk) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     return merged_dict, get_msg_stats(merged_dict)
 
 
-def merge_in_child(current_pk, child_pk, new_pk):
+def _finalize(merged_dict, parameters) -> None:
+    """Make the merged payload a TRAPI 2.0 Response, in place.
+
+    Upstream stored a bare ``{"message": ...}`` (plus logs). TRAPI 2.0 asks a
+    response to name its schema / biolink versions and to repeat the query's
+    ``parameters``, and forbids nulls and empty minItems containers;
+    ``finalize_response`` applies all of that. Idempotent, so it runs after
+    the fold and again after post-processing has added to the payload.
+    """
+    finalize_response(merged_dict, {"parameters": parameters} if parameters else None)
+
+
+def merge_in_child(current_pk, child_pk, new_pk, parameters=None):
     """Pool-side fold only: fetch by id, merge, save once; only stats cross
     IPC. (merge_and_postprocess_in_child is what production runs; this is
     the fold on its own, kept for the golden-backed fold test.)"""
     merged_dict, stats = _fold(current_pk, child_pk)
+    _finalize(merged_dict, parameters)
     save_message_sync(str(new_pk), merged_dict)
     return stats
 
@@ -143,6 +157,10 @@ def _separate_annotated_nodes(nodes, logger):
     unannotated = []
     try:
         for curie, value in nodes.items():
+            # upstream's ``"attribute"`` [sic] typo: the check never matches
+            # (TRAPI 2.0 Node forbids unknown members), but a node with no
+            # attributes falls through to the loop below and is found
+            # unannotated anyway, so the output is the same. Kept verbatim.
             if "attribute" in value.keys() and value["attributes"] == []:
                 unannotated.append(curie)
             else:
@@ -217,15 +235,16 @@ def _post_processing_error(merged_row, data, text):
     stamped with the row's updated_at (its in-memory E/206 is always
     overwritten by the calling handler before anything is saved)."""
     updated_at = merged_row.get("updated_at")
+    # RFC 3339 (TRAPI 2.0 LogEntry.timestamp); upstream wrote %H:%M:%S
     if isinstance(updated_at, datetime):
-        stamp = updated_at.strftime("%H:%M:%S")
+        stamp = log_timestamp(updated_at)
     elif isinstance(updated_at, str) and updated_at:
         try:
-            stamp = datetime.fromisoformat(updated_at).strftime("%H:%M:%S")
+            stamp = log_timestamp(datetime.fromisoformat(updated_at))
         except ValueError:
-            stamp = timestamp_hms()
+            stamp = log_timestamp()
     else:
-        stamp = timestamp_hms()
+        stamp = log_timestamp()
     add_log_entry(data, [text, stamp, "DEBUG"])
 
 
@@ -272,7 +291,7 @@ async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str,
             data,
             [
                 f"node annotation internal error: {str(e)}",
-                timestamp_hms(),
+                log_timestamp(),
                 "DEBUG",
             ],
         )
@@ -312,7 +331,7 @@ async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str,
             _post_processing_error(merged_row, data, "Error in score stat calculation")
             add_log_entry(
                 data,
-                ["Error in score stat calculation", timestamp_hms(), "DEBUG"],
+                ["Error in score stat calculation", log_timestamp(), "DEBUG"],
             )
             status = "E"
             code = 444
@@ -349,7 +368,13 @@ class _CaptureHandler(logging.Handler):
 
 
 def merge_and_postprocess_in_child(
-    current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier=None
+    current_pk,
+    child_pk,
+    new_pk,
+    agent_name,
+    row_updated_at,
+    otel_carrier=None,
+    parameters=None,
 ) -> Dict[str, Any]:
     """Pool-side fold + post-process. Fetches the blobs by pk, saves the
     fold (so a post-process crash still leaves a merged payload, as
@@ -359,7 +384,8 @@ def merge_and_postprocess_in_child(
 
     ``otel_carrier`` is the parent's span context (W3C traceparent); the
     fold and post-process spans start under it so the child's work shows up
-    in the query's trace.
+    in the query's trace. ``parameters`` is the submitted query's TRAPI 2.0
+    ``parameters``, which every saved version echoes (``_finalize``).
     """
     setup_pool_child_tracer(STREAM)
     parent_ctx = extract(otel_carrier) if otel_carrier else None
@@ -370,6 +396,7 @@ def merge_and_postprocess_in_child(
         span.set_attribute("merge.new_pk", str(new_pk))
         span.set_attribute("merge.first", current_pk is None)
         merged_dict, stats = _fold(current_pk, child_pk)
+        _finalize(merged_dict, parameters)
         save_message_sync(str(new_pk), merged_dict)
         for key in ("results", "knowledge_graph_nodes", "knowledge_graph_edges"):
             if key in stats:
@@ -394,6 +421,7 @@ def merge_and_postprocess_in_child(
             outcome = asyncio.run(
                 postprocess_message(merged_dict, merged_row, agent_name, child_logger)
             )
+            _finalize(merged_dict, parameters)
             try:
                 save_message_sync(str(new_pk), merged_dict)
             except Exception:
@@ -413,11 +441,26 @@ def merge_and_postprocess_in_child(
 
 
 async def _run_merge_in_pool(
-    current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier, logger
+    current_pk,
+    child_pk,
+    new_pk,
+    agent_name,
+    row_updated_at,
+    otel_carrier,
+    logger,
+    parameters=None,
 ) -> Dict[str, Any]:
     """Indirection for tests; production runs the fold + post-process in
     the pool."""
-    args = (current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier)
+    args = (
+        current_pk,
+        child_pk,
+        new_pk,
+        agent_name,
+        row_updated_at,
+        otel_carrier,
+        parameters,
+    )
     if _pool is not None and _loop is not None:
         return await _pool.run(_loop, merge_and_postprocess_in_child, *args)
     return await asyncio.to_thread(merge_and_postprocess_in_child, *args)
@@ -459,6 +502,18 @@ def _replay_child_logs(lines, logger: logging.Logger) -> None:
         logger.log(level, message)
 
 
+async def _query_parameters(parent_pk, logger: logging.Logger) -> Dict[str, Any]:
+    """The submitted query's TRAPI 2.0 ``parameters`` (the parent's data is
+    the query), for the merged versions to echo. ``{}`` if it can't be read:
+    a missing echo is not worth failing a merge over."""
+    try:
+        query = await ars_db.load_message_data(parent_pk, logger)
+    except Exception as e:
+        logger.warning(f"Merge: could not read the query of {parent_pk}: {e}")
+        return {}
+    return dict(query_parameters(query if isinstance(query, dict) else None))
+
+
 async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
     """Fold one validated child into the parent's merged message and
     post-process the new version: merge_and_post_process for one result."""
@@ -484,6 +539,7 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
     # (and the annotator's httpx calls) nest under the current task span
     carrier: Dict[str, str] = {}
     inject(carrier)
+    parameters = await _query_parameters(parent_pk, logger)
     try:
         outcome = await _run_merge_in_pool(
             str(current_pk) if current_pk else None,
@@ -493,6 +549,7 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
             updated_at.isoformat() if isinstance(updated_at, datetime) else None,
             carrier,
             logger,
+            parameters,
         )
     except Exception as e:
         # merge_received swallows and returns {} -- the shell merge child

@@ -35,7 +35,13 @@ async def filter_analyses_top_n(task, logger: logging.Logger):
     # ``analyses[:n]`` slice, so the dropped analyses are freed now rather than
     # allocating a parallel list and holding the originals until save.
     for result in results:
-        del result["analyses"][n:]
+        analyses = result.get("analyses")
+        if analyses is None:
+            continue
+        del analyses[n:]
+        if not analyses:
+            # TRAPI 2.0: Result.analyses has minItems 1, so omit it when empty.
+            del result["analyses"]
     logger.info("Returning filtered analyses.")
 
     # save merged message back to db

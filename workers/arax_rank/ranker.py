@@ -24,6 +24,8 @@ import numpy as np
 import numpy.typing as npt
 import scipy.stats
 
+from shepherd_utils.trapi import binding_ids
+
 # Default confidence for manual agent edges (matches ARAX_ranker.py line 24)
 EDGE_CONFIDENCE_MANUAL_AGENT = 0.90
 
@@ -85,6 +87,11 @@ class ARAXRanker:
         self.score_stats: Dict[str, Dict[str, float]] = {}
         # Edge lookup for quick access
         self.kg_edge_id_to_edge: Dict[str, Dict] = {}
+        # Per-edge confidence, keyed by knowledge-graph edge id. Kept here
+        # rather than written onto the edges: a TRAPI 2.0 Edge has
+        # additionalProperties false, so a "confidence" key would make the
+        # saved message invalid.
+        self.edge_confidence: Dict[str, float] = {}
 
     def rank_results(self, message: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -202,25 +209,32 @@ class ARAXRanker:
         kg = msg.get("knowledge_graph", {})
         edges = kg.get("edges", {})
 
+        self.edge_confidence = {}
         for edge_key, edge in edges.items():
             # Check for manual agent (ARAX_ranker.py lines 713-720)
-            is_manual_agent = False
-            if edge.get("attributes"):
-                for attr in edge["attributes"]:
-                    if (
-                        attr.get("attribute_type_id") == "biolink:agent_type"
-                        and attr.get("value") == "manual_agent"
-                    ):
-                        is_manual_agent = True
-                        break
-
-            if is_manual_agent:
-                edge["confidence"] = float(EDGE_CONFIDENCE_MANUAL_AGENT)
+            if self._is_manual_agent(edge):
+                self.edge_confidence[edge_key] = float(EDGE_CONFIDENCE_MANUAL_AGENT)
             else:
                 # Ensure native Python float for JSON serialization
-                edge["confidence"] = float(
+                self.edge_confidence[edge_key] = float(
                     self._calculate_edge_confidence(edge_key, edge)
                 )
+
+    @staticmethod
+    def _is_manual_agent(edge: Dict) -> bool:
+        """Whether an edge was asserted by a manual agent.
+
+        TRAPI 2.0 makes ``agent_type`` a required top-level Edge property, which
+        is authoritative. The 1.x ``biolink:agent_type`` attribute is only
+        consulted for an edge that has no top-level value.
+        """
+        agent_type = edge.get("agent_type")
+        if agent_type is not None:
+            return agent_type == "manual_agent"
+        for attr in edge.get("attributes") or []:
+            if attr.get("attribute_type_id") == "biolink:agent_type":
+                return attr.get("value") == "manual_agent"
+        return False
 
     def _calculate_edge_confidence(self, edge_key: str, edge: Dict) -> float:
         """
@@ -675,10 +689,11 @@ class ARAXRanker:
             # Round to reasonable precision and ensure native Python float
             final_score = float(round(final_score, 6))
 
+            # A result without analyses is left as-is: synthesizing
+            # {"score": ...} would be an invalid TRAPI 2.0 Analysis (it needs a
+            # resource_id and bindings). It sorts as score 0.
             if result.get("analyses"):
                 result["analyses"][0]["score"] = final_score
-            else:
-                result["analyses"] = [{"score": final_score}]
 
     def _build_query_graph_nx(self, qg: Dict) -> nx.MultiDiGraph:
         """
@@ -731,34 +746,33 @@ class ARAXRanker:
         for analysis in analyses:
             edge_bindings = analysis.get("edge_bindings", {})
 
-            for qedge_key, edge_binding_list in edge_bindings.items():
+            for qedge_key, edge_binding in edge_bindings.items():
                 if "creative_" not in qedge_key:  # Ignore xDTD/xCRG supported edges
                     if qedge_key in qg_edge_key_to_edge_tuple:
                         qedge_tuple = qg_edge_key_to_edge_tuple[qedge_key]
                         valid_edge_id_info[qedge_key] = {
                             "edge_tuple": qedge_tuple,
-                            "edge_binding_list": edge_binding_list,
+                            # TRAPI 2.0: one EdgeBinding {"ids": [...]} per qedge
+                            "edge_ids": binding_ids(edge_binding),
                         }
 
         # Process valid edge ids (ARAX_ranker.py lines 78-98)
         # This handles duplicate edges by averaging their scores
         for qedge_key, edge_info in valid_edge_id_info.items():
             qedge_tuple = edge_info["edge_tuple"]
-            edge_binding_list = edge_info["edge_binding_list"]
+            edge_ids = edge_info["edge_ids"]
 
             # Group edges by their ID suffix to handle duplicates
             # ARAX_ranker.py lines 87-92
             same_edge_ids: Dict[str, List[float]] = {}
-            for binding in edge_binding_list:
-                full_edge_id = binding.get("id", "")
+            for full_edge_id in edge_ids:
                 # Extract edge ID suffix: split by ':', take part after 2nd split
                 # e.g., "infores:aragorn--MONDO:123:NCBIGene:456" -> "NCBIGene:456"
                 edge_id_suffix = (
                     full_edge_id.split(":", 2)[-1] if full_edge_id else full_edge_id
                 )
 
-                edge = self.kg_edge_id_to_edge.get(full_edge_id, {})
-                confidence = edge.get("confidence", 0.5)
+                confidence = self.edge_confidence.get(full_edge_id, 0.5)
 
                 if edge_id_suffix not in same_edge_ids:
                     same_edge_ids[edge_id_suffix] = []
@@ -942,11 +956,13 @@ class ARAXRanker:
 
         # Sort by score descending (ARAX_ranker.py line 774)
         results.sort(
-            key=lambda r: r.get("analyses", [{}])[0].get("score", 0), reverse=True
+            key=lambda r: (r.get("analyses") or [{}])[0].get("score", 0), reverse=True
         )
 
         # Break ties to preserve order (ARAX_ranker.py lines 776-783)
-        scores_with_ties = [r.get("analyses", [{}])[0].get("score", 0) for r in results]
+        scores_with_ties = [
+            (r.get("analyses") or [{}])[0].get("score", 0) for r in results
+        ]
         scores_without_ties = self._break_ties(scores_with_ties)
 
         # Reinsert adjusted scores

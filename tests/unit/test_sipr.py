@@ -293,3 +293,166 @@ async def test_sipr_set_input_runs_pagerank_and_saves_message(redis_mock, mocker
     if saved_msg["message"]["results"]:
         analysis = saved_msg["message"]["results"][0]["analyses"][0]
         assert "score" in analysis and analysis["score"] > 0
+
+
+def test_write_trapi_is_a_valid_trapi_2_query():
+    """No empty results / auxiliary_graphs on the outgoing query."""
+    from translator_tom import Query
+
+    query = sipr_worker.write_trapi(["MONDO:0001"], 0)
+    assert set(query["message"]) == {"query_graph"}
+    Query.from_dict(query)
+
+
+def test_make_sipr_edge_is_valid_trapi_2_edge():
+    from translator_tom import Edge
+
+    edge = sipr_worker.make_sipr_edge("MONDO:0001", "CHEBI:0001")
+    assert edge["knowledge_level"] == "prediction"
+    assert edge["agent_type"] == "computational_model"
+    assert edge["sources"] == [
+        {
+            "resource_id": "infores:shepherd-sipr",
+            "resource_role": "primary_knowledge_source",
+        }
+    ]
+    assert "attributes" not in edge
+    Edge.from_dict(edge)
+
+
+@pytest.mark.asyncio
+async def test_sipr_saved_message_is_valid_trapi_2(redis_mock, mocker):
+    """The final SIPR message validates as TRAPI 2.0: {"ids": [...]} bindings,
+    edges with knowledge_level / agent_type / sources, nodes with categories
+    (including nodes absent from the retrieved neighborhood), and no empty
+    auxiliary_graphs or support_graphs."""
+    from translator_tom import Response
+
+    set_input_query = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "SN": {
+                        "ids": ["MONDO:0001", "MONDO:0002", "MONDO:0003"],
+                        "set_interpretation": "MANY",
+                    },
+                    "ON": {"categories": ["biolink:NamedThing"]},
+                },
+                "edges": {"e0": {"subject": "SN", "object": "ON"}},
+            }
+        }
+    }
+    mocker.patch(
+        "workers.sipr.worker.get_message",
+        new_callable=mocker.AsyncMock,
+        return_value=set_input_query,
+    )
+    fake_neighborhood = [
+        {
+            "message": {
+                "knowledge_graph": {
+                    "nodes": {
+                        "MONDO:0001": {"categories": ["biolink:Disease"], "name": "d1"},
+                        "MONDO:0002": {"categories": ["biolink:Disease"], "name": "d2"},
+                        "CHEBI:0001": {
+                            "categories": ["biolink:ChemicalEntity"],
+                            "name": "c1",
+                        },
+                    },
+                    "edges": {
+                        "e1": {
+                            "subject": "MONDO:0001",
+                            "object": "CHEBI:0001",
+                            "predicate": "biolink:treats",
+                        },
+                        "e2": {
+                            "subject": "MONDO:0002",
+                            "object": "CHEBI:0001",
+                            "predicate": "biolink:treats",
+                        },
+                    },
+                }
+            }
+        }
+    ]
+    mocker.patch(
+        "workers.sipr.worker.get_neighborhood",
+        new_callable=mocker.AsyncMock,
+        return_value=fake_neighborhood,
+    )
+    mock_save = mocker.patch(
+        "workers.sipr.worker.save_message", new_callable=mocker.AsyncMock
+    )
+
+    await sipr_worker.sipr(_make_task(), logger)
+    saved_msg = mock_save.call_args.args[1]
+    Response.from_dict(saved_msg)
+
+    message = saved_msg["message"]
+    assert "auxiliary_graphs" not in message
+    # MONDO:0003 never came back from retrieval: it still gets a category.
+    assert message["knowledge_graph"]["nodes"]["MONDO:0003"]["categories"] == [
+        "biolink:NamedThing"
+    ]
+    assert message["results"]
+    for result in message["results"]:
+        assert result["node_bindings"]["SN"] == {
+            "ids": ["MONDO:0001", "MONDO:0002", "MONDO:0003"]
+        }
+        assert len(result["node_bindings"]["ON"]["ids"]) == 1
+        (analysis,) = result["analyses"]
+        assert "support_graphs" not in analysis
+        assert analysis["resource_id"] == "infores:shepherd-sipr"
+        edge_ids = analysis["edge_bindings"]["e0"]["ids"]
+        assert len(edge_ids) == 3
+        for edge_id in edge_ids:
+            edge = message["knowledge_graph"]["edges"][edge_id]
+            assert edge["knowledge_level"] == "prediction"
+            assert edge["agent_type"] == "computational_model"
+
+
+@pytest.mark.asyncio
+async def test_run_trapi_upgrades_trapi_1_response(mocker):
+    """A 1.x answer from Retriever is read as 2.0."""
+    import httpx
+
+    one_x = {
+        "message": {
+            "knowledge_graph": {
+                "nodes": {"A:1": {"categories": ["biolink:NamedThing"]}},
+                "edges": {
+                    "e": {
+                        "subject": "A:1",
+                        "predicate": "biolink:related_to",
+                        "object": "A:1",
+                        "sources": [
+                            {
+                                "resource_id": "infores:x",
+                                "resource_role": "primary_knowledge_source",
+                            }
+                        ],
+                        "attributes": [
+                            {
+                                "attribute_type_id": "biolink:knowledge_level",
+                                "value": "knowledge_assertion",
+                            },
+                            {
+                                "attribute_type_id": "biolink:agent_type",
+                                "value": "manual_agent",
+                            },
+                        ],
+                    }
+                },
+            }
+        }
+    }
+    request = httpx.Request("POST", "https://retriever.example/query")
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=httpx.Response(200, json=one_x, request=request),
+    )
+    response = await sipr_worker.run_trapi(sipr_worker.write_trapi(["A:1"], 0), logger)
+    edge = response["message"]["knowledge_graph"]["edges"]["e"]
+    assert edge["knowledge_level"] == "knowledge_assertion"
+    assert edge["agent_type"] == "manual_agent"

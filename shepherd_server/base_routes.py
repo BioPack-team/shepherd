@@ -41,6 +41,15 @@ from shepherd_utils.response_limit import (
     TOO_LARGE_LOG_MARKER,
     fail_response_too_large,
 )
+from shepherd_utils.trapi import (
+    TRAPIRequestError,
+    finalize_response,
+    is_trapi_1_response,
+    query_log_level,
+    query_parameters,
+    upgrade_trapi_1_response,
+    validate_query,
+)
 from shepherd_utils.task_deadline import (
     TIMEOUT_STATUS,
     deadline_field,
@@ -61,8 +70,8 @@ OK_QUERY_STATUS = "OK"
 # The status prefix the janitor writes when a query never completed within its
 # budget (see the ABANDONED update in shepherd_utils.db).
 ABANDONED_STATUS_PREFIX = "abandoned"
-# What /query answers with for each way a query can fail. TRAPI 1.5 only
-# documents 200/400/429/500/501 for this operation, but a caller is better
+# What /query answers with for each way a query can fail. TRAPI 2.0 only
+# documents 200/400/409/429/500/501 for this operation, but a caller is better
 # served by the code that actually describes what happened: a query that ran
 # out of time is not an internal error, and one that was never accepted because
 # the datastore was unavailable is worth retrying.
@@ -73,6 +82,12 @@ QUERY_UNAVAILABLE_CODE = 503
 # ``query: dict = Body(...)`` validation returned for the same rejections, kept
 # so the parser swap isn't visible to callers.
 QUERY_BODY_ERROR_CODE = 422
+# What a JSON body that isn't a valid TRAPI 2.0 query answers with -- TRAPI's
+# own "Bad request. The request is invalid according to this OpenAPI schema".
+QUERY_INVALID_CODE = 400
+# How long /query holds the connection when the client names no (usable)
+# ``parameters.timeout``.
+DEFAULT_SYNC_TIMEOUT = 360
 
 
 class QueryIntakeError(Exception):
@@ -114,24 +129,22 @@ default_input_query: dict = {
                 "n1": {"categories": ["biolink:Gene"]},
             },
         },
-        "knowledge_graph": {"nodes": {}, "edges": {}},
-        "results": [],
-        "auxiliary_graphs": {},
-    }
+    },
+    "parameters": {"log_level": "INFO"},
 }
 
 
-def query_openapi_extra() -> dict:
+def query_openapi_extra(schema: str = "Query") -> dict:
     """Build the OpenAPI overrides for one /query or /asyncquery route.
 
     Those routes take the raw ``Request`` so the body can be parsed with orjson
     (see ``parse_query_body``), which leaves FastAPI with no body parameter to
     infer a schema from -- and so no auto-generated request body or 422.
     Declaring both here, and wiring them in via each route's ``openapi_extra``,
-    keeps /openapi.json equivalent to what the old
-    ``query: dict = Body(..., examples=[default_input_query])`` signature
-    produced, so the TRAPI validators and the Swagger "Try it out" example are
-    unaffected by the parser swap.
+    documents the body as TRAPI 2.0's ``Query`` / ``AsyncQuery`` (``schema``):
+    the schemas themselves come from ``translator_tom`` and are added to the
+    document's components by ``shepherd_server.openapi``, so the TRAPI
+    validators and the Swagger "Try it out" example see the real contract.
 
     A fresh dict per call: FastAPI stores ``openapi_extra`` on the route and
     merges it into the generated operation, and eight routes sharing one mutable
@@ -147,17 +160,46 @@ def query_openapi_extra() -> dict:
         "requestBody": {
             "content": {
                 "application/json": {
-                    "schema": {
-                        "additionalProperties": True,
-                        "type": "object",
-                        "title": "Query",
-                        "examples": [default_input_query],
-                    }
+                    "schema": {"$ref": f"#/components/schemas/{schema}"},
+                    "examples": {"default": {"value": default_input_query}},
                 }
             },
             "required": True,
         },
         "responses": {
+            "200": {
+                "description": "OK",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/"
+                            + (
+                                "AsyncQueryResponse"
+                                if schema == "AsyncQuery"
+                                else "Response"
+                            )
+                        }
+                    }
+                },
+            },
+            "400": {
+                "description": (
+                    "Bad request. The request is invalid according to the TRAPI "
+                    "2.0 schema."
+                ),
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "title": "QueryBadRequest",
+                            "properties": {
+                                "status": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                        }
+                    }
+                },
+            },
             "422": {
                 "description": "Validation Error",
                 "content": {
@@ -172,7 +214,7 @@ def query_openapi_extra() -> dict:
                         }
                     }
                 },
-            }
+            },
         },
     }
 
@@ -215,6 +257,10 @@ async def parse_query_body(request: Request) -> dict:
     JSON, or isn't a JSON object. The ``query: dict = Body(...)`` signature got
     all three checks for free; without them a form-encoded post or a posted list
     would reach ``query.get(...)`` downstream and 500.
+
+    Raises ``TRAPIRequestError`` for a JSON object that isn't a TRAPI 2.0 query
+    (``validate_query``), including one still using a 1.x spelling, so a stale
+    client gets a 400 naming the fix rather than silently unfiltered results.
     """
     content_type = request.headers.get("content-type")
     if not _is_json_content_type(content_type):
@@ -229,6 +275,7 @@ async def parse_query_body(request: Request) -> dict:
         raise QueryBodyError("Invalid request body: not valid JSON.") from e
     if not isinstance(query, dict):
         raise QueryBodyError("Invalid request body: expected a JSON object.")
+    validate_query(query)
     return query
 
 
@@ -244,7 +291,7 @@ async def run_query(
     # Same resolver the callback handler and the merge use, so an unparseable
     # level from a client falls back to the default instead of failing intake.
     level_number = resolve_log_level(
-        query.get("log_level"), resolve_log_level(settings.log_level)
+        query_log_level(query), resolve_log_level(settings.log_level)
     )
     logger = logging.getLogger(f"shepherd.{query_id}")
     logger.setLevel(level_number)
@@ -280,6 +327,8 @@ async def run_query(
         if not isinstance(workflow, list):
             raise TypeError("Query workflow must be a list.")
         for operation in workflow:
+            if not isinstance(operation, dict):
+                raise TypeError("Query workflow operations must be objects.")
             if operation.get("id") not in supported_workflow_operations:
                 raise KeyError(f"Workflow operation {operation} is not supported.")
 
@@ -335,6 +384,29 @@ async def run_query(
     return query_id, response_id, logger
 
 
+def sync_timeout(query: dict) -> float:
+    """How long /query waits for ``query``, in seconds.
+
+    TRAPI 2.0's ``parameters.timeout`` when it is a positive number. A
+    negative one asks the server to drop its own default timeout, but a
+    synchronous connection can't be held open forever, so it (like an absent
+    or unusable value) gets the default.
+
+    >>> sync_timeout({"parameters": {"timeout": 30}})
+    30.0
+    >>> sync_timeout({"parameters": {"timeout": -1}}) == DEFAULT_SYNC_TIMEOUT
+    True
+    >>> sync_timeout({"parameters": None}) == DEFAULT_SYNC_TIMEOUT
+    True
+    """
+    requested = query_parameters(query).get("timeout")
+    try:
+        timeout = float(requested) if requested is not None else 0.0
+    except (TypeError, ValueError):
+        timeout = 0.0
+    return timeout if timeout > 0 else float(DEFAULT_SYNC_TIMEOUT)
+
+
 def query_status_code(status: Optional[str]) -> int:
     """The HTTP code describing how a query ended, from its stored status.
 
@@ -382,6 +454,11 @@ async def run_sync_query(
             content={"status": "ERROR", "description": str(e)},
             status_code=QUERY_BODY_ERROR_CODE,
         )
+    except TRAPIRequestError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_INVALID_CODE,
+        )
     try:
         query_id, response_id, logger = await run_query(target, query_dict)
     except QueryIntakeError as e:
@@ -391,7 +468,7 @@ async def run_sync_query(
         )
     start = time.time()
     now = start
-    timeout = query_dict.get("parameters", {}).get("timeout", 360)
+    timeout = sync_timeout(query_dict)
     logger.info(f"Query running with {timeout} second timeout.")
     while now <= start + timeout:
         now = time.time()
@@ -413,7 +490,7 @@ async def run_sync_query(
                         status_code=QUERY_ERROR_CODE,
                     )
                 logs = await get_logs(response_id, logger)
-                response["logs"] = logs
+                finalize_response(response, query_dict, logs)
                 # The stored status is the one thing that knows the query
                 # failed -- a response an operation never got to write looks
                 # exactly like one that legitimately found nothing. Report it
@@ -452,6 +529,11 @@ async def run_async_query(
         return ORJSONResponse(
             content={"status": "Failed", "description": str(e)},
             status_code=QUERY_BODY_ERROR_CODE,
+        )
+    except TRAPIRequestError as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=QUERY_INVALID_CODE,
         )
     callback_url = query.get("callback")
     if callback_url is None:
@@ -641,14 +723,35 @@ async def callback(
         # logs under; surface it in the console/collector at least.
         logger.warning(f"Callback {callback_id}: couldn't find original query.")
         return Response("Couldn't find original query.", 500)
-    # Apply the level the client asked for. It lives in the stored query -- a
-    # TRAPI response has no log_level field, so the body we were just posted
-    # can't tell us (it used to be read from there, which quietly meant INFO for
-    # every callback and dropped a DEBUG query's logs from here on).
+    # Apply the level the client asked for. It lives in the stored query's
+    # ``parameters`` -- the body we were just posted is the subservice's
+    # response, which says nothing about what our client asked for (it used to
+    # be read from there, which quietly meant INFO for every callback and
+    # dropped a DEBUG query's logs from here on).
     level_number = await get_query_log_level(original_query[0], logger)
     logger.setLevel(level_number)
     logger.debug(f"Got original query: {original_query}")
-    # logger.info(response)
+    # Services Shepherd calls move to TRAPI 2.0 on their own schedules; one
+    # still answering in 1.x is converted here, once, so nothing downstream
+    # has to read two shapes.
+    if is_trapi_1_response(response):
+        logger.warning(
+            f"[{callback_id}] Callback is TRAPI 1.x shaped; converting it to "
+            "TRAPI 2.0."
+        )
+        try:
+            response = upgrade_trapi_1_response(response)
+        except Exception as e:
+            logger.error(
+                f"[{callback_id}] Couldn't convert the TRAPI 1.x callback: {e}"
+            )
+            await _save_callback_error_logs(callback_id, logger)
+            return JSONResponse(
+                content={"detail": "Invalid TRAPI response"},
+                status_code=422,
+            )
+    if not isinstance(response.get("message"), dict):
+        response["message"] = {}
     results = response["message"].get("results")
     if results is None:
         response["message"]["results"] = []
@@ -790,5 +893,7 @@ async def get_query_response(
     if response is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
     logs = await get_logs(query_id, logger)
-    response["logs"] = logs
+    # The stored response started as a copy of the query, so a
+    # ``parameters`` still on it is the one to repeat back.
+    finalize_response(response, logs=logs)
     return ORJSONResponse(content=response)

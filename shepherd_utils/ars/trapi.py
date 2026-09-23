@@ -1,199 +1,121 @@
-"""TRAPI response validation with Shepherd-native pydantic v2 models.
+"""TRAPI 2.0 response validation for the ARS, on translator_tom (TOM) models.
 
-Replaces upstream's reasoner-pydantic 5.1.1 (pydantic 1.x, incompatible with
-Shepherd's pydantic 2). The models below mirror reasoner-pydantic's field
-requirements exactly -- required/optional flags and extra-field policies were
-dumped from the installed upstream package and verdict parity over a corpus
-of valid + deliberately broken responses is enforced by
-tests/unit/ars/test_golden_parity.py::test_validate_verdict_parity.
+Upstream Relay validated each ARA response with reasoner-pydantic 5.1.1
+(TRAPI 1.5), and this module used to carry a pydantic-2 mirror of those
+models. Shepherd now speaks TRAPI 2.0 end to end, so the verdict comes from
+TOM's own 2.0 ``Response`` model -- the same object model the rest of the
+Translator (and ``shepherd_utils.trapi``) uses -- rather than a hand-kept copy.
 
-Notable upstream semantics reproduced here:
-  - Message/Node/Edge/Attribute forbid unknown fields; most others allow.
-  - KG nodes require categories AND attributes; edges require subject,
-    object, predicate, sources AND attributes.
-  - RetrievalSource.resource_role is a closed enum of the three roles.
-  - Result.analyses is a homogeneous union: all edge-bound Analysis or all
-    path-bound PathfinderAnalysis.
-  - Message.query_graph is a union of QueryGraph and PathfinderQueryGraph
-    (nodes + paths, no edges key), so pathfinder responses that echo their
-    paths-based query graph validate.
+What the verdict enforces (TOM's pydantic models, i.e. TRAPI 2.0 structure):
+  - required members: ``Response.message``; ``Edge.subject/object/predicate/
+    sources/knowledge_level/agent_type``; ``Node.categories``;
+    ``Result.node_bindings``; ``Analysis.resource_id``;
+    ``AuxiliaryGraph.edges``; ``LogEntry.timestamp`` (RFC 3339, zoned) and
+    ``message``; binding ``ids``.
+  - ``minItems`` 1 on ``ids``, ``Node.categories``, ``Edge.sources``,
+    ``Edge.qualifiers``, ``Result.analyses``, ``Analysis.edge_bindings`` /
+    ``path_bindings`` / ``support_graphs``, ``Message.auxiliary_graphs``,
+    ``Response.logs``, ``RetrievalSource.upstream_resource_ids`` ...
+  - ``additionalProperties: false`` on Message, Node, Edge, Attribute and
+    Qualifier; everything else (Result, Analysis, bindings, ...) allows
+    extras, which is what lets the ARS hang ``normalized_score`` and
+    ``ordering_components`` on a Result.
+  - ``RetrievalSource.resource_role`` and ``LogEntry.level`` enums.
+  - the two ``anyOf`` rules the pydantic models cannot express (TOM checks
+    them only in its much heavier semantic validation, which also checks
+    referential integrity -- more than upstream's verdict ever did): an
+    Analysis binds ``edge_bindings`` and/or ``path_bindings``, and a query
+    graph has ``edges`` and/or ``paths``. These replace 1.5's separate
+    Analysis / PathfinderAnalysis and QueryGraph / PathfinderQueryGraph.
+
+Explicit nulls: TRAPI 2.0 has no ``nullable`` anywhere, but TOM's models
+type optional members as ``X | None`` and so accept an explicit ``null``.
+The ARS treats a null exactly as an absent member: ``strip_nulls`` removes
+them before validation (premerge runs it on every ARA response, validated
+or not, so nothing downstream -- and nothing the ARS emits -- carries a
+null). A null in a REQUIRED member therefore fails validation as a missing
+member, and a null attribute ``value`` (required, never null in 2.0) does
+too. Forbidden EMPTY containers are not repaired: they fail the verdict.
 """
 
 import logging
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import ValidationError
+from translator_tom import Response
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["strip_nulls", "validate"]
 
-class _Allow(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-
-class _Forbid(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+# Members whose content is free-form JSON (Attribute.value, a constraint's
+# value): a null nested inside them is data, not an absent TRAPI member.
+_OPAQUE_MEMBERS = frozenset({"value"})
 
 
-class ResourceRoleEnum(str, Enum):
-    aggregator_knowledge_source = "aggregator_knowledge_source"
-    primary_knowledge_source = "primary_knowledge_source"
-    supporting_data_source = "supporting_data_source"
+def strip_nulls(obj: Any) -> Any:
+    """Remove every null-valued object member, in place, recursively.
+
+    Does not descend into free-form ``value`` members; a ``"value": null``
+    member itself is still removed (an attribute value may not be null).
+    Iterative so a deeply nested response cannot hit the recursion limit.
+    Returns ``obj`` for convenience.
+
+    >>> strip_nulls({"a": None, "b": [{"c": None, "value": {"d": None}}]})
+    {'b': [{'value': {'d': None}}]}
+    """
+    stack = [obj]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            nulls = [k for k, v in node.items() if v is None]
+            for key in nulls:
+                del node[key]
+            for key, value in node.items():
+                if key in _OPAQUE_MEMBERS:
+                    continue
+                if isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(node, list):
+            for value in node:
+                if isinstance(value, (dict, list)):
+                    stack.append(value)
+    return obj
 
 
-class Attribute(_Forbid):
-    attribute_type_id: str
-    value: Any
-    value_type_id: Optional[str] = None
-    original_attribute_name: Optional[str] = None
-    value_url: Optional[str] = None
-    attribute_source: Optional[str] = None
-    description: Optional[str] = None
-    attributes: Optional[List["Attribute"]] = None
+class _AnyOfError(ValueError):
+    pass
 
 
-class Qualifier(_Allow):
-    qualifier_type_id: str
-    qualifier_value: str
+def _check_any_of(message: dict) -> None:
+    """The schema's anyOf rules, on a dict the models already accepted."""
+    query_graph = message.get("query_graph")
+    if query_graph is not None and not (
+        query_graph.get("edges") or query_graph.get("paths")
+    ):
+        raise _AnyOfError("query_graph has neither edges nor paths")
+    for i, result in enumerate(message.get("results") or []):
+        for j, analysis in enumerate(result.get("analyses") or []):
+            if not (analysis.get("edge_bindings") or analysis.get("path_bindings")):
+                raise _AnyOfError(
+                    f"results[{i}].analyses[{j}] has neither edge_bindings "
+                    "nor path_bindings"
+                )
 
 
-class RetrievalSource(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+def validate(response: Any) -> bool:
+    """utils.validate: True when the response is a TRAPI 2.0 Response.
 
-    resource_id: str
-    resource_role: ResourceRoleEnum
-    upstream_resource_ids: Optional[List[str]] = None
-    source_record_urls: Optional[List[str]] = None
-
-
-class Node(_Forbid):
-    categories: List[str]
-    name: Optional[str] = None
-    attributes: List[Attribute]
-    is_set: Optional[bool] = None
-
-
-class Edge(_Forbid):
-    subject: str
-    object: str
-    predicate: str
-    sources: List[RetrievalSource]
-    qualifiers: Optional[List[Qualifier]] = None
-    attributes: List[Attribute]
-
-
-class KnowledgeGraph(_Allow):
-    nodes: Dict[str, Node]
-    edges: Dict[str, Edge]
-
-
-class QNode(_Allow):
-    ids: Optional[List[str]] = None
-    categories: Optional[List[str]] = None
-    set_interpretation: Optional[str] = "BATCH"
-    constraints: Optional[List[Dict[str, Any]]] = None
-    member_ids: Optional[List[str]] = None
-
-
-class QEdge(_Allow):
-    subject: str
-    object: str
-    knowledge_type: Optional[str] = None
-    predicates: Optional[List[str]] = None
-    attribute_constraints: Optional[List[Dict[str, Any]]] = None
-    qualifier_constraints: Optional[List[Dict[str, Any]]] = None
-
-
-class QueryGraph(_Allow):
-    nodes: Dict[str, QNode]
-    edges: Dict[str, QEdge]
-
-
-class QPath(_Allow):
-    subject: str
-    object: str
-    predicates: Optional[List[str]] = None
-    constraints: Optional[List[Dict[str, Any]]] = None
-
-
-class PathfinderQueryGraph(_Allow):
-    nodes: Dict[str, QNode]
-    paths: Dict[str, QPath]
-
-
-class NodeBinding(_Allow):
-    id: str
-    query_id: Optional[str] = None
-    attributes: List[Attribute]
-
-
-class EdgeBinding(_Allow):
-    id: str
-    attributes: List[Attribute]
-
-
-class PathBinding(_Allow):
-    id: str
-
-
-class Analysis(_Allow):
-    resource_id: str
-    score: Optional[float] = None
-    support_graphs: Optional[List[str]] = None
-    scoring_method: Optional[str] = None
-    attributes: Optional[List[Attribute]] = None
-    edge_bindings: Dict[str, List[EdgeBinding]]
-
-
-class PathfinderAnalysis(_Allow):
-    resource_id: str
-    score: Optional[float] = None
-    support_graphs: Optional[List[str]] = None
-    scoring_method: Optional[str] = None
-    attributes: Optional[List[Attribute]] = None
-    path_bindings: Dict[str, List[PathBinding]]
-
-
-class Result(_Allow):
-    node_bindings: Dict[str, List[NodeBinding]]
-    analyses: Union[List[Analysis], List[PathfinderAnalysis]]
-
-
-class AuxiliaryGraph(_Allow):
-    edges: List[str]
-    attributes: List[Attribute]
-
-
-class Message(_Forbid):
-    # upstream: Union[QueryGraph, PathfinderQueryGraph, None] -- a pathfinder
-    # response's echoed query graph (nodes + paths, no edges key) validates
-    # via the second arm
-    query_graph: Optional[Union[QueryGraph, PathfinderQueryGraph]] = None
-    knowledge_graph: Optional[KnowledgeGraph] = None
-    results: Optional[List[Result]] = None
-    auxiliary_graphs: Optional[Dict[str, AuxiliaryGraph]] = None
-
-
-class LogEntry(_Allow):
-    timestamp: Optional[str] = None
-    level: Optional[str] = None
-    code: Optional[str] = None
-    message: Optional[str] = None
-
-
-class Response(_Allow):
-    message: Message
-    logs: List[LogEntry] = []
-    status: Optional[str] = None
-    workflow: Optional[Any] = None
-
-
-def validate(response: dict) -> bool:
-    """utils.validate: True when the response parses as a TRAPI Response."""
+    Pure: ``response`` is not modified. Callers that want nulls read as
+    absent run ``strip_nulls`` first (see the module docstring).
+    """
     try:
         Response.model_validate(response)
+        _check_any_of(response["message"])
         return True
+    except _AnyOfError as e:
+        logger.debug(f"Validation problem found {e}")
+        return False
     except ValidationError as e:
         logger.debug(f"Validation problem found {e}")
         return False

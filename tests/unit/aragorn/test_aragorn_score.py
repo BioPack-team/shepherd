@@ -1,6 +1,7 @@
 import copy
 import logging
 
+from shepherd_utils.trapi import upgrade_trapi_1_response
 from tests.helpers.generate_messages import response_1
 from workers.aragorn_score.worker import aragorn_score
 
@@ -15,7 +16,8 @@ def test_aragorn_ranker_loads_scores_and_saves(mocker):
     """
     mocker.patch(
         "workers.aragorn_score.worker.get_message_sync",
-        return_value=copy.deepcopy(response_1),
+        # upgrade_trapi_1_response is a no-op once the shared fixture is 2.0.
+        return_value=upgrade_trapi_1_response(copy.deepcopy(response_1)),
     )
     save = mocker.patch("workers.aragorn_score.worker.save_message_sync")
     logger = logging.getLogger(__name__)
@@ -50,9 +52,10 @@ def test_aragorn_score_saves_unchanged_when_no_results(mocker):
     aragorn_score("resp-2", logger)
 
     # The loaded message is saved back (not None); scoring was skipped because
-    # there were no results. (aragorn_score also initializes an empty logs list.)
+    # there were no results. No empty logs list is added (invalid in TRAPI 2.0).
     save.assert_called_once()
     saved_id, saved_message = save.call_args.args
     assert saved_id == "resp-2"
     assert saved_message is not None
     assert saved_message["message"]["results"] is None
+    assert "logs" not in saved_message

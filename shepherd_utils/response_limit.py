@@ -56,18 +56,21 @@ def build_too_large_response(
 ) -> Dict[str, Any]:
     """The empty TRAPI response delivered in place of a discarded one.
 
-    Carries the original query graph (so the caller can still tell which query
-    this answers), empty knowledge graph / results / auxiliary graphs, and a
-    ``status`` + ``description`` saying what happened. ``logs`` is left out on
-    purpose: ``finish_query`` splices the query's log list in when it delivers.
+    Carries the original query graph when there is one (so the caller can
+    still tell which query this answers), an empty knowledge graph and result
+    list, and a ``status`` + ``description`` saying what happened. TRAPI 2.0
+    forbids an empty ``auxiliary_graphs``, and a query graph without nodes, so
+    both are simply absent. ``logs`` is left out on purpose: they are added
+    when the response is delivered (``finalize_response``).
     """
+    message: Dict[str, Any] = {
+        "knowledge_graph": {"nodes": {}, "edges": {}},
+        "results": [],
+    }
+    if query_graph:
+        message["query_graph"] = query_graph
     return {
-        "message": {
-            "query_graph": query_graph if query_graph is not None else {},
-            "knowledge_graph": {"nodes": {}, "edges": {}},
-            "results": [],
-            "auxiliary_graphs": {},
-        },
+        "message": message,
         "status": TOO_LARGE_RESPONSE_STATUS,
         "description": f"{TOO_LARGE_DESCRIPTION_PREFIX}: {reason}",
     }

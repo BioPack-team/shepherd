@@ -22,7 +22,7 @@ async def sync_query(request: Request) -> Response:
     return response
 
 
-@ARAX.post("/asyncquery", openapi_extra=query_openapi_extra())
+@ARAX.post("/asyncquery", openapi_extra=query_openapi_extra("AsyncQuery"))
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.ARAX, request)
     return response

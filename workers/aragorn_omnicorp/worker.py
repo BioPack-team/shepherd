@@ -18,7 +18,7 @@ import logging
 import os
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from itertools import combinations
 from typing import Dict, List
 from uuid import uuid4
@@ -33,6 +33,11 @@ from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.trapi import (
+    binding_ids,
+    edge_binding_ids,
+    edge_support_graphs,
+)
 
 # Queue name
 STREAM = "aragorn.omnicorp"
@@ -146,14 +151,16 @@ def make_key(x, node_indices):
 
 
 def create_log_entry(msg: str, err_level, code=None) -> dict:
-    """Build a shepherd-style log entry."""
-    now = datetime.now()
-    return {
-        "timestamp": now.strftime("%m-%d-%Y %H:%M:%S"),
+    """Build a TRAPI 2.0 LogEntry (ISO 8601 timestamp; ``code`` omitted, not
+    null, when there is none)."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "level": err_level,
         "message": msg,
-        "code": code,
     }
+    if code is not None:
+        entry["code"] = code
+    return entry
 
 
 def add_node_pmid_counts(kgraph, counts):
@@ -182,7 +189,6 @@ def add_node_pmid_counts(kgraph, counts):
 def add_shared_pmid_counts(message, values, pair_to_answer):
     """Count PMIDS shared by a pair of nodes and create a new support edge."""
     kgraph = message["knowledge_graph"]
-    aux_graphs = message["auxiliary_graphs"]
     answers = message["results"]
     support_idx = 0
 
@@ -195,20 +201,16 @@ def add_shared_pmid_counts(message, values, pair_to_answer):
             {
                 uid: {
                     "predicate": "biolink:occurs_together_in_literature_with",
+                    # TRAPI 2.0: required top-level Edge properties, no longer
+                    # biolink:knowledge_level / biolink:agent_type attributes.
+                    "knowledge_level": "statistical_association",
+                    "agent_type": "statistical_association_pipeline",
                     "attributes": [
                         {
                             "original_attribute_name": "num_publications",
                             "attribute_type_id": "biolink:has_count",
                             "value_type_id": "EDAM:data_0006",
                             "value": publication_count,
-                        },
-                        {
-                            "attribute_type_id": "biolink:agent_type",
-                            "value": "statistical_association_pipeline",
-                        },
-                        {
-                            "attribute_type_id": "biolink:knowledge_level",
-                            "value": "statistical_association",
                         },
                     ],
                     "sources": [
@@ -226,11 +228,8 @@ def add_shared_pmid_counts(message, values, pair_to_answer):
         for answer_idx, analysis_idx in pair_to_answer[pair]:
             analysis = answers[answer_idx]["analyses"][analysis_idx]
 
-            if "support_graphs" not in analysis or analysis["support_graphs"] is None:
-                analysis["support_graphs"] = []
-
             omnisupport = None
-            for sg in analysis["support_graphs"]:
+            for sg in analysis.get("support_graphs") or []:
                 if sg.startswith("OMNICORP_support_graph"):
                     omnisupport = sg
                     break
@@ -243,10 +242,19 @@ def add_shared_pmid_counts(message, values, pair_to_answer):
             if omnisupport is None:
                 omnisupport = f"OMNICORP_support_graph_{support_idx}"
                 support_idx += 1
+                # TRAPI 2.0: support_graphs has minItems 1, so it is only
+                # created here, with its first id.
+                if not analysis.get("support_graphs"):
+                    analysis["support_graphs"] = []
                 analysis["support_graphs"].append(omnisupport)
 
+            # Message.auxiliary_graphs has minProperties 1: create it lazily,
+            # with its first graph. AuxiliaryGraph is {"edges": [...]} in 2.0.
+            aux_graphs = message.get("auxiliary_graphs")
+            if not aux_graphs:
+                aux_graphs = message["auxiliary_graphs"] = {}
             if omnisupport not in aux_graphs:
-                aux_graphs[omnisupport] = {"edges": [], "attributes": []}
+                aux_graphs[omnisupport] = {"edges": []}
 
             aux_graphs[omnisupport]["edges"].append(uid)
 
@@ -271,35 +279,29 @@ def generate_curie_pairs(
         nonset_nodes = []
         setnodes = {}
 
-        for nb in answer_map["node_bindings"]:
+        # TRAPI 2.0: one NodeBinding {"ids": [...]} per qnode.
+        for nb, node_binding in (answer_map.get("node_bindings") or {}).items():
             if nb in qgraph_setnodes:
-                setnodes[nb] = [node["id"] for node in answer_map["node_bindings"][nb]]
+                setnodes[nb] = binding_ids(node_binding)
             else:
-                if len(answer_map["node_bindings"][nb]) != 0:
-                    nonset_nodes.extend(
-                        [x["id"] for x in answer_map["node_bindings"][nb]]
-                    )
+                nonset_nodes.extend(binding_ids(node_binding))
 
-        for analysis_idx, analysis in enumerate(answer_map["analyses"]):
+        # Result.analyses is optional in 2.0.
+        for analysis_idx, analysis in enumerate(answer_map.get("analyses") or []):
             new_nonset_nodes = set()
 
-            relevant_kedge_id_lists = [
-                [x["id"] for x in eb] for eb in analysis["edge_bindings"].values()
-            ]
-            relevant_kedge_ids = [x for el in relevant_kedge_id_lists for x in el]
+            relevant_kedge_ids = edge_binding_ids(analysis)
 
             auxgraph_ids = []
             for kedge_id in relevant_kedge_ids:
                 kedge = message["knowledge_graph"]["edges"][kedge_id]
-                for attribute in kedge.get("attributes", []) or []:
-                    if attribute["attribute_type_id"] == "biolink:support_graphs":
-                        auxgraph_ids.extend(attribute["value"])
+                auxgraph_ids.extend(edge_support_graphs(kedge))
 
             all_relevant_edge_ids = set()
             for auxgraph_id in auxgraph_ids:
                 try:
                     all_relevant_edge_ids.update(
-                        message["auxiliary_graphs"][auxgraph_id]["edges"]
+                        (message.get("auxiliary_graphs") or {})[auxgraph_id]["edges"]
                     )
                 except KeyError:
                     logger.warning(f"Auxgraph id not found: {auxgraph_id}")
@@ -382,16 +384,14 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     if debug == "True":
         logger.info(f"convert in message to dict: {dt_2 - dt_1}")
 
-    if "logs" not in in_message or in_message["logs"] is None:
-        in_message["logs"] = []
-    else:
-        for log in in_message["logs"]:
-            log["timestamp"] = str(log["timestamp"])
+    # Response.logs has minItems 1 in TRAPI 2.0: never create an empty list.
+    for log in in_message.get("logs") or []:
+        log["timestamp"] = str(log["timestamp"])
 
     message = in_message["message"]
     qgraph = message["query_graph"]
     kgraph = message["knowledge_graph"]
-    answers = message["results"]
+    answers = message.setdefault("results", [])
 
     # Idempotency: if this message already carries the omnicorp overlay (a
     # reclaim redelivered a message a previous run had already overlaid and
@@ -401,8 +401,10 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
         logger.info("Omnicorp overlay already applied; skipping to stay idempotent.")
         return in_message
 
-    if "auxiliary_graphs" not in message or message["auxiliary_graphs"] is None:
-        message["auxiliary_graphs"] = {}
+    # auxiliary_graphs is created lazily by add_shared_pmid_counts: an empty
+    # {} is invalid TRAPI 2.0 (minProperties 1).
+    if message.get("auxiliary_graphs") is None:
+        message.pop("auxiliary_graphs", None)
 
     dt_start = datetime.now()
 
@@ -495,7 +497,7 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
 
     if debug == "True":
         diff = datetime.now() - dt_start
-        in_message["logs"].append(
+        in_message.setdefault("logs", []).append(
             create_log_entry(
                 f"End of omnicorp overlay processing. Time elapsed: {diff.seconds} seconds",
                 "DEBUG",

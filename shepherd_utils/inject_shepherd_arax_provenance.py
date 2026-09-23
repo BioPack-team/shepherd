@@ -5,7 +5,6 @@ from typing import Any, Dict
 SHEPHERD_ARAX_SOURCE = {
     "resource_id": "infores:shepherd-arax",
     "resource_role": "aggregator_knowledge_source",
-    "source_record_urls": None,
     "upstream_resource_ids": ["infores:arax"],
 }
 

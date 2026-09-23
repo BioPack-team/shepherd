@@ -1,6 +1,6 @@
 [project]
 name = "shepherd"
-version = "1.2.1"
+version = "2.0.0"
 description = "A shared platform for Translator ARAs"
 authors = [{ name = "Max Wang", email = "max@covar.com" }]
 readme = "README.md"
@@ -18,12 +18,15 @@ dependencies = [
   "psycopg[binary]~=3.1",
   "psycopg_pool~=3.2",
   "pycryptodome~=3.20",
-  "pydantic~=2.11",
+  "pydantic~=2.12",
   "pydantic-settings~=2.9",
   "python-dotenv~=1.0",
   "pyyaml~=6.0",
   "redis~=5.2",
   "scipy",
+  # The Translator-wide TRAPI object model: TRAPI 2.0 request validation,
+  # the OpenAPI schemas, and TypedDicts for the internal (dict) messages.
+  "translator_tom~=2.2",
   "uvicorn[standard]~=0.29",
   "zstandard~=0.23"
 ]

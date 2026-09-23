@@ -185,7 +185,10 @@ def _source(db, merged_pk=None, status="D"):
 
 
 async def test_lookup_disabled_or_non_normal_mode_is_none(db, monkeypatch):
-    assert await cache.lookup(dict(QUERY, bypass_cache=True), LOGGER) is None
+    assert (
+        await cache.lookup(dict(QUERY, parameters={"bypass_cache": True}), LOGGER)
+        is None
+    )
     assert (
         await cache.lookup(dict(QUERY, parameters={"overwrite_cache": True}), LOGGER)
         is None
@@ -271,7 +274,7 @@ async def test_claim_disabled_is_plain_dispatch(db, monkeypatch):
 
 async def test_bypass_and_overwrite_record_role_and_dispatch(db):
     for body, role in (
-        (dict(QUERY, bypass_cache=True), "bypass"),
+        (dict(QUERY, parameters={"bypass_cache": True}), "bypass"),
         (dict(QUERY, parameters={"overwrite_cache": True}), "overwrite"),
     ):
         outcome, out, payload = await cache.claim_or_serve(row(), body, LOGGER)

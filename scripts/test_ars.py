@@ -54,7 +54,7 @@ _metrics_lock = asyncio.Lock()
 
 
 def generate_query(curie: str) -> dict:
-    """Build a TRAPI 'what chemicals treat <disease>' inferred query for a curie."""
+    """Build a TRAPI 2.0 'what chemicals treat <disease>' inferred query for a curie."""
     return {
         "message": {
             "query_graph": {
@@ -101,20 +101,17 @@ def generate_mvp2_query(curie: str, direction: str, pinned: str = "gene") -> dic
                         "object": "ON",
                         "predicates": ["biolink:affects"],
                         "knowledge_type": "inferred",
-                        "qualifier_constraints": [
-                            {
-                                "qualifier_set": [
-                                    {
-                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                        "qualifier_value": "activity_or_abundance",
-                                    },
-                                    {
-                                        "qualifier_type_id": "biolink:object_direction_qualifier",
-                                        "qualifier_value": direction,
-                                    },
-                                ]
-                            }
-                        ],
+                        # TRAPI 2.0: one qualifier set is a
+                        # {qualifier_type_id: qualifier_value} mapping
+                        # under constraints.qualifiers
+                        "constraints": {
+                            "qualifiers": [
+                                {
+                                    "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                    "biolink:object_direction_qualifier": direction,
+                                }
+                            ]
+                        },
                     }
                 },
             },

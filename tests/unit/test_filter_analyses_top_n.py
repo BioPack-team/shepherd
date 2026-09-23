@@ -88,3 +88,43 @@ async def test_filter_analyses_top_n_handles_empty_results(redis_mock, mocker):
     )
     saved = await get_message("test_response", logger)
     assert saved["message"]["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_filter_analyses_top_n_tolerates_absent_analyses(redis_mock, mocker):
+    """TRAPI 2.0: Result.analyses is optional; a result without it is kept."""
+    mocker.patch(
+        "workers.filter_analyses_top_n.worker.get_message",
+        new_callable=mocker.AsyncMock,
+        return_value={
+            "message": {
+                "results": [
+                    {"node_bindings": {"n0": {"ids": ["X:1"]}}},
+                    {"analyses": [{"score": i} for i in range(3)]},
+                ]
+            }
+        },
+    )
+
+    await filter_analyses_top_n(
+        _make_task([{"id": "filter_analyses_top_n", "max_analyses": 1}]), logger
+    )
+    saved = await get_message("test_response", logger)
+    assert "analyses" not in saved["message"]["results"][0]
+    assert len(saved["message"]["results"][1]["analyses"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_filter_analyses_top_n_drops_emptied_analyses(redis_mock, mocker):
+    """TRAPI 2.0: analyses has minItems 1, so an emptied list is removed."""
+    mocker.patch(
+        "workers.filter_analyses_top_n.worker.get_message",
+        new_callable=mocker.AsyncMock,
+        return_value={"message": {"results": [{"analyses": [{"score": 1}]}]}},
+    )
+
+    await filter_analyses_top_n(
+        _make_task([{"id": "filter_analyses_top_n", "max_analyses": 0}]), logger
+    )
+    saved = await get_message("test_response", logger)
+    assert "analyses" not in saved["message"]["results"][0]

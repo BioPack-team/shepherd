@@ -3,12 +3,19 @@
 Each scenario arms the mockworld and defines the query submitted to BOTH
 stacks. ARA responses come from the layer-1 corpus so the merge inputs are
 the same TRAPI the golden tests already pin.
+
+TRAPI versions: the mockworld's stub ARAs answer only the Relay stack (the
+de-federated Shepherd ARS fans out to its own hosted ARAs over the broker),
+and Relay speaks TRAPI 1.5, so they serve the TRAPI 1.5 corpus
+(fixtures/ars_corpus/trapi15/). The submitted query is TRAPI 2.0, which is
+what Shepherd's /submit requires; the standard query graph is the same in
+both versions, so Relay reads it unchanged.
 """
 
 import json
 import pathlib
 
-CORPUS = pathlib.Path(__file__).resolve().parents[1] / "fixtures/ars_corpus"
+CORPUS = pathlib.Path(__file__).resolve().parents[1] / "fixtures/ars_corpus/trapi15"
 
 
 def corpus(name):
@@ -25,7 +32,7 @@ PATHFINDER_QUERY = {
     "message": {
         "query_graph": {
             "nodes": {"n0": {"ids": ["MONDO:0005148"]}, "n1": {"ids": ["CHEBI:6801"]}},
-            "edges": {},
+            # TRAPI 2.0: no "edges": {} (minProperties 1) beside the paths
             "paths": {"p0": {"subject": "n0", "object": "n1"}},
         }
     }
