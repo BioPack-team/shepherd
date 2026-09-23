@@ -72,7 +72,7 @@ async def test_finish_query_propagates_status_to_set_query_completed(
     mocker.patch(
         "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
-        return_value=orjson.dumps({"message": {}}),
+        return_value={"message": {}},
     )
 
     await finish_query(
@@ -110,7 +110,7 @@ async def test_finish_async_query_retries_callback_on_failure(redis_mock, mocker
     mocker.patch(
         "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
-        return_value=orjson.dumps({"message": {"results": []}}),
+        return_value={"message": {"results": []}},
     )
     mocker.patch(
         "workers.finish_query.worker.get_logs",
@@ -157,7 +157,7 @@ async def test_finish_async_query_attaches_logs_to_message_payload(redis_mock, m
     mocker.patch(
         "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
-        return_value=orjson.dumps({"message": {"results": []}}),
+        return_value={"message": {"results": []}},
     )
     mocker.patch(
         "workers.finish_query.worker.get_logs",

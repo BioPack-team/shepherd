@@ -49,7 +49,7 @@ def _patch_async_query(mocker, message=None, logs=None):
     mocker.patch(
         "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
-        return_value=orjson.dumps(message if message is not None else {"message": {}}),
+        return_value=message if message is not None else {"message": {}},
     )
     mocker.patch(
         "workers.finish_query.worker.get_logs",
@@ -240,6 +240,97 @@ def test_append_log_entry_handles_both_array_shapes():
     populated = orjson.dumps({"message": {}, "logs": [{"message": "first"}]})
     appended = orjson.loads(_append_log_entry(populated, entry))["logs"]
     assert [e["message"] for e in appended] == ["first", "late"]
+
+
+def test_append_log_entry_adds_logs_to_a_payload_without_any():
+    """TRAPI 2.0 forbids an empty ``logs``, so a response with no logs is
+    delivered without the key (ending with the message object); a late entry
+    adds the array rather than being dropped."""
+    from shepherd_utils.trapi import finalize_response
+
+    entry = {"message": "late", "level": "ERROR"}
+    response = finalize_response(
+        {"message": {"results": [], "knowledge_graph": {"nodes": {}, "edges": {}}}},
+        {"parameters": {"log_level": "INFO"}},
+        [],
+    )
+    payload = orjson.dumps(response)
+    assert b'"logs"' not in payload
+    appended = orjson.loads(_append_log_entry(payload, entry))
+    assert appended["logs"] == [entry]
+    assert appended["message"] == response["message"]
+    assert appended["parameters"] == {"log_level": "INFO"}
+    # A payload with a logs array elsewhere is still left alone.
+    other = orjson.dumps({"logs": [], "message": {"x": {}}})
+    assert _append_log_entry(other, entry) == other
+
+
+@pytest.mark.asyncio
+async def test_callback_payload_is_a_valid_trapi_2_response(redis_mock, mocker):
+    """What finish_query POSTs is a TRAPI 2.0 Response: version stamps, the
+    query's parameters echoed back, query-only members dropped, forbidden
+    empties pruned, logs last."""
+    from translator_tom import Response
+
+    stored = {
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["X:1"]}, "n1": {}},
+                "edges": {"e0": {"subject": "n0", "object": "n1"}},
+            },
+            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "results": [],
+            "auxiliary_graphs": {},
+        },
+        "callback": "http://callback",
+        "submitter": "infores:someone",
+        "workflow": [{"id": "lookup"}],
+    }
+    query = {
+        "message": {"query_graph": stored["message"]["query_graph"]},
+        "parameters": {"log_level": "DEBUG", "timeout": 60},
+    }
+
+    async def _get(message_id, logger, *args, **kwargs):
+        return {"rid": stored, "test": query}[message_id]
+
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        new_callable=mocker.AsyncMock,
+        return_value=["", "", "", "", "", "", "", "rid", "http://callback"],
+    )
+    mocker.patch(
+        "workers.finish_query.worker.set_query_completed",
+        new_callable=mocker.AsyncMock,
+    )
+    mocker.patch("workers.finish_query.worker.get_message", side_effect=_get)
+    log = {
+        "timestamp": "2024-01-01T00:00:00+00:00",
+        "level": "INFO",
+        "message": "done",
+    }
+    mocker.patch(
+        "workers.finish_query.worker.get_logs",
+        new_callable=mocker.AsyncMock,
+        return_value=[log],
+    )
+    mock_post = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=_http_error_response(200, b"ok"),
+    )
+
+    await finish_query(TASK, logger)
+
+    payload = orjson.loads(mock_post.call_args.kwargs["content"])
+    Response.from_dict(payload)
+    assert payload["schema_version"] == "2.0.0"
+    assert "biolink_version" in payload
+    assert payload["parameters"] == {"log_level": "DEBUG", "timeout": 60}
+    assert "callback" not in payload and "submitter" not in payload
+    assert "auxiliary_graphs" not in payload["message"]
+    assert payload["logs"] == [log]
+    assert list(payload)[-1] == "logs"
 
 
 def test_append_log_entry_leaves_an_unexpected_tail_alone():

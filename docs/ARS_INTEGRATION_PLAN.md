@@ -9,6 +9,15 @@
 > `ars_public_host` no longer describes the code. The current design is
 > summarized in the README ("Translator ARS") and in the de-federation
 > entry of `docs/ARS_PARITY_REGISTER.md`.
+>
+> **TRAPI 2.0 (2026-09-23).** This plan was written against TRAPI 1.5, the
+> version upstream Relay speaks. The port now speaks TRAPI 2.0 end to end on
+> `translator_tom` models: submits must be 2.0 queries, ARA responses are
+> validated as 2.0, and merged messages are 2.0 Responses; the layer-1
+> goldens are the 2.0 translation of the Relay runs. Where this plan says
+> "reasoner-pydantic", "TRAPI 1.5 schema", top-level `log_level` /
+> `bypass_cache` or list-shaped bindings, read deviation 18 and "Golden
+> fixtures and TRAPI 2.0" in `docs/ARS_PARITY_REGISTER.md` instead.
 
 # Translator ARS → Shepherd Integration Plan
 
@@ -419,7 +428,9 @@ for closer parity with upstream:
   container-mediated approximation.
 - **reasoner-pydantic** was replaced with Shepherd-native pydantic-v2
   models per project direction (risk R1's option b, upgraded: field
-  requirements were dumped from the installed upstream package).
+  requirements were dumped from the installed upstream package). Those
+  models were later replaced in turn by translator_tom's TRAPI 2.0 models
+  when the ARS moved to TRAPI 2.0 (parity register, deviations 1 and 18).
 - **SmartAPI cache** is per-process (matching upstream) rather than
   Redis-shared; the hourly-refresh/30s-retry cadence is identical.
 - The complete invariant list and every accepted deviation live in

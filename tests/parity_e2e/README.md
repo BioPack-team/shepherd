@@ -63,3 +63,18 @@ The normalizer lives in `normalize.py` and is unit-tested in
 `tests/unit/ars/test_parity_harness.py`; scenario definitions in
 `scenarios.py` reuse the layer-1 corpus fixtures so merge inputs are the
 same TRAPI the golden tests pin.
+
+## TRAPI versions
+
+Shepherd's ARS speaks TRAPI 2.0; the pinned Relay speaks 1.5 (see
+deviation 18 in `docs/ARS_PARITY_REGISTER.md`). The mock ARAs answer only
+the Relay stack, so they serve the TRAPI 1.5 corpus
+(`tests/fixtures/ars_corpus/trapi15/`) and the stub registry advertises
+`x-trapi` 1.5.0; the scripted empty response is valid in both versions. The
+submitted query is a 2.0 query (Shepherd's `/submit` rejects anything
+else) whose query graph reads the same in 1.5. Before the merged answers
+are diffed, Relay's is up-converted with TOM's 1.6 -> 2.0 transforms and
+Shepherd's 2.0 envelope members (`schema_version`, `biolink_version`,
+`parameters`) are dropped (`normalize.as_trapi2`), so the comparison is of
+answers rather than of TRAPI versions. Run the driver from the Shepherd
+venv (it needs `translator_tom`).

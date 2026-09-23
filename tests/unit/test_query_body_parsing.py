@@ -216,34 +216,99 @@ def test_every_asyncquery_422_uses_one_body_shape(client_factory):
 # --- OpenAPI -------------------------------------------------------------
 
 
+def _resolve(document, ref):
+    """Follow a local ``#/a/b`` JSON reference within ``document``."""
+    assert ref.startswith("#/"), ref
+    node = document
+    for part in ref[2:].split("/"):
+        node = node[part]
+    return node
+
+
+def _all_refs(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref":
+                yield value
+            else:
+                yield from _all_refs(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _all_refs(item)
+
+
 @pytest.mark.parametrize("app", ALL_APPS)
-@pytest.mark.parametrize("path", ["/query", "/asyncquery"])
-def test_openapi_still_documents_the_request_body(app, path):
-    """The hand-written ``openapi_extra`` must match what ``Body(...)`` produced.
+@pytest.mark.parametrize(
+    "path, request_schema, response_schema",
+    [
+        ("/query", "Query", "Response"),
+        ("/asyncquery", "AsyncQuery", "AsyncQueryResponse"),
+    ],
+)
+def test_openapi_documents_the_trapi_2_request_body(
+    app, path, request_schema, response_schema
+):
+    """The hand-written ``openapi_extra`` documents the TRAPI 2.0 body.
 
     Taking a raw ``Request`` leaves FastAPI nothing to infer a schema from, so
     an unnoticed regression here would silently publish a TRAPI endpoint with no
-    documented request body.
+    documented request body. The body is TOM's ``Query`` / ``AsyncQuery``
+    schema, referenced from the document's components.
     """
-    operation = app.openapi()["paths"][path]["post"]
+    document = app.openapi()
+    operation = document["paths"][path]["post"]
 
     request_body = operation["requestBody"]
     assert request_body["required"] is True
-    schema = request_body["content"]["application/json"]["schema"]
-    assert schema["type"] == "object"
-    assert schema["additionalProperties"] is True
-    assert schema["examples"] == [default_input_query]
+    content = request_body["content"]["application/json"]
+    assert content["schema"] == {"$ref": f"#/components/schemas/{request_schema}"}
+    resolved = _resolve(document, content["schema"]["$ref"])
+    assert "message" in resolved["properties"]
+    assert content["examples"]["default"]["value"] == default_input_query
 
+    ok_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert ok_schema == {"$ref": f"#/components/schemas/{response_schema}"}
+    _resolve(document, ok_schema["$ref"])
+
+    # TRAPI's own 400 for a body that isn't a valid 2.0 query...
+    assert "400" in operation["responses"]
+    # ...and the 422 every body rejection (and /asyncquery's missing
+    # callback) returns.
     assert "422" in operation["responses"]
     error_schema = operation["responses"]["422"]["content"]["application/json"][
         "schema"
     ]
-    # Documents the shape every 422 these routes return actually uses -- the
-    # body rejections and /asyncquery's missing-callback alike.
     assert error_schema["properties"] == {
         "status": {"type": "string"},
         "description": {"type": "string"},
     }
+
+
+@pytest.mark.parametrize("app", ALL_APPS)
+def test_openapi_every_ref_resolves(app):
+    document = app.openapi()
+    refs = set(_all_refs(document))
+    assert refs
+    for ref in refs:
+        _resolve(document, ref)
+
+
+def test_server_openapi_is_trapi_2():
+    """The top-level app's document declares TRAPI 2.0, and the TRAPI
+    component schemas it carries resolve."""
+    from shepherd_server.server import APP
+
+    from shepherd_utils.trapi import BIOLINK_VERSION
+
+    document = APP.openapi()
+    assert document["info"]["x-trapi"]["version"] == "2.0.0"
+    assert document["info"]["x-translator"]["biolink-version"] == BIOLINK_VERSION
+    schemas = document["components"]["schemas"]
+    for name in ("Query", "AsyncQuery", "Response"):
+        assert name in schemas
+        _resolve(document, f"#/components/schemas/{name}")
+    for ref in set(_all_refs(document)):
+        _resolve(document, ref)
 
 
 def test_each_route_gets_its_own_openapi_extra():
@@ -256,3 +321,90 @@ def test_each_route_gets_its_own_openapi_extra():
     assert first == second
     assert first is not second
     assert first["responses"] is not second["responses"]
+
+
+# --- TRAPI 2.0 request validation ----------------------------------------
+
+TRAPI_1_QUERIES = {
+    "top_level_log_level": {
+        "message": default_input_query["message"],
+        "log_level": "DEBUG",
+    },
+    "qualifier_constraints": {
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["X:1"]}, "n1": {}},
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": "activity",
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                },
+            }
+        }
+    },
+    "intermediate_categories": {
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["X:1"]}, "n1": {"ids": ["Y:1"]}},
+                "paths": {
+                    "p0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "constraints": [
+                            {"intermediate_categories": ["biolink:Gene"]}
+                        ],
+                    }
+                },
+            }
+        }
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(TRAPI_1_QUERIES))
+async def test_parse_query_body_rejects_trapi_1_spellings(name):
+    from shepherd_utils.trapi import TRAPIRequestError
+
+    import orjson
+
+    body = orjson.dumps(TRAPI_1_QUERIES[name])
+    with pytest.raises(TRAPIRequestError):
+        await parse_query_body(_make_request(body, {}))
+
+
+@pytest.mark.parametrize("name", sorted(TRAPI_1_QUERIES))
+@pytest.mark.parametrize("path", ["/query", "/asyncquery"])
+def test_trapi_1_query_is_rejected_with_400(name, path, client_factory):
+    """A stale 1.x client gets TRAPI's 400 naming the 2.0 spelling, and the
+    query is never registered."""
+    client, captured, _ = client_factory(ARAGORN)
+    body = dict(TRAPI_1_QUERIES[name], callback="http://callback/1")
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == base_routes.QUERY_INVALID_CODE == 400
+    assert "2.0" in response.json()["description"]
+    assert captured == {}
+
+
+def test_schema_invalid_query_is_rejected_with_400(client_factory):
+    """Not just retired spellings: anything TOM's Query rejects is a 400."""
+    client, captured, _ = client_factory(ARAGORN)
+
+    response = client.post(
+        "/query", json={"message": {"query_graph": {"nodes": "not an object"}}}
+    )
+
+    assert response.status_code == 400
+    assert captured == {}

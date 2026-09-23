@@ -367,6 +367,30 @@ def _query_adapter() -> TypeAdapter[QueryDict]:
     return TypeAdapter(QueryDict)
 
 
+def _require_non_empty_query_graph(query: Mapping[str, Any]) -> None:
+    """The ``minProperties`` rules TOM's lite validation doesn't check.
+
+    A QueryGraph needs at least one node, and ``edges`` / ``paths`` (at
+    least one of which it needs) each hold at least one entry when present.
+    """
+    message = query.get("message")
+    query_graph = message.get("query_graph") if isinstance(message, dict) else None
+    if query_graph is None:
+        return
+    if not query_graph.get("nodes"):
+        raise TRAPIRequestError("Invalid TRAPI 2.0 query: query_graph has no nodes.")
+    for key in ("edges", "paths"):
+        if key in query_graph and not query_graph[key]:
+            raise TRAPIRequestError(
+                f"Invalid TRAPI 2.0 query: query_graph.{key} is empty; omit it "
+                "or give at least one."
+            )
+    if not query_graph.get("edges") and not query_graph.get("paths"):
+        raise TRAPIRequestError(
+            "Invalid TRAPI 2.0 query: query_graph needs edges or paths."
+        )
+
+
 def validate_query(query: dict[str, Any]) -> None:
     """Reject a request body that is not a TRAPI 2.0 query.
 
@@ -400,6 +424,7 @@ def validate_query(query: dict[str, Any]) -> None:
             f"Invalid TRAPI 2.0 query: {location}: {first['msg']}"
         ) from e
     _reject_retired_fields(query)
+    _require_non_empty_query_graph(query)
 
 
 # ---------------------------------------------------------------------------

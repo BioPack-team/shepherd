@@ -242,3 +242,18 @@ def test_finalize_response_drops_analyses_that_bind_nothing():
     finalize_response(response)
     assert "analyses" not in response["message"]["results"][0]
     Response.from_dict(response)
+
+
+@pytest.mark.parametrize(
+    "query_graph, problem",
+    [
+        ({"nodes": {}, "edges": {"e0": {"subject": "a", "object": "b"}}}, "no nodes"),
+        ({"nodes": {"a": {}}, "edges": {}}, "edges is empty"),
+        ({"nodes": {"a": {}}, "paths": {}}, "paths is empty"),
+        ({"nodes": {"a": {}}}, "needs edges or paths"),
+    ],
+)
+def test_empty_query_graph_members_are_rejected(query_graph, problem):
+    """TRAPI 2.0 gives nodes / edges / paths a minProperties of 1."""
+    with pytest.raises(TRAPIRequestError, match=problem):
+        validate_query({"message": {"query_graph": query_graph}})
