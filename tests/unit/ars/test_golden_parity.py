@@ -159,11 +159,10 @@ def test_merge_ba_parity():
 
 
 def test_merge_pipeline_parity():
-    """scrub + decorate + normalize_scores on each side, then merge --
-    the same shape pre_merge_process + merge_received produce."""
+    """decorate + normalize_scores on each side, then merge -- the same
+    shape pre_merge_process + merge_received produce."""
     pipe_a, pipe_b = load("response_aragorn.json"), load("response_arax.json")
     for resp, infores in ((pipe_a, "infores:aragorn"), (pipe_b, "infores:arax")):
-        ars_premerge.scrub_null_attributes(resp)
         ars_premerge.decorate_edges_with_infores(resp, infores)
         ars_premerge.normalize_scores(resp, "k", "agent")
     assert_parity(jsonable(pipe_a), GOLDENS["premerged_inputs"]["aragorn"])
@@ -190,12 +189,6 @@ def test_get_msg_stats_parity():
 # ---------------------------------------------------------------------------
 # premerge pieces
 # ---------------------------------------------------------------------------
-
-
-def test_scrub_parity():
-    data = load("scrub_input.json")
-    ars_premerge.scrub_null_attributes(data)
-    assert_parity(jsonable(data), GOLDENS["scrub"])
 
 
 @pytest.mark.parametrize("case", load("decorate_cases.json"), ids=lambda c: c["name"])

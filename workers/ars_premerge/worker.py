@@ -3,10 +3,10 @@
 Receives an ARA's response off the broker and runs the per-response pipeline
 that upstream executes inline in its Django result-callback view: the intake
 state machine (guards, counts, the ara_response_complete notification), then
-pre_merge_process (scrub null attributes, decorate edge sources with the
-agent's infores, normalize scores), phantom support-graph removal, and TRAPI
-validation. Moved off the server because this is the CPU-heavy stretch of
-the callback path and it saturated the server under concurrent load
+pre_merge_process (decorate edge sources with the agent's infores,
+normalize scores), phantom support-graph removal, and TRAPI validation.
+Moved off the server because this is the CPU-heavy stretch of the callback
+path and it saturated the server under concurrent load
 (documented deviation in the parity register; the outcome contract below is
 upstream's, applied asynchronously).
 
@@ -39,6 +39,9 @@ fields the premerge stage reads.
 import asyncio
 import logging
 import uuid
+from typing import Dict
+
+from opentelemetry.propagate import extract, inject
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
@@ -63,7 +66,7 @@ from shepherd_utils.db import (
     save_message_sync,
 )
 from shepherd_utils.logger import get_worker_logger
-from shepherd_utils.otel import setup_tracer
+from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks
 
@@ -78,33 +81,45 @@ _pool = None
 _loop = None
 
 
-def premerge_in_child(child_pk, agent_name, inforesid, do_validate) -> bool:
+def premerge_in_child(
+    child_pk, agent_name, inforesid, do_validate, otel_carrier=None
+) -> bool:
     """Pool-side premerge: fetch the child's blob by pk, process it in place,
     write it back, and return the validation verdict.
 
     The processed payload is saved whether or not it validates, as upstream
     saved the (already premerged) data on both branches of its view.
+    ``otel_carrier`` is the parent's span context; the stage span starts
+    under it (see shepherd_utils.otel.setup_pool_child_tracer).
     """
-    data = get_message_sync(str(child_pk))
-    pre_merge_process(data, str(child_pk), agent_name, inforesid)
-    if do_validate:
-        remove_phantom_support_graphs(data)
-        valid = validate(data)
-    else:
-        valid = True
-    save_message_sync(str(child_pk), data)
+    setup_pool_child_tracer(STREAM)
+    parent_ctx = extract(otel_carrier) if otel_carrier else None
+    with tracer.start_as_current_span(
+        "ars.premerge.process", context=parent_ctx
+    ) as span:
+        span.set_attribute("agent", agent_name)
+        span.set_attribute("premerge.child_pk", str(child_pk))
+        span.set_attribute("premerge.validate", bool(do_validate))
+        data = get_message_sync(str(child_pk))
+        pre_merge_process(data, str(child_pk), agent_name, inforesid)
+        if do_validate:
+            remove_phantom_support_graphs(data)
+            valid = validate(data)
+        else:
+            valid = True
+        save_message_sync(str(child_pk), data)
+        span.set_attribute("premerge.valid", bool(valid))
     return bool(valid)
 
 
-async def _run_premerge_in_pool(child_pk, agent_name, inforesid, do_validate, logger):
+async def _run_premerge_in_pool(
+    child_pk, agent_name, inforesid, do_validate, otel_carrier, logger
+):
     """Indirection for tests; production runs premerge_in_child in the pool."""
+    args = (child_pk, agent_name, inforesid, do_validate, otel_carrier)
     if _pool is not None and _loop is not None:
-        return await _pool.run(
-            _loop, premerge_in_child, child_pk, agent_name, inforesid, do_validate
-        )
-    return await asyncio.to_thread(
-        premerge_in_child, child_pk, agent_name, inforesid, do_validate
-    )
+        return await _pool.run(_loop, premerge_in_child, *args)
+    return await asyncio.to_thread(premerge_in_child, *args)
 
 
 async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
@@ -280,9 +295,12 @@ async def ars_premerge(task, logger: logging.Logger):
     params = mesg.get("params") or {}
     do_validate = not ("validate" in params.keys() and not params["validate"])
 
+    # the pool child continues this trace under the current task span
+    carrier: Dict[str, str] = {}
+    inject(carrier)
     try:
         valid = await _run_premerge_in_pool(
-            str(child_pk), agent_name, inforesid, do_validate, logger
+            str(child_pk), agent_name, inforesid, do_validate, carrier, logger
         )
     except Exception as e:
         logger.error(f"premerge failed for {child_pk}: {e}", exc_info=True)

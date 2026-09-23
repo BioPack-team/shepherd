@@ -5,10 +5,11 @@ merge_and_post_process + merge_received + post_process: lock, merge-child
 creation, fold into the running merged_version, parent bookkeeping
 (merged_version, merged_versions_list append, params.stats), the
 merged_version_begun notification, then post-processing (blocklist ->
-scrub -> annotate -> appraise_confidence -> stats, with the exact failure
-codes: 444 for the cleanup stages and the stat calc, confidence failures
-only logged), the merged_version_available notification and the parent
-completion check.
+annotate -> appraise_confidence -> stats, with the exact failure codes:
+444 for the cleanup stages and the stat calc, confidence failures only
+logged; the null-attribute scrub was removed upstream in Relay PR #885),
+the merged_version_available notification and the parent completion
+check.
 
 Work comes from the merge-ready index (real, on fakeredis here): the worker
 holding the parent's lock drains it in arrival order, one merged version per
@@ -202,6 +203,9 @@ async def test_first_merge(env, redis_mock, caplog):
     assert str(args[1]) == str(env["child_pk"])
     assert str(args[2]) == str(merge_pk)
     assert args[3] == "ara-shepherd-aragorn"
+    # the parent's span context rides along so the child's fold and
+    # post-process spans join this trace
+    assert isinstance(args[5], dict)
 
     # parent bookkeeping in one update
     pupdate = next(

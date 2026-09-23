@@ -31,7 +31,7 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 CORPUS = REPO / "tests/fixtures/ars_corpus"
 GOLDENS = REPO / "tests/fixtures/ars_goldens"
 DEFAULT_RELAY = pathlib.Path("/home/user/ncatstranslator/relay")
-RELAY_COMMIT = "3e65975db287a73afa4388b7dbaf3c64d0d218c4"
+RELAY_COMMIT = "2b2121df740a4c8bc47bb2e6bafa9e52f748f028"
 
 
 def bootstrap_django(relay: pathlib.Path):
@@ -139,12 +139,11 @@ def main():
     merged_ba = utils.mergeMessages([tmsg(arax), tmsg(aragorn)], "pk-ba")
     out["merge_ba"] = jsonable(merged_ba.to_dict())
 
-    # pipeline-realistic: scrub + decorate + normalize_scores first (what
+    # pipeline-realistic: decorate + normalize_scores first (what
     # pre_merge_process does to each callback), then merge.
     pipe_a = copy.deepcopy(aragorn)
     pipe_b = copy.deepcopy(arax)
     for resp, infores in ((pipe_a, "infores:aragorn"), (pipe_b, "infores:arax")):
-        utils.scrub_null_attributes(resp)
         utils.decorate_edges_with_infores(resp, infores)
         utils.normalize_scores(resp, "k", "agent")
     merged_pipe = utils.mergeMessages(
@@ -160,11 +159,6 @@ def main():
         "arax": jsonable(pipe_b),
     }
     out["get_msg_stats"] = jsonable(utils.get_msg_stats(merged_ab.to_dict()))
-
-    # ---------------- scrub_null_attributes ----------------
-    scrub = load("scrub_input.json")
-    utils.scrub_null_attributes(scrub)
-    out["scrub"] = jsonable(scrub)
 
     # ---------------- decorate_edges_with_infores ----------------
     dec_cases = []

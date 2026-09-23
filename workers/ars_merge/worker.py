@@ -9,16 +9,24 @@ merged_versions_list / params.stats advanced, the merged_version_begun and
 merged_version_available notifications, and the parent completion check.
 
 Post-processing runs on the merged message right after the fold, in the
-same process-pool child that holds it: blocklist removal, null-attribute
-scrubbing, node annotation, local confidence calculation, and score stats,
-with upstream's exact stage-failure codes (cleanup stages and the stat calc
-mark the merged child 'E'/444, and the 444 sticks; appraise_confidence
-failures are logged and swallowed; a failed final save is E/422). On success
-the 202 shell flips to 'D'/200. The external Appraiser call and the Sugeno
-scoring pass were removed upstream (Relay PRs #884/#883) -- ordering
-components come from appraise_confidence. Node annotation runs the
-biothings_annotator package in-process, as upstream (parity register R2 pins
-the package to a specific commit where Relay installs it unpinned).
+same process-pool child that holds it: blocklist removal, node annotation,
+local confidence calculation, and score stats, with upstream's exact
+stage-failure codes (cleanup stages and the stat calc mark the merged child
+'E'/444, and the 444 sticks; appraise_confidence failures are logged and
+swallowed; a failed final save is E/422). On success the 202 shell flips to
+'D'/200. The external Appraiser call and the Sugeno scoring pass were
+removed upstream (Relay PRs #884/#883) -- ordering components come from
+appraise_confidence -- and so was the null-attribute scrub (Relay PR #885).
+Node annotation runs the biothings_annotator package in-process, as
+upstream (parity register R2 pins the package to a specific commit where
+Relay installs it unpinned).
+
+The pool child emits its own spans: the parent injects its span context
+into a carrier that rides the pool call, and the child (which sets up its
+own tracer provider, see shepherd_utils.otel.setup_pool_child_tracer)
+starts ars.merge.fold and ars.postprocess under it, with the annotator's
+span and its outbound httpx client spans nested beneath -- the same trace
+shape the standalone post-process worker used to produce.
 
 Work arrives through the merge-ready index (shepherd_utils.ars.db
 add_ready_child): ars_premerge records each validated child there and wakes
@@ -46,6 +54,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from biothings_annotator import annotator
+from opentelemetry.propagate import extract, inject
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
@@ -63,7 +72,6 @@ from shepherd_utils.ars.premerge import (
     add_log_entry,
     appraise_confidence,
     get_safe,
-    scrub_null_attributes,
     timestamp_hms,
 )
 from shepherd_utils.broker import (
@@ -77,7 +85,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_logs, save_message_sync
 from shepherd_utils.logger import get_worker_logger
-from shepherd_utils.otel import setup_tracer
+from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks
 
@@ -249,30 +257,8 @@ async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str,
         )
         row_code = 444
 
-    # 2. scrub
-    try:
-        scrub_null_attributes(data)
-    except Exception:
-        status = "E"
-        code = 444
-        logger.exception(
-            f"Problem with the second scrubbing of null attributes for agent: "
-            f"{agent_name} pk: {merged_row.get('id')}"
-        )
-        _post_processing_error(
-            merged_row, data, "Error in second scrubbing of null attributes"
-        )
-        add_log_entry(
-            data,
-            [
-                "Error in second scrubbing of null attributes",
-                timestamp_hms(),
-                "DEBUG",
-            ],
-        )
-        row_code = 444
-
-    # 3. annotate
+    # 2. annotate (the null-attribute scrub that sat here was removed
+    # upstream, Relay PR #885)
     try:
         await annotate_nodes(data, agent_name, logger)
         logger.info(
@@ -296,7 +282,7 @@ async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str,
         )
         row_code = 444
 
-    # 4. confidence + stats (only when there are results)
+    # 3. confidence + stats (only when there are results)
     result_count = None
     result_stat = None
     stat_calc_failed = False
@@ -332,7 +318,7 @@ async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str,
             code = 444
             stat_calc_failed = True
 
-    # 5. the 202 shell flips to D/200 only when nothing failed and the final
+    # 4. the 202 shell flips to D/200 only when nothing failed and the final
     # save (the caller's) succeeds; a stat-calc failure returned early
     # upstream, before that flip
     if not stat_calc_failed and row_code == 202:
@@ -363,16 +349,31 @@ class _CaptureHandler(logging.Handler):
 
 
 def merge_and_postprocess_in_child(
-    current_pk, child_pk, new_pk, agent_name, row_updated_at
+    current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier=None
 ) -> Dict[str, Any]:
     """Pool-side fold + post-process. Fetches the blobs by pk, saves the
     fold (so a post-process crash still leaves a merged payload, as
     upstream's fold-time save did), post-processes the dict it already
     holds, and saves the final version. Only the stats, the outcome, and
     the stage log lines cross IPC.
+
+    ``otel_carrier`` is the parent's span context (W3C traceparent); the
+    fold and post-process spans start under it so the child's work shows up
+    in the query's trace.
     """
-    merged_dict, stats = _fold(current_pk, child_pk)
-    save_message_sync(str(new_pk), merged_dict)
+    setup_pool_child_tracer(STREAM)
+    parent_ctx = extract(otel_carrier) if otel_carrier else None
+
+    with tracer.start_as_current_span("ars.merge.fold", context=parent_ctx) as span:
+        span.set_attribute("agent", agent_name)
+        span.set_attribute("merge.child_pk", str(child_pk))
+        span.set_attribute("merge.new_pk", str(new_pk))
+        span.set_attribute("merge.first", current_pk is None)
+        merged_dict, stats = _fold(current_pk, child_pk)
+        save_message_sync(str(new_pk), merged_dict)
+        for key in ("results", "knowledge_graph_nodes", "knowledge_graph_edges"):
+            if key in stats:
+                span.set_attribute(f"merge.{key}", stats[key])
 
     capture = _CaptureHandler()
     child_logger = logging.getLogger(f"shepherd.ars.merge.child.{new_pk}")
@@ -381,19 +382,29 @@ def merge_and_postprocess_in_child(
     child_logger.addHandler(capture)
     try:
         merged_row = {"id": str(new_pk), "code": 202, "updated_at": row_updated_at}
-        # A fresh loop: this runs in a spawned pool child (or, in tests, a
-        # worker thread), where no loop is running -- the equivalent of
-        # upstream's run_until_complete around the annotator call.
-        outcome = asyncio.run(
-            postprocess_message(merged_dict, merged_row, agent_name, child_logger)
-        )
-        try:
-            save_message_sync(str(new_pk), merged_dict)
-        except Exception:
-            # upstream's DatabaseError on the final save -> E/422
-            child_logger.exception("Final save failed")
-            outcome["status"] = "E"
-            outcome["code"] = 422
+        with tracer.start_as_current_span(
+            "ars.postprocess", context=parent_ctx
+        ) as span:
+            span.set_attribute("agent", agent_name)
+            span.set_attribute("merged.pk", str(new_pk))
+            # A fresh loop: this runs in a spawned pool child (or, in tests,
+            # a worker thread), where no loop is running -- the equivalent
+            # of upstream's run_until_complete around the annotator call.
+            # The loop's tasks inherit this span as their current context.
+            outcome = asyncio.run(
+                postprocess_message(merged_dict, merged_row, agent_name, child_logger)
+            )
+            try:
+                save_message_sync(str(new_pk), merged_dict)
+            except Exception:
+                # upstream's DatabaseError on the final save -> E/422
+                child_logger.exception("Final save failed")
+                outcome["status"] = "E"
+                outcome["code"] = 422
+            span.set_attribute("postprocess.status", outcome["status"])
+            span.set_attribute("postprocess.code", outcome["code"])
+            if outcome.get("result_count") is not None:
+                span.set_attribute("postprocess.result_count", outcome["result_count"])
     finally:
         child_logger.removeHandler(capture)
     outcome["stats"] = stats
@@ -402,11 +413,11 @@ def merge_and_postprocess_in_child(
 
 
 async def _run_merge_in_pool(
-    current_pk, child_pk, new_pk, agent_name, row_updated_at, logger
+    current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier, logger
 ) -> Dict[str, Any]:
     """Indirection for tests; production runs the fold + post-process in
     the pool."""
-    args = (current_pk, child_pk, new_pk, agent_name, row_updated_at)
+    args = (current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier)
     if _pool is not None and _loop is not None:
         return await _pool.run(_loop, merge_and_postprocess_in_child, *args)
     return await asyncio.to_thread(merge_and_postprocess_in_child, *args)
@@ -469,6 +480,10 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
     current_pk = parent.get("merged_version")
     logger.info(f"Beginning merge for agent {agent_name} with current_pk: {current_pk}")
     updated_at = merged_shell.get("updated_at")
+    # the pool child continues this trace: its fold / post-process spans
+    # (and the annotator's httpx calls) nest under the current task span
+    carrier: Dict[str, str] = {}
+    inject(carrier)
     try:
         outcome = await _run_merge_in_pool(
             str(current_pk) if current_pk else None,
@@ -476,6 +491,7 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
             str(new_pk),
             agent_name,
             updated_at.isoformat() if isinstance(updated_at, datetime) else None,
+            carrier,
             logger,
         )
     except Exception as e:
@@ -577,7 +593,10 @@ async def ars_merge(task, logger: logging.Logger):
                 break
             for child_pk in ready:
                 try:
-                    await merge_one(parent_pk, child_pk, logger)
+                    with tracer.start_as_current_span("ars.merge.one") as span:
+                        span.set_attribute("merge.parent_pk", str(parent_pk))
+                        span.set_attribute("merge.child_pk", str(child_pk))
+                        await merge_one(parent_pk, child_pk, logger)
                     folded += 1
                 except Exception as e:
                     logger.error(

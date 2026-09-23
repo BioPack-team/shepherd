@@ -95,7 +95,10 @@ Postgres tables instead of MySQL. `ars_premerge` validates each ARA response
 in a process pool; `ars_merge` folds each validated response into the
 query's merged message and post-processes the new version in the same
 pool child, draining every response that is ready for a query under one
-lock (the merge_message worker's pattern).
+lock (the merge_message worker's pattern). Node annotation runs the
+`biothings_annotator` package in-process there; it is configured by the
+package's own environment variables (`SERVICE_PROVIDER_API_HOST`,
+`ANNOTATOR_QUERY_BACKEND`), set on the `ars_merge` container.
 
 The ARS is **de-federated**: it talks only to the ARAs this same Shepherd
 deployment hosts (`shepherd_utils/ars/aras.py` -- Aragorn, ARAX, BTE), and

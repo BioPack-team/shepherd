@@ -3,11 +3,33 @@
 The behavior contract for Shepherd's hosted port of the Translator ARS
 ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)).
 
-**Pinned upstream commit:** `3e65975db287a73afa4388b7dbaf3c64d0d218c4`
-(master, re-pinned 2026-09-05 from the original 2026-09-01 pin at
-`dd1e71b8284de746f9d11e4fc823bf57861e081f`; byte-exact reference copies
-under `/home/user/ncatstranslator/relay` during development, key files
-mirrored in the golden-generation tooling).
+**Pinned upstream commit:** `2b2121df740a4c8bc47bb2e6bafa9e52f748f028`
+(master, re-pinned 2026-09-23 from the 2026-09-05 pin at
+`3e65975db287a73afa4388b7dbaf3c64d0d218c4`, itself re-pinned from the
+original 2026-09-01 pin at `dd1e71b8284de746f9d11e4fc823bf57861e081f`;
+goldens are regenerated from a fresh clone of the pinned commit).
+
+Behavioral changes accepted with the 2026-09-23 re-pin:
+
+- **Relay PR #885 (removeScrubMethod)**: `scrub_null_attributes` is gone,
+  and with it the scrub step at the head of `pre_merge_process` and the
+  "second scrubbing" stage (with its E/444) in `post_process`. Ported:
+  the port's copy of the function, its golden (`scrub`), its corpus
+  fixture, and its divergence row are removed; the pipeline goldens are
+  unchanged (the corpus carried nothing the scrub touched).
+- **Relay PRs #886 / #890 (RRF scores, then reverted)**: net zero; the
+  pinned commit is the revert.
+- **Relay PR #880 (inactive-endpoints)**: upstream's `config.yaml` now
+  deactivates every ARA and KP except `infores:shepherd-aragorn`,
+  `shepherd-arax` and `shepherd-bte`, and `get_or_create_actor` keeps the
+  active flag in sync on every startup. Nothing to port: the de-federated
+  port has no registry and fans out to exactly those three (deviation 16),
+  so upstream has converged on the same roster.
+- **Relay PR #888 (annotatorBackend)**: upstream's deployment passes
+  `ANNOTATOR_QUERY_BACKEND` through to the `biothings_annotator` package,
+  which already reads it at the pinned package commit. The port needs no
+  code change -- the package runs in-process and reads the container's
+  environment -- and documents the variable (README, config.py).
 
 Behavioral changes accepted with the 2026-09-05 re-pin (everything else in
 the range was OpenTelemetry/gunicorn/celery tuning):
@@ -286,8 +308,14 @@ Behavioral deviations:
     and re-saved the merged message a second time and let two versions of
     one parent post-process concurrently. They are one worker again:
     `ars_merge` folds a child and post-processes the new version in the
-    same process-pool child that already holds it (blocklist, scrub,
-    annotation, confidence, stats, with the same 444/422 stage codes).
+    same process-pool child that already holds it (blocklist, annotation,
+    confidence, stats, with the same 444/422 stage codes). The child emits
+    its own spans (`ars.merge.fold`, `ars.postprocess`, the `annotator`
+    span with the package's httpx calls beneath) under the parent task's
+    span context, which rides the pool call as a W3C carrier; pool
+    children set up their own tracer provider for this
+    (`shepherd_utils.otel.setup_pool_child_tracer`), and `ars_premerge`'s
+    child does the same for `ars.premerge.process`.
     Work arrives through a per-parent merge-ready index (a sorted set in
     the data store) that `ars_premerge` writes before waking the stream;
     the worker that wins the parent's lock (`try_lock`, non-blocking)
@@ -327,7 +355,6 @@ failure is the prompt to re-decide each one, not a bug).
 | `decorate_edges_with_infores` read `has_primary`, only ever assigned inside its loop → `UnboundLocalError` on any non-empty `sources` with no `primary_knowledge_source`, failing the whole callback | `has_primary` is initialized; the agent adds itself as primary, which is what the unreachable branch intended |
 | `decorate_edges_with_infores` shared ONE `self_source` dict across the whole graph, so the last edge to need a role rewrote the role of every earlier edge | a fresh source dict per edge (`_self_source`) |
 | `normalizeScores` ranked only score-bearing results but popped one rank per RESULT → `IndexError` on any mixed response, after misassigning the ranks it did hand out | each rank goes to the result it was computed from; unscored results get no `normalized_score` |
-| `scrub_null_attributes` iterated `get_safe(edge, "sources")` directly → `TypeError` on an edge with no `sources` key | treated as empty |
 | `remove_blocked` bound `nodes_to_remove` / `edges_to_remove` / `aux_graphs_to_remove` / `results_to_remove` inside conditional branches and read them unconditionally → `UnboundLocalError` on any response without `auxiliary_graphs` (an ordinary shape), without a knowledge graph, or with a null `edges` map | every accumulator bound up front |
 | `remove_blocked`'s pathfinder branch raised `UnboundLocalError` on an empty `path_bindings` | the removal loop is inside the per-path loop, so there is nothing to leave unbound |
 | `QueryGraph` / `KnowledgeGraph` / `Results` returned early on a `None` input, leaving every attribute unset → `AttributeError` from the next getter | they initialize empty |

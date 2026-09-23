@@ -367,8 +367,12 @@ class Settings(BaseSettings):
     ars_enabled_aras: str = ""
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
     # Node annotation runs the biothings_annotator package in-process (as
-    # upstream); its backend host is overridable via the package's own
-    # SERVICE_PROVIDER_API_HOST env var, not a Shepherd setting.
+    # upstream), in the ars_merge worker's pool children, which inherit the
+    # container's environment. The package's own env vars configure it, not
+    # a Shepherd setting: SERVICE_PROVIDER_API_HOST (the BioThings host) and
+    # ANNOTATOR_QUERY_BACKEND ("biothings", the package default, or
+    # "elasticsearch" with ELASTICSEARCH_CONNECTION) -- the same variable
+    # upstream Relay's deployment sets (Relay PR #888).
     # AES key for decrypting stored notification-client secrets (upstream env
     # AES_MASTER_KEY). Empty disables signed notifications.
     aes_master_key: str = ""

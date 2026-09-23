@@ -88,13 +88,6 @@ def test_each_edge_gets_its_own_source_dict():
     assert edges["e2"]["sources"][1]["resource_role"] == "primary_knowledge_source"
 
 
-def test_edge_without_sources_key_is_not_a_typeerror():
-    """scrub_null_attributes iterated get_safe(edge, "sources") straight,
-    which is None for an edge that has no sources key."""
-    data = {"message": {"knowledge_graph": {"nodes": {}, "edges": {"e1": {}}}}}
-    ars_premerge.scrub_null_attributes(data)  # no raise
-
-
 # ---------------------------------------------------------------------------
 # premerge.normalizeScores
 # ---------------------------------------------------------------------------
