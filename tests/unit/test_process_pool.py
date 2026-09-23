@@ -129,3 +129,32 @@ async def test_replace_is_idempotent_for_the_same_broken_pool():
         assert pool._executor is replaced_once
     finally:
         pool.shutdown()
+
+
+def _noop():
+    return None
+
+
+async def test_warmup_spawns_every_child_up_front():
+    """With a warmup hook every child is spawned when the pool is built (and
+    rebuilt), not lazily on the first real tasks."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=2, name="test pool", warmup=_noop)
+    try:
+        assert len(pool._executor._processes) == 2
+        first = pool._executor
+        with pytest.raises(BrokenProcessPool):
+            await pool.run(loop, _suicide, None)
+        assert pool._executor is not first
+        assert len(pool._executor._processes) == 2
+        assert await pool.run(loop, _echo, "ok") == "ok"
+    finally:
+        pool.shutdown()
+
+
+async def test_no_warmup_keeps_children_lazy():
+    pool = ProcessPoolManager(max_workers=2, name="test pool")
+    try:
+        assert len(pool._executor._processes) == 0
+    finally:
+        pool.shutdown()

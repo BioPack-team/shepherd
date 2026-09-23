@@ -23,10 +23,30 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import shepherd_utils.ars.annotate as annotate_mod
 import shepherd_utils.ars.db as ars_db
+from shepherd_utils.config import settings
 from workers.ars_premerge import worker as pm
 
 LOGGER = logging.getLogger(__name__)
+
+
+ANNOTATIONS = {
+    "MONDO:0005148": {"disease_info": {"mondo": "0005148"}},
+    "CHEBI:6801": [{"notfound": True}],
+    "NCBIGene:5468": {"gene_info": {"symbol": "PPARG"}},
+}
+
+
+def _annotated_curies(payload):
+    return {
+        curie
+        for curie, node in payload["message"]["knowledge_graph"]["nodes"].items()
+        if any(
+            a.get("attribute_type_id") == "biothings_annotations"
+            for a in node.get("attributes") or []
+        )
+    }
 
 
 def load_corpus(name):
@@ -74,7 +94,13 @@ def env(mocker, redis_mock):
 
     mocker.patch.object(pm, "get_message_sync", side_effect=_get_sync)
     mocker.patch.object(pm, "save_message_sync", side_effect=_save_sync)
+    # the in-process biothings_annotator package (ars_annotation_mode
+    # "premerge" runs it here); never the live BioThings APIs
+    annotator = mocker.MagicMock()
+    annotator.annotate_curie_list = AsyncMock(return_value=ANNOTATIONS)
+    mocker.patch.object(annotate_mod.annotator, "Annotator", return_value=annotator)
     return {
+        "annotator": annotator,
         "parent_pk": parent_pk,
         "child_pk": child_pk,
         "child_row": child_row,
@@ -420,3 +446,62 @@ async def test_intake_crash_is_500_with_log_entry(env, intake, mocker, redis_moc
     )
     env["completion"].assert_awaited_once()
     assert await _merge_tasks() == []
+
+
+# ---------------------------------------------------------------------------
+# ars_annotation_mode: annotation in premerge, off the merge lock
+# ---------------------------------------------------------------------------
+
+
+async def test_premerge_mode_annotates_the_validated_response(
+    env, monkeypatch, redis_mock
+):
+    monkeypatch.setattr(settings, "ars_annotation_mode", "premerge")
+    await pm.ars_premerge(_task(env), LOGGER)
+
+    (curies,) = env["annotator"].annotate_curie_list.await_args.args
+    assert sorted(curies) == ["CHEBI:6801", "MONDO:0005148", "NCBIGene:5468"]
+    # annotations ride the saved response to the merge; notfound stays bare
+    payload = env["saved"][-1][1]
+    assert _annotated_curies(payload) == {"MONDO:0005148", "NCBIGene:5468"}
+    assert _final_status_update(env)["status"] == "D"
+    assert await _ready(env) == [str(env["child_pk"])]
+
+
+@pytest.mark.parametrize("mode", ["merge", "off"])
+async def test_other_modes_do_not_annotate_in_premerge(
+    env, monkeypatch, redis_mock, mode
+):
+    monkeypatch.setattr(settings, "ars_annotation_mode", mode)
+    await pm.ars_premerge(_task(env), LOGGER)
+    env["annotator"].annotate_curie_list.assert_not_awaited()
+    assert _annotated_curies(env["saved"][-1][1]) == set()
+
+
+async def test_premerge_annotation_failure_still_merges(env, monkeypatch, redis_mock):
+    """A failed annotation is noted on the response, which still goes D/200
+    and merge-ready: its nodes just merge unannotated."""
+    monkeypatch.setattr(settings, "ars_annotation_mode", "premerge")
+    env["annotator"].annotate_curie_list.side_effect = RuntimeError("annotator down")
+    await pm.ars_premerge(_task(env), LOGGER)
+
+    payload = env["saved"][-1][1]
+    assert _annotated_curies(payload) == set()
+    assert any(
+        entry["message"].startswith("node annotation internal error")
+        for entry in payload.get("logs", [])
+    )
+    final = _final_status_update(env)
+    assert final["status"] == "D"
+    assert final["code"] == 200
+    assert await _ready(env) == [str(env["child_pk"])]
+
+
+async def test_premerge_mode_skips_invalid_and_non_ara_responses(
+    env, monkeypatch, redis_mock
+):
+    monkeypatch.setattr(settings, "ars_annotation_mode", "premerge")
+    await pm.ars_premerge(_task(env, agent="kp-genetics"), LOGGER)
+    del env["data"]["message"]["results"][0]["node_bindings"]
+    await pm.ars_premerge(_task(env), LOGGER)
+    env["annotator"].annotate_curie_list.assert_not_awaited()

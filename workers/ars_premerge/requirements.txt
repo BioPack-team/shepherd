@@ -1,1 +1,4 @@
 scipy
+# In-process node annotation (ars_annotation_mode "premerge"); keep the pin
+# in step with workers/ars_merge/requirements.txt.
+biothings_annotator @ git+https://github.com/biothings/biothings_annotator@82d3accf6c219860583d3b9b91029538b6a434a1

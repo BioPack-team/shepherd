@@ -1,4 +1,5 @@
 import re
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -318,6 +319,13 @@ class Settings(BaseSettings):
     # override via POOL_MAX_TASKS_PER_CHILD; 0 disables recycling.
     pool_max_tasks_per_child: int = 100
 
+    # Spawn every process-pool child when the pool is created (and again when
+    # it is rebuilt) instead of on first use. A spawned child re-imports its
+    # worker module before it can run anything, which put ~1.2-1.5s on the
+    # first ARS response a fresh ars_premerge / ars_merge handled. Costs each
+    # child's idle memory from startup. Used by the pools that opt in.
+    pool_prewarm: bool = True
+
     # Event-loop liveness watchdog. A daemon thread force-exits the process if
     # the asyncio loop stops ticking for this long, turning any loop wedge (an
     # unexpected blocking call, a deadlock) into a Kubernetes restart instead of
@@ -367,12 +375,26 @@ class Settings(BaseSettings):
     ars_enabled_aras: str = ""
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
     # Node annotation runs the biothings_annotator package in-process (as
-    # upstream), in the ars_merge worker's pool children, which inherit the
-    # container's environment. The package's own env vars configure it, not
+    # upstream), in the ars_premerge or ars_merge worker's pool children (see
+    # ars_annotation_mode below), which inherit the container's environment. The package's own env vars configure it, not
     # a Shepherd setting: SERVICE_PROVIDER_API_HOST (the BioThings host) and
     # ANNOTATOR_QUERY_BACKEND ("biothings", the package default, or
     # "elasticsearch" with ELASTICSEARCH_CONNECTION) -- the same variable
     # upstream Relay's deployment sets (Relay PR #888).
+    # Where node annotation runs:
+    #   "merge"    -- upstream's placement: in ars_merge's post-process, over
+    #                 every merged version, under the parent's merge lock.
+    #   "premerge" -- in ars_premerge, over each ARA response once it has
+    #                 validated. Responses annotate in parallel and off the
+    #                 merge lock, so a slow annotation no longer holds up
+    #                 every later merge of the same query; the merge skips
+    #                 the stage. An annotation failure is logged on the
+    #                 response instead of marking the merged version E/444.
+    #   "off"      -- never annotate (e.g. when the graph already carries
+    #                 biothings_annotations attributes).
+    # Nodes already carrying a biothings_annotations attribute are skipped in
+    # every mode.
+    ars_annotation_mode: Literal["merge", "premerge", "off"] = "premerge"
     # AES key for decrypting stored notification-client secrets (upstream env
     # AES_MASTER_KEY). Empty disables signed notifications.
     aes_master_key: str = ""

@@ -19,7 +19,9 @@ removed upstream (Relay PRs #884/#883) -- ordering components come from
 appraise_confidence -- and so was the null-attribute scrub (Relay PR #885).
 Node annotation runs the biothings_annotator package in-process, as
 upstream (parity register R2 pins the package to a specific commit where
-Relay installs it unpinned).
+Relay installs it unpinned) -- here only with ``ars_annotation_mode``
+"merge". The default, "premerge", annotates each response in ars_premerge
+instead, so annotation stays off this worker's per-parent lock.
 
 The pool child emits its own spans: the parent injects its span context
 into a carrier that rides the pool call, and the child (which sets up its
@@ -48,17 +50,16 @@ merge_received exception -- the 8-minute watchdog 598s it.
 import asyncio
 import json
 import logging
-import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from biothings_annotator import annotator
 from opentelemetry.propagate import extract, inject
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 from shepherd_utils.ars import aras
+from shepherd_utils.ars.annotate import annotate_nodes
 from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
 from shepherd_utils.ars.merge import (
     TranslatorMessage,
@@ -68,7 +69,6 @@ from shepherd_utils.ars.merge import (
 from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
-    add_attribute,
     add_log_entry,
     appraise_confidence,
     get_safe,
@@ -98,8 +98,6 @@ LOGGER = get_worker_logger(STREAM)
 
 _pool = None
 _loop = None
-
-CURIE_PATTERN = re.compile(r"[\w\.]+:[\w\.]+")
 
 
 # ---------------------------------------------------------------------------
@@ -137,81 +135,6 @@ def merge_in_child(current_pk, child_pk, new_pk):
 # ---------------------------------------------------------------------------
 
 
-def _separate_annotated_nodes(nodes, logger):
-    """sperate_annotated_nodes [sic]: curies lacking a biothings_annotations
-    attribute."""
-    unannotated = []
-    try:
-        for curie, value in nodes.items():
-            if "attribute" in value.keys() and value["attributes"] == []:
-                unannotated.append(curie)
-            else:
-                annotated = False
-                for attribute in value.get("attributes") or []:
-                    if (
-                        "attribute_type_id" in attribute.keys()
-                        and attribute["attribute_type_id"] == "biothings_annotations"
-                    ):
-                        annotated = True
-                if not annotated:
-                    unannotated.append(curie)
-    except Exception as e:
-        logger.debug(f"separate_annotated_nodes: {e}")
-    return unannotated
-
-
-async def annotate_nodes(data, agent_name, logger):
-    """utils.annotate_nodes via the in-process biothings_annotator package,
-    as upstream. The consumption loop is verbatim, quirks included: a
-    non-dict or empty-list value crashes the notfound check (-> the caller's
-    E/444), and annotated values index the node dict directly."""
-    nodes = get_safe(data, "message", "knowledge_graph", "nodes")
-    if nodes is None:
-        return
-    curie_list = _separate_annotated_nodes(nodes, logger)
-    invalid_nodes = {}
-    for key in list(curie_list):
-        if not CURIE_PATTERN.match(str(key)):
-            invalid_nodes[key] = nodes[key]
-    for key in invalid_nodes.keys():
-        curie_list.remove(key)
-    if not curie_list:
-        return
-    logger.info(f"annotating {len(curie_list)} curie ids in-process")
-    # A named span, as upstream's annotate_nodes wraps its package call: the
-    # annotator is in-process (no separate Jaeger service), so this is what
-    # makes the stage findable -- the package's outbound BioThings requests
-    # appear as httpx client POST spans nested underneath.
-    with tracer.start_as_current_span("annotator") as span:
-        span.set_attribute("annotator.curie_count", len(curie_list))
-        span.set_attribute("agent", agent_name)
-        atr = annotator.Annotator()
-        span.set_attribute("annotator.api_host", str(atr.api_host))
-        rj = await atr.annotate_curie_list(curie_list)
-        annotated = 0
-        for key, value in rj.items():
-            if (
-                isinstance(value, list)
-                and "notfound" in value[0].keys()
-                and value[0]["notfound"] == True  # noqa: E712 -- upstream verbatim
-            ):
-                pass
-            elif isinstance(value, dict) and value == {}:
-                pass
-            else:
-                attribute = {
-                    "attribute_type_id": "biothings_annotations",
-                    "value": value,
-                }
-                add_attribute(
-                    data["message"]["knowledge_graph"]["nodes"][key], attribute
-                )
-                annotated += 1
-        span.set_attribute("annotator.annotated_count", annotated)
-        if len(invalid_nodes) > 0:
-            data["message"]["knowledge_graph"]["nodes"].update(invalid_nodes)
-
-
 def _post_processing_error(merged_row, data, text):
     """utils.post_processing_error's visible effect: the extra log entry
     stamped with the row's updated_at (its in-memory E/206 is always
@@ -229,7 +152,9 @@ def _post_processing_error(merged_row, data, text):
     add_log_entry(data, [text, stamp, "DEBUG"])
 
 
-async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str, Any]:
+async def postprocess_message(
+    data, merged_row, agent_name, logger, annotate: bool = True
+) -> Dict[str, Any]:
     """Run upstream's post_process stages over a merged message in place.
 
     Pure with respect to the database: the caller persists ``data`` and
@@ -238,7 +163,9 @@ async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str,
     the row as it happened and then overwrote it with the final state; the
     final state is the only thing a reader could observe, so it is all
     that is produced here. ``merged_row`` supplies the row's code (202 for
-    a fresh shell) and updated_at (for the error log stamps).
+    a fresh shell) and updated_at (for the error log stamps). ``annotate``
+    False skips node annotation (``ars_annotation_mode`` "premerge", where
+    each response was annotated before it reached the merge, or "off").
     """
     # local code/status mirror upstream's sticky variables
     code = None
@@ -258,29 +185,31 @@ async def postprocess_message(data, merged_row, agent_name, logger) -> Dict[str,
         row_code = 444
 
     # 2. annotate (the null-attribute scrub that sat here was removed
-    # upstream, Relay PR #885)
-    try:
-        await annotate_nodes(data, agent_name, logger)
-        logger.info(
-            f"node annotation successful for agent {agent_name} and pk: "
-            f"{merged_row.get('id')}"
-        )
-    except Exception as e:
-        status = "E"
-        code = 444
-        add_log_entry(
-            data,
-            [
-                f"node annotation internal error: {str(e)}",
-                timestamp_hms(),
-                "DEBUG",
-            ],
-        )
-        logger.exception(
-            f"problem with node annotation for agent: {agent_name} pk: "
-            f"{merged_row.get('id')}"
-        )
-        row_code = 444
+    # upstream, Relay PR #885); skipped when annotation happens in
+    # premerge or is switched off
+    if annotate:
+        try:
+            await annotate_nodes(data, agent_name, logger)
+            logger.info(
+                f"node annotation successful for agent {agent_name} and pk: "
+                f"{merged_row.get('id')}"
+            )
+        except Exception as e:
+            status = "E"
+            code = 444
+            add_log_entry(
+                data,
+                [
+                    f"node annotation internal error: {str(e)}",
+                    timestamp_hms(),
+                    "DEBUG",
+                ],
+            )
+            logger.exception(
+                f"problem with node annotation for agent: {agent_name} pk: "
+                f"{merged_row.get('id')}"
+            )
+            row_code = 444
 
     # 3. confidence + stats (only when there are results)
     result_count = None
@@ -349,7 +278,13 @@ class _CaptureHandler(logging.Handler):
 
 
 def merge_and_postprocess_in_child(
-    current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier=None
+    current_pk,
+    child_pk,
+    new_pk,
+    agent_name,
+    row_updated_at,
+    otel_carrier=None,
+    annotate=True,
 ) -> Dict[str, Any]:
     """Pool-side fold + post-process. Fetches the blobs by pk, saves the
     fold (so a post-process crash still leaves a merged payload, as
@@ -359,7 +294,7 @@ def merge_and_postprocess_in_child(
 
     ``otel_carrier`` is the parent's span context (W3C traceparent); the
     fold and post-process spans start under it so the child's work shows up
-    in the query's trace.
+    in the query's trace. ``annotate`` is postprocess_message's.
     """
     setup_pool_child_tracer(STREAM)
     parent_ctx = extract(otel_carrier) if otel_carrier else None
@@ -392,7 +327,9 @@ def merge_and_postprocess_in_child(
             # of upstream's run_until_complete around the annotator call.
             # The loop's tasks inherit this span as their current context.
             outcome = asyncio.run(
-                postprocess_message(merged_dict, merged_row, agent_name, child_logger)
+                postprocess_message(
+                    merged_dict, merged_row, agent_name, child_logger, annotate
+                )
             )
             try:
                 save_message_sync(str(new_pk), merged_dict)
@@ -412,12 +349,28 @@ def merge_and_postprocess_in_child(
     return outcome
 
 
+def _warm_pool_child():
+    """Pool prewarm hook: the spawn already imported this module; set up the
+    child's tracer too, so a real merge pays for neither."""
+    setup_pool_child_tracer(STREAM)
+
+
 async def _run_merge_in_pool(
     current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier, logger
 ) -> Dict[str, Any]:
     """Indirection for tests; production runs the fold + post-process in
-    the pool."""
-    args = (current_pk, child_pk, new_pk, agent_name, row_updated_at, otel_carrier)
+    the pool. The merge annotates only in ``ars_annotation_mode`` "merge"
+    (upstream's placement); "premerge" annotated each response already."""
+    annotate = settings.ars_annotation_mode == "merge"
+    args = (
+        current_pk,
+        child_pk,
+        new_pk,
+        agent_name,
+        row_updated_at,
+        otel_carrier,
+        annotate,
+    )
     if _pool is not None and _loop is not None:
         return await _pool.run(_loop, merge_and_postprocess_in_child, *args)
     return await asyncio.to_thread(merge_and_postprocess_in_child, *args)
@@ -664,6 +617,7 @@ async def poll_for_tasks():
         task_timeout=max(
             settings.pool_task_timeout_sec, settings.ars_timeout_merge_sec
         ),
+        warmup=_warm_pool_child if settings.pool_prewarm else None,
     )
     while True:
         try:
