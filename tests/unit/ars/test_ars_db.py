@@ -16,7 +16,6 @@ import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars.db import (
     MESSAGE_COLUMNS,
     create_message,
-    serialize_channels,
     update_message,
 )
 
@@ -59,22 +58,22 @@ def _executed_sql(conn, call_index=0):
 async def test_create_message_maps_long_status_and_coerces_code(pg):
     """Message.create('Running', code=202) stores ('R', 202); even a bogus
     code is coerced for R/D statuses."""
-    await create_message(actor_id=1, status="Running", code=500)
+    await create_message(agent="ars-default-agent", status="Running", code=500)
     params = _executed_params(pg)
-    # (pk, name, code, status, actor, ref, params)
+    # (pk, name, code, status, agent, ref, params)
     assert params[2] == 202
     assert params[3] == "R"
 
 
 async def test_create_message_done_coerces_200(pg):
-    await create_message(actor_id=1, status="Done", code=202)
+    await create_message(agent="ars-default-agent", status="Done", code=202)
     params = _executed_params(pg)
     assert params[2] == 200
     assert params[3] == "D"
 
 
 async def test_create_message_error_keeps_code(pg):
-    await create_message(actor_id=1, status="E", code=598)
+    await create_message(agent="ars-default-agent", status="E", code=598)
     params = _executed_params(pg)
     assert params[2] == 598
     assert params[3] == "E"
@@ -117,83 +116,3 @@ async def test_update_message_non_status_write_keeps_code(pg):
     await update_message(uuid.uuid4(), status="E", code=598)
     params = _executed_params(pg)
     assert 598 in params
-
-
-def test_serialize_channels_matches_django_serializer_shape():
-    rows = [
-        {"id": 1, "name": "general", "description": "General channel"},
-        {"id": 2, "name": "workflow", "description": None},
-    ]
-    assert serialize_channels(rows) == [
-        {
-            "model": "tr_ars.channel",
-            "pk": 1,
-            "fields": {"name": "general", "description": "General channel"},
-        },
-        {
-            "model": "tr_ars.channel",
-            "pk": 2,
-            "fields": {"name": "workflow", "description": None},
-        },
-    ]
-
-
-async def test_otel_carrier_roundtrip(redis_mock):
-    """The query's submit-time trace context is stored per parent pk so
-    callback-side stages rejoin the same trace; absent -> '{}'."""
-    import logging
-    import uuid
-
-    import shepherd_utils.ars.db as ars_db
-
-    logger = logging.getLogger(__name__)
-    pk = uuid.uuid4()
-    assert await ars_db.load_otel_carrier(pk, logger) == "{}"
-    await ars_db.save_otel_carrier(pk, {"traceparent": "00-abc"}, logger)
-    assert await ars_db.load_otel_carrier(pk, logger) == '{"traceparent": "00-abc"}'
-
-
-async def test_persist_data_copy_retries_transient_redis_failure(redis_mock, mocker):
-    """A Redis timeout reading the blob is retried; the durable copy still
-    lands in Postgres."""
-    import logging
-
-    import shepherd_utils.ars.db as ars_db
-    import shepherd_utils.db as shepherd_db
-
-    logger = logging.getLogger(__name__)
-    pk = uuid.uuid4()
-    blob = b"\x28\xb5\x2f\xfd fake-zstd"
-
-    real_get = shepherd_db.data_db_client.get
-    calls = {"n": 0}
-
-    async def flaky_get(key):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise TimeoutError("Timeout reading from shepherd_broker:6379")
-        return blob
-
-    mocker.patch.object(shepherd_db.data_db_client, "get", side_effect=flaky_get)
-    mocker.patch("asyncio.sleep")
-
-    executed = []
-
-    class _Conn:
-        async def execute(self, sql, params):
-            executed.append((sql, params))
-
-        async def commit(self):
-            pass
-
-    class _ConnCM:
-        async def __aenter__(self):
-            return _Conn()
-
-        async def __aexit__(self, *a):
-            return False
-
-    mocker.patch.object(shepherd_db.pool, "connection", lambda timeout: _ConnCM())
-    await ars_db.persist_data_copy(pk, logger)
-    assert calls["n"] == 2
-    assert executed and executed[0][1] == (blob, pk)

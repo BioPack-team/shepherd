@@ -153,14 +153,55 @@ def decode_message(blob: bytes) -> Any:
     return orjson.loads(zstandard.decompress(blob))
 
 
-def decompress_zstd(blob: bytes) -> bytes:
+class DecompressedTooLargeError(Exception):
+    """Raised by ``decompress_zstd`` when a frame's output exceeds the cap."""
+
+
+# Chunk size for the bounded streaming decompress below.
+_DECOMPRESS_CHUNK_BYTES = 1 << 20
+
+
+def decompress_zstd(blob: bytes, max_bytes: int = 0) -> bytes:
     """Decompress a zstd frame into raw bytes.
 
     Uses a streaming reader so it handles both frames with an embedded content
     size and streaming frames that omit it (unlike the one-shot
     ``zstandard.decompress``).
+
+    ``max_bytes`` bounds the *decompressed* output: zstd routinely packs TRAPI
+    JSON 10-20x, so a body cap measured on the wire says little about what a
+    compressed body will expand to in memory. The frame header's content size
+    is checked first so an honest frame is rejected before any output is
+    produced; the stream is then read in chunks and abandoned the moment the
+    running total crosses the cap, so a frame that omits (or lies about) its
+    content size can't expand unboundedly either. Raises
+    ``DecompressedTooLargeError`` when the cap is exceeded; 0 disables it.
     """
-    return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)).read()
+    reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob))
+    if max_bytes <= 0:
+        return reader.read()
+    try:
+        declared = zstandard.frame_content_size(blob)
+    except zstandard.ZstdError:
+        declared = -1
+    if declared is not None and declared > max_bytes:
+        raise DecompressedTooLargeError(
+            f"zstd frame declares {declared} decompressed bytes, over the "
+            f"{max_bytes}-byte limit"
+        )
+    chunks = []
+    total = 0
+    while True:
+        chunk = reader.read(_DECOMPRESS_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise DecompressedTooLargeError(
+                f"zstd frame decompresses past the {max_bytes}-byte limit"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # Idempotent DDL applied on every startup. The image's init_db.sql only runs
@@ -204,6 +245,56 @@ ARS_SCHEMA_MARKER_INDEX = "idx_ars_message_ref"
 # The response-cache tables landed after the first ARS release; their own
 # marker keeps volumes that already carry the ars_* block from skipping them.
 ARS_CACHE_SCHEMA_MARKER_INDEX = "idx_ars_response_cache_source"
+# The de-federated ARS keys messages by agent name instead of an actor row;
+# this marker is what makes a volume still carrying the registry tables run
+# ``_migrate_ars_registry`` below.
+ARS_AGENT_SCHEMA_MARKER_INDEX = "idx_ars_message_agent"
+
+
+async def _migrate_ars_registry(conn) -> None:
+    """Retire the ARS registry tables on a volume that predates de-federation.
+
+    The ARS used to mirror upstream's Agent/Channel/Actor tables and point
+    ``ars_message.actor`` at an actor row; it now records the agent name on
+    the message itself (``ars_message.agent``) and keeps the roster of ARAs it
+    talks to in code (shepherd_utils.ars.aras). On such a volume this adds
+    the column, backfills it from the old join so every existing tree keeps
+    its agent names (trace, completion, and merge bookkeeping all read
+    them), drops the FK column, and drops the three tables. A volume that
+    never had them -- fresh, or pre-ARS -- passes straight through, and the
+    bundled DDL then creates ``ars_message`` in its current shape.
+    """
+    cursor = await conn.execute("""
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'ars_message' AND column_name = 'actor'
+        )
+        """)
+    row = await cursor.fetchone()
+    if row is not None and row[0]:
+        await conn.execute(
+            "ALTER TABLE ars_message ADD COLUMN IF NOT EXISTS agent TEXT"
+        )
+        cursor = await conn.execute(
+            "SELECT to_regclass('ars_actor') IS NOT NULL "
+            "AND to_regclass('ars_agent') IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        if row is not None and row[0]:
+            await conn.execute("""
+                UPDATE ars_message m SET agent = g.name
+                FROM ars_actor a JOIN ars_agent g ON g.id = a.agent
+                WHERE a.id = m.actor AND m.agent IS NULL
+                """)
+        await conn.execute("UPDATE ars_message SET agent = '' WHERE agent IS NULL")
+        await conn.execute("ALTER TABLE ars_message ALTER COLUMN agent SET NOT NULL")
+        await conn.execute("ALTER TABLE ars_message ALTER COLUMN agent SET DEFAULT ''")
+        await conn.execute("ALTER TABLE ars_message DROP COLUMN actor")
+    # the column (and its FK) is gone, so the registry tables can follow
+    await conn.execute("DROP TABLE IF EXISTS ars_actor")
+    await conn.execute("DROP TABLE IF EXISTS ars_channel")
+    await conn.execute("DROP TABLE IF EXISTS ars_agent")
+
 
 # Arbitrary-but-fixed advisory lock id serializing the upgrades across the
 # whole fleet booting at once: IF NOT EXISTS alone still races when two
@@ -226,6 +317,7 @@ async def apply_schema_upgrades() -> None:
         marker_names = [name for name, _ in _SCHEMA_UPGRADES] + [
             ARS_SCHEMA_MARKER_INDEX,
             ARS_CACHE_SCHEMA_MARKER_INDEX,
+            ARS_AGENT_SCHEMA_MARKER_INDEX,
         ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",
@@ -239,6 +331,9 @@ async def apply_schema_upgrades() -> None:
         )
         for _, ddl in _SCHEMA_UPGRADES:
             await conn.execute(ddl)
+        # Retire the ARS registry tables on a volume that still has them
+        # (before the DDL below, which describes the current shape only).
+        await _migrate_ars_registry(conn)
         # Bring pre-ARS volumes up to date with the ars_* tables. Everything
         # in the bundled DDL is IF NOT EXISTS, so this is free once applied.
         for ddl in _ars_schema_statements():
@@ -617,6 +712,70 @@ async def clear_ready_callback(
         logger.error(f"Failed to clear ready callback {callback_id}: {e}")
 
 
+async def clear_ready_callbacks(
+    response_id: str,
+    logger: logging.Logger,
+) -> None:
+    """Drop every ready callback for ``response_id`` in one go.
+
+    Used when a query is being failed outright (see
+    ``shepherd_utils.response_limit``): nothing that has arrived for it will be
+    merged, so the whole index goes rather than one member at a time.
+    """
+    key = _ready_callbacks_key(response_id)
+    try:
+        await data_db_client.delete(key)
+    except Exception as e:
+        logger.error(f"Failed to clear ready callbacks for {response_id}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Per-query merge crash counter
+#
+# The merge_message worker's in-process retry counter rides in the wake task's
+# fields, and the Redis Streams delivery count the reclaim breaker reads is per
+# stream message -- but a query has one wake message per callback, and every
+# one of them re-drains the same ready set. So neither survives the failure
+# mode that matters: a merge so large the *whole container* is OOM-killed.
+# The count of times a merge for this response was started and never came
+# back has to live outside the process, in Redis, keyed by the response.
+# ---------------------------------------------------------------------------
+
+MERGE_CRASHES_PREFIX = "merge_crashes:"
+
+
+def _merge_crashes_key(response_id: str) -> str:
+    return f"{MERGE_CRASHES_PREFIX}{response_id}"
+
+
+async def bump_merge_crashes(response_id: str) -> int:
+    """Record that a merge pass for ``response_id`` is starting; returns the
+    number of passes started without finishing, this one included."""
+    key = _merge_crashes_key(response_id)
+    async with data_db_client.pipeline(transaction=True) as pipe:
+        pipe.incr(key)
+        pipe.expire(key, settings.redis_ttl)
+        count, _ = await pipe.execute()
+    return int(count)
+
+
+async def get_merge_crashes(response_id: str) -> int:
+    """How many merge passes for ``response_id`` started and never finished."""
+    raw = await data_db_client.get(_merge_crashes_key(response_id))
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def clear_merge_crashes(response_id: str) -> None:
+    """A merge pass for ``response_id`` came back (success or a Python error),
+    so it didn't crash the process: forget the count."""
+    await data_db_client.delete(_merge_crashes_key(response_id))
+
+
 # ---------------------------------------------------------------------------
 # Sync variants of get_message / save_message
 #
@@ -645,13 +804,19 @@ def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
 
 
 async def _append_logs(response_id: str, entries: List[dict]) -> None:
-    """Append log entries to a query's list and (re)set the key's TTL.
+    """Append log entries to a query's list, cap it, and (re)set the TTL.
 
-    Both in one round trip, so a crash can't leave the key without an
-    expiration.
+    All in one round trip, so a crash can't leave the key without an
+    expiration. The cap (``settings.query_max_log_entries``) keeps the newest
+    entries: ``LTRIM -N -1`` drops from the head, so however many times a
+    stage re-runs and re-logs, the list can never outgrow what every reader
+    of it can afford to load, and the last thing logged is always there.
     """
     pipe = logs_db_client.pipeline()
     pipe.rpush(response_id, *(orjson.dumps(entry) for entry in entries))
+    max_entries = int(settings.query_max_log_entries)
+    if max_entries > 0:
+        pipe.ltrim(response_id, -max_entries, -1)
     pipe.expire(response_id, settings.redis_ttl)
     await pipe.execute()
 
@@ -851,6 +1016,49 @@ async def get_running_callbacks(
             logger.error(f"Failed to get running lookups: {e}")
             raise
     return running_lookups
+
+
+async def get_existing_callback_ids(
+    callback_ids: List[str],
+    logger: logging.Logger,
+) -> Union[set, None]:
+    """Which of ``callback_ids`` still have a row in the callbacks table.
+
+    A callback's row is what says the query is still waiting for it: the
+    lookup worker deletes every row for the query when it gives up waiting,
+    ``finish_query`` deletes them when the query ends, and a merge deletes a
+    callback's row once it is folded in. So a ready callback with no row is one
+    nobody wants any more, and the merge worker uses this to drop it instead of
+    merging it into a response that has already moved on. Returns ``None`` if
+    the table couldn't be read, so a datastore blip fails open (callers keep
+    everything) rather than dropping callbacks.
+    """
+    if not callback_ids:
+        return set()
+    for attempt in range(PG_RETRIES):
+        try:
+            async with pool.connection(settings.postgres_pool_timeout) as conn:
+                cursor = await conn.execute(
+                    """
+                SELECT callback_id FROM callbacks WHERE callback_id = ANY(%s)
+                """,
+                    (list(callback_ids),),
+                )
+                rows = await cursor.fetchall()
+            return {row[0] for row in rows}
+        except OperationalError as e:
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "get_existing_callback_ids", e)
+                break
+            logger.error(
+                f"Connection error checking callbacks after attempt {attempt}: {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+            continue
+        except Exception as e:
+            logger.error(f"Failed to check which callbacks still exist: {e}")
+            break
+    return None
 
 
 async def cleanup_callbacks(

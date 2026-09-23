@@ -61,13 +61,13 @@ async def test_finish_sync_query(redis_mock, mocker):
 
 @pytest.mark.asyncio
 async def test_finish_internal_ars_query_enqueues_premerge(redis_mock, mocker):
-    """A query whose callback is the internal ARS sentinel is not POSTed
+    """A query whose callback is the ARS handoff sentinel is not POSTed
     anywhere: finish_query enqueues an intake task on ars.premerge (which
     loads the response from the blob store itself) and completes the query.
     """
     import uuid
 
-    from shepherd_utils.ars.internal import internal_callback_url
+    from shepherd_utils.ars.handoff import handoff_callback_url
     from shepherd_utils.broker import get_task
 
     child_pk = str(uuid.uuid4())
@@ -82,7 +82,7 @@ async def test_finish_internal_ars_query_enqueues_premerge(redis_mock, mocker):
         "",
         "",
         response_id,
-        internal_callback_url(child_pk),
+        handoff_callback_url(child_pk),
     ]
     mock_set_query_completed = mocker.patch(
         "workers.finish_query.worker.set_query_completed"

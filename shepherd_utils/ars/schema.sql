@@ -1,51 +1,25 @@
--- Translator ARS tables (mirror of the upstream Django models).
+-- Translator ARS tables (Shepherd's de-federated port of the upstream
+-- Django models).
 -- This file is the same DDL that shepherd_db/init_db.sql carries; it is
 -- bundled with shepherd_utils so apply_schema_upgrades can bring a
 -- pre-existing Postgres volume (whose init_db.sql ran before the ARS port
--- landed) up to date at startup. Everything here is idempotent.
-
--- Integer pks mirror Django's implicit AutoField so serialized envelopes
--- ({"model": ..., "pk": <int>}) match the upstream wire shape.
-CREATE TABLE IF NOT EXISTS ars_agent (
-  id SERIAL PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
-  description TEXT,
-  uri TEXT NOT NULL DEFAULT '',
-  contact TEXT,
-  registered TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS ars_channel (
-  id SERIAL PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
-  description TEXT
-);
-
--- Actor.channel stores the Django-serialized channel list
--- ([{"model":"tr_ars.channel","pk":1,"fields":{...}}, ...]) exactly as the
--- upstream get_or_create_actor persists it -- trace/actors rendering reads
--- ch['fields']['name'] from it.
-CREATE TABLE IF NOT EXISTS ars_actor (
-  id SERIAL PRIMARY KEY,
-  agent INT NOT NULL REFERENCES ars_agent(id) ON DELETE CASCADE,
-  channel JSONB NOT NULL DEFAULT '[]',
-  path TEXT NOT NULL DEFAULT '',
-  inforesid TEXT NOT NULL DEFAULT '',
-  active BOOLEAN NOT NULL DEFAULT TRUE,
-  UNIQUE (agent, path)
-);
+-- landed, or before the registry tables were retired) up to date at
+-- startup. Everything here is idempotent.
 
 -- The ARS message tree: one parent row per submitted query, one child row per
--- actor fan-out, plus merge-child rows (agent ars-ars-agent). Payload blobs
--- live in Redis (hot path) with a durable zstd copy written into ``data`` when
--- a message reaches a terminal status.
+-- ARA fan-out, plus merge-child rows. ``agent`` names who the row belongs to
+-- (ars-default-agent for a parent, ara-shepherd-<ara> for an ARA's child,
+-- ars-ars-agent for a merged message); the ARAs themselves are a static
+-- roster in shepherd_utils/ars/aras.py, not a table -- the ARS only talks to
+-- the ARAs this Shepherd deployment hosts. Payload blobs live in Redis (hot
+-- path) with a durable zstd copy written into ``data`` when a message reaches
+-- a terminal status.
 CREATE TABLE IF NOT EXISTS ars_message (
   id UUID PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
   code SMALLINT NOT NULL DEFAULT 200,
   status CHAR(1) NOT NULL DEFAULT 'U',
-  actor INT NOT NULL REFERENCES ars_actor(id),
+  agent TEXT NOT NULL DEFAULT '',
   ref UUID REFERENCES ars_message(id),
   ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -62,6 +36,10 @@ CREATE TABLE IF NOT EXISTS ars_message (
 CREATE INDEX IF NOT EXISTS idx_ars_message_ref ON ars_message (ref);
 CREATE INDEX IF NOT EXISTS idx_ars_message_status_updated ON ars_message (status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_ars_message_ts ON ars_message (ts);
+-- idx_ars_message_agent doubles as the schema-upgrade marker for the
+-- registry retirement (shepherd_utils.db.apply_schema_upgrades migrates a
+-- volume still carrying ars_message.actor + the registry tables first).
+CREATE INDEX IF NOT EXISTS idx_ars_message_agent ON ars_message (agent, ts);
 
 CREATE TABLE IF NOT EXISTS ars_client (
   id SERIAL PRIMARY KEY,

@@ -303,11 +303,12 @@ async def test_initialize_db_skips_upgrades_when_indexes_present(mocker):
     """The pre-flight catalog check short-circuits the common case: when every
     upgrade index already exists, no advisory lock is taken and no DDL runs, so
     a whole fleet booting at once doesn't queue on one lock for a no-op."""
-    # +2: the ARS schema marker index (idx_ars_message_ref) and the ARS
-    # response-cache marker (idx_ars_response_cache_source) joined the
-    # pre-flight set when those tables were added to startup upgrades.
+    # +3: the ARS schema marker index (idx_ars_message_ref), the ARS
+    # response-cache marker (idx_ars_response_cache_source), and the ARS
+    # registry-retirement marker (idx_ars_message_agent) joined the
+    # pre-flight set when those upgrades were added to startup.
     mock_conn, mock_pool = _install_pool_mock(
-        mocker, cursor_fetchone=(len(db._SCHEMA_UPGRADES) + 2,)
+        mocker, cursor_fetchone=(len(db._SCHEMA_UPGRADES) + 3,)
     )
     await db.initialize_db()
     assert mock_pool.open.called
@@ -353,3 +354,59 @@ async def test_check_connection_executes_select_one():
     mock_conn = AsyncMock()
     await db.check_connection(mock_conn)
     mock_conn.execute.assert_awaited_once_with("SELECT 1")
+
+
+# --- ARS registry retirement -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_migrate_ars_registry_moves_actor_fk_to_agent_column(mocker):
+    """A volume from before de-federation still has ars_message.actor and the
+    ars_agent/ars_channel/ars_actor tables: the upgrade adds ``agent``,
+    backfills it from the old join so existing trees keep their agent names,
+    drops the FK column, then drops the three tables."""
+    mock_conn, _ = _install_pool_mock(mocker, cursor_fetchone=(True,))
+    await db._migrate_ars_registry(mock_conn)
+    executed = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    joined = " ".join(executed)
+    assert "ADD COLUMN IF NOT EXISTS agent TEXT" in joined
+    assert "UPDATE ars_message m SET agent = g.name" in joined
+    assert "SET agent = '' WHERE agent IS NULL" in joined
+    assert "ALTER COLUMN agent SET NOT NULL" in joined
+    assert "DROP COLUMN actor" in joined
+    # the column (and its FK) goes before the tables it pointed at
+    assert joined.index("DROP COLUMN actor") < joined.index(
+        "DROP TABLE IF EXISTS ars_actor"
+    )
+    assert "DROP TABLE IF EXISTS ars_channel" in joined
+    assert "DROP TABLE IF EXISTS ars_agent" in joined
+
+
+@pytest.mark.asyncio
+async def test_migrate_ars_registry_is_a_noop_on_a_current_volume(mocker):
+    """No ``actor`` column (fresh volume, or already migrated): nothing is
+    altered; the table drops are IF NOT EXISTS and harmless."""
+    mock_conn, _ = _install_pool_mock(mocker, cursor_fetchone=(False,))
+    await db._migrate_ars_registry(mock_conn)
+    executed = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    assert not any("ALTER TABLE" in sql for sql in executed)
+    assert not any("UPDATE ars_message" in sql for sql in executed)
+    assert sum("DROP TABLE IF EXISTS" in sql for sql in executed) == 3
+
+
+@pytest.mark.asyncio
+async def test_initialize_db_runs_the_registry_migration_before_the_ddl(mocker):
+    mock_conn, _ = _install_pool_mock(mocker, cursor_fetchone=(0,))
+    await db.initialize_db()
+    executed = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    lock = next(i for i, sql in enumerate(executed) if "pg_advisory_xact_lock" in sql)
+    drop = next(
+        i for i, sql in enumerate(executed) if "DROP TABLE IF EXISTS ars_actor" in sql
+    )
+    create = next(
+        i
+        for i, sql in enumerate(executed)
+        if "CREATE TABLE IF NOT EXISTS ars_message" in sql
+    )
+    assert lock < drop < create
+    assert any("idx_ars_message_agent" in sql for sql in executed)

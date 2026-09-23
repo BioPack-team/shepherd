@@ -33,40 +33,11 @@ def client(app):
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-def make_actor(
-    actor_id=7,
-    agent="ara-aragorn",
-    inforesid="infores:aragorn",
-    path="runquery",
-    channels=("general",),
-    active=True,
-    uri=None,
-):
-    serialized = [
-        {
-            "model": "tr_ars.channel",
-            "pk": i + 1,
-            "fields": {"name": name, "description": None},
-        }
-        for i, name in enumerate(channels)
-    ]
-    return {
-        "id": actor_id,
-        "agent": 4,
-        "channel": serialized,
-        "path": path,
-        "inforesid": inforesid,
-        "active": active,
-        "agent_name": agent,
-        "agent_uri": uri if uri is not None else f"/{agent}/api/",
-    }
-
-
 def make_message(
     pk=None,
     status="R",
     code=202,
-    actor=7,
+    agent="ara-shepherd-aragorn",
     ref=None,
     result_count=None,
     params=None,
@@ -80,7 +51,7 @@ def make_message(
         "name": name,
         "code": code,
         "status": status,
-        "actor": actor,
+        "agent": agent,
         "ref": ref,
         "ts": TS,
         "updated_at": TS,
@@ -121,11 +92,8 @@ def db(mocker):
     """Patch every ars_db collaborator the endpoints use."""
     parent_pk = uuid.uuid4()
     child_pk = uuid.uuid4()
-    default_actor = make_actor(1, "ars-default-agent", "", "", ("general",), uri="")
-    ara_actor = make_actor()
-    merge_actor = make_actor(3, "ars-ars-agent", "infores:ars", "", (), uri="")
-    parent = make_message(pk=parent_pk, actor=1)
-    child = make_message(pk=child_pk, actor=7, ref=parent_pk)
+    parent = make_message(pk=parent_pk, agent="ars-default-agent")
+    child = make_message(pk=child_pk, agent="ara-shepherd-aragorn", ref=parent_pk)
 
     def _patch(name, **kwargs):
         return mocker.patch.object(ars_db, name, new_callable=AsyncMock, **kwargs)
@@ -137,9 +105,6 @@ def db(mocker):
         "child_pk": child_pk,
         "parent": parent,
         "child": child,
-        "ara_actor": ara_actor,
-        "default_actor": default_actor,
-        "merge_actor": merge_actor,
         "get_message_row": _patch(
             "get_message_row",
             side_effect=lambda pk: rows.get(str(pk)),
@@ -147,7 +112,7 @@ def db(mocker):
         "create_message": _patch(
             "create_message",
             side_effect=lambda **kw: make_message(
-                actor=kw.get("actor_id", 1),
+                agent=kw.get("agent", "ars-default-agent"),
                 status=kw.get("status", "R")[:1] if kw.get("status") else "R",
                 code=kw.get("code", 202),
                 ref=kw.get("ref"),
@@ -168,39 +133,6 @@ def db(mocker):
         "persist_data_copy": _patch("persist_data_copy"),
         "get_children": _patch("get_children", return_value=[]),
         "get_recent_message_pks": _patch("get_recent_message_pks", return_value=[]),
-        "get_actor": _patch(
-            "get_actor",
-            side_effect=lambda aid: {
-                1: default_actor,
-                7: ara_actor,
-                3: merge_actor,
-            }.get(aid),
-        ),
-        "get_or_create_actor": _patch(
-            "get_or_create_actor", return_value=(ara_actor, 302)
-        ),
-        "get_or_create_agent": _patch(
-            "get_or_create_agent",
-            return_value=(
-                {
-                    "id": 4,
-                    "name": "ara-aragorn",
-                    "description": None,
-                    "uri": "/ara-aragorn/api/",
-                    "contact": None,
-                    "registered": TS,
-                    "updated": TS,
-                },
-                201,
-            ),
-        ),
-        "get_agent_by_name": _patch("get_agent_by_name", return_value=None),
-        "list_agents": _patch("list_agents", return_value=[]),
-        "list_actors": _patch("list_actors", return_value=[ara_actor]),
-        "get_or_create_channel": _patch(
-            "get_or_create_channel",
-            return_value=({"id": 1, "name": "general", "description": None}, False),
-        ),
         "get_status_rows": _patch("get_status_rows", return_value={}),
         "retain_tree": _patch("retain_tree"),
         "get_report_rows": _patch("get_report_rows", return_value=[]),
@@ -241,26 +173,6 @@ def db(mocker):
         "check_parent_completion": mocker.patch.object(
             lifecycle, "check_parent_completion", new_callable=AsyncMock
         ),
-        "ensure_default_actor": mocker.patch.object(
-            lifecycle,
-            "ensure_default_actor",
-            new_callable=AsyncMock,
-            return_value=default_actor,
-        ),
-        "ensure_workflow_actor": mocker.patch.object(
-            lifecycle,
-            "ensure_workflow_actor",
-            new_callable=AsyncMock,
-            return_value=make_actor(
-                2, "ars-workflow-agent", "", "", ("workflow",), uri=""
-            ),
-        ),
-        "ensure_ars_actor": mocker.patch.object(
-            lifecycle,
-            "ensure_ars_actor",
-            new_callable=AsyncMock,
-            return_value=make_actor(3, "ars-ars-agent", "infores:ars", "", (), uri=""),
-        ),
     }
     return mocks
 
@@ -294,8 +206,10 @@ async def test_submit_returns_201_envelope_and_enqueues_fanout(client, db, redis
     assert body["fields"]["status"] == "Running"
     assert body["fields"]["code"] == 202
     assert body["fields"]["data"] == QUERY
-    # query_type derived from the query graph
+    # the parent is recorded under the ARS's own agent, and query_type is
+    # derived from the query graph
     create_kwargs = db["create_message"].await_args.kwargs
+    assert create_kwargs["agent"] == "ars-default-agent"
     assert create_kwargs["params"] == {"query_type": "standard"}
     # a fanout wake task was enqueued for the parent
     from shepherd_utils.broker import get_task
@@ -321,11 +235,14 @@ async def test_submit_validate_flag_stored(client, db, redis_mock):
     assert db["create_message"].await_args.kwargs["params"]["validate"] is False
 
 
-async def test_submit_workflow_selects_workflow_actor(client, db, redis_mock):
+async def test_submit_workflow_query_is_a_plain_parent(client, db, redis_mock):
+    """Every hosted ARA takes workflow queries, so there is no workflow actor
+    to route through any more: the parent is an ordinary submitted query."""
     q = dict(QUERY, workflow=[{"id": "lookup"}])
     resp = await client.post("/api/submit", json=q)
     assert resp.status_code == 201
-    db["ensure_workflow_actor"].assert_awaited_once()
+    assert db["create_message"].await_args.kwargs["agent"] == "ars-default-agent"
+    assert await _fanout_enqueued()
 
 
 async def test_submit_empty_workflow_is_400(client, db, redis_mock):
@@ -334,6 +251,15 @@ async def test_submit_empty_workflow_is_400(client, db, redis_mock):
     resp = await client.post("/api/submit", json=q)
     assert resp.status_code == 400
     assert resp.text.startswith("failing due to")
+    db["create_message"].assert_not_awaited()
+
+
+async def test_submit_non_list_workflow_is_400(client, db, redis_mock):
+    q = dict(QUERY, workflow="lookup")
+    resp = await client.post("/api/submit", json=q)
+    assert resp.status_code == 400
+    assert resp.text.startswith("failing due to")
+    db["create_message"].assert_not_awaited()
 
 
 async def test_submit_no_query_graph_is_400(client, db, redis_mock):
@@ -423,22 +349,14 @@ async def test_message_get_envelope_uses_agent_name(client, db, redis_mock):
 
 async def test_message_trace_tree(client, db, redis_mock):
     child = dict(
-        make_message(
-            actor=7, ref=db["parent_pk"], status="D", code=200, result_count=5
-        ),
-        inforesid="infores:aragorn",
-        actor_channel=db["ara_actor"]["channel"],
-        actor_path="runquery",
-        agent_name="ara-aragorn",
-        actor_id=7,
+        make_message(ref=db["parent_pk"], status="D", code=200, result_count=5),
+        inforesid="infores:shepherd-aragorn",
+        agent_name="ara-shepherd-aragorn",
     )
     merge_child = dict(
-        make_message(actor=3, ref=db["parent_pk"], status="D", code=200),
+        make_message(agent="ars-ars-agent", ref=db["parent_pk"], status="D", code=200),
         inforesid="infores:ars",
-        actor_channel=[],
-        actor_path="",
         agent_name="ars-ars-agent",
-        actor_id=3,
     )
     db["get_children"].side_effect = lambda pk: (
         [child, merge_child] if str(pk) == str(db["parent_pk"]) else []
@@ -458,18 +376,24 @@ async def test_message_trace_tree(client, db, redis_mock):
     assert tree["merged_versions_list"] == "None"
     assert tree["query_graph"] == {"nodes": {}, "edges": {}}
     assert tree["ref"] is None
-    # merge children (infores:ars) are excluded from children
+    # the actor block names the agent and its infores (no registry row to
+    # render any more); the parent is the ARS itself
+    assert tree["actor"] == {"agent": "ars-default-agent", "inforesid": "", "ara": None}
+    # merge children (ars-ars-agent) are excluded from children
     assert len(tree["children"]) == 1
     node = tree["children"][0]
-    assert node["actor"]["agent"] == "ara-aragorn"
-    assert node["actor"]["channel"] == ["general"]
+    assert node["actor"] == {
+        "agent": "ara-shepherd-aragorn",
+        "inforesid": "infores:shepherd-aragorn",
+        "ara": "aragorn",
+    }
     assert node["status"] == "Done"
     assert node["result_count"] == 5
     assert node["parent"] == str(db["parent_pk"])
 
 
 # ---------------------------------------------------------------------------
-# callback POST /api/messages/{pk}
+# POST /api/messages/{pk}: no longer an ARA callback
 # ---------------------------------------------------------------------------
 
 
@@ -483,287 +407,123 @@ RESPONSE = {
 }
 
 
-async def test_callback_unknown_pk_404(client, db, redis_mock):
-    missing = uuid.uuid4()
-    resp = await client.post(f"/api/messages/{missing}", json=RESPONSE)
-    assert resp.status_code == 404
-    assert resp.text == f"Unknown state reference {missing}"
-
-
-async def test_callback_bad_json_500(client, db, redis_mock):
-    resp = await client.post(
-        f"/api/messages/{db['child_pk']}",
-        content=b"{nope",
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 500
-    assert "Can not decode json" in resp.text
-
-
-async def test_callback_already_done_returns_200_text(client, db, redis_mock):
-    db["child"]["status"] = "D"
+async def test_message_post_is_405(client, db, redis_mock):
+    """Upstream's ARAs delivered their responses by POSTing here. The
+    de-federated ARS receives them over the broker (finish_query ->
+    ars.premerge), so a POST changes nothing and enqueues nothing."""
     resp = await client.post(f"/api/messages/{db['child_pk']}", json=RESPONSE)
-    assert resp.status_code == 200
-    assert "ARS has already received" in resp.text
-
-
-async def test_callback_duplicate_results_409(client, db, redis_mock):
-    db["child"]["result_count"] = 12
-    resp = await client.post(f"/api/messages/{db['child_pk']}", json=RESPONSE)
-    assert resp.status_code == 409
-    assert "ARS already has a response" in resp.text
-
-
-async def test_callback_errored_child_400(client, db, redis_mock):
-    db["child"]["status"] = "E"
-    resp = await client.post(f"/api/messages/{db['child_pk']}", json=RESPONSE)
-    assert resp.status_code == 400
-    assert "Response rejected" in resp.text
-
-
-async def test_callback_empty_results_completes_child(client, db, redis_mock):
-    """results=[]: child -> D/200, result_count stays None (upstream only
-    zeroes it when results is literally absent)."""
-    resp = await client.post(f"/api/messages/{db['child_pk']}", json=RESPONSE)
-    assert resp.status_code == 201
-    # no-echo deviation applies to the no-results branch too
-    assert resp.json()["fields"]["data"] is None
-    update = db["update_message"].await_args_list[-1]
-    assert update.kwargs.get("status") == "D"
-    assert "result_count" not in update.kwargs
-    db["check_parent_completion"].assert_awaited()
-
-
-async def test_callback_missing_results_zeroes_count(client, db, redis_mock):
-    resp = await client.post(
-        f"/api/messages/{db['child_pk']}",
-        json={"message": {"knowledge_graph": {"nodes": {}, "edges": {}}}},
-    )
-    assert resp.status_code == 201
-    update = db["update_message"].await_args_list[-1]
-    assert update.kwargs.get("result_count") == 0
-
-
-async def test_callback_with_results_premerges_and_enqueues_merge(
-    client, db, redis_mock, mocker
-):
-    import pathlib
-
-    valid = json.loads(
-        pathlib.Path("tests/fixtures/ars_corpus/response_aragorn.json").read_text()
-    )
-    import logging
-
-    import shepherd_utils.ars.db as ars_db_mod
-
-    await ars_db_mod.save_otel_carrier(
-        db["parent_pk"], {"traceparent": "00-sub"}, logging.getLogger()
-    )
-    resp = await client.post(f"/api/messages/{db['child_pk']}", json=valid)
-    assert resp.status_code == 201
-    body = resp.json()
-    # DEVIATION: pre-merge processing + validation run in the ars_premerge
-    # worker now (the CPU work saturated the server; see the parity
-    # register), so the child is still Running here -- upstream's Done/200
-    # flip happens asynchronously in the worker -- and the payload is NOT
-    # echoed back (fields.data null): serializing the multi-MB body at a
-    # caller that never reads it starved the event loop under load.
-    assert body["fields"]["status"] == "Running"
-    assert body["fields"]["data"] is None
-    save = db["save_message_data"].await_args
-    assert str(save.args[0]) == str(db["child_pk"])
-    assert "normalized_score" not in save.args[1]["message"]["results"][0]
-    # a premerge wake task is enqueued (which enqueues ars.merge on success)
+    assert resp.status_code == 405
+    assert resp.text == "Only GET is permitted!"
+    db["save_message_data"].assert_not_awaited()
+    db["update_message"].assert_not_awaited()
+    db["check_parent_completion"].assert_not_awaited()
     from shepherd_utils.broker import get_task
     import logging
 
-    task = await get_task("ars.premerge", "consumer", "t", logging.getLogger())
-    assert task is not None
-    assert task[1]["parent_pk"] == str(db["parent_pk"])
-    assert task[1]["child_pk"] == str(db["child_pk"])
-    assert task[1]["agent_name"] == "ara-aragorn"
-    assert task[1]["status"] == "D"
-    # the task rejoins the query's submit-time trace via the stored
-    # carrier (the ARA callback itself carries no traceparent)
-    assert task[1]["otel"] == '{"traceparent": "00-sub"}'
-    # result_count / result_stat recorded on the child synchronously (the
-    # repeated-results 409 guard depends on them)
-    update = db["update_message"].await_args_list[-1]
-    assert update.kwargs.get("result_count") == 2
-    assert "status" not in update.kwargs
+    assert await get_task("ars.premerge", "consumer", "t", logging.getLogger()) is None
 
 
-async def test_callback_invalid_trapi_answers_201_worker_flags_422(
-    client, db, redis_mock
-):
-    """DEVIATION: upstream validates inline and answers HTTP 422; the port
-    validates in the ars_premerge worker, so an invalid payload gets the
-    same 201 as a valid one and the child goes E/422 asynchronously (see
-    test_ars_premerge.py::test_premerge_validation_failure_is_422 for the
-    terminal-state parity)."""
-    import pathlib
-
-    invalid = json.loads(
-        pathlib.Path("tests/fixtures/ars_corpus/response_aragorn.json").read_text()
-    )
-    del invalid["message"]["results"][0]["node_bindings"]
-    resp = await client.post(f"/api/messages/{db['child_pk']}", json=invalid)
-    assert resp.status_code == 201
-    from shepherd_utils.broker import get_task
-    import logging
-
-    task = await get_task("ars.premerge", "consumer", "t", logging.getLogger())
-    assert task is not None
+async def test_message_other_methods_405(client, db, redis_mock):
+    for method in ("put", "delete", "patch"):
+        resp = await client.request(method, f"/api/messages/{db['child_pk']}")
+        assert resp.status_code == 405, method
+        assert resp.text == "Only GET is permitted!"
 
 
-async def test_callback_header_status_override(client, db, redis_mock):
-    resp = await client.post(
-        f"/api/messages/{db['child_pk']}",
-        json=RESPONSE,
-        headers={"tr_ars.message.status": "S"},
-    )
-    assert resp.status_code == 201
-    update = db["update_message"].await_args_list[-1]
-    assert update.kwargs.get("status") == "S"
+async def test_message_post_unknown_pk_still_405(client, db, redis_mock):
+    resp = await client.post(f"/api/messages/{uuid.uuid4()}", json=RESPONSE)
+    assert resp.status_code == 405
 
 
 # ---------------------------------------------------------------------------
-# agents / actors / channels
+# aras (replaces the upstream agents / actors / channels registry surface)
 # ---------------------------------------------------------------------------
 
+import time as _time  # noqa: E402
 
-async def test_agents_get(client, db, redis_mock):
-    db["list_agents"].return_value = [
-        {
-            "id": 4,
-            "name": "ara-aragorn",
-            "description": None,
-            "uri": "/ara-aragorn/api/",
-            "contact": None,
-            "registered": TS,
-            "updated": TS,
-        }
-    ]
-    resp = await client.get("/api/agents")
-    assert resp.status_code == 200
-    assert resp.json()[0]["model"] == "tr_ars.agent"
+from shepherd_utils.ars import aras as _aras  # noqa: E402
+from shepherd_utils.heartbeat import heartbeat_key as _heartbeat_key  # noqa: E402
 
 
-async def test_agents_post_missing_fields_400(client, db, redis_mock):
-    resp = await client.post("/api/agents", json={"name": "x"})
-    assert resp.status_code == 400
-    assert resp.text == 'JSON does not contain "name" and "uri" fields'
-
-
-async def test_agents_post_created_201(client, db, redis_mock):
-    resp = await client.post("/api/agents", json={"name": "ara-new", "uri": "/x/api/"})
-    assert resp.status_code == 201
-
-
-async def test_get_agent_unknown_400(client, db, redis_mock):
-    resp = await client.get("/api/agents/nope")
-    assert resp.status_code == 400
-    assert resp.text == "Unknown agent: nope"
-
-
-async def test_actors_get_shape(client, db, redis_mock):
-    resp = await client.get("/api/actors")
-    assert resp.status_code == 200
-    actor = resp.json()[0]
-    fields = actor["fields"]
-    assert fields["name"] == "ara-aragorn-runquery"
-    assert fields["channel"] == ["general"]
-    assert fields["agent"] == "ara-aragorn"
-    assert "urlRemote" in fields
-    assert fields["path"].endswith("/ara-aragorn/api/runquery")
-    assert fields["active"] is True
-    assert fields["inforesid"] == "infores:aragorn"
-
-
-async def test_actors_post_returns_the_actor(client, db, redis_mock):
-    """Upstream created the actor and THEN crashed on actor.channel.name, so
-    every caller got 400 for an actor that had in fact been created. The
-    endpoint now returns the envelope it was always meant to."""
-    db["get_or_create_actor"].return_value = (
-        dict(make_actor(actor_id=11), agent_uri="/a/"),
-        201,
+async def _beat(broker, stream, consumer, age_sec=0.0):
+    await broker.set(
+        _heartbeat_key(stream, consumer),
+        json.dumps({"stream": stream, "last_seen": _time.time() - age_sec}),
     )
-    resp = await client.post(
-        "/api/actors",
-        json={
-            "channel": ["general"],
-            "agent": {"name": "a", "uri": "/a/"},
-            "path": "runquery",
-            "inforesid": "infores:a",
-        },
-    )
-    assert resp.status_code == 201
+
+
+async def test_aras_lists_the_hosted_roster(client, db, redis_mock):
+    resp = await client.get("/api/aras")
+    assert resp.status_code == 200
     body = resp.json()
-    assert body["model"] == "tr_ars.actor"
-    assert body["pk"] == 11
-    assert body["fields"]["path"] == "runquery"
-    assert body["fields"]["url"] == "/a/runquery"
-    db["get_or_create_actor"].assert_awaited_once()
+    assert [a["name"] for a in body] == [a.name for a in _aras.ARAS]
+    aragorn = body[0]
+    assert aragorn == {
+        "name": "aragorn",
+        "inforesid": "infores:shepherd-aragorn",
+        "agent": "ara-shepherd-aragorn",
+        "url": "http://testserver/aragorn",
+        "stream": "aragorn",
+        "enabled": True,
+        # no worker heartbeats in the broker: nothing would pick a query up
+        "live_workers": 0,
+        "available": False,
+    }
+    # both slash variants, like every upstream collection route
+    assert (await client.get("/api/aras/")).status_code == 200
 
 
-async def test_actors_post_existing_actor_is_302(client, db, redis_mock):
-    db["get_or_create_actor"].return_value = (
-        dict(make_actor(actor_id=11), agent_uri="/a/"),
-        302,
-    )
-    resp = await client.post(
-        "/api/actors",
-        json={"agent": {"name": "a", "uri": "/a/"}, "path": "runquery"},
-    )
-    assert resp.status_code == 302
+async def test_aras_reports_live_workers_from_heartbeats(client, db, redis_mock):
+    broker = redis_mock["broker"]
+    await _beat(broker, "aragorn", "w1")
+    await _beat(broker, "aragorn", "w2")
+    await _beat(broker, "bte", "stale", age_sec=3600)
+    body = {a["name"]: a for a in (await client.get("/api/aras")).json()}
+    assert body["aragorn"]["live_workers"] == 2
+    assert body["aragorn"]["available"] is True
+    assert body["bte"]["live_workers"] == 0
+    assert body["bte"]["available"] is False
 
 
-async def test_actors_post_unwraps_a_serialized_envelope(client, db, redis_mock):
-    db["get_or_create_actor"].return_value = (
-        dict(make_actor(actor_id=11), agent_uri="/a/"),
-        201,
-    )
-    resp = await client.post(
-        "/api/actors",
-        json={
-            "model": "tr_ars.actor",
-            "pk": 11,
-            "fields": {"agent": {"name": "a", "uri": "/a/"}, "path": "runquery"},
-        },
-    )
-    assert resp.status_code == 201
-    assert db["get_or_create_actor"].await_args.args[0]["path"] == "runquery"
+async def test_aras_reflects_the_enabled_setting(client, db, redis_mock, monkeypatch):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_enabled_aras", "arax")
+    await _beat(redis_mock["broker"], "aragorn", "w1")
+    body = {a["name"]: a for a in (await client.get("/api/aras")).json()}
+    # every hosted ARA is listed; only the enabled ones are dispatch targets
+    assert set(body) == {"aragorn", "arax", "bte"}
+    assert body["arax"]["enabled"] is True
+    assert body["aragorn"]["enabled"] is False
+    # alive but disabled is not available
+    assert body["aragorn"]["live_workers"] == 1
+    assert body["aragorn"]["available"] is False
 
 
-async def test_actors_post_missing_fields_is_400(client, db, redis_mock):
-    resp = await client.post("/api/actors", json={"channel": ["general"]})
-    assert resp.status_code == 400
-    assert resp.text == 'JSON does not contain "agent" and "path" fields'
-    db["get_or_create_actor"].assert_not_awaited()
+async def test_aras_is_read_only(client, db, redis_mock):
+    resp = await client.post("/api/aras", json={"name": "new"})
+    assert resp.status_code == 405
 
 
-async def test_actors_post_bad_json_is_400(client, db, redis_mock):
-    resp = await client.post(
-        "/api/actors", content=b"not json", headers={"content-type": "application/json"}
-    )
-    assert resp.status_code == 400
-    assert resp.text == "Not a valid json format"
-
-
-async def test_actors_post_unknown_agent_is_404(client, db, redis_mock):
-    db["get_or_create_actor"].side_effect = KeyError("agent: nope")
-    resp = await client.post("/api/actors", json={"agent": "nope", "path": "runquery"})
-    assert resp.status_code == 404
-    assert resp.text.startswith("Unknown ")
-
-
-async def test_channels_endpoint_is_gone(client, db, redis_mock):
-    """Channels are not an independently useful resource: the fanout matches
-    on an actor's channels, seeding creates them implicitly, and each actor
-    reports its own under fields.channel."""
+async def test_registry_endpoints_are_gone(client, db, redis_mock):
+    """The ARS talks only to the ARAs this deployment hosts, so there is no
+    registry to list or add to: /agents, /actors and /channels are not
+    served, in either slash variant or method."""
+    for path in ("/api/agents", "/api/agents/", "/api/agents/ara-aragorn"):
+        assert (await client.get(path)).status_code == 404, path
+    assert (
+        await client.post("/api/agents", json={"name": "x", "uri": "/x/"})
+    ).status_code == 404
+    for path in ("/api/actors", "/api/actors/"):
+        assert (await client.get(path)).status_code == 404, path
+    assert (
+        await client.post(
+            "/api/actors", json={"agent": {"name": "a", "uri": "/a/"}, "path": "p"}
+        )
+    ).status_code == 404
     assert (await client.get("/api/channels")).status_code == 404
     assert (await client.post("/api/channels", json={"name": "x"})).status_code == 404
-    db["get_or_create_channel"].assert_not_awaited()
+    db["create_message"].assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -860,8 +620,11 @@ async def test_index_does_not_advertise_dropped_routes(client, db, redis_mock):
         "timeoutTest",
         "filter",
         "channels",
+        "agents",
+        "actors",
     ):
         assert not any(dropped in e for e in entries), dropped
+    assert any(e.endswith("/ars/api/aras/") for e in entries)
 
 
 async def test_dead_debug_endpoints_are_gone(client, db, redis_mock):
@@ -887,6 +650,9 @@ async def test_latest_pk_shape(client, db, redis_mock):
     assert "pk_count_last_7_days" in body
     assert body["latest_7_pks"] == ["abc"]
     assert "latest_24hr_running_pks" in body
+    db["get_parent_message_counts"].assert_awaited_once_with(7)
+    db["get_latest_parent_pks"].assert_awaited_once_with(7)
+    db["get_running_parent_pks_24h"].assert_awaited_once_with()
 
 
 async def test_report_shape(client, db, redis_mock):
@@ -910,21 +676,18 @@ async def test_report_shape(client, db, redis_mock):
 
 
 async def test_submit_retries_transient_pg_failure(client, db, mocker, redis_mock):
-    """A transient Postgres pool timeout on the actor lookup is retried;
+    """A transient Postgres pool timeout on the parent insert is retried;
     the submit still lands 201."""
     from psycopg_pool import PoolTimeout
 
-    import shepherd_utils.ars.lifecycle as lifecycle_mod
-
-    actor = db["ensure_default_actor"].return_value
-    db["ensure_default_actor"].side_effect = [
+    db["create_message"].side_effect = [
         PoolTimeout("couldn't get a connection after 5.00 sec"),
-        actor,
+        make_message(agent="ars-default-agent"),
     ]
     mocker.patch("asyncio.sleep")
     resp = await client.post("/api/submit", json=QUERY)
     assert resp.status_code == 201
-    assert db["ensure_default_actor"].await_count == 2
+    assert db["create_message"].await_count == 2
 
 
 async def test_submit_enqueue_failure_is_honest_400(client, db, mocker, redis_mock):
@@ -999,13 +762,13 @@ RELABELED_QUERY = {
 
 
 def _source_tree(db):
-    """A completed source tree: parent Done -> merged message (actor 3)."""
+    """A completed source tree: parent Done -> merged message."""
     from shepherd_utils.ars import cache as _cache
 
     source_pk, merged_pk = uuid.uuid4(), uuid.uuid4()
     source = make_message(
         pk=source_pk,
-        actor=1,
+        agent="ars-default-agent",
         status="D",
         code=200,
         merged_version=merged_pk,
@@ -1013,7 +776,9 @@ def _source_tree(db):
         params={"query_type": "standard", "stats": {"results": 1}},
         result_count=1,
     )
-    merged = make_message(pk=merged_pk, actor=3, ref=source_pk, status="D", code=200)
+    merged = make_message(
+        pk=merged_pk, agent="ars-ars-agent", ref=source_pk, status="D", code=200
+    )
     rows = {
         str(source_pk): source,
         str(merged_pk): merged,
@@ -1060,7 +825,7 @@ async def test_submit_cache_hit_returns_source_pk_without_payload(
 
 async def test_submit_pending_entry_returns_leader_pk(client, db, redis_mock):
     leader_pk = uuid.uuid4()
-    leader = make_message(pk=leader_pk, actor=1, status="R", code=202)
+    leader = make_message(pk=leader_pk, agent="ars-default-agent", status="R", code=202)
     db["get_message_row"].side_effect = lambda pk: (
         leader if str(pk) == str(leader_pk) else None
     )

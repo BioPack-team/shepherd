@@ -3,11 +3,33 @@
 The behavior contract for Shepherd's hosted port of the Translator ARS
 ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)).
 
-**Pinned upstream commit:** `3e65975db287a73afa4388b7dbaf3c64d0d218c4`
-(master, re-pinned 2026-09-05 from the original 2026-09-01 pin at
-`dd1e71b8284de746f9d11e4fc823bf57861e081f`; byte-exact reference copies
-under `/home/user/ncatstranslator/relay` during development, key files
-mirrored in the golden-generation tooling).
+**Pinned upstream commit:** `2b2121df740a4c8bc47bb2e6bafa9e52f748f028`
+(master, re-pinned 2026-09-23 from the 2026-09-05 pin at
+`3e65975db287a73afa4388b7dbaf3c64d0d218c4`, itself re-pinned from the
+original 2026-09-01 pin at `dd1e71b8284de746f9d11e4fc823bf57861e081f`;
+goldens are regenerated from a fresh clone of the pinned commit).
+
+Behavioral changes accepted with the 2026-09-23 re-pin:
+
+- **Relay PR #885 (removeScrubMethod)**: `scrub_null_attributes` is gone,
+  and with it the scrub step at the head of `pre_merge_process` and the
+  "second scrubbing" stage (with its E/444) in `post_process`. Ported:
+  the port's copy of the function, its golden (`scrub`), its corpus
+  fixture, and its divergence row are removed; the pipeline goldens are
+  unchanged (the corpus carried nothing the scrub touched).
+- **Relay PRs #886 / #890 (RRF scores, then reverted)**: net zero; the
+  pinned commit is the revert.
+- **Relay PR #880 (inactive-endpoints)**: upstream's `config.yaml` now
+  deactivates every ARA and KP except `infores:shepherd-aragorn`,
+  `shepherd-arax` and `shepherd-bte`, and `get_or_create_actor` keeps the
+  active flag in sync on every startup. Nothing to port: the de-federated
+  port has no registry and fans out to exactly those three (deviation 16),
+  so upstream has converged on the same roster.
+- **Relay PR #888 (annotatorBackend)**: upstream's deployment passes
+  `ANNOTATOR_QUERY_BACKEND` through to the `biothings_annotator` package,
+  which already reads it at the pinned package commit. The port needs no
+  code change -- the package runs in-process and reads the container's
+  environment -- and documents the variable (README, config.py).
 
 Behavioral changes accepted with the 2026-09-05 re-pin (everything else in
 the range was OpenTelemetry/gunicorn/celery tuning):
@@ -51,10 +73,10 @@ accept each behavioral change.
 | Layer | What it pins | Where |
 |---|---|---|
 | 1. Golden function parity | merge/premerge/scoring/blocklist/validation outputs, byte-compared to upstream runs | `tests/unit/ars/test_golden_parity.py` |
-| 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_merge_worker.py`, `test_ars_postprocess.py`, `test_ars_watchdog.py`, `test_ars_notify.py` |
+| 2. Lifecycle & state machine | status letters/coercion, completion arithmetic, orchestration, worker state machines, the ARA roster + broker handoff | `test_statuses.py`, `test_completion.py`, `test_ars_lifecycle.py`, `test_ars_fanout.py`, `test_ars_premerge.py`, `test_ars_merge_worker.py` (fold + post-process), `test_ars_watchdog.py`, `test_ars_notify.py`, `test_aras.py` |
 | 3. API contract | paths, methods, status codes, error bodies, envelope shapes | `test_envelope.py`, `test_ars_api_contract.py` |
 | 3b. Deliberate divergences | the upstream bugs the port does NOT reproduce | `test_upstream_bugfixes.py` |
-| 4. Differential end-to-end | both stacks against the same mocked world | `tests/parity_e2e/` (run on demand; see its README) |
+| 4. Differential end-to-end | both stacks against the same mocked world | `tests/parity_e2e/` (run on demand; see its README -- since de-federation it compares the post-response pipeline only, as Shepherd's fan-out no longer reaches the mock ARAs) |
 
 ## Invariant index (register rows referenced from tests)
 
@@ -63,7 +85,8 @@ accept each behavioral change.
   `_skip_post_save` escape hatch.
 - **P-ENV-1..6** — Django-serializer envelopes: DjangoJSONEncoder datetime
   format, exact model field order, long-form statuses, inline-decompressed
-  `data`, FK/pk shapes.
+  `data`, FK/pk shapes (with `fields.agent` in place of upstream's
+  `fields.actor`, deviation 16).
 - **P-LC-1..6** — parent-completion counting verbatim from
   `message_post_save`: `finished` over the terminal set;
   `orig_count`/`merge_count` from result-bearing `ar*` agents; the
@@ -77,10 +100,11 @@ accept each behavioral change.
   emitted and carried in the `ars.notify` task (`client_pks`): the
   completion path clears the parent's subscriptions immediately after its
   final events, so a worker resolving them later would deliver to nobody.
-- **Callback guard order** — dup-Done → 200 text; repeated results → 409;
-  errored child → 400; decode failure → 500 `Can not decode json...`;
-  validation failure → 422 `Problem with TRAPI Validation` with the child
-  E/422; header `tr_ars.message.status` override; `results: null` → 
+- **Callback guard order** — applied by the `ars.premerge` intake to every
+  response that comes back over the broker (deviation 16): dup-Done,
+  repeated results, and errored child are skips (upstream's 200 text /
+  409 / 400); validation failure flips the child E/422 (upstream's inline
+  422 `Problem with TRAPI Validation`); `results: null` →
   `result_count = 0` while `results: []` leaves it None.
 - **Timeouts** — parents exempt; merge children 8 min; everything else
   **5 min including pathfinder** (upstream's code, not its log message);
@@ -103,11 +127,12 @@ Infrastructure substitutions (behavior-preserving by definition):
 
 | Upstream | Port |
 |---|---|
-| Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.postprocess`, `ars.notify`) + the `ars_watchdog` loop |
+| Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.notify`) + the `ars_watchdog` loop |
 | MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + `ars_message.data` bytea (durable, written at terminal status) |
-| `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent (semaphore column still maintained for envelope parity) |
+| `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent, lock-and-drain: `ars_premerge` records each validated child in a merge-ready index and wakes `ars.merge`; the worker that wins the parent's lock folds every ready child in arrival order and a loser simply acks (the semaphore column is still maintained for envelope parity; see deviation 17) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
-| self-proxy views `/ara-*/api/runquery` | direct POST to the SmartAPI-resolved remote (same body; proxy endpoints not served) |
+| self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |
+| `Agent` / `Channel` / `Actor` tables, seeded from the `tr_ara_*` apps and `config.yaml`, with `/agents` + `/actors` to list and add to them | a static roster (`shepherd_utils/ars/aras.py`); `ars_message.agent` records the agent name a row belongs to instead of an actor FK; `GET /ars/api/aras` lists the roster with each ARA's live worker count |
 
 Behavioral deviations:
 
@@ -119,12 +144,13 @@ Behavioral deviations:
    upstream, with two deltas. (a) *Version pinning*: Relay installs the
    package as an unpinned git dependency off master, so its annotation
    logic shifts per image build; the port pins commit `82d3acc` in
-   `workers/ars_postprocess/requirements.txt` and `test-requirements.txt`
-   -- bump deliberately when re-pinning. (b) *Invocation*: the async
-   worker awaits `annotate_curie_list` directly. Upstream's event-loop
-   dance has two branches: celery's sync workers always take
-   `run_until_complete` (to which the direct await is equivalent), while
-   the `loop.is_running()` branch would hand back a Future and crash the
+   `workers/ars_merge/requirements.txt` and `test-requirements.txt`
+   -- bump deliberately when re-pinning. (b) *Invocation*: the
+   post-process runs in `ars_merge`'s process-pool child under
+   `asyncio.run`, which awaits `annotate_curie_list` directly. Upstream's
+   event-loop dance has two branches: celery's sync workers always take
+   `run_until_complete` (to which this is equivalent), while the
+   `loop.is_running()` branch would hand back a Future and crash the
    consumption loop -- a branch a sync celery worker never takes, not
    reproduced. The consumption loop itself is verbatim (notfound-list
    skip, empty-dict skip, direct node indexing, quirky crash modes ->
@@ -237,30 +263,80 @@ Behavioral deviations:
     server runs 4 uvicorn worker processes (`WEB_CONCURRENCY` in
     `shepherd_server/Dockerfile`) vs. upstream's 8 gunicorn workers x 4
     threads.
-16. **Shepherd-hosted ARAs are dispatched internally** (post-parity change,
-    accepted 2026-09-10): for actors in
-    `shepherd_utils/ars/internal.INTERNAL_ARA_TARGETS` (infores:shepherd-*),
-    ars_fanout enqueues the ARA's worker task directly -- persisting the
-    same query record `POST /{ara}/asyncquery` would have -- with a
-    `shepherd-ars://callback/<child_pk>` sentinel callback, and
-    finish_query recognizes the sentinel and enqueues
-    `{intake_child_pk, response_id}` on `ars.premerge` instead of POSTing
-    the response to `/ars/api/messages/<child_pk>`. The premerge worker's
-    `intake_internal_response` then runs the callback endpoint's exact
-    state machine (guard order, result_count/result_stat, the
-    `ara_response_complete` notification, the no-results terminal rules,
-    the generic-failure E/500 with its log entry) before premerging in the
-    same task, so no multi-MB body crosses the network in either
-    direction. Differences in kind: HTTP-level answers nobody read (the
-    dup-200 text, the 409, the 400) become logged skips; a dispatch
-    failure is the same child E/500 as a failed POST; an intake whose
-    response blob is missing leaves the child Running for the watchdog
-    (the shape of a callback that never arrived); and a `get_logs` failure
-    delivers the response without spliced logs instead of failing
-    delivery. External actors, external callers, and both public endpoint
-    surfaces are unchanged; `settings.ars_internal_dispatch=false`
-    restores HTTP dispatch for everything (already-issued sentinels still
-    deliver internally, since they are not POSTable).
+16. **The ARS is de-federated** (post-parity change; the broker handoff
+    was accepted 2026-09-10 as an internal short-circuit for the
+    Shepherd-hosted actors, and on 2026-09-15 became the only path). The
+    ARS fans out solely to the ARAs this Shepherd deployment hosts, a
+    static roster in `shepherd_utils/ars/aras.py` (Aragorn, ARAX, BTE;
+    `settings.ars_enabled_aras` narrows it). For each, ars_fanout creates
+    the child under the ARA's agent name and enqueues the ARA's worker
+    task directly -- persisting the same query record
+    `POST /{ara}/asyncquery` would have -- with a
+    `shepherd-ars://callback/<child_pk>` sentinel callback
+    (`shepherd_utils/ars/handoff.py`). finish_query recognizes the
+    sentinel and enqueues `{intake_child_pk, response_id}` on
+    `ars.premerge`, whose `intake_internal_response` runs the upstream
+    callback view's exact state machine (guard order,
+    result_count/result_stat, the `ara_response_complete` notification,
+    the no-results terminal rules, the generic-failure E/500 with its log
+    entry) before premerging in the same task. So: no SmartAPI lookup, no
+    channel matching (every hosted ARA takes standard and workflow
+    queries alike, so the workflow actor is gone and every parent is
+    `ars-default-agent`), no HTTP in either direction, and no
+    `ars_public_host`. Differences in kind: the HTTP-level answers nobody
+    read (the callback's dup-200 text, 409, 400, 422) become logged skips
+    or asynchronous terminal states; a dispatch failure is the same child
+    E/500 upstream recorded for a failed POST; an intake whose response
+    blob is missing leaves the child Running for the watchdog (the shape
+    of a callback that never arrived); a `get_logs` failure delivers the
+    response without spliced logs; and a submit with no enabled ARA
+    completes empty at fan-out time instead of sitting Running forever.
+    Schema: `ars_message.actor` (FK) became `ars_message.agent` (the
+    agent name), and the `ars_agent`/`ars_channel`/`ars_actor` tables are
+    dropped -- `shepherd_utils.db._migrate_ars_registry` backfills and
+    migrates a pre-existing volume at startup. The message envelope's
+    `fields.actor` (an int pk) is now `fields.agent` (the name), and a
+    trace node's `actor` block is `{agent, inforesid, ara}` (the Shepherd
+    target, for an ARA's child) instead of the actor row's pk/channels/
+    path. `GET /ars/api/latest_pk/<n>` and `/retain/<pk>` treat every
+    submitted query as a parent (upstream keyed both on the default
+    actor, which excluded workflow parents).
+17. **Merge and post-process run together, draining a ready index**
+    (post-parity change, accepted 2026-09-16). Upstream ran the fold and
+    `post_process` in one Celery task; the port had split them across
+    `ars_merge` and an `ars_postprocess` worker, which loaded, decoded,
+    and re-saved the merged message a second time and let two versions of
+    one parent post-process concurrently. They are one worker again:
+    `ars_merge` folds a child and post-processes the new version in the
+    same process-pool child that already holds it (blocklist, annotation,
+    confidence, stats, with the same 444/422 stage codes). The child emits
+    its own spans (`ars.merge.fold`, `ars.postprocess`, the `annotator`
+    span with the package's httpx calls beneath) under the parent task's
+    span context, which rides the pool call as a W3C carrier; pool
+    children set up their own tracer provider for this
+    (`shepherd_utils.otel.setup_pool_child_tracer`), and `ars_premerge`'s
+    child does the same for `ars.premerge.process`.
+    Work arrives through a per-parent merge-ready index (a sorted set in
+    the data store) that `ars_premerge` writes before waking the stream;
+    the worker that wins the parent's lock (`try_lock`, non-blocking)
+    drains the index in arrival order, one merged version per child, and
+    a worker that loses the lock acks without waiting or re-enqueueing
+    (the previous port waited up to a minute on the lock and then
+    re-enqueued itself with no backoff). Every merged version still gets
+    its own row, its own `merged_versions_list` entry, its own post-process
+    pass, and its own `merged_version_available` notification, so the
+    completion arithmetic (one Done merge child per result-bearing ARA
+    child) and every subscriber-visible shape are unchanged. Two timing
+    differences: `merged_version_begun` is emitted after the fold and
+    post-process have both finished (immediately before
+    `merged_version_available`) instead of between them, and
+    `parent.merged_version` is only ever advanced to a version that is
+    already post-processed, so a reader never fetches a 202 merged
+    version through it. `ars_premerge` likewise runs its stages in a
+    process pool (they ran in threads under the GIL before) and, if a
+    validated child cannot be recorded in the index, fails that child
+    E/500 rather than leaving its parent waiting on a merge that never
+    comes.
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 
@@ -279,7 +355,6 @@ failure is the prompt to re-decide each one, not a bug).
 | `decorate_edges_with_infores` read `has_primary`, only ever assigned inside its loop → `UnboundLocalError` on any non-empty `sources` with no `primary_knowledge_source`, failing the whole callback | `has_primary` is initialized; the agent adds itself as primary, which is what the unreachable branch intended |
 | `decorate_edges_with_infores` shared ONE `self_source` dict across the whole graph, so the last edge to need a role rewrote the role of every earlier edge | a fresh source dict per edge (`_self_source`) |
 | `normalizeScores` ranked only score-bearing results but popped one rank per RESULT → `IndexError` on any mixed response, after misassigning the ranks it did hand out | each rank goes to the result it was computed from; unscored results get no `normalized_score` |
-| `scrub_null_attributes` iterated `get_safe(edge, "sources")` directly → `TypeError` on an edge with no `sources` key | treated as empty |
 | `remove_blocked` bound `nodes_to_remove` / `edges_to_remove` / `aux_graphs_to_remove` / `results_to_remove` inside conditional branches and read them unconditionally → `UnboundLocalError` on any response without `auxiliary_graphs` (an ordinary shape), without a knowledge graph, or with a null `edges` map | every accumulator bound up front |
 | `remove_blocked`'s pathfinder branch raised `UnboundLocalError` on an empty `path_bindings` | the removal loop is inside the per-path loop, so there is nothing to leave unbound |
 | `QueryGraph` / `KnowledgeGraph` / `Results` returned early on a `None` input, leaving every attribute unset → `AttributeError` from the next getter | they initialize empty |
@@ -295,7 +370,7 @@ failure is the prompt to re-decide each one, not a bug).
 | `TranslatorMessage.to_dict` emitted `"results": {}` for a message with no results | `[]`, as TRAPI requires |
 | `remove_blocked` pruned pathfinder `path_bindings` for only the last path id (its removal loop was dedented out of the per-path loop and shadowed the dict with its own values) | every path id is pruned |
 | `remove_blocked` matched analysis-level `support_graphs` (aux graph ids) against removed EDGE ids — never a match — so support graphs that really had gone away stayed on the analysis | matched against removed aux graph ids |
-| The notification `stats` block keyed off the parent's `result_count`, which nothing ever set, and counted aux graphs from a `data` argument no caller passed — so stats were never attached, and would have read 0 if they had been | `ars_postprocess` carries the merge's result count up to the parent; the aux count comes from the `params.stats` the merge already recorded |
+| The notification `stats` block keyed off the parent's `result_count`, which nothing ever set, and counted aux graphs from a `data` argument no caller passed — so stats were never attached, and would have read 0 if they had been | `ars_merge` carries the merge's result count up to the parent after post-processing; the aux count comes from the `params.stats` the merge already recorded |
 
 ### Stuck or unbounded state
 
@@ -312,13 +387,14 @@ failure is the prompt to re-decide each one, not a bug).
 
 | Upstream | Port |
 |---|---|
-| `GET /ars/api/block/<pk>` ran the blocklist cascade over an arbitrary stored message and saved the result in place — an unauthenticated destructive edit of a shared tree, which also 500s on any response without `auxiliary_graphs` | **not served**, and dropped from the `api/` index. Blocklist removal still runs where it belongs, in `ars_postprocess` over each merged message |
+| `GET /ars/api/block/<pk>` ran the blocklist cascade over an arbitrary stored message and saved the result in place — an unauthenticated destructive edit of a shared tree, which also 500s on any response without `auxiliary_graphs` | **not served**, and dropped from the `api/` index. Blocklist removal still runs where it belongs, in `ars_merge`'s post-process stage over each merged message |
 | `GET /ars/api/merge/<pk>` called `utils.merge.apply_async`, which does not exist. Before dying it created a Running merge child under the parent — never a terminal status, so that parent could never complete again | **not served** |
 | `GET /ars/api/post_process/<pk>` passed a dict where a `Message` was expected → 500; `/ars/api/timeoutTest` returned `None` → 500 | **not served** (neither ever did anything else) |
 | `POST /ars/api/messages` looked the actor up in the Agent table and assigned the result to the actor FK → 500 | `405 Only GET is permitted!`. The collection is read-only: nothing can depend on a route that never succeeded, and unauthenticated out-of-band message creation is not a surface worth adding |
-| `POST /ars/api/actors` created the actor and *then* evaluated `actor.channel.name` on a list, so every caller got `400 Not a valid json format` for an actor that had in fact been created. It also tested the posted envelope against `tr_ars.agent` in an actor endpoint | returns the actor envelope with `201`/`302`, like `POST /agents`; accepts `tr_ars.actor` (and still `tr_ars.agent`); missing `agent`/`path` is a 400 that names them, an unknown agent or channel is 404, and only a real failure is 500 |
+| `GET`/`POST /ars/api/agents`, `GET /ars/api/agents/<name>`, `GET`/`POST /ars/api/actors` -- the federation registry, with `POST /actors` 400-ing after creating the actor | **not served** (404). The de-federated ARS talks only to the ARAs this deployment hosts and nothing registers at runtime; `GET /ars/api/aras` (Shepherd-native) lists that roster with each ARA's `enabled` flag and live worker count |
+| `POST /ars/api/messages/<pk>` -- the result callback an external ARA delivered its response to | `405 Only GET is permitted!` (so are PUT/DELETE/PATCH, which upstream answered 400). Responses arrive over the broker; see deviation 16 |
 | `GET /ars/api/filters` and `GET /ars/api/filter/<pk>` — the filter path read a stored message, rewrote its results, and saved new message rows for the filtered copy | **not served**, and `shepherd_utils/ars/filters.py` is removed with them. Unused in practice, and the endpoint was a write path into stored trees dressed as a query |
-| `GET`/`POST /ars/api/channels` exposed channels as a standalone resource | **not served**. Channels are not independently useful: an actor's channels are what the fanout matches on, they are created implicitly by registry seeding, and each actor reports its own under `fields.channel`. `get_or_create_channel` stays (it backs `get_or_create_actor`); `list_channels` and `channel_envelope` are removed with the route |
+| `GET`/`POST /ars/api/channels` exposed channels as a standalone resource | **not served**. Channels went with the registry (above): there is no channel matching in a de-federated fan-out |
 | `GET /ars/api/messages` rendered a full envelope per message with its whole stored payload inline, so listing the last ten queries could mean serving hundreds of MB to answer "what has come through recently" | returns `[{"pk", "timestamp"}, ...]`, newest first; fetch a listed pk to get its payload. Timestamps keep the DjangoJSONEncoder spelling |
 | `GET /ars/api/messages/<pk>?compress` read only Redis, so it 404'd once the Redis TTL lapsed on a message still readable through every other endpoint | falls back to the durable `ars_message.data` copy and re-warms Redis |
 | `GET /ars/api/health` answered a non-GET with `Only POST is permitted!` | `Only GET is permitted!` |

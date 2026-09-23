@@ -44,7 +44,10 @@ def message_envelope(
 
     ``data`` is the already-decompressed payload dict; upstream ``to_dict``
     only replaces ``fields.data`` when the stored blob is not None, so pass
-    ``None`` to render a message without a payload.
+    ``None`` to render a message without a payload. One field differs from
+    upstream: where its envelope carried ``actor`` (the integer pk of a
+    registry row), this one carries ``agent`` (the agent name the row is
+    recorded under) -- the de-federated ARS has no actor table.
     """
     return {
         "model": "tr_ars.message",
@@ -53,7 +56,7 @@ def message_envelope(
             "name": row.get("name", ""),
             "code": row.get("code"),
             "status": to_name(row.get("status")),
-            "actor": row.get("actor"),
+            "agent": row.get("agent"),
             "timestamp": django_datetime(row.get("ts")),
             "updated_at": django_datetime(row.get("updated_at")),
             "data": data,
@@ -67,44 +70,5 @@ def message_envelope(
             "merged_versions_list": row.get("merged_versions_list"),
             "params": row.get("params"),
             "clients": row.get("clients", []),
-        },
-    }
-
-
-def agent_envelope(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "model": "tr_ars.agent",
-        "pk": row["id"],
-        "fields": {
-            "name": row.get("name"),
-            "description": row.get("description"),
-            "uri": row.get("uri"),
-            "contact": row.get("contact"),
-            "registered": django_datetime(row.get("registered")),
-            "updated": django_datetime(row.get("updated")),
-        },
-    }
-
-
-def actor_envelope(
-    row: Dict[str, Any],
-    agent_uri: str = "",
-) -> Dict[str, Any]:
-    """Serialize an ars_actor row like ``Actor.to_dict``.
-
-    The stored ``channel`` JSON is the Django-serialized channel list (see
-    ars db ``get_or_create_actor``), passed through verbatim; ``fields.url``
-    is ``agent.uri + path`` exactly as ``Actor.url()`` computes it.
-    """
-    return {
-        "model": "tr_ars.actor",
-        "pk": row["id"],
-        "fields": {
-            "channel": row.get("channel", []),
-            "agent": row.get("agent"),
-            "path": row.get("path", ""),
-            "inforesid": row.get("inforesid", ""),
-            "active": row.get("active", True),
-            "url": f"{agent_uri}{row.get('path', '')}",
         },
     }

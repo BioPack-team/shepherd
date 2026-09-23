@@ -29,13 +29,11 @@ services:
     ports:
       - "8099:8099"
 
+  # NOTE: the de-federated ARS fans out only to the ARAs this Shepherd stack
+  # hosts, over the broker, so the mockworld's stub ARAs and stub SmartAPI
+  # registry are reached by the Relay stack alone. Shepherd-side scenarios
+  # exercise the post-response pipeline (merge / post-process / notify)
+  # against the real hosted ARAs.
   shepherd_server:
     environment:
-      ARS_PUBLIC_HOST: http://shepherd_server:5439
-      SMARTAPI_URL: http://mockworld:8099/api/query
       TR_NORMALIZER: http://mockworld:8099/get_normalized_nodes
-
-  ars_fanout:
-    environment:
-      ARS_PUBLIC_HOST: http://shepherd_server:5439
-      SMARTAPI_URL: http://mockworld:8099/api/query

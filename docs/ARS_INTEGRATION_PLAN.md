@@ -1,3 +1,15 @@
+> **Status (2026-09): partly superseded.** This is the original integration
+> plan and is kept as a record of the port's design decisions. The ARS has
+> since been **de-federated**: it talks only to the ARAs this Shepherd
+> deployment hosts, over the broker (`shepherd_utils/ars/aras.py`,
+> `shepherd_utils/ars/handoff.py`). Everything below about SmartAPI
+> discovery, the `ars_agent`/`ars_channel`/`ars_actor` tables, actor
+> seeding, HTTP dispatch to remote ARAs, the `/agents` and `/actors`
+> endpoints, the `POST /ars/api/messages/<pk>` result callback, and
+> `ars_public_host` no longer describes the code. The current design is
+> summarized in the README ("Translator ARS") and in the de-federation
+> entry of `docs/ARS_PARITY_REGISTER.md`.
+
 # Translator ARS → Shepherd Integration Plan
 
 **Status:** Implemented (see the delivery appendix at the bottom and docs/ARS_PARITY_REGISTER.md)

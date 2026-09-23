@@ -18,6 +18,7 @@ from opentelemetry.propagate import extract, inject
 from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    DecompressedTooLargeError,
     add_query,
     add_ready_callback,
     decompress_zstd,
@@ -36,6 +37,10 @@ from shepherd_utils.logger import (
     setup_logging,
 )
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.response_limit import (
+    TOO_LARGE_LOG_MARKER,
+    fail_response_too_large,
+)
 from shepherd_utils.task_deadline import (
     TIMEOUT_STATUS,
     deadline_field,
@@ -524,6 +529,42 @@ async def _save_callback_error_logs(callback_id: str, logger: logging.Logger) ->
     await save_logs(query_state[7], logger)
 
 
+async def _fail_query_for_oversized_callback(
+    callback_id: str, reason: str, logger: logging.Logger
+) -> None:
+    """Fail the query behind an oversized callback, as RESPONSE_TOO_LARGE.
+
+    A callback too big to accept is a response too big to build: dropping just
+    that callback and letting the query carry on would deliver an answer that
+    silently omits most of its data. So the whole query is failed instead
+    (``fail_response_too_large``: empty response saying why, marker for the
+    merge worker, callback rows cleared so the lookup stops waiting, CRITICAL
+    log in the worker output and the query's log list). The query behind the
+    callback is resolved through the callback->query mapping, which is the
+    only route back to it -- the body that would name it is what we refused.
+    """
+    original_query = await get_callback_query_id(callback_id, logger)
+    if original_query is None:
+        logger.critical(
+            f"{TOO_LARGE_LOG_MARKER} callback={callback_id}: {reason}. The "
+            "callback no longer maps to a query, so there is nothing to fail."
+        )
+        return
+    query_id = original_query[0]
+    query_state = await get_query_state(query_id, logger)
+    if query_state is None:
+        logger.critical(
+            f"{TOO_LARGE_LOG_MARKER} callback={callback_id} query={query_id}: "
+            f"{reason}. The query has no state row, so only the callback is "
+            "dropped."
+        )
+        await remove_callback_id(callback_id, logger)
+        return
+    await fail_response_too_large(
+        query_id, query_state[7], f"callback {callback_id}: {reason}", logger
+    )
+
+
 async def callback(
     target: ARATargetEnum,
     callback_id: str,
@@ -539,19 +580,19 @@ async def callback(
     max_bytes = settings.callback_max_request_size_bytes
     raw = await _read_body_within_limit(request, max_bytes)
     if raw is None:
-        logger.warning(
-            f"Rejecting callback {callback_id}: request body exceeds the maximum "
-            f"allowed size of {max_bytes} bytes."
+        # The rejection fails the whole query (see
+        # _fail_query_for_oversized_callback), which also clears its callback
+        # rows so the lookup worker stops waiting -- otherwise it would block
+        # until its timeout, since a callback only leaves the set once
+        # merge_message has processed it, which never happens for a payload
+        # we refused to read.
+        await _fail_query_for_oversized_callback(
+            callback_id,
+            f"request body exceeds the maximum allowed size of {max_bytes} "
+            f"bytes (callback_max_request_size="
+            f"{settings.callback_max_request_size})",
+            logger,
         )
-        # Persist the rejection log BEFORE removing the callback: resolving the
-        # response_id reads the callback->query mapping that remove_callback_id
-        # deletes.
-        await _save_callback_error_logs(callback_id, logger)
-        # Drop this callback from the running set so the lookup worker stops
-        # waiting on it. Without this the lookup blocks until its whole-query
-        # timeout, since a callback only leaves the set once merge_message has
-        # processed it -- which never happens for a payload we refused to read.
-        await remove_callback_id(callback_id, logger)
         return JSONResponse(
             content={
                 "detail": (
@@ -563,8 +604,27 @@ async def callback(
         )
     try:
         if "zstd" in request.headers.get("content-encoding", "").lower():
-            raw = decompress_zstd(raw)
+            # The cap applies to what we have to hold in memory, so a
+            # compressed body is bounded on its decompressed size too.
+            raw = decompress_zstd(raw, max_bytes)
         response = orjson.loads(raw)
+    except DecompressedTooLargeError as e:
+        await _fail_query_for_oversized_callback(
+            callback_id,
+            f"zstd-encoded request body decompresses past the maximum allowed "
+            f"size of {max_bytes} bytes (callback_max_request_size="
+            f"{settings.callback_max_request_size}): {e}",
+            logger,
+        )
+        return JSONResponse(
+            content={
+                "detail": (
+                    f"Request body decompresses past the maximum allowed size "
+                    f"of {max_bytes} bytes."
+                )
+            },
+            status_code=413,
+        )
     except (orjson.JSONDecodeError, zstandard.ZstdError):
         logger.warning(f"Rejecting callback {callback_id}: invalid request body.")
         await _save_callback_error_logs(callback_id, logger)

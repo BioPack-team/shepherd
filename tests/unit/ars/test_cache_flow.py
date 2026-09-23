@@ -44,13 +44,21 @@ RELABELED = {
 assert cache.cache_key(RELABELED)[0] == KEY
 
 
-def row(pk=None, status="R", code=202, actor=1, ref=None, params=None, **extra):
+def row(
+    pk=None,
+    status="R",
+    code=202,
+    agent="ars-default-agent",
+    ref=None,
+    params=None,
+    **extra,
+):
     base = {
         "id": pk or uuid.uuid4(),
         "name": "",
         "status": status,
         "code": code,
-        "actor": actor,
+        "agent": agent,
         "ref": ref,
         "ts": TS,
         "updated_at": TS,

@@ -72,74 +72,6 @@ def add_attribute(node_or_edge, attribute_json):
         node_or_edge["attributes"] = [template_attribute]
 
 
-def scrub_null_attributes(data):
-    nodes = get_safe(data, "message", "knowledge_graph", "nodes")
-    edges = get_safe(data, "message", "knowledge_graph", "edges")
-    aux_graphs = get_safe(data, "message", "auxiliary_graphs")
-    if nodes is not None:
-        for nodeId, nodeStuff in nodes.items():
-            nodeAttributes = get_safe(nodeStuff, "attributes")
-            if nodeAttributes is not None:
-                while None in nodeAttributes:
-                    logger.info("scrubnull: Found node attributes of None value")
-                    nodeAttributes.remove(None)
-
-    if edges is not None:
-        bad_sources = []
-        for edgeId, edgeStuff in edges.items():
-            edgeAttributes = get_safe(edgeStuff, "attributes")
-            if edgeAttributes is not None:
-                while None in edgeAttributes:
-                    edgeAttributes.remove(None)
-                for edgeAttribute in edgeAttributes:
-                    if "attributes" in edgeAttribute.keys():
-                        edgeAttributeAttributes = get_safe(edgeAttribute, "attributes")
-                        if edgeAttributeAttributes is None:
-                            logger.info(
-                                "scrubnull: Found edge attributes of None value"
-                            )
-                            edgeAttribute["attributes"] = []
-
-            # upstream iterated this straight off get_safe, so an edge
-            # without a "sources" key raised TypeError on None
-            edgeSources = get_safe(edgeStuff, "sources") or []
-            sources_to_remove = {}
-            for edge_source in edgeSources:
-                if (
-                    "resource_id" not in edge_source.keys()
-                    or edge_source["resource_id"] is None
-                ):
-                    if edgeId not in sources_to_remove.keys():
-                        sources_to_remove[edgeId] = [edge_source]
-                    else:
-                        sources_to_remove[edgeId].append(edge_source)
-
-                if "upstream_resource_ids" not in edge_source.keys() or (
-                    "upstream_resource_ids" in edge_source.keys()
-                    and edge_source["upstream_resource_ids"] is None
-                ):
-                    edge_source["upstream_resource_ids"] = []
-                if "upstream_resource_ids" in edge_source.keys() and isinstance(
-                    edge_source["upstream_resource_ids"], list
-                ):
-                    while None in edge_source["upstream_resource_ids"]:
-                        edge_source["upstream_resource_ids"].remove(None)
-
-            if len(sources_to_remove) > 0:
-                logger.info(
-                    "scrubnull: Found bad sources " + str(len(sources_to_remove))
-                )
-                bad_sources.append(sources_to_remove)
-            for key, sources in sources_to_remove.items():
-                for source in sources:
-                    edgeSources.remove(source)
-    if aux_graphs is not None:
-        for aux_graph_id, aux_graph in aux_graphs.items():
-            if "attributes" in aux_graph.keys() and aux_graph["attributes"] is None:
-                aux_graph["attributes"] = []
-                logger.info("scrubnull: Found bad attributes in aux graphs")
-
-
 def _self_source(inforesid, role):
     """A fresh retrieval source for this agent.
 
@@ -344,13 +276,8 @@ def pre_merge_process(data, key, agent_name, inforesid):
     Raises on any stage failure (the caller marks the child errored, exactly
     as the upstream callback handler's generic except does).
     """
-    try:
-        scrub_null_attributes(data)
-    except Exception as e:
-        logger.exception("Error in the scrubbing of null attributes")
-        raise e
-    # node normalization removed upstream (Relay PR #871): data arrives
-    # pre-normalized.
+    # null-attribute scrubbing removed upstream (Relay PR #885) and node
+    # normalization before it (Relay PR #871): data arrives pre-normalized.
     try:
         decorate_edges_with_infores(data, inforesid)
     except Exception as e:

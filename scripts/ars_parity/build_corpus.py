@@ -436,66 +436,6 @@ def response_blocklist():
     }
 
 
-def scrub_input():
-    return {
-        "message": {
-            "knowledge_graph": {
-                "nodes": {
-                    "n1": {
-                        "attributes": [
-                            None,
-                            {"attribute_type_id": "x", "value": 1},
-                            None,
-                        ]
-                    },
-                    "n2": {"attributes": None},
-                    "n3": {},
-                },
-                "edges": {
-                    "e1": {
-                        "subject": "n1",
-                        "object": "n2",
-                        "attributes": [
-                            None,
-                            {"attribute_type_id": "y", "value": 2, "attributes": None},
-                        ],
-                        "sources": [
-                            {
-                                "resource_id": "infores:a",
-                                "resource_role": "primary_knowledge_source",
-                            },
-                            {"resource_role": "aggregator_knowledge_source"},
-                            {
-                                "resource_id": None,
-                                "resource_role": "aggregator_knowledge_source",
-                            },
-                            {
-                                "resource_id": "infores:b",
-                                "resource_role": "aggregator_knowledge_source",
-                                "upstream_resource_ids": None,
-                            },
-                            {
-                                "resource_id": "infores:c",
-                                "resource_role": "aggregator_knowledge_source",
-                                "upstream_resource_ids": [
-                                    "infores:a",
-                                    None,
-                                    "infores:b",
-                                ],
-                            },
-                        ],
-                    },
-                },
-            },
-            "auxiliary_graphs": {
-                "a1": {"edges": ["e1"], "attributes": None},
-                "a2": {"edges": ["e1"], "attributes": [{"attribute_type_id": "k"}]},
-                "a3": {"edges": ["e1"]},
-            },
-        }
-    }
-
-
 def decorate_cases():
     return [
         {
@@ -1029,7 +969,6 @@ def main():
             }
         },
         "response_blocklist.json": response_blocklist(),
-        "scrub_input.json": scrub_input(),
         "decorate_cases.json": decorate_cases(),
         "scores_cases.json": scores_cases(),
         "ordering_cases.json": ordering_cases(),

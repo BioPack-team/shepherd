@@ -44,7 +44,8 @@ services:
     # 2026-09 (later): shepherd_server now runs 4 uvicorn worker processes,
     # each with its own pool (4 x 10 = 40, was 1 x 30), aragorn_lookup and
     # bte_lookup moved to 30-max pools, and ars_premerge joined at the
-    # default 10 -- worst case ~350, still under 400.
+    # default 10 -- worst case ~350, still under 400. ars_postprocess has
+    # since been folded into ars_merge (one fewer pool).
     command: postgres -c max_connections=400
     build:
       context: .
@@ -523,21 +524,6 @@ services:
     build:
       context: .
       dockerfile: workers/ars_merge/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      shepherd_db:
-        condition: service_healthy
-      shepherd_broker:
-        condition: service_healthy
-    volumes:
-      - ./logs:/app/logs
-      - ./.env:/app/.env
-
-  ars_postprocess:
-    container_name: ars_postprocess
-    build:
-      context: .
-      dockerfile: workers/ars_postprocess/Dockerfile
     restart: unless-stopped
     depends_on:
       shepherd_db:

@@ -6,17 +6,22 @@ serializer envelope are reproduced exactly (parity: tests/unit/ars/
 test_ars_api_contract.py and the differential harness).
 
 Upstream routes that only ever failed are not reproduced: POST /messages
-answers 405 instead of 500, POST /actors returns the actor it creates
-instead of 400-ing after creating it, and /block, /merge, /post_process and
+answers 405 instead of 500, and /block, /merge, /post_process and
 /timeoutTest are not served at all. /filters and /filter/<pk> are dropped
 as well -- unused, and the filter path rewrote and re-saved stored messages.
 See the divergences section of docs/ARS_PARITY_REGISTER.md.
 
+This ARS is de-federated: it talks only to the ARAs this Shepherd deployment
+hosts (shepherd_utils/ars/aras.py), over the broker. So the upstream
+registry surface (/agents, /actors, and the POST /messages/<pk> callback an
+external ARA delivered its response to) is not served; GET /aras lists the
+hosted ARAs and whether their workers are alive instead.
+
 Background work rides Shepherd's Redis Streams instead of Celery: submit
-enqueues ``ars.fanout``; a result-bearing callback enqueues ``ars.premerge``
-(pre-merge processing + TRAPI validation, run there instead of inline as
-upstream does -- documented deviation, the CPU work saturated the server),
-which enqueues ``ars.merge`` on success.
+enqueues ``ars.fanout``, which enqueues each ARA's own worker task; when an
+ARA pipeline finishes, finish_query hands the response to ``ars.premerge``
+(intake + pre-merge processing + TRAPI validation), which enqueues
+``ars.merge`` on success.
 """
 
 import asyncio
@@ -34,19 +39,12 @@ from opentelemetry.propagate import inject
 
 import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
-import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.broker as broker
 import shepherd_utils.db as shepherd_db
-from shepherd_utils.ars import crypto
-from shepherd_utils.ars.envelope import (
-    actor_envelope,
-    agent_envelope,
-    django_datetime,
-    message_envelope,
-)
-from shepherd_utils.ars.notify import notify_subscribers, replay_completion
-from shepherd_utils.ars.premerge import ScoreStatCalc, get_safe
-from shepherd_utils.ars.statuses import coerce_status, to_letter, to_name
+from shepherd_utils.ars import aras, crypto
+from shepherd_utils.ars.envelope import django_datetime, message_envelope
+from shepherd_utils.ars.notify import replay_completion
+from shepherd_utils.ars.statuses import to_name
 from shepherd_utils.config import settings
 from shepherd_utils.logger import resolve_log_level
 
@@ -156,9 +154,7 @@ _API_PATTERNS = [
     ("", True),
     ("submit/", True),
     ("messages/", True),
-    ("agents/", True),
-    ("actors/", True),
-    ("agents/<name>", False),
+    ("aras/", True),
     ("messages/<uuid:key>", False),
     ("reports/<inforesid>", False),
     ("retain/<uuid:key>", False),
@@ -208,23 +204,17 @@ async def submit(request: Request) -> Response:
             params = {"query_type": "standard"}
         if "validate" in data:
             params["validate"] = data["validate"]
-        actor = None
         if "workflow" in data:
+            # Upstream routed a workflow query through its workflow actor and,
+            # for a ``workflow`` that is not a non-empty list, never assigned
+            # ``message`` -> UnboundLocalError -> 400. Every hosted ARA takes
+            # workflow queries, so there is no routing left to do; the
+            # contract for a malformed workflow field is kept.
             wf = data["workflow"]
-            if isinstance(wf, list):
-                if len(wf) > 0:
-                    actor = await _retry_transient_pg(
-                        lifecycle.ensure_workflow_actor, logger, "submit actor lookup"
-                    )
-        else:
-            actor = await _retry_transient_pg(
-                lifecycle.ensure_default_actor, logger, "submit actor lookup"
-            )
-        if actor is None:
-            # upstream: `message` was never assigned -> UnboundLocalError
-            raise UnboundLocalError(
-                "local variable 'message' referenced before assignment"
-            )
+            if not isinstance(wf, list) or len(wf) == 0:
+                raise UnboundLocalError(
+                    "local variable 'message' referenced before assignment"
+                )
         # Response cache (Shepherd-native, docs/ARS_RESPONSE_CACHE_PLAN.md):
         # there is one message tree per distinct query. A structurally
         # identical completed query answers right here with the source
@@ -240,7 +230,7 @@ async def submit(request: Request) -> Response:
             return dj_json(message_envelope(row, data=payload), 201)
         message = await _retry_transient_pg(
             lambda: ars_db.create_message(
-                actor_id=actor["id"],
+                agent=aras.DEFAULT_AGENT,
                 status="Running",
                 code=202,
                 params=params,
@@ -257,7 +247,7 @@ async def submit(request: Request) -> Response:
             message["id"], data, logger, raise_on_failure=True
         )
         # Root the query's trace here and remember the carrier: every later
-        # stage (fanout now; merge/postprocess/notify from the callback side)
+        # stage (fanout now; premerge/merge/notify from the response side)
         # rejoins this trace, giving one end-to-end trace per query even when
         # an ARA doesn't propagate traceparent into its callback.
         carrier: Dict[str, str] = {}
@@ -325,14 +315,24 @@ async def messages(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
+def _trace_actor(agent: Optional[str]) -> Dict[str, Any]:
+    """The ``actor`` block of a trace node. Upstream rendered the actor row
+    (pk, channels, path); the de-federated ARS has no such row, so this
+    names the agent, the infores it stands for, and -- for an ARA's child --
+    the Shepherd target it was dispatched to."""
+    ara = aras.by_agent(agent)
+    return {
+        "agent": agent,
+        "inforesid": aras.inforesid_for(agent),
+        "ara": ara.name if ara is not None else None,
+    }
+
+
 async def _trace_children(parent_pk, task_logger) -> List[Dict[str, Any]]:
     nodes = []
     for child in await ars_db.get_children(parent_pk):
-        if child.get("inforesid") == "infores:ars":
+        if child["agent_name"] == aras.MERGE_AGENT:
             continue
-        channel_names = []
-        for ch in child.get("actor_channel") or []:
-            channel_names.append(ch["fields"]["name"])
         n = {
             "message": str(child["id"]),
             "status": to_name(child["status"]),
@@ -340,13 +340,7 @@ async def _trace_children(parent_pk, task_logger) -> List[Dict[str, Any]]:
             "result_count": child.get("result_count"),
             "result_stat": child.get("result_stat"),
             "code": int(child["code"]),
-            "actor": {
-                "pk": child["actor_id"],
-                "inforesid": child.get("inforesid"),
-                "channel": channel_names,
-                "agent": child.get("agent_name"),
-                "path": child.get("actor_path"),
-            },
+            "actor": _trace_actor(child["agent_name"]),
             "children": await _trace_children(child["id"], task_logger),
         }
         nodes.append(n)
@@ -359,17 +353,12 @@ async def trace_message(key: uuid.UUID) -> Response:
         return text(f"Unknown message: {key}", 404)
     data = await ars_db.load_message_data(key, logger)
     query_graph = data.get("message", {}).get("query_graph", {}) if data else {}
-    actor = await ars_db.get_actor(mesg["actor"]) or {}
-    channel_names = []
-    for ch in actor.get("channel") or []:
-        channel_names.append(ch["fields"]["name"])
     n_merged: Dict[str, Any] = {}
     if mesg["code"] == 200:
         merged_pk = mesg.get("merged_version")
         if merged_pk is not None:
             merged_msg = await ars_db.get_message_row(merged_pk)
             if merged_msg is not None:
-                merged_actor = await ars_db.get_actor(merged_msg["actor"]) or {}
                 n_merged = {
                     "message": str(merged_pk),
                     "status": to_name(merged_msg["status"]),
@@ -377,11 +366,7 @@ async def trace_message(key: uuid.UUID) -> Response:
                     "result_count": str(merged_msg.get("result_count")),
                     "result_stat": merged_msg.get("result_stat"),
                     "code": int(merged_msg["code"]),
-                    "actor": {
-                        "pk": merged_msg["actor"],
-                        "inforesid": merged_actor.get("inforesid"),
-                        "agent": merged_actor.get("agent_name"),
-                    },
+                    "actor": _trace_actor(merged_msg.get("agent")),
                     "children": [],
                 }
     tree = {
@@ -391,13 +376,7 @@ async def trace_message(key: uuid.UUID) -> Response:
         "retain": mesg["retain"],
         "timestamp": str(mesg["ts"]),
         "updated_at": str(mesg["updated_at"]),
-        "actor": {
-            "pk": mesg["actor"],
-            "inforesid": actor.get("inforesid"),
-            "channel": channel_names,
-            "agent": actor.get("agent_name"),
-            "path": actor.get("path"),
-        },
+        "actor": _trace_actor(mesg.get("agent")),
         "result_count": mesg.get("result_count"),
         "merged_version": str(mesg.get("merged_version")),
         "merged_versions_list": str(mesg.get("merged_versions_list")),
@@ -432,257 +411,49 @@ async def message(key: str, request: Request) -> Response:
                     headers={"X-Content-Compression": "zstd"},
                 )
             return text(f"Unknown message: {key}", 404)
-        actor = await ars_db.get_actor(mesg["actor"]) or {}
-        mesg = dict(mesg, name=actor.get("agent_name"))
+        # upstream overwrites fields.name with the actor's agent name
+        mesg = dict(mesg, name=mesg.get("agent"))
         return Response(
             content=await _envelope_bytes(mesg), media_type="application/json"
         )
 
-    if request.method == "POST":
-        return await _result_callback(pk, request)
-
-    return text(f"Method {request.method} not supported!", 400)
-
-
-async def _result_callback(key: uuid.UUID, request: Request) -> Response:
-    """POST /ars/api/messages/<child_pk>: an ARA delivering its response."""
-    body = await request.body()
-    mesg = await ars_db.get_message_row(key)
-    if mesg is None:
-        return text(f"Unknown state reference {key}", 404)
-    try:
-        # a thread: ARA responses run to tens of MB, and parsing one on the
-        # event loop stalls every other in-flight request on this process
-        data = await asyncio.to_thread(json.loads, body)
-    except json.decoder.JSONDecodeError:
-        return text(
-            "Can not decode json:<br>\n%s for the pk: %s"
-            % (body.decode(errors="replace"), key),
-            500,
-        )
-    try:
-        status = "D"
-        code = 200
-        if "tr_ars.message.status" in request.headers:
-            # Caller-controlled: an unrecognized value used to be written
-            # straight into the CHAR(1) status column, where a one-character
-            # nonsense status is never terminal (so the parent never
-            # completes) and never 'R' (so the watchdog never reaps it).
-            raw_status = request.headers["tr_ars.message.status"]
-            status = coerce_status(raw_status, "D")
-            if status != to_letter(raw_status):
-                logger.warning(
-                    f"Ignoring unrecognized tr_ars.message.status "
-                    f"{raw_status!r} on callback for {key}; using 'D'"
-                )
-        res = get_safe(data, "message", "results")
-        actor = await ars_db.get_actor(mesg["actor"]) or {}
-        inforesid = actor.get("inforesid")
-        agent_name = str(actor.get("agent_name"))
-        parent = await ars_db.get_message_row(mesg["ref"]) if mesg.get("ref") else None
-        if parent is None:
-            return text(f"Unknown state reference {key}", 404)
-        result_length = len(res) if res is not None else None
-        await notify_subscribers(
-            parent,
-            {
-                "event_type": "ara_response_complete",
-                "ara_name": inforesid,
-                "child_uuid": str(mesg["id"]),
-                "ara_response_status": status,
-                "ara_n_results": result_length,
-            },
-            logger,
-        )
-        logger.info(
-            f"received msg from agent: {inforesid} with parent pk: "
-            f"{mesg['ref']} and result: {result_length}"
-        )
-        if mesg["status"] == "D":
-            return text(
-                "ARS has already received %s results from pk: %s" % (result_length, key)
-            )
-        if mesg.get("result_count") is not None and mesg["result_count"] > 0:
-            return text(
-                "ARS already has a response with: %s results for pk %s \nWe are "
-                "temporarily disallowing subsequent updates to PKs which already "
-                "have results\n" % (result_length, key),
-                409,
-            )
-        if mesg["status"] == "E":
-            return text(
-                "Response received but Message is already in state "
-                + str(mesg["code"])
-                + ". Response rejected\n",
-                400,
-            )
-        result_count = None
-        result_stat = None
-        if res is not None and result_length > 0:
-            result_count = result_length
-            # a thread: numpy over every result's scores, sized by the payload
-            result_stat = await asyncio.to_thread(ScoreStatCalc, res)
-            # Pre-merge processing (scrub/decorate/normalize), phantom
-            # removal, and TRAPI validation run in the ars_premerge worker
-            # instead of inline here (documented deviation: the CPU work
-            # saturated the server under load; upstream runs it in its
-            # Django request). The child stays R/202 with its counts until
-            # the worker validates and flips it -- or E/422s it, sending the
-            # ara_failed_validation notification upstream sent with its
-            # inline HTTP 422.
-            # STRICT save + enqueue: the 201 below promises the pipeline
-            # owns this response now; a swallowed failure would strand it.
-            await ars_db.save_message_data(key, data, logger, raise_on_failure=True)
-            updated = await ars_db.update_message(
-                key, result_count=result_count, result_stat=result_stat
-            )
-            await broker.add_task(
-                "ars.premerge",
-                {
-                    "parent_pk": str(mesg["ref"]),
-                    "child_pk": str(key),
-                    "agent_name": agent_name,
-                    "inforesid": str(inforesid or ""),
-                    # the tr_ars.message.status header override rides along
-                    "status": status,
-                    "query_id": str(mesg["ref"]),
-                    # rejoin the query's submit-time trace
-                    "otel": await ars_db.load_otel_carrier(mesg["ref"], logger),
-                },
-                logger,
-                raise_on_failure=True,
-            )
-            # No payload echo (deviation from upstream, which returns the
-            # whole stored message): serializing a multi-MB body back at the
-            # ARA -- which never reads it -- was the single largest CPU cost
-            # of the callback and starved the event loop under load.
-            env = message_envelope(updated or mesg, data=None)
-            return dj_json(env, 201)
-
-        # no results: terminal inline, nothing to premerge or validate
-        await ars_db.save_message_data(key, data, logger)
-        updates: Dict[str, Any] = {"status": status, "code": code}
-        if res is None:
-            # design choice upstream (06-09-2026): None results means 0
-            updates["result_count"] = 0
-        updated = await ars_db.update_message(key, **updates)
-        await ars_db.persist_data_copy(key, logger)
-        if updated and updated["status"] in ("D", "S", "E", "U"):
-            await lifecycle.check_parent_completion(mesg["ref"], logger)
-        # same no-echo deviation as the result-bearing branch above
-        env = message_envelope(updated or mesg, data=None)
-        return dj_json(env, 201)
-    except Exception as e:
-        logger.error(f"callback failed for {key}: {e}", exc_info=True)
-        try:
-            log_entry = {
-                "message": "Internal ARS Server Error",
-                "timestamp": str(mesg.get("updated_at")),
-                "level": "ERROR",
-            }
-            if "logs" in data.keys():
-                data["logs"].append(log_entry)
-            else:
-                data["logs"] = [log_entry]
-            await ars_db.save_message_data(key, data, logger)
-            await ars_db.update_message(key, status="E", code=500)
-            await ars_db.persist_data_copy(key, logger)
-            await lifecycle.check_parent_completion(mesg["ref"], logger)
-        except Exception:
-            pass
-        return text("Internal server error", 500)
+    # Upstream's ARAs POSTed their responses here. The de-federated ARS
+    # receives them over the broker instead (finish_query -> ars.premerge),
+    # so the route is read-only.
+    return text("Only GET is permitted!", 405)
 
 
 # ---------------------------------------------------------------------------
-# agents / actors
+# aras
 #
-# /api/channels is not served. Channels are not an independently useful
-# resource: an actor's channels are what the fanout matches on, they are
-# created implicitly by registry seeding (get_or_create_channel, still used
-# by get_or_create_actor), and each actor reports its own under
-# fields.channel. Nothing consumed the collection, and POSTing a bare
-# channel no actor references does nothing.
+# The upstream registry surface (/agents, /actors, /channels) is not served:
+# the ARS talks only to the ARAs this deployment hosts, a static roster, and
+# nothing registers at runtime. This lists that roster with each ARA's live
+# worker count, so an operator can see what the ARS can currently reach.
 # ---------------------------------------------------------------------------
 
 
-@route("/api/agents", ["GET", "POST"])
-async def agents(request: Request) -> Response:
-    if request.method == "GET":
-        return Response(
-            content=json.dumps(
-                [agent_envelope(a) for a in await ars_db.list_agents()],
-                default=str,
-            ),
-            media_type="application/json",
+@route("/api/aras", ["GET"])
+async def list_aras(request: Request) -> Response:
+    enabled = aras.enabled_aras()
+    counts = await aras.live_worker_counts(a.name for a in aras.ARAS)
+    base = _host_base(request)
+    out = []
+    for ara in aras.ARAS:
+        workers = counts.get(ara.name, 0)
+        out.append(
+            {
+                "name": ara.name,
+                "inforesid": ara.inforesid,
+                "agent": ara.agent,
+                "url": f"{base}/{ara.name}",
+                "stream": ara.name,
+                "enabled": ara in enabled,
+                "live_workers": workers,
+                "available": ara in enabled and workers > 0,
+            }
         )
-    try:
-        data = json.loads(await request.body())
-        if "model" in data and "tr_ars.agent" == data["model"]:
-            data = data["fields"]
-        if "name" not in data or "uri" not in data:
-            return text('JSON does not contain "name" and "uri" fields', 400)
-        agent, status = await ars_db.get_or_create_agent(data)
-        return dj_json(agent_envelope(agent), status)
-    except Exception as e:
-        logger.error(f"agents POST failed: {e}")
-        return text("Not a valid json format", 400)
-
-
-@route("/api/agents/{name}", ["GET"])
-async def get_agent(name: str) -> Response:
-    agent = await ars_db.get_agent_by_name(name)
-    if agent is None:
-        return text(f"Unknown agent: {name}", 400)
-    return dj_json(agent_envelope(agent))
-
-
-@route("/api/actors", ["GET", "POST"])
-async def actors(request: Request) -> Response:
-    if request.method == "GET":
-        from shepherd_utils.smartapi import url_remote_from_inforesid
-
-        out = []
-        for a in await ars_db.list_actors(exclude_empty_path=True):
-            actor = {"model": "tr_ars.actor", "pk": a["id"], "fields": {}}
-            actor["fields"]["name"] = a["agent_name"] + "-" + a["path"]
-            actor["fields"]["channel"] = [
-                ch["fields"]["name"] for ch in (a.get("channel") or [])
-            ]
-            actor["fields"]["agent"] = a["agent_name"]
-            actor["fields"]["urlRemote"] = url_remote_from_inforesid(a.get("inforesid"))
-            actor["fields"][
-                "path"
-            ] = f"{_host_base(request)}{a.get('agent_uri', '')}{a['path']}"
-            actor["fields"]["active"] = a["active"]
-            actor["fields"]["inforesid"] = a["inforesid"]
-            out.append(actor)
-        return dj_json(out)
-    # Upstream created the actor and THEN evaluated actor.channel.name on a
-    # list, so the AttributeError landed in its generic handler and every
-    # caller got 400 "Not a valid json format" for an actor that had in fact
-    # been created. Nothing could ever have consumed a success here, so this
-    # returns the envelope the endpoint was always meant to return.
-    try:
-        data = json.loads(await request.body())
-    except json.JSONDecodeError:
-        return text("Not a valid json format", 400)
-    if not isinstance(data, dict):
-        return text("Not a valid json format", 400)
-    # upstream compared against "tr_ars.agent" here, in an actor endpoint
-    if data.get("model") in ("tr_ars.actor", "tr_ars.agent"):
-        data = data.get("fields")
-        if not isinstance(data, dict):
-            return text('JSON does not contain a "fields" object', 400)
-    if "agent" not in data or "path" not in data:
-        return text('JSON does not contain "agent" and "path" fields', 400)
-    try:
-        actor, status = await ars_db.get_or_create_actor(data)
-    except KeyError as e:
-        return text(f"Unknown {str(e)}", 404)
-    except Exception as e:
-        logger.error(f"actors POST failed: {e}", exc_info=True)
-        return text("Internal server error", 500)
-    return dj_json(actor_envelope(actor, actor.get("agent_uri", "")), status)
+    return JSONResponse(content=out)
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +466,8 @@ async def actors(request: Request) -> Response:
 #                              stored message and saved the result in place:
 #                              a destructive, unauthenticated edit of a
 #                              shared tree. Blocklist removal still runs
-#                              where it belongs, in ars_postprocess.
+#                              where it belongs, in ars_merge's
+#                              post-process stage.
 #   GET /api/merge/<pk>        called a task that does not exist. Before
 #                              dying it created a Running merge child under
 #                              the parent -- which is never terminal, so the
@@ -727,16 +499,14 @@ async def retain(key: str) -> Response:
     if mesg is None:
         return text(f"Unknown message: {key}", 404)
     json_response: Dict[str, Any] = {"success": False}
-    actor = await ars_db.get_actor(mesg["actor"]) or {}
-    if str(actor.get("agent_name")) == "ars-default-agent":
+    if mesg.get("ref") is None:
+        # a parent (submitted query): retain its whole tree
         json_response = await _retain_all(mesg, json_response)
-    elif mesg.get("ref") is not None:
+    else:
         parent_mesg = await ars_db.get_message_row(mesg["ref"])
         if parent_mesg is None:
             return text(f"Unknown message: {mesg['ref']}", 404)
         json_response = await _retain_all(parent_mesg, json_response)
-    else:
-        json_response["description"] = "Invalid PK"
     return dj_json(json_response)
 
 
@@ -779,20 +549,15 @@ async def latest_pk(n: int) -> Response:
     response[f"pk_count_last_{n}_days"] = {}
     response[f"latest_{n}_pks"] = []
     response["latest_24hr_running_pks"] = []
-    default_actor = await lifecycle.ensure_default_actor()
-    counts = await ars_db.get_parent_message_counts(default_actor["id"], n)
+    counts = await ars_db.get_parent_message_counts(n)
     end_date = datetime.datetime.now(datetime.timezone.utc)
     start_date = end_date - datetime.timedelta(days=n)
     while start_date <= end_date:
         day = str(start_date.date())
         response[f"pk_count_last_{n}_days"][day] = counts.get(day, 0)
         start_date += datetime.timedelta(days=1)
-    response[f"latest_{n}_pks"] = await ars_db.get_latest_parent_pks(
-        default_actor["id"], n
-    )
-    response["latest_24hr_running_pks"] = await ars_db.get_running_parent_pks_24h(
-        default_actor["id"]
-    )
+    response[f"latest_{n}_pks"] = await ars_db.get_latest_parent_pks(n)
+    response["latest_24hr_running_pks"] = await ars_db.get_running_parent_pks_24h()
     return JSONResponse(content=response)
 
 

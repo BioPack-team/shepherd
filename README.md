@@ -85,19 +85,37 @@ permission error rather than silently continuing.
 
 ### Translator ARS
 
-Shepherd also hosts a full port of the NCATS Translator ARS
+Shepherd also hosts a port of the NCATS Translator ARS
 ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)) at
 `/ars/...` -- the same `/ars/api/submit` / `messages/<pk>?trace=y` /
 `get_status` surface the Translator UI uses, backed by five workers
-(`ars_fanout`, `ars_merge`, `ars_postprocess`, `ars_watchdog`, `ars_notify`)
+(`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_watchdog`, `ars_notify`)
 on the shared Redis Streams fabric instead of Celery/RabbitMQ, and `ars_*`
-Postgres tables instead of MySQL. Behavior is pinned against the upstream
-codebase by a four-layer parity suite; see `docs/ARS_PARITY_REGISTER.md`
-for the invariants, the golden-regeneration procedure, and every documented
-deviation, and `tests/parity_e2e/README.md` for the side-by-side
-differential harness. Deployment knobs live in `shepherd_utils/config.py`
-under the "Translator ARS" block (`ARS_PUBLIC_HOST` must be reachable by
-remote ARAs for their result callbacks).
+Postgres tables instead of MySQL. `ars_premerge` validates each ARA response
+in a process pool; `ars_merge` folds each validated response into the
+query's merged message and post-processes the new version in the same
+pool child, draining every response that is ready for a query under one
+lock (the merge_message worker's pattern). Node annotation runs the
+`biothings_annotator` package in-process there; it is configured by the
+package's own environment variables (`SERVICE_PROVIDER_API_HOST`,
+`ANNOTATOR_QUERY_BACKEND`), set on the `ars_merge` container.
+
+The ARS is **de-federated**: it talks only to the ARAs this same Shepherd
+deployment hosts (`shepherd_utils/ars/aras.py` -- Aragorn, ARAX, BTE), and
+every hop goes through the broker. A submitted query is fanned out by
+enqueueing each ARA's own worker task, and when an ARA pipeline finishes,
+`finish_query` hands the response back onto the `ars.premerge` queue. There
+is no SmartAPI registry lookup, no HTTP round trip to an ARA, and no HTTP
+result callback; the upstream `/agents` and `/actors` registry endpoints are
+not served. `GET /ars/api/aras` lists the hosted ARAs instead, with whether
+each is enabled for fan-out (`ARS_ENABLED_ARAS`, empty = all) and how many
+of its workers are currently alive, so it shows what the ARS can reach right
+now.
+
+Behavior is pinned against the upstream codebase by a parity suite; see
+`docs/ARS_PARITY_REGISTER.md` for the invariants, the golden-regeneration
+procedure, and every documented deviation. Deployment knobs live in
+`shepherd_utils/config.py` under the "Translator ARS" block.
 
 #### ARS response cache
 
@@ -202,6 +220,56 @@ monitor's abandoned-query reaper (`MONITOR_ABANDONED_QUERY_SEC`, default 600s)
 remains the backstop for queries that go over *without* any worker picking a
 task up for them — e.g. one whose driving worker died with nothing left in a
 stream.
+
+##### Response size limits
+
+A TRAPI response is held in memory as a Python object tree several times the
+size of its JSON, by every worker that touches it, and `merge_message` reloads
+the whole accumulated response on every pass. One big enough is OOM-killed and
+then retried on the next pod, which dies the same way. Two caps bound that, and
+both are **off by default** — set them per deployment (Helm) from the pod's
+memory limit:
+
+| Setting | Meaning |
+| --- | --- |
+| `CALLBACK_MAX_REQUEST_SIZE` | Largest `/callback` body the server accepts (e.g. `100M`). Checked on the wire before the body is buffered, and on the *decompressed* size for a zstd-encoded body. Over it: 413, and the query is failed. |
+| `MAX_RESPONSE_SIZE` | Largest *uncompressed* response any worker will load (e.g. `300M`). Read from the stored blob's zstd header, so nothing is loaded to check it. Every standard worker checks before loading; `finish_query` checks before delivering; `merge_message` treats it as the budget for the accumulated response and sizes each merge pass to stay within it. |
+
+Sizing: decoding expands the uncompressed JSON roughly 6-7x in memory, and a
+merge pass can overshoot the budget by at most one callback, so for the merge
+pod keep `2 x MAX_RESPONSE_SIZE x 7` under its memory limit (about `300M` for a
+5Gi pod). The callback endpoint records each payload's size on its trace span
+(`callback.payload_bytes`), which is the number to tune from.
+
+A breach never yields a partial answer. The whole response is discarded
+(`shepherd_utils/response_limit.py`): the stored response is replaced by an
+empty message whose `status`/`description` say it was too large, the query's
+outstanding callbacks are cleared so the workflow runs on to `finish_query`
+promptly, and the query finishes with status `RESPONSE_TOO_LARGE` (HTTP 500 on
+the sync endpoint, `Failed` from `/asyncquery_status`). Every breach is logged
+at **CRITICAL** with a `RESPONSE_TOO_LARGE` marker, both in the worker's output
+and in the query's own log list, so it shows up in the delivered response too.
+
+Two more bounds, both always on:
+
+- **Per-query logs are capped** (`QUERY_MAX_LOG_ENTRIES`, default 10000, `0`
+  disables). A query's log list is loaded whole by everything that reads it,
+  including the status endpoint the ARS polls, so it is trimmed to the newest
+  N entries on every append. The last thing logged, such as the CRITICAL line
+  a failed query ends with, always survives.
+- **`merge_message` only merges callbacks the query is still waiting for.** A
+  callback's row in the callbacks table is cleared when the lookup times out,
+  when the query finishes, or once it is merged; a ready callback with no row
+  is dropped instead of being merged into (and logging against) a response
+  that has already been delivered.
+
+Independently of the caps, `merge_message` keeps a per-query crash counter in
+Redis: each merge pass is counted before it starts and cleared when it returns,
+so a pass that took the pod down with it is still counted on the next pod. Once
+a response's merge has crashed `MAX_TASK_DELIVERIES` (default 3) times without
+completing, the query is failed `RESPONSE_TOO_LARGE` instead of being retried.
+This is the always-on backstop for the case the caps were set too high to
+catch.
 
 ##### Kubernetes sizing (Helm)
 
