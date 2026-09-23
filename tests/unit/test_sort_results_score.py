@@ -8,6 +8,10 @@ from workers.sort_results_score.worker import sort_results_score
 
 logger = logging.getLogger(__name__)
 
+# Every analysis binds something: an analysis without edge or path bindings is
+# invalid TRAPI 2.0 and is pruned when a response is stored (save_response).
+_A = {"resource_id": "infores:test", "edge_bindings": {"e0": {"ids": ["ke0"]}}}
+
 
 @pytest.mark.asyncio
 async def test_default_sort(redis_mock, mocker):
@@ -21,6 +25,7 @@ async def test_default_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
+                            **_A,
                             "score": 0.1,
                         },
                     ],
@@ -28,6 +33,7 @@ async def test_default_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
+                            **_A,
                             "score": 0.9,
                         },
                     ],
@@ -71,6 +77,7 @@ async def test_ascending_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
+                            **_A,
                             "score": 0.9,
                         },
                     ],
@@ -78,6 +85,7 @@ async def test_ascending_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
+                            **_A,
                             "score": 0.1,
                         },
                     ],
@@ -127,7 +135,7 @@ async def test_results_without_analyses_sort_as_zero(redis_mock, mocker):
         "message": {
             "results": [
                 {"node_bindings": {"n0": {"ids": ["X:1"]}}},
-                {"analyses": [{"score": 0.2}, {"score": 0.7}]},
+                {"analyses": [{**_A, "score": 0.2}, {**_A, "score": 0.7}]},
             ],
         },
     }

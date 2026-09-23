@@ -16,6 +16,7 @@ from workers.finish_query.worker import (
     CALLBACK_ATTEMPTS,
     CALLBACK_ERROR_BODY_BYTES,
     _append_log_entry,
+    delivery_payload,
     _describe_callback_failure,
     _is_retryable,
     finish_query,
@@ -46,11 +47,13 @@ def _patch_async_query(mocker, message=None, logs=None):
         "workers.finish_query.worker.set_query_completed",
         new_callable=mocker.AsyncMock,
     )
-    mocker.patch(
-        "workers.finish_query.worker.get_message",
-        new_callable=mocker.AsyncMock,
-        return_value=message if message is not None else {"message": {}},
-    )
+    message = message if message is not None else {"message": {}}
+
+    async def _get(message_id, logger, *args, raw=False, **kwargs):
+        # The response is loaded as raw bytes, the query decoded.
+        return orjson.dumps(message) if raw else message
+
+    mocker.patch("workers.finish_query.worker.get_message", side_effect=_get)
     mocker.patch(
         "workers.finish_query.worker.get_logs",
         new_callable=mocker.AsyncMock,
@@ -244,55 +247,96 @@ def test_append_log_entry_handles_both_array_shapes():
 
 def test_append_log_entry_adds_logs_to_a_payload_without_any():
     """TRAPI 2.0 forbids an empty ``logs``, so a response with no logs is
-    delivered without the key (ending with the message object); a late entry
-    adds the array rather than being dropped."""
-    from shepherd_utils.trapi import finalize_response
-
+    delivered without the member; a late entry adds it (``has_logs=False``)
+    rather than being dropped."""
     entry = {"message": "late", "level": "ERROR"}
-    response = finalize_response(
-        {"message": {"results": [], "knowledge_graph": {"nodes": {}, "edges": {}}}},
-        {"parameters": {"log_level": "INFO"}},
-        [],
+    payload = delivery_payload(
+        orjson.dumps({"message": {"results": []}}), {"parameters": {"timeout": 5}}, []
     )
-    payload = orjson.dumps(response)
     assert b'"logs"' not in payload
-    appended = orjson.loads(_append_log_entry(payload, entry))
+    appended = orjson.loads(_append_log_entry(payload, entry, has_logs=False))
     assert appended["logs"] == [entry]
-    assert appended["message"] == response["message"]
-    assert appended["parameters"] == {"log_level": "INFO"}
-    # A payload with a logs array elsewhere is still left alone.
-    other = orjson.dumps({"logs": [], "message": {"x": {}}})
-    assert _append_log_entry(other, entry) == other
+    assert appended["message"] == {"results": []}
+    assert appended["parameters"] == {"timeout": 5}
+    assert list(appended)[-1] == "logs"
+
+
+STORED = {
+    "message": {
+        "query_graph": {
+            "nodes": {"n0": {"ids": ["X:1"]}, "n1": {}},
+            "edges": {"e0": {"subject": "n0", "object": "n1"}},
+        },
+        "knowledge_graph": {"nodes": {}, "edges": {}},
+        "results": [],
+    },
+    "workflow": [{"id": "lookup"}],
+}
+LOG = {"timestamp": "2024-01-01T00:00:00+00:00", "level": "INFO", "message": "done"}
+
+
+def test_delivery_payload_is_a_valid_trapi_2_response():
+    """The envelope goes in front of the stored members and the logs last."""
+    from translator_tom import Response
+
+    query = {"message": {}, "parameters": {"log_level": "DEBUG", "timeout": 60}}
+    payload = delivery_payload(orjson.dumps(STORED), query, [LOG])
+
+    body = orjson.loads(payload)
+    Response.from_dict(body)
+    assert list(body) == [
+        "schema_version",
+        "biolink_version",
+        "parameters",
+        "message",
+        "workflow",
+        "logs",
+    ]
+    assert body["schema_version"] == "2.0.0"
+    assert body["parameters"] == query["parameters"]
+    assert body["message"] == STORED["message"]
+    assert body["logs"] == [LOG]
+
+
+def test_delivery_payload_without_logs_or_query():
+    """No logs: no ``logs`` member (an empty one is invalid 2.0). No query (it
+    expired) or no parameters: no ``parameters`` echo."""
+    from translator_tom import Response
+
+    for query in (None, {"message": {}}):
+        body = orjson.loads(delivery_payload(orjson.dumps(STORED), query, []))
+        Response.from_dict(body)
+        assert "logs" not in body
+        assert "parameters" not in body
+        assert body["message"] == STORED["message"]
+
+
+def test_delivery_payload_handles_an_empty_stored_object():
+    body = orjson.loads(delivery_payload(b"{}", None, [LOG]))
+    assert body["logs"] == [LOG] and body["schema_version"] == "2.0.0"
+
+
+@pytest.mark.parametrize("stored", [b"[1, 2]", b'"text"', b"", b"null"])
+def test_delivery_payload_returns_a_non_object_untouched(stored):
+    assert delivery_payload(stored, {"parameters": {"timeout": 1}}, [LOG]) == stored
 
 
 @pytest.mark.asyncio
 async def test_callback_payload_is_a_valid_trapi_2_response(redis_mock, mocker):
-    """What finish_query POSTs is a TRAPI 2.0 Response: version stamps, the
-    query's parameters echoed back, query-only members dropped, forbidden
-    empties pruned, logs last."""
+    """What finish_query POSTs is a TRAPI 2.0 Response built around the
+    stored bytes: version stamps, the query's parameters echoed, logs last."""
     from translator_tom import Response
 
-    stored = {
-        "message": {
-            "query_graph": {
-                "nodes": {"n0": {"ids": ["X:1"]}, "n1": {}},
-                "edges": {"e0": {"subject": "n0", "object": "n1"}},
-            },
-            "knowledge_graph": {"nodes": {}, "edges": {}},
-            "results": [],
-            "auxiliary_graphs": {},
-        },
-        "callback": "http://callback",
-        "submitter": "infores:someone",
-        "workflow": [{"id": "lookup"}],
-    }
     query = {
-        "message": {"query_graph": stored["message"]["query_graph"]},
+        "message": {"query_graph": STORED["message"]["query_graph"]},
         "parameters": {"log_level": "DEBUG", "timeout": 60},
     }
 
-    async def _get(message_id, logger, *args, **kwargs):
-        return {"rid": stored, "test": query}[message_id]
+    async def _get(message_id, logger, *args, raw=False, **kwargs):
+        if message_id == "rid":
+            assert raw, "the response must not be decoded"
+            return orjson.dumps(STORED)
+        return query
 
     mocker.patch(
         "workers.finish_query.worker.get_query_state",
@@ -304,15 +348,10 @@ async def test_callback_payload_is_a_valid_trapi_2_response(redis_mock, mocker):
         new_callable=mocker.AsyncMock,
     )
     mocker.patch("workers.finish_query.worker.get_message", side_effect=_get)
-    log = {
-        "timestamp": "2024-01-01T00:00:00+00:00",
-        "level": "INFO",
-        "message": "done",
-    }
     mocker.patch(
         "workers.finish_query.worker.get_logs",
         new_callable=mocker.AsyncMock,
-        return_value=[log],
+        return_value=[LOG],
     )
     mock_post = mocker.patch(
         "httpx.AsyncClient.post",
@@ -327,10 +366,39 @@ async def test_callback_payload_is_a_valid_trapi_2_response(redis_mock, mocker):
     assert payload["schema_version"] == "2.0.0"
     assert "biolink_version" in payload
     assert payload["parameters"] == {"log_level": "DEBUG", "timeout": 60}
-    assert "callback" not in payload and "submitter" not in payload
-    assert "auxiliary_graphs" not in payload["message"]
-    assert payload["logs"] == [log]
+    assert payload["logs"] == [LOG]
     assert list(payload)[-1] == "logs"
+
+
+@pytest.mark.asyncio
+async def test_retry_note_is_added_to_a_payload_without_logs(redis_mock, mocker):
+    """A query with no logs is delivered without ``logs``; when a POST fails,
+    the retry payload gains a ``logs`` member carrying the failure note."""
+    _patch_async_query(mocker, logs=[])
+    # Three attempts, so the second retry shows the member added by the first
+    # is then extended rather than added again.
+    mocker.patch("workers.finish_query.worker.CALLBACK_ATTEMPTS", 3)
+    mock_post = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        side_effect=[
+            _http_error_response(500, b"try again"),
+            _http_error_response(500, b"try again"),
+            _http_error_response(200, b"ok"),
+        ],
+    )
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+
+    await finish_query(TASK, logger)
+
+    first = orjson.loads(mock_post.call_args_list[0].kwargs["content"])
+    second = orjson.loads(mock_post.call_args_list[1].kwargs["content"])
+    third = orjson.loads(mock_post.call_args_list[2].kwargs["content"])
+    assert "logs" not in first
+    assert len(second["logs"]) == 1
+    assert len(third["logs"]) == 2
+    assert "HTTP 500" in second["logs"][0]["message"]
+    assert third["logs"][0] == second["logs"][0]
 
 
 def test_append_log_entry_leaves_an_unexpected_tail_alone():

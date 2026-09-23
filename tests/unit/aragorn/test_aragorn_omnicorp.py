@@ -381,12 +381,12 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
     ``aragorn_omnicorp`` is the function dispatched to the process pool: only
     the ``response_id`` crosses the boundary. It loads the message from Redis via
     ``get_message_sync``, applies the overlay, and persists it with
-    ``save_message_sync`` -- the large payload never has to be passed in or
+    ``save_response_sync`` -- the large payload never has to be passed in or
     returned across the process boundary. It must also strip and restore any
     top-level ``workflow`` around the overlay.
     """
     loaded = {
-        "workflow": {"ids": ["aragorn.omnicorp"]},
+        "workflow": [{"id": "aragorn.omnicorp"}],
         "message": {
             "query_graph": {
                 "nodes": {"n0": {"set_interpretation": "BATCH"}},
@@ -406,7 +406,7 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
     )
     monkeypatch.setattr(
         worker,
-        "save_message_sync",
+        "save_response_sync",
         lambda response_id, message: saved.update({response_id: message}),
     )
 
@@ -418,7 +418,7 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
     out = saved["resp-1"]
 
     # The workflow is stripped before the overlay and restored afterwards.
-    assert out["workflow"] == {"ids": ["aragorn.omnicorp"]}
+    assert out["workflow"] == [{"id": "aragorn.omnicorp"}]
 
     node = out["message"]["knowledge_graph"]["nodes"]["MONDO:0001"]
     article_attrs = [

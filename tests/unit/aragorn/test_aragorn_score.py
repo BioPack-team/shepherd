@@ -10,14 +10,14 @@ def test_aragorn_ranker_loads_scores_and_saves(mocker):
 
     Only the ``response_id`` crosses into the worker: ``aragorn_score`` loads the
     message via ``get_message_sync``, scores it, and persists it with
-    ``save_message_sync`` -- the large payload never has to be passed in or
+    ``save_response_sync`` -- the large payload never has to be passed in or
     returned across the process boundary.
     """
     mocker.patch(
         "workers.aragorn_score.worker.get_message_sync",
         return_value=copy.deepcopy(response_1),
     )
-    save = mocker.patch("workers.aragorn_score.worker.save_message_sync")
+    save = mocker.patch("workers.aragorn_score.worker.save_response_sync")
     logger = logging.getLogger(__name__)
 
     aragorn_score("resp-1", logger)
@@ -44,7 +44,7 @@ def test_aragorn_score_saves_unchanged_when_no_results(mocker):
         "workers.aragorn_score.worker.get_message_sync",
         return_value=copy.deepcopy(no_results),
     )
-    save = mocker.patch("workers.aragorn_score.worker.save_message_sync")
+    save = mocker.patch("workers.aragorn_score.worker.save_response_sync")
     logger = logging.getLogger(__name__)
 
     aragorn_score("resp-2", logger)

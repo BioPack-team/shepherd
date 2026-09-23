@@ -14,6 +14,10 @@ from workers.filter_analyses_top_n.worker import filter_analyses_top_n
 
 logger = logging.getLogger(__name__)
 
+# Every analysis binds something: an analysis without edge or path bindings is
+# invalid TRAPI 2.0 and is pruned when a response is stored (save_response).
+_A = {"resource_id": "infores:test", "edge_bindings": {"e0": {"ids": ["ke0"]}}}
+
 
 def _make_task(workflow):
     return [
@@ -37,8 +41,8 @@ async def test_filter_analyses_top_n_truncates_to_max(redis_mock, mocker):
         return_value={
             "message": {
                 "results": [
-                    {"analyses": [{"score": i} for i in range(5)]},
-                    {"analyses": [{"score": i} for i in range(2)]},
+                    {"analyses": [{**_A, "score": i} for i in range(5)]},
+                    {"analyses": [{**_A, "score": i} for i in range(2)]},
                 ]
             }
         },
@@ -62,7 +66,7 @@ async def test_filter_analyses_top_n_default_cap_when_unset(redis_mock, mocker):
         return_value={
             "message": {
                 "results": [
-                    {"analyses": [{"score": i} for i in range(5)]},
+                    {"analyses": [{**_A, "score": i} for i in range(5)]},
                 ]
             }
         },
@@ -100,7 +104,7 @@ async def test_filter_analyses_top_n_tolerates_absent_analyses(redis_mock, mocke
             "message": {
                 "results": [
                     {"node_bindings": {"n0": {"ids": ["X:1"]}}},
-                    {"analyses": [{"score": i} for i in range(3)]},
+                    {"analyses": [{**_A, "score": i} for i in range(3)]},
                 ]
             }
         },
@@ -120,7 +124,7 @@ async def test_filter_analyses_top_n_drops_emptied_analyses(redis_mock, mocker):
     mocker.patch(
         "workers.filter_analyses_top_n.worker.get_message",
         new_callable=mocker.AsyncMock,
-        return_value={"message": {"results": [{"analyses": [{"score": 1}]}]}},
+        return_value={"message": {"results": [{"analyses": [{**_A, "score": 1}]}]}},
     )
 
     await filter_analyses_top_n(

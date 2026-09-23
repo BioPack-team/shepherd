@@ -113,8 +113,13 @@ async def test_example_score(mocker, redis_mock):
         "message": {
             "results": [
                 {
+                    # An analysis must bind something to survive being
+                    # stored (save_response prunes invalid 2.0 analyses).
                     "analyses": [
-                        {},
+                        {
+                            "resource_id": "infores:test",
+                            "edge_bindings": {"e0": {"ids": ["ke0"]}},
+                        },
                     ],
                 },
             ],

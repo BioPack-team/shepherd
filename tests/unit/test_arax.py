@@ -69,59 +69,6 @@ ARAX_RESPONSE = {
     }
 }
 
-# What a still-TRAPI-1.x ARAX answers with: list-shaped bindings and
-# knowledge_level / agent_type as edge attributes.
-ARAX_1X_RESPONSE = {
-    "message": {
-        "query_graph": QUERY["message"]["query_graph"],
-        "knowledge_graph": {
-            "nodes": {
-                "MONDO:0005148": {"categories": ["biolink:Disease"]},
-                "CHEBI:15365": {"categories": ["biolink:SmallMolecule"]},
-            },
-            "edges": {
-                "e0": {
-                    "subject": "CHEBI:15365",
-                    "predicate": "biolink:treats",
-                    "object": "MONDO:0005148",
-                    "attributes": [
-                        {
-                            "attribute_type_id": "biolink:knowledge_level",
-                            "value": "knowledge_assertion",
-                        },
-                        {
-                            "attribute_type_id": "biolink:agent_type",
-                            "value": "manual_agent",
-                        },
-                    ],
-                    "sources": [
-                        {
-                            "resource_id": "infores:arax",
-                            "resource_role": "primary_knowledge_source",
-                            "upstream_resource_ids": [],
-                            "source_record_urls": None,
-                        }
-                    ],
-                }
-            },
-        },
-        "results": [
-            {
-                "node_bindings": {
-                    "a": [{"id": "MONDO:0005148", "attributes": []}],
-                    "b": [{"id": "CHEBI:15365", "attributes": []}],
-                },
-                "analyses": [
-                    {
-                        "resource_id": "infores:arax",
-                        "edge_bindings": {"e0": [{"id": "e0", "attributes": []}]},
-                    }
-                ],
-            }
-        ],
-    }
-}
-
 
 def _task():
     return [
@@ -145,7 +92,7 @@ def _patch_db(mocker, message=None):
         return_value=message if message is not None else dict(QUERY),
     )
     return mocker.patch(
-        "workers.arax.worker.save_message",
+        "workers.arax.worker.save_response",
         new_callable=mocker.AsyncMock,
     )
 
@@ -200,30 +147,6 @@ async def test_successful_query_saves_response_and_advances_workflow(mocker):
     ]
     assert json.loads(task[1]["workflow"]) == [{"id": "arax"}]
     Response.from_dict(saved)
-
-
-@pytest.mark.asyncio
-async def test_trapi_1_arax_response_is_upgraded_to_2_0(mocker):
-    """settings.arax_url may still be a 1.x ARAX; its response is converted to
-    TRAPI 2.0 before it is saved."""
-    save = _patch_db(mocker)
-    _patch_span(mocker)
-    _patch_post(mocker, _http_response(200, json_body=ARAX_1X_RESPONSE))
-
-    await arax(_task(), logger)
-
-    saved = save.await_args.args[1]
-    Response.from_dict(saved)
-    result = saved["message"]["results"][0]
-    assert result["node_bindings"]["a"] == {"ids": ["MONDO:0005148"]}
-    assert result["analyses"][0]["edge_bindings"]["e0"] == {"ids": ["e0"]}
-    edge = saved["message"]["knowledge_graph"]["edges"]["e0"]
-    assert edge["knowledge_level"] == "knowledge_assertion"
-    assert edge["agent_type"] == "manual_agent"
-    assert [s["resource_id"] for s in edge["sources"]] == [
-        "infores:arax",
-        "infores:shepherd-arax",
-    ]
 
 
 @pytest.mark.parametrize("status_code", [400, 404, 429, 500, 502])

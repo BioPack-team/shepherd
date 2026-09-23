@@ -659,7 +659,7 @@ async def test_finish_query_records_too_large_and_delivers_the_empty_message(
 
     completed.assert_awaited_once_with("q1", TOO_LARGE_STATUS, logger)
     # What was delivered is the empty message, logs spliced in...
-    url, payload, _ = sent.await_args.args
+    url, payload = sent.await_args.args[:2]
     body = orjson.loads(payload)
     assert body["message"]["results"] == []
     assert body["status"] == "Error"

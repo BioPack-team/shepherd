@@ -13,6 +13,15 @@ from workers.finish_query.worker import CALLBACK_ATTEMPTS, finish_query
 logger = logging.getLogger(__name__)
 
 
+def _by_raw(message):
+    """get_message: the response is loaded as raw bytes, the query decoded."""
+
+    async def _get(message_id, logger, *args, raw=False, **kwargs):
+        return orjson.dumps(message) if raw else message
+
+    return _get
+
+
 @pytest.mark.asyncio
 async def test_finish_query_skips_callback_when_state_missing(redis_mock, mocker):
     """If get_query_state returns None, don't try to fetch a message or POST.
@@ -110,7 +119,7 @@ async def test_finish_async_query_retries_callback_on_failure(redis_mock, mocker
     mocker.patch(
         "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
-        return_value={"message": {"results": []}},
+        side_effect=_by_raw({"message": {"results": []}}),
     )
     mocker.patch(
         "workers.finish_query.worker.get_logs",
@@ -157,7 +166,7 @@ async def test_finish_async_query_attaches_logs_to_message_payload(redis_mock, m
     mocker.patch(
         "workers.finish_query.worker.get_message",
         new_callable=mocker.AsyncMock,
-        return_value={"message": {"results": []}},
+        side_effect=_by_raw({"message": {"results": []}}),
     )
     mocker.patch(
         "workers.finish_query.worker.get_logs",

@@ -66,7 +66,7 @@ QUERY = {
     }
 }
 
-# What the catrax-pathfinder library returns: still TRAPI 1.x shaped.
+# What the catrax-pathfinder library returns (TRAPI 2.0).
 PATHS_RESULT = (
     {
         "id": "r0",
@@ -74,15 +74,15 @@ PATHS_RESULT = (
             {
                 "resource_id": "infores:arax",
                 "score": 1.0,
-                "path_bindings": {"p0": [{"id": "aux0", "attributes": []}]},
+                "path_bindings": {"p0": {"ids": ["aux0"]}},
             }
         ],
         "node_bindings": {
-            "n0": [{"id": "MONDO:0005148", "attributes": []}],
-            "n1": [{"id": "CHEBI:15365", "attributes": []}],
+            "n0": {"ids": ["MONDO:0005148"]},
+            "n1": {"ids": ["CHEBI:15365"]},
         },
     },
-    {"aux0": {"edges": ["e0"], "attributes": []}},
+    {"aux0": {"edges": ["e0"]}},
     {
         "nodes": {"MONDO:0005148": {}},
         "edges": {"e0": {"predicate": "biolink:related_to"}},
@@ -124,7 +124,7 @@ def test_pathfinder_task_searches_rehydrates_and_saves(mocker):
     """The process-pool entrypoint reads by id, searches, and writes back.
 
     Only the two ids cross into the child: the message is loaded with
-    ``get_message_sync``, assembled, and persisted with ``save_message_sync`` --
+    ``get_message_sync``, assembled, and persisted with ``save_response_sync`` --
     the knowledge graph never has to be pickled back to the parent.
     """
     _patch_query(mocker)
@@ -136,7 +136,7 @@ def test_pathfinder_task_searches_rehydrates_and_saves(mocker):
         "workers.arax_pathfinder.worker.rehydrate",
         return_value=copy.deepcopy(REHYDRATED_KG),
     )
-    save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
+    save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
     pf_worker.arax_pathfinder_task("query-1", "resp-1", {}, LOGGER)
 
@@ -150,7 +150,7 @@ def test_pathfinder_task_searches_rehydrates_and_saves(mocker):
     # The 2.0 edge from Retriever keeps its knowledge_level / agent_type.
     assert kg["edges"]["e0"]["knowledge_level"] == "knowledge_assertion"
     assert kg["edges"]["e0"]["agent_type"] == "manual_agent"
-    # 1.x aux graphs / results from the pathfinder library are now 2.0.
+    # Results and aux graphs are saved as the pathfinder library built them.
     assert message["message"]["auxiliary_graphs"] == {"aux0": {"edges": ["e0"]}}
     assert len(message["message"]["results"]) == 1
     result = message["message"]["results"][0]
@@ -179,7 +179,7 @@ def test_pathfinder_task_saves_empty_graphs_when_no_paths_found(mocker):
         return_value=(None, None, None),
     )
     mocker.patch("workers.arax_pathfinder.worker.rehydrate", return_value=None)
-    save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
+    save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
     pf_worker.arax_pathfinder_task("query-2", "resp-2", {}, LOGGER)
 
@@ -188,34 +188,6 @@ def test_pathfinder_task_saves_empty_graphs_when_no_paths_found(mocker):
     # An empty auxiliary_graphs object is invalid in TRAPI 2.0: omitted.
     assert "auxiliary_graphs" not in message["message"]
     assert message["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
-
-
-def test_pathfinder_1x_kg_edges_are_upgraded(mocker):
-    """A 1.x edge (knowledge_level / agent_type as attributes) is converted."""
-    _patch_query(mocker)
-    mocker.patch(
-        "workers.arax_pathfinder.worker.execute_pathfinding",
-        return_value=copy.deepcopy(PATHS_RESULT),
-    )
-    kg_1x = copy.deepcopy(REHYDRATED_KG)
-    edge = kg_1x["edges"]["e0"]
-    del edge["knowledge_level"], edge["agent_type"]
-    edge["attributes"] = [
-        {"attribute_type_id": "biolink:knowledge_level", "value": "prediction"},
-        {"attribute_type_id": "biolink:agent_type", "value": "computational_model"},
-    ]
-    kg_1x["nodes"]["CHEBI:15365"] = {"categories": [], "name": "x"}
-    mocker.patch("workers.arax_pathfinder.worker.rehydrate", return_value=kg_1x)
-    save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
-
-    pf_worker.arax_pathfinder_task("query-6", "resp-6", {}, LOGGER)
-
-    _, message = save.call_args.args
-    kg = message["message"]["knowledge_graph"]
-    assert kg["edges"]["e0"]["knowledge_level"] == "prediction"
-    assert kg["edges"]["e0"]["agent_type"] == "computational_model"
-    assert kg["nodes"]["CHEBI:15365"]["categories"] == ["biolink:NamedThing"]
-    Message.from_dict(message["message"])
 
 
 def test_parse_query_graph_reads_required_intermediate_categories():
@@ -290,7 +262,7 @@ def test_unanswerable_query_graph_raises(mocker, qgraph, expected):
     routes the query to ``finish_query`` with an ERROR status instead.
     """
     _patch_query(mocker, {"message": {"query_graph": qgraph}})
-    save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
+    save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
     search = mocker.patch("workers.arax_pathfinder.worker.execute_pathfinding")
 
     with pytest.raises(ValueError, match=expected):
@@ -312,7 +284,7 @@ def test_search_failure_propagates_instead_of_saving_error_blob(mocker):
         "workers.arax_pathfinder.worker.execute_pathfinding",
         side_effect=RuntimeError("sqlite is on fire"),
     )
-    save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
+    save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
     with pytest.raises(RuntimeError, match="sqlite is on fire"):
         pf_worker.arax_pathfinder_task("query-4", "resp-4", {}, LOGGER)
@@ -331,7 +303,7 @@ def test_rehydrate_failure_propagates(mocker):
         "workers.arax_pathfinder.worker.rehydrate",
         side_effect=RuntimeError("retriever unreachable"),
     )
-    save = mocker.patch("workers.arax_pathfinder.worker.save_message_sync")
+    save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
     with pytest.raises(RuntimeError, match="retriever unreachable"):
         pf_worker.arax_pathfinder_task("query-5", "resp-5", {}, LOGGER)

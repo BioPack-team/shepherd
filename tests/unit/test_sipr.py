@@ -206,7 +206,7 @@ async def test_sipr_skips_non_set_input_query(redis_mock, mocker):
         },
     )
     mock_save = mocker.patch(
-        "workers.sipr.worker.save_message",
+        "workers.sipr.worker.save_response",
         new_callable=mocker.AsyncMock,
     )
     task = _make_task()
@@ -278,7 +278,7 @@ async def test_sipr_set_input_runs_pagerank_and_saves_message(redis_mock, mocker
         return_value=fake_neighborhood,
     )
     mock_save = mocker.patch(
-        "workers.sipr.worker.save_message",
+        "workers.sipr.worker.save_response",
         new_callable=mocker.AsyncMock,
     )
 
@@ -381,7 +381,7 @@ async def test_sipr_saved_message_is_valid_trapi_2(redis_mock, mocker):
         return_value=fake_neighborhood,
     )
     mock_save = mocker.patch(
-        "workers.sipr.worker.save_message", new_callable=mocker.AsyncMock
+        "workers.sipr.worker.save_response", new_callable=mocker.AsyncMock
     )
 
     await sipr_worker.sipr(_make_task(), logger)
@@ -409,50 +409,3 @@ async def test_sipr_saved_message_is_valid_trapi_2(redis_mock, mocker):
             edge = message["knowledge_graph"]["edges"][edge_id]
             assert edge["knowledge_level"] == "prediction"
             assert edge["agent_type"] == "computational_model"
-
-
-@pytest.mark.asyncio
-async def test_run_trapi_upgrades_trapi_1_response(mocker):
-    """A 1.x answer from Retriever is read as 2.0."""
-    import httpx
-
-    one_x = {
-        "message": {
-            "knowledge_graph": {
-                "nodes": {"A:1": {"categories": ["biolink:NamedThing"]}},
-                "edges": {
-                    "e": {
-                        "subject": "A:1",
-                        "predicate": "biolink:related_to",
-                        "object": "A:1",
-                        "sources": [
-                            {
-                                "resource_id": "infores:x",
-                                "resource_role": "primary_knowledge_source",
-                            }
-                        ],
-                        "attributes": [
-                            {
-                                "attribute_type_id": "biolink:knowledge_level",
-                                "value": "knowledge_assertion",
-                            },
-                            {
-                                "attribute_type_id": "biolink:agent_type",
-                                "value": "manual_agent",
-                            },
-                        ],
-                    }
-                },
-            }
-        }
-    }
-    request = httpx.Request("POST", "https://retriever.example/query")
-    mocker.patch(
-        "httpx.AsyncClient.post",
-        new_callable=mocker.AsyncMock,
-        return_value=httpx.Response(200, json=one_x, request=request),
-    )
-    response = await sipr_worker.run_trapi(sipr_worker.write_trapi(["A:1"], 0), logger)
-    edge = response["message"]["knowledge_graph"]["edges"]["e"]
-    assert edge["knowledge_level"] == "knowledge_assertion"
-    assert edge["agent_type"] == "manual_agent"
