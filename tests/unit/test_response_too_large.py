@@ -91,7 +91,8 @@ def test_build_too_large_response_is_empty_and_says_why():
     assert response["message"]["query_graph"] is qg
     assert response["message"]["results"] == []
     assert response["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
-    assert response["message"]["auxiliary_graphs"] == {}
+    # TRAPI 2.0 forbids an empty auxiliary_graphs: absent instead.
+    assert "auxiliary_graphs" not in response["message"]
     assert response["status"] == "Error"
     assert response["description"] == "Response too large: it was huge"
     # finish_query splices the query's logs in itself.
@@ -99,7 +100,18 @@ def test_build_too_large_response_is_empty_and_says_why():
 
 
 def test_build_too_large_response_without_a_query_graph():
-    assert build_too_large_response(None, "x")["message"]["query_graph"] == {}
+    """An empty query graph is invalid TRAPI 2.0, so there is none at all."""
+    assert "query_graph" not in build_too_large_response(None, "x")["message"]
+    assert "query_graph" not in build_too_large_response({}, "x")["message"]
+
+
+def test_build_too_large_response_is_a_valid_trapi_2_response():
+    from translator_tom import Response
+
+    from shepherd_utils.trapi import finalize_response
+
+    response = build_too_large_response(QUERY["message"]["query_graph"], "big")
+    Response.from_dict(finalize_response(response, QUERY))
 
 
 async def test_fail_response_too_large_settles_everything(
@@ -137,10 +149,10 @@ async def test_fail_response_too_large_settles_everything(
 
 async def test_fail_response_too_large_without_the_query(redis_mock, no_postgres):
     """A query blob that has already expired doesn't stop the failure from
-    being recorded; the response just carries an empty query graph."""
+    being recorded; the response just carries no query graph."""
     await fail_response_too_large("missing-q", "r2", "reason", logger)
     stored = await get_message("r2", logger)
-    assert stored["message"]["query_graph"] == {}
+    assert "query_graph" not in stored["message"]
     assert await get_too_large_reason("r2") == "reason"
 
 
@@ -671,11 +683,19 @@ async def test_finish_query_checks_the_cap_itself(
     monkeypatch.setattr(settings, "max_response_size", "100")
     await save_message("q1", QUERY, logger)
     await save_message("r1", _big_message(), logger)
-    load = mocker.patch.object(fq, "get_message")
+    real_get_message = fq.get_message
+
+    async def _load(message_id, logger, *args, **kwargs):
+        # Loading the query (to echo its parameters) is fine; the response
+        # itself must never be loaded.
+        assert message_id != "r1", "the oversized response was loaded"
+        return await real_get_message(message_id, logger, *args, **kwargs)
+
+    load = mocker.patch.object(fq, "get_message", side_effect=_load)
 
     await fq.finish_query(_finish_task(), logger)
 
-    load.assert_not_called()
+    assert all(call.args[0] != "r1" for call in load.call_args_list)
     completed.assert_awaited_once_with("q1", TOO_LARGE_STATUS, logger)
     assert "finish_query" in await get_too_large_reason("r1")
     body = orjson.loads(sent.await_args.args[1])
@@ -695,6 +715,9 @@ async def test_finish_query_is_unchanged_for_a_normal_response(
     completed.assert_awaited_once_with("q1", "OK", logger)
     body = orjson.loads(sent.await_args.args[1])
     assert len(body["message"]["knowledge_graph"]["nodes"]) == 2000
+    # The query blob ("q1") was never stored here -- as when it has expired
+    # under a long query -- and the response is still delivered, as 2.0.
+    assert body["schema_version"] == "2.0.0"
 
 
 # --- merge_message: callbacks the query is no longer waiting for --------------

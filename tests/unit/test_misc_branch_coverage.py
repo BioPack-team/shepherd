@@ -183,11 +183,12 @@ def test_create_log_entry_returns_shaped_dict():
     assert "timestamp" in entry
 
 
-def test_create_log_entry_default_code_none():
+def test_create_log_entry_omits_code_when_none():
+    """TRAPI 2.0 has no nulls: an absent code is an absent property."""
     from workers.aragorn_omnicorp.worker import create_log_entry
 
     entry = create_log_entry("hi", "WARNING")
-    assert entry["code"] is None
+    assert "code" not in entry
 
 
 def test_add_node_pmid_counts_uses_zero_for_missing_curies():
@@ -280,8 +281,8 @@ def test_generate_curie_pairs_includes_setnode_pairings():
     answers = [
         {
             "node_bindings": {
-                "qset": [{"id": "S1"}, {"id": "S2"}],
-                "qother": [{"id": "O1"}],
+                "qset": {"ids": ["S1", "S2"]},
+                "qother": {"ids": ["O1"]},
             },
             "analyses": [
                 {

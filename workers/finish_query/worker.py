@@ -382,7 +382,16 @@ async def finish_query(task, logger: logging.Logger):
             # ``_append_log_entry``). That needs the decoded response, so the
             # dict is dropped the moment it is encoded -- only the bytes stay
             # resident for the (up to 120s x retries) POST below.
-            original_query = await get_message(query_id, logger)
+            try:
+                original_query = await get_message(query_id, logger)
+            except Exception as e:
+                # The query blob can have expired under a long-running query;
+                # that must not cost the caller their response. Without it,
+                # a ``parameters`` already on the response is echoed instead.
+                logger.warning(
+                    f"Couldn't load query {query_id} to echo its parameters: {e}"
+                )
+                original_query = None
             message = finalize_response(
                 message if message is not None else {}, original_query, logs
             )

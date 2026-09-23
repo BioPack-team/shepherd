@@ -1,8 +1,9 @@
 """Tests for the log level the /callback endpoint runs at.
 
-The level a query asked for lives in the query itself. A TRAPI *response* has
-no ``log_level`` field, so the body a subservice posts to ``/callback`` can't
-carry it -- the handler has to read it back from the stored query. Getting this
+The level a query asked for lives in the query itself (TRAPI 2.0:
+``parameters.log_level``). The body a subservice posts to ``/callback`` is its
+own response and says nothing about what our client asked for -- the handler
+has to read it back from the stored query. Getting this
 wrong is quiet: everything downstream of the callback (the handler's own logs,
 the merge task it enqueues, and the retrieval logs merge folds into the query's
 log list) silently runs at INFO and a DEBUG query loses its logs.
@@ -79,7 +80,9 @@ def _callback_body(**extra):
 async def test_callback_takes_its_level_from_the_stored_query(redis_mock, monkeypatch):
     """A DEBUG query keeps logging at DEBUG once its callbacks come back."""
     tasks = _patch_callback_deps(monkeypatch)
-    await save_message("q-1", {"log_level": "DEBUG", "message": {}}, logger)
+    await save_message(
+        "q-1", {"parameters": {"log_level": "DEBUG"}, "message": {}}, logger
+    )
 
     response = await callback(
         ARATargetEnum.ARAGORN, "cb-1", _make_request(_callback_body())
@@ -98,10 +101,16 @@ async def test_callback_ignores_a_level_claimed_by_the_body(redis_mock, monkeypa
     """The regression: the level used to be read off the posted body. Nothing a
     subservice sends back gets to lower (or raise) what the client asked for."""
     tasks = _patch_callback_deps(monkeypatch)
-    await save_message("q-1", {"log_level": "DEBUG", "message": {}}, logger)
+    await save_message(
+        "q-1", {"parameters": {"log_level": "DEBUG"}, "message": {}}, logger
+    )
 
     await callback(
-        ARATargetEnum.ARAGORN, "cb-2", _make_request(_callback_body(log_level="ERROR"))
+        ARATargetEnum.ARAGORN,
+        "cb-2",
+        _make_request(
+            _callback_body(log_level="ERROR", parameters={"log_level": "ERROR"})
+        ),
     )
 
     assert logging.getLogger("shepherd.cb-2").level == logging.DEBUG
@@ -134,3 +143,108 @@ async def test_callback_survives_an_unreadable_query(redis_mock, monkeypatch):
     assert response.status_code == 200
     assert logging.getLogger("shepherd.cb-4").level == logging.INFO
     assert tasks[0][1]["log_level"] == logging.INFO
+
+
+@pytest.mark.asyncio
+async def test_callback_ignores_a_top_level_1x_log_level_on_the_query(
+    redis_mock, monkeypatch
+):
+    """TRAPI 2.0 moved log_level into parameters; a stored query that only
+    has the 1.x top-level spelling (intake rejects it now) gets the default."""
+    tasks = _patch_callback_deps(monkeypatch)
+    await save_message("q-1", {"log_level": "DEBUG", "message": {}}, logger)
+
+    await callback(ARATargetEnum.ARAGORN, "cb-5", _make_request(_callback_body()))
+
+    assert tasks[0][1]["log_level"] == logging.INFO
+
+
+TRAPI_1_CALLBACK = {
+    "message": {
+        "knowledge_graph": {
+            "nodes": {
+                "A:1": {"categories": ["biolink:Gene"]},
+                "B:1": {"categories": ["biolink:Disease"]},
+            },
+            "edges": {
+                "e1": {
+                    "subject": "A:1",
+                    "predicate": "biolink:related_to",
+                    "object": "B:1",
+                    "sources": [
+                        {
+                            "resource_id": "infores:kp",
+                            "resource_role": "primary_knowledge_source",
+                            "upstream_resource_ids": [],
+                        }
+                    ],
+                    "attributes": [
+                        {
+                            "attribute_type_id": "biolink:knowledge_level",
+                            "value": "knowledge_assertion",
+                        },
+                        {
+                            "attribute_type_id": "biolink:agent_type",
+                            "value": "manual_agent",
+                        },
+                    ],
+                }
+            },
+        },
+        "results": [
+            {
+                "node_bindings": {
+                    "n0": [{"id": "A:1", "attributes": []}],
+                    "n1": [{"id": "B:1", "attributes": []}],
+                },
+                "analyses": [
+                    {
+                        "resource_id": "infores:kp",
+                        "edge_bindings": {"e0": [{"id": "e1", "attributes": []}]},
+                    }
+                ],
+            }
+        ],
+    }
+}
+
+
+@pytest.mark.asyncio
+async def test_trapi_1_callback_is_converted_before_it_is_stored(
+    redis_mock, monkeypatch
+):
+    """A subservice still answering in TRAPI 1.x is converted to 2.0 once, in
+    the handler, so the merge only ever reads 2.0."""
+    from shepherd_utils.db import get_message
+
+    tasks = _patch_callback_deps(monkeypatch)
+    await save_message("q-1", {"message": {}}, logger)
+
+    response = await callback(
+        ARATargetEnum.ARAGORN, "cb-6", _make_request(orjson.dumps(TRAPI_1_CALLBACK))
+    )
+
+    assert response.status_code == 200
+    assert tasks and tasks[0][0] == "merge_message"
+    stored = await get_message("cb-6", logger)
+    result = stored["message"]["results"][0]
+    assert result["node_bindings"] == {"n0": {"ids": ["A:1"]}, "n1": {"ids": ["B:1"]}}
+    assert result["analyses"][0]["edge_bindings"] == {"e0": {"ids": ["e1"]}}
+    edge = stored["message"]["knowledge_graph"]["edges"]["e1"]
+    assert edge["knowledge_level"] == "knowledge_assertion"
+    assert edge["agent_type"] == "manual_agent"
+    assert "upstream_resource_ids" not in edge["sources"][0]
+
+
+@pytest.mark.asyncio
+async def test_trapi_2_callback_is_stored_unchanged(redis_mock, monkeypatch):
+    from shepherd_utils.db import get_message
+    from shepherd_utils.trapi import upgrade_trapi_1_response
+
+    _patch_callback_deps(monkeypatch)
+    await save_message("q-1", {"message": {}}, logger)
+    body = upgrade_trapi_1_response(orjson.loads(orjson.dumps(TRAPI_1_CALLBACK)))
+
+    await callback(ARATargetEnum.ARAGORN, "cb-7", _make_request(orjson.dumps(body)))
+
+    assert await get_message("cb-7", logger) == body

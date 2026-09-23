@@ -361,9 +361,7 @@ TRAPI_1_QUERIES = {
                     "p0": {
                         "subject": "n0",
                         "object": "n1",
-                        "constraints": [
-                            {"intermediate_categories": ["biolink:Gene"]}
-                        ],
+                        "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
                     }
                 },
             }
