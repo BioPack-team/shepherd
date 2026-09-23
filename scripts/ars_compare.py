@@ -80,7 +80,7 @@ try:
     from shepherd_utils.ars.merge import TranslatorMessage, mergeMessages
     from shepherd_utils.ars.premerge import appraise_confidence
     from shepherd_utils.ars.trapi import strip_nulls
-    from shepherd_utils.trapi import finalize_response, upgrade_trapi_1_response
+    from shepherd_utils.trapi import finalize_response
 
     REPLAY_AVAILABLE = True
 except ImportError as _replay_err:  # pragma: no cover
@@ -104,25 +104,24 @@ def canonical_agent(name: str) -> str:
     return out
 
 
-#: Response members that name the envelope rather than the answer: a TRAPI
-#: 1.5 ARS (upstream Relay) has none of them, Shepherd's 2.0 ARS stamps them.
+#: Response members that name the envelope rather than the answer (version
+#: stamps and the repeated parameters), which legitimately differ between
+#: stacks.
 ENVELOPE_MEMBERS = ("schema_version", "biolink_version", "parameters")
 
 
 def strip_for_comparison(payload, ignore_annotations: bool, include_logs: bool):
     """Remove content that legitimately differs between live stacks.
 
-    Shepherd's ARS speaks TRAPI 2.0 and a deployed upstream ARS 1.5, so a
-    1.x payload is first up-converted with TOM's 1.6 -> 2.0 transforms
-    (shepherd_utils.trapi.upgrade_trapi_1_response) and both sides lose the
-    2.0 envelope members; what remains is the answer, in one shape.
+    Both stacks must speak TRAPI 2.0: there is no 1.x -> 2.0 conversion,
+    so comparing against a 1.x ARS reports every shape difference. Both
+    sides lose the envelope members; what remains is the answer.
     """
     if not isinstance(payload, dict):
         return payload
     out = json.loads(json.dumps(payload))
     if REPLAY_AVAILABLE:
         strip_nulls(out)
-        out = upgrade_trapi_1_response(out)
     for member in ENVELOPE_MEMBERS:
         out.pop(member, None)
     if not include_logs:
@@ -168,8 +167,8 @@ def replay_side(side: dict) -> tuple:
     its own recorded merge order: fold -> blocklist -> confidence ->
     finalize per step, exactly like merge_received + post_process minus the
     external annotator (the null-attribute scrub left upstream in Relay PR
-    #885). Inputs from a TRAPI 1.x stack are up-converted to 2.0 first, as
-    the port only speaks 2.0. Returns (replayed_payload, error)."""
+    #885). The port only speaks TRAPI 2.0, so the captured inputs must be
+    2.0. Returns (replayed_payload, error)."""
     if not REPLAY_AVAILABLE:
         return None, f"pipeline import failed: {_REPLAY_IMPORT_ERROR}"
     order = merge_order(side.get("trace"))
@@ -181,7 +180,7 @@ def replay_side(side: dict) -> tuple:
             child = side["children"].get(agent)
             if not isinstance(child, dict) or "message" not in child:
                 return None, f"no captured input payload for {agent}"
-            child = upgrade_trapi_1_response(strip_nulls(copy.deepcopy(child)))
+            child = strip_nulls(copy.deepcopy(child))
             newcomer = TranslatorMessage(copy.deepcopy(child["message"]))
             if current is None:
                 # first merge: the newcomer IS the merged message

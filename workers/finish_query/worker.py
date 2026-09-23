@@ -22,7 +22,6 @@ from shepherd_utils.db import (
     get_message,
     get_query_state,
     save_logs,
-    save_message,
     set_query_completed,
 )
 from shepherd_utils.response_limit import (
@@ -32,7 +31,11 @@ from shepherd_utils.response_limit import (
     write_too_large_response,
 )
 from shepherd_utils.shared import get_tasks
-from shepherd_utils.trapi import finalize_response
+from shepherd_utils.trapi import (
+    BIOLINK_VERSION,
+    SCHEMA_VERSION,
+    query_parameters,
+)
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 
@@ -128,25 +131,64 @@ def _is_retryable(e: Exception) -> bool:
     return True
 
 
-def _append_log_entry(payload: bytes, entry: dict) -> bytes:
+def delivery_payload(stored: bytes, query: "dict | None", logs: "list[dict]") -> bytes:
+    """The TRAPI 2.0 Response delivered for ``stored``, without decoding it.
+
+    A stored response never carries the delivery envelope (see
+    ``shepherd_utils.trapi.prepare_stored_response``) and its content is
+    already valid 2.0, so the envelope -- ``schema_version``,
+    ``biolink_version``, the query's ``parameters`` (which 2.0 says the server
+    MUST repeat) -- is written in front of the stored members, and the logs
+    after them. ``logs`` are last so ``_append_log_entry`` can extend them,
+    and absent when there are none (``Response.logs`` has a ``minItems`` of
+    1). One allocation of the payload's size; the slices are views. Anything
+    that is not a JSON object is returned untouched.
+    """
+    envelope: dict = {
+        "schema_version": SCHEMA_VERSION,
+        "biolink_version": BIOLINK_VERSION,
+    }
+    parameters = query_parameters(query)
+    if parameters:
+        envelope["parameters"] = parameters
+    head = orjson.dumps(envelope)
+    view = memoryview(stored)
+    # ``stored`` is one JSON object as orjson wrote it: no whitespace, so its
+    # members are everything between the outer braces.
+    if stored[:1] != b"{" or stored[-1:] != b"}":
+        # Not something a worker stored; deliver it untouched rather than
+        # guess at its structure.
+        return stored
+    members = view[1:-1]
+    parts = [memoryview(head)[:-1]]
+    if len(members):
+        parts += [b",", members]
+    if logs:
+        parts += [b',"logs":', orjson.dumps(logs)]
+    parts.append(b"}")
+    return b"".join(parts)
+
+
+def _append_log_entry(payload: bytes, entry: dict, has_logs: bool = True) -> bytes:
     """Return ``payload`` with ``entry`` appended to its trailing logs array.
 
-    Only sound for a payload this worker built (``finalize_response`` fixes the
-    key order): it ends with the logs array and the closing brace, or -- when
-    there were no logs, since TRAPI 2.0 forbids an empty ``logs`` -- with the
-    message object and no ``logs`` key at all, in which case one is added.
-    Rebuilding costs a transient second copy of the payload, so callers guard
-    on size; the rebind releases the old buffer immediately. If the payload
-    doesn't have the expected tail, hand it back untouched rather than risk
-    shipping malformed JSON.
+    Only sound for a payload this worker built (``delivery_payload``): with
+    ``has_logs`` it ends with the logs array and the closing brace; without,
+    it has no ``logs`` member at all (an empty one is invalid TRAPI 2.0), so
+    one is added. Rebuilding costs a transient second copy of the payload, so
+    callers guard on size; the rebind releases the old buffer immediately. If
+    the payload doesn't have the expected tail, hand it back untouched rather
+    than risk shipping malformed JSON.
     """
     entry_bytes = orjson.dumps(entry)
+    if not has_logs:
+        if payload.endswith(b"}"):
+            return payload[:-1] + b',"logs":[' + entry_bytes + b"]}"
+        return payload
     if payload.endswith(b"[]}"):
         return payload[:-3] + b"[" + entry_bytes + b"]}"
     if payload.endswith(b"]}"):
         return payload[:-2] + b"," + entry_bytes + b"]}"
-    if payload.endswith(b"}}") and payload.find(b'"logs":') == -1:
-        return payload[:-1] + b',"logs":[' + entry_bytes + b"]}"
     return payload
 
 
@@ -154,6 +196,7 @@ async def send_callback(
     callback_url: str,
     message_bytes: bytes,
     logger: logging.Logger,
+    has_logs: bool = True,
 ) -> bool:
     """POST the finished response to the caller's callback URL.
 
@@ -232,8 +275,9 @@ async def send_callback(
             if attempt < CALLBACK_ATTEMPTS:
                 if len(message_bytes) <= RETRY_LOG_SPLICE_MAX_BYTES:
                     message_bytes = _append_log_entry(
-                        message_bytes, _log_entry(failure)
+                        message_bytes, _log_entry(failure), has_logs
                     )
+                    has_logs = True
                 sleep_for = 1 * (2 ** (attempt - 1))
                 backoff += sleep_for
                 await asyncio.sleep(sleep_for)
@@ -286,25 +330,6 @@ async def _too_large_reason(
     return None
 
 
-async def _store_finalized_response(
-    query_id: str, response_id: str, logger: logging.Logger
-) -> None:
-    """Rewrite the stored response as a finished TRAPI 2.0 Response.
-
-    Best effort: a response that can't be read or rewritten is left as it is
-    rather than failing the hand-off.
-    """
-    try:
-        response = await get_message(response_id, logger)
-        if response is None:
-            return
-        original_query = await get_message(query_id, logger)
-        response = finalize_response(response, original_query)
-        await save_message(response_id, response, logger)
-    except Exception as e:
-        logger.error(f"Couldn't finalize response {response_id}: {e}")
-
-
 async def finish_query(task, logger: logging.Logger):
     """Do all the wrap up necessary for a query."""
     start = time.time()
@@ -342,10 +367,6 @@ async def finish_query(task, logger: logging.Logger):
             # here. If the enqueue fails after its retries, the child stays
             # Running for the ARS watchdog -- the same terminal shape as an
             # undeliverable HTTP callback.
-            # The intake reads the stored response as-is, so store it as the
-            # TRAPI 2.0 Response it is delivered as (its logs travel
-            # separately; the intake reads them from the log store itself).
-            await _store_finalized_response(query_id, response_id, logger)
             carrier: dict = {}
             inject(carrier)
             try:
@@ -372,33 +393,31 @@ async def finish_query(task, logger: logging.Logger):
         elif callback_url is not None:
             # this was an async query, need to send message back
             if too_large is not None:
-                message = too_large_response
+                message_bytes = orjson.dumps(too_large_response)
             else:
-                message = await get_message(response_id, logger)
+                message_bytes = await get_message(response_id, logger, raw=True)
             logs = await get_logs(response_id, logger)
-            # The delivered payload is a TRAPI 2.0 Response: version stamps,
-            # the query's ``parameters`` repeated back (which 2.0 requires),
-            # no nulls or forbidden empties, and the logs last (see
-            # ``_append_log_entry``). That needs the decoded response, so the
-            # dict is dropped the moment it is encoded -- only the bytes stay
-            # resident for the (up to 120s x retries) POST below.
             try:
                 original_query = await get_message(query_id, logger)
             except Exception as e:
                 # The query blob can have expired under a long-running query;
-                # that must not cost the caller their response. Without it,
-                # a ``parameters`` already on the response is echoed instead.
+                # that must not cost the caller their response, only the
+                # parameters echo.
                 logger.warning(
                     f"Couldn't load query {query_id} to echo its parameters: {e}"
                 )
                 original_query = None
-            message = finalize_response(
-                message if message is not None else {}, original_query, logs
-            )
-            message_bytes = orjson.dumps(message)
-            del message, logs, original_query
+            # Build the TRAPI 2.0 Response around the stored bytes rather
+            # than decoding them: the decoded tree is several times the size
+            # of its JSON, and this worker holds many responses at once.
+            # Rebinding releases the stored buffer as soon as the payload is
+            # built, so only one full copy stays resident for the (up to
+            # 120s x retries) POST below.
+            message_bytes = delivery_payload(message_bytes, original_query, logs)
+            has_logs = bool(logs)
+            del logs, original_query
 
-            await send_callback(callback_url, message_bytes, logger)
+            await send_callback(callback_url, message_bytes, logger, has_logs)
             # Release the payload before the remaining db round trips.
             del message_bytes
 

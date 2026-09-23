@@ -159,7 +159,7 @@ async def test_callback_ignores_a_top_level_1x_log_level_on_the_query(
     assert tasks[0][1]["log_level"] == logging.INFO
 
 
-TRAPI_1_CALLBACK = {
+TRAPI_2_CALLBACK = {
     "message": {
         "knowledge_graph": {
             "nodes": {
@@ -169,38 +169,26 @@ TRAPI_1_CALLBACK = {
             "edges": {
                 "e1": {
                     "subject": "A:1",
-                    "predicate": "biolink:related_to",
                     "object": "B:1",
+                    "predicate": "biolink:related_to",
+                    "knowledge_level": "knowledge_assertion",
+                    "agent_type": "manual_agent",
                     "sources": [
                         {
                             "resource_id": "infores:kp",
                             "resource_role": "primary_knowledge_source",
-                            "upstream_resource_ids": [],
                         }
-                    ],
-                    "attributes": [
-                        {
-                            "attribute_type_id": "biolink:knowledge_level",
-                            "value": "knowledge_assertion",
-                        },
-                        {
-                            "attribute_type_id": "biolink:agent_type",
-                            "value": "manual_agent",
-                        },
                     ],
                 }
             },
         },
         "results": [
             {
-                "node_bindings": {
-                    "n0": [{"id": "A:1", "attributes": []}],
-                    "n1": [{"id": "B:1", "attributes": []}],
-                },
+                "node_bindings": {"n0": {"ids": ["A:1"]}, "n1": {"ids": ["B:1"]}},
                 "analyses": [
                     {
                         "resource_id": "infores:kp",
-                        "edge_bindings": {"e0": [{"id": "e1", "attributes": []}]},
+                        "edge_bindings": {"e0": {"ids": ["e1"]}},
                     }
                 ],
             }
@@ -210,41 +198,19 @@ TRAPI_1_CALLBACK = {
 
 
 @pytest.mark.asyncio
-async def test_trapi_1_callback_is_converted_before_it_is_stored(
-    redis_mock, monkeypatch
-):
-    """A subservice still answering in TRAPI 1.x is converted to 2.0 once, in
-    the handler, so the merge only ever reads 2.0."""
+async def test_callback_is_stored_as_it_was_posted(redis_mock, monkeypatch):
+    """Callbacks are TRAPI 2.0 and are stored as posted: Shepherd does not
+    convert between TRAPI versions."""
     from shepherd_utils.db import get_message
 
     tasks = _patch_callback_deps(monkeypatch)
     await save_message("q-1", {"message": {}}, logger)
+    body = orjson.loads(orjson.dumps(TRAPI_2_CALLBACK))
 
     response = await callback(
-        ARATargetEnum.ARAGORN, "cb-6", _make_request(orjson.dumps(TRAPI_1_CALLBACK))
+        ARATargetEnum.ARAGORN, "cb-7", _make_request(orjson.dumps(body))
     )
 
     assert response.status_code == 200
     assert tasks and tasks[0][0] == "merge_message"
-    stored = await get_message("cb-6", logger)
-    result = stored["message"]["results"][0]
-    assert result["node_bindings"] == {"n0": {"ids": ["A:1"]}, "n1": {"ids": ["B:1"]}}
-    assert result["analyses"][0]["edge_bindings"] == {"e0": {"ids": ["e1"]}}
-    edge = stored["message"]["knowledge_graph"]["edges"]["e1"]
-    assert edge["knowledge_level"] == "knowledge_assertion"
-    assert edge["agent_type"] == "manual_agent"
-    assert "upstream_resource_ids" not in edge["sources"][0]
-
-
-@pytest.mark.asyncio
-async def test_trapi_2_callback_is_stored_unchanged(redis_mock, monkeypatch):
-    from shepherd_utils.db import get_message
-    from shepherd_utils.trapi import upgrade_trapi_1_response
-
-    _patch_callback_deps(monkeypatch)
-    await save_message("q-1", {"message": {}}, logger)
-    body = upgrade_trapi_1_response(orjson.loads(orjson.dumps(TRAPI_1_CALLBACK)))
-
-    await callback(ARATargetEnum.ARAGORN, "cb-7", _make_request(orjson.dumps(body)))
-
     assert await get_message("cb-7", logger) == body

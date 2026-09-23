@@ -17,7 +17,7 @@ import uuid
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
-from shepherd_utils.db import get_message_sync, save_message_sync
+from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -93,7 +93,7 @@ def arax_rank_task(response_id: str, logger: logging.Logger) -> None:
     ranked_message = rank_message(message, logger)
     if ranked_message is None:
         ranked_message = message
-    save_message_sync(response_id, ranked_message)
+    save_response_sync(response_id, ranked_message)
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):

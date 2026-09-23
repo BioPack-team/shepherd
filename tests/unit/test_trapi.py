@@ -10,8 +10,6 @@ from shepherd_utils.trapi import (
     SCHEMA_VERSION,
     TRAPIRequestError,
     finalize_response,
-    is_trapi_1_response,
-    upgrade_trapi_1_response,
     validate_query,
 )
 
@@ -114,7 +112,7 @@ def test_shepherd_workflow_operations_are_left_to_shepherd():
     validate_query(query)
 
 
-def _v1_response():
+def _response():
     return {
         "message": {
             "query_graph": _query()["message"]["query_graph"],
@@ -128,21 +126,13 @@ def _v1_response():
                         "subject": "CHEBI:1",
                         "object": "MONDO:0005148",
                         "predicate": "biolink:treats",
+                        "knowledge_level": "knowledge_assertion",
+                        "agent_type": "manual_agent",
                         "sources": [
                             {
                                 "resource_id": "infores:x",
                                 "resource_role": "primary_knowledge_source",
                             }
-                        ],
-                        "attributes": [
-                            {
-                                "attribute_type_id": "biolink:knowledge_level",
-                                "value": "knowledge_assertion",
-                            },
-                            {
-                                "attribute_type_id": "biolink:agent_type",
-                                "value": "manual_agent",
-                            },
                         ],
                     }
                 },
@@ -150,47 +140,25 @@ def _v1_response():
             "results": [
                 {
                     "node_bindings": {
-                        "n0": [{"id": "MONDO:0005148", "attributes": []}],
-                        "n1": [{"id": "CHEBI:1", "attributes": []}],
+                        "n0": {"ids": ["MONDO:0005148"]},
+                        "n1": {"ids": ["CHEBI:1"]},
                     },
                     "analyses": [
                         {
                             "resource_id": "infores:x",
-                            "edge_bindings": {"e0": [{"id": "k0", "attributes": []}]},
+                            "edge_bindings": {"e0": {"ids": ["k0"]}},
                         }
                     ],
                 }
             ],
-            "auxiliary_graphs": {},
         },
-        "logs": [],
     }
-
-
-def test_a_1_x_response_is_converted_to_2_0():
-    v1 = _v1_response()
-    assert is_trapi_1_response(v1)
-    v2 = upgrade_trapi_1_response(v1)
-    assert not is_trapi_1_response(v2)
-    result = v2["message"]["results"][0]
-    assert result["node_bindings"]["n1"] == {"ids": ["CHEBI:1"]}
-    assert result["analyses"][0]["edge_bindings"]["e0"] == {"ids": ["k0"]}
-    edge = v2["message"]["knowledge_graph"]["edges"]["k0"]
-    assert edge["knowledge_level"] == "knowledge_assertion"
-    assert edge["agent_type"] == "manual_agent"
-    assert "attributes" not in edge
-    Response.from_dict(v2)
-
-
-def test_a_2_0_response_is_passed_through_untouched():
-    v2 = upgrade_trapi_1_response(_v1_response())
-    assert upgrade_trapi_1_response(v2) is v2
 
 
 def test_finalize_response_makes_a_valid_2_0_response():
     """The stored response starts as a copy of the query; what leaves is a Response."""
     query = _query()
-    response = upgrade_trapi_1_response(_v1_response())
+    response = _response()
     response.update(
         callback="http://example.org/cb",
         submitter="someone",

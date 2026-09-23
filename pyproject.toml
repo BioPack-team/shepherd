@@ -50,3 +50,7 @@ shepherd_utils = ["*.yml"]
 # The ARS port bundles its upstream blocklist and the schema DDL applied by
 # startup upgrades on pre-existing volumes.
 "shepherd_utils.ars" = ["blocklist.json", "*.sql"]
+
+[tool.black]
+# Match requires-python, so black parses and checks with the running 3.12.
+target-version = ["py312"]

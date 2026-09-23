@@ -15,7 +15,7 @@ from torch import nn
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_embeddings
-from shepherd_utils.db import get_message_sync, save_message_sync
+from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -406,7 +406,7 @@ def score_paths(response_id, logger):
                 analysis.setdefault("score", 0.0)
     for attempt in range(5):
         try:
-            save_message_sync(response_id, message)
+            save_response_sync(response_id, message)
             break
         except Exception as e:
             if attempt < 4:

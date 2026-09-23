@@ -5,7 +5,7 @@ import json
 import logging
 import random
 import uuid
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.db import get_message, save_response
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -30,7 +30,7 @@ async def example_score(task, logger: logging.Logger):
         for analysis in result.get("analyses") or []:
             analysis["score"] = random.random()
 
-    await save_message(response_id, message, logger)
+    await save_response(response_id, message, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):

@@ -19,7 +19,6 @@ import logging
 import numpy as np
 import pytest
 
-from shepherd_utils.trapi import upgrade_trapi_1_response
 from tests.helpers.generate_messages import response_1 as _shared_response_1
 from workers.aragorn_score.worker import (
     BLENDED_PROFILE,
@@ -29,9 +28,7 @@ from workers.aragorn_score.worker import (
 
 logger = logging.getLogger(__name__)
 
-# The ranker reads TRAPI 2.0 bindings; upgrade_trapi_1_response is a no-op
-# once the shared fixture is itself 2.0.
-response_1 = upgrade_trapi_1_response(copy.deepcopy(_shared_response_1))
+response_1 = copy.deepcopy(_shared_response_1)
 
 
 # --- __init__ profile selection ------------------------------------------

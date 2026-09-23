@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
-from .trapi import query_log_level
+from .trapi import prepare_stored_response, query_log_level
 
 PG_RETRIES = 5
 # Retries for the handful of Redis writes that are correctness-critical
@@ -390,9 +390,16 @@ async def add_query(
     """
     start = time.time()
     try:
-        encoded = encode_message(query)
-        await data_db_client.set(query_id, encoded, ex=settings.redis_ttl)
-        await data_db_client.set(response_id, encoded, ex=settings.redis_ttl)
+        await data_db_client.set(query_id, encode_message(query), ex=settings.redis_ttl)
+        # The response starts as the query's message; the query-level members
+        # stay on the query only (see prepare_stored_response).
+        response = prepare_stored_response(
+            {k: v for k, v in query.items() if k != "message"}
+            | {"message": dict(query.get("message") or {})}
+        )
+        await data_db_client.set(
+            response_id, encode_message(response), ex=settings.redis_ttl
+        )
     except Exception as e:
         # failed to put message in db
         # TODO: do something more severe
@@ -462,6 +469,22 @@ async def save_message(
             logger.error(f"Failed to save a message into redis: {e}")
             if raise_on_failure:
                 raise
+
+
+async def save_response(
+    response_id: str,
+    response: dict[str, Any],
+    logger: logging.Logger,
+    **kwargs: Any,
+):
+    """Store a query's response, in its stored form (see
+    ``shepherd_utils.trapi.prepare_stored_response``).
+
+    Every write of a response goes through here (or ``save_response_sync``):
+    it is what guarantees a stored response carries no delivery envelope, so
+    ``finish_query`` can add one to the stored bytes without decoding them.
+    """
+    await save_message(response_id, prepare_stored_response(response), logger, **kwargs)
 
 
 class ResponseTooLargeError(Exception):
@@ -804,6 +827,11 @@ def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
         encode_message(message),
         ex=settings.redis_ttl,
     )
+
+
+def save_response_sync(response_id: str, response: dict[str, Any]) -> None:
+    """``save_response`` for the process-pool workers."""
+    save_message_sync(response_id, prepare_stored_response(response))
 
 
 async def _append_logs(response_id: str, entries: List[dict]) -> None:

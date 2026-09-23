@@ -118,7 +118,7 @@ async def write_too_large_response(
             f"Couldn't read query {query_id} for the too-large response: {e}"
         )
     response = build_too_large_response(query_graph, reason)
-    await _db.save_message(response_id, response, logger)
+    await _db.save_response(response_id, response, logger)
     return response
 
 

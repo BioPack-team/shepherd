@@ -14,7 +14,7 @@ from shepherd_utils.db import (
     cleanup_callbacks,
     get_message,
     get_running_callbacks,
-    save_message,
+    save_response,
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -22,7 +22,6 @@ from shepherd_utils.shared import (
     get_tasks,
     run_task_lifecycle,
 )
-from shepherd_utils.trapi import upgrade_trapi_1_response
 
 # Queue name
 STREAM = "aragorn.pathfinder"
@@ -65,9 +64,8 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                     json=response,
                 )
                 rehydrated_response.raise_for_status()
-                # Retriever may still answer in TRAPI 1.x; store it as 2.0.
-                response_json = upgrade_trapi_1_response(rehydrated_response.json())
-                await save_message(response_id, response_json, logger)
+                response_json = rehydrated_response.json()
+                await save_response(response_id, response_json, logger)
                 return json.dumps({})
 
     filter_config = parameters.get("filter_config", {})

@@ -20,9 +20,15 @@ use, rather than being re-derived here:
 - **Internals** stay plain dicts -- responses can hold hundreds of thousands of
   edges and are reloaded by every worker -- typed with TOM's TypedDicts where
   it helps. The 2.0 helpers every worker shares (binding ids, query
-  parameters, response finalization, 1.x conversion) live in
+  parameters, stored/delivered response form) live in
   `shepherd_utils/trapi.py`, whose module docstring lists the 2.0 rules the
   pipeline depends on.
+- **Stored vs delivered responses.** Every worker writes a query's response
+  through `shepherd_utils.db.save_response`, which stores it without the
+  delivery envelope (`schema_version`, `biolink_version`, `parameters`,
+  `logs`) and with nulls and forbidden empties already pruned. When the
+  response is delivered the envelope is added -- by `finish_query` directly
+  on the stored bytes, without decoding the response.
 - **The ARS port** validates ARA responses with TOM's 2.0 models.
 
 What changed for clients coming from TRAPI 1.x:
@@ -41,10 +47,9 @@ What changed for clients coming from TRAPI 1.x:
   Nulls and the empty containers 2.0 forbids (`logs`, `auxiliary_graphs`,
   `analyses`, ...) are omitted.
 
-A service Shepherd calls that still answers in TRAPI 1.x (e.g. a callback
-posted back in the 1.x shape) is converted to 2.0 with TOM's own 1.6 -> 2.0
-transforms as it arrives, and a warning is logged, so nothing downstream reads
-two shapes.
+Shepherd does not convert between TRAPI versions. The services it calls
+(Retriever, ARAX, the pathfinder library) are expected to answer in 2.0; a
+1.x-shaped answer is not read correctly.
 
 ## Local Development
 
@@ -317,11 +322,9 @@ catch.
 
 Production limits live in the Helm chart, not in `compose.yml` (which is
 dev-only). Recommended starting point for `finish_query`, which holds whole
-decompressed TRAPI payloads in memory while POSTing async callbacks. It also
-decodes each response briefly before sending it, to stamp the TRAPI 2.0
-envelope (versions, the repeated `parameters`, no forbidden empties); the
-decoded tree is released as soon as it is re-encoded, but it is the worker's
-peak, so size against `MAX_RESPONSE_SIZE` x ~7:
+decompressed TRAPI payloads in memory while POSTing async callbacks (as JSON
+bytes: it never decodes a response, the TRAPI 2.0 envelope is written around
+the stored bytes):
 
 | Setting | Value |
 | --- | --- |

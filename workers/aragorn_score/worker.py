@@ -13,7 +13,7 @@ import numpy as np
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
-from shepherd_utils.db import get_message_sync, save_message_sync
+from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -1196,7 +1196,7 @@ def aragorn_score(response_id: str, logger: logging.Logger) -> None:
     if ("results" not in message) or (message["results"] is None):
         # No results to weight; save unchanged and abort.
         logger.info("No results to score. Saving unscored.")
-        save_message_sync(response_id, in_message)
+        save_response_sync(response_id, in_message)
         return
 
     # get a reference to the results
@@ -1220,7 +1220,7 @@ def aragorn_score(response_id: str, logger: logging.Logger) -> None:
         # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
 
     logger.info("Score complete. Saving.")
-    save_message_sync(response_id, in_message)
+    save_response_sync(response_id, in_message)
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):

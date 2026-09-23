@@ -32,7 +32,7 @@ from shepherd_utils.db import (
     message_exists,
     remove_callback_id,
     save_logs,
-    save_message_sync,
+    save_response_sync,
 )
 from shepherd_utils.logger import (
     LOG_LEVELS,
@@ -812,7 +812,7 @@ def merge_messages_by_ids(
             merged.append(callback_id)
 
         if merged:
-            save_message_sync(response_id, accumulator)
+            save_response_sync(response_id, accumulator)
         # drain() hands back oldest-first, which is the order the parent's
         # handler.ingest wants. The retrieval logs describe work that happened
         # before this merge, so they lead.

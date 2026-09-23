@@ -11,11 +11,11 @@ from shepherd_utils.inject_shepherd_arax_provenance import (
 )
 
 from shepherd_utils.config import settings
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.db import get_message, save_response
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
-from shepherd_utils.trapi import normalize_query_graph, upgrade_trapi_1_response
+from shepherd_utils.trapi import normalize_query_graph
 
 # Queue name
 STREAM = "arax"
@@ -147,17 +147,6 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
             status_code,
         ) from e
 
-    # settings.arax_url may still point at a TRAPI 1.x ARAX. Convert its
-    # response to 2.0 (a no-op on a 2.0 response) before anything reads it.
-    try:
-        result = upgrade_trapi_1_response(result)
-    except Exception as e:
-        raise ARAXServiceError(
-            f"ARAX service at {settings.arax_url} returned a TRAPI 1.x response "
-            f"that could not be converted to TRAPI 2.0: {type(e).__name__}: {e}",
-            BAD_GATEWAY,
-        ) from e
-
     return add_shepherd_arax_to_edge_sources(result)
 
 
@@ -205,9 +194,9 @@ async def arax(task, logger: logging.Logger):
             # status. Without this the response id still holds the echo of the
             # incoming query, so the caller gets a query that looks like it
             # simply found nothing.
-            await save_message(response_id, error_response(message, e), logger)
+            await save_response(response_id, error_response(message, e), logger)
             raise
-        await save_message(response_id, result, logger)
+        await save_response(response_id, result, logger)
         task[1]["workflow"] = json.dumps([{"id": "arax"}])
 
 

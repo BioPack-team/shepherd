@@ -44,10 +44,8 @@ from shepherd_utils.response_limit import (
 from shepherd_utils.trapi import (
     TRAPIRequestError,
     finalize_response,
-    is_trapi_1_response,
     query_log_level,
     query_parameters,
-    upgrade_trapi_1_response,
     validate_query,
 )
 from shepherd_utils.task_deadline import (
@@ -738,25 +736,6 @@ async def callback(
     level_number = await get_query_log_level(original_query[0], logger)
     logger.setLevel(level_number)
     logger.debug(f"Got original query: {original_query}")
-    # Services Shepherd calls move to TRAPI 2.0 on their own schedules; one
-    # still answering in 1.x is converted here, once, so nothing downstream
-    # has to read two shapes.
-    if is_trapi_1_response(response):
-        logger.warning(
-            f"[{callback_id}] Callback is TRAPI 1.x shaped; converting it to "
-            "TRAPI 2.0."
-        )
-        try:
-            response = upgrade_trapi_1_response(response)
-        except Exception as e:
-            logger.error(
-                f"[{callback_id}] Couldn't convert the TRAPI 1.x callback: {e}"
-            )
-            await _save_callback_error_logs(callback_id, logger)
-            return JSONResponse(
-                content={"detail": "Invalid TRAPI response"},
-                status_code=422,
-            )
     if not isinstance(response.get("message"), dict):
         response["message"] = {}
     results = response["message"].get("results")

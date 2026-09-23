@@ -1,7 +1,6 @@
 import copy
 import logging
 
-from shepherd_utils.trapi import upgrade_trapi_1_response
 from tests.helpers.generate_messages import response_1
 from workers.aragorn_score.worker import aragorn_score
 
@@ -16,8 +15,7 @@ def test_aragorn_ranker_loads_scores_and_saves(mocker):
     """
     mocker.patch(
         "workers.aragorn_score.worker.get_message_sync",
-        # upgrade_trapi_1_response is a no-op once the shared fixture is 2.0.
-        return_value=upgrade_trapi_1_response(copy.deepcopy(response_1)),
+        return_value=copy.deepcopy(response_1),
     )
     save = mocker.patch("workers.aragorn_score.worker.save_message_sync")
     logger = logging.getLogger(__name__)

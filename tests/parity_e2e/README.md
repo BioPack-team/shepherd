@@ -73,8 +73,9 @@ the Relay stack, so they serve the TRAPI 1.5 corpus
 `x-trapi` 1.5.0; the scripted empty response is valid in both versions. The
 submitted query is a 2.0 query (Shepherd's `/submit` rejects anything
 else) whose query graph reads the same in 1.5. Before the merged answers
-are diffed, Relay's is up-converted with TOM's 1.6 -> 2.0 transforms and
-Shepherd's 2.0 envelope members (`schema_version`, `biolink_version`,
-`parameters`) are dropped (`normalize.as_trapi2`), so the comparison is of
-answers rather than of TRAPI versions. Run the driver from the Shepherd
-venv (it needs `translator_tom`).
+are diffed, Shepherd's 2.0 envelope members (`schema_version`,
+`biolink_version`, `parameters`) are dropped (`normalize.strip_envelope`).
+Nothing is converted between TRAPI versions, so the merged-message diff also
+reports every place Relay's 1.5 answer and Shepherd's 2.0 one differ in
+shape (bindings, `knowledge_level` / `agent_type`, ...); read it for
+differences in the answer itself.

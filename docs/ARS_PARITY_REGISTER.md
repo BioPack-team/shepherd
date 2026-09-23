@@ -473,10 +473,11 @@ Behavioral deviations:
       message, whose `parameters` echo is the leader's.
     - **Tooling**: `scripts/test_ars.py` builds 2.0 queries
       (`constraints.qualifiers` for MVP2); `scripts/ars_compare.py` /
-      `ars_inject.py` up-convert a 1.x stack's payloads with TOM before
-      comparing or injecting; the layer-4 harness serves the 1.5 corpus to
-      Relay (the only consumer of the mock ARAs) and up-converts Relay's
-      merged answer before diffing.
+      `ars_inject.py` need a 2.0 source stack, as nothing converts between
+      TRAPI versions at runtime or in the tooling; the layer-4 harness
+      serves the 1.5 corpus to Relay (the only consumer of the mock ARAs)
+      and its merged-message diff therefore includes the 1.5-vs-2.0 shape
+      differences.
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 

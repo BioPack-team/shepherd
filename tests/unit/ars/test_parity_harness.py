@@ -233,42 +233,18 @@ def test_mockworld_empty_response_is_valid_trapi2(query):
         Response.from_dict(out)
 
 
-def test_as_trapi2_compares_a_relay_payload_with_a_shepherd_one():
-    """Relay's merged answer is TRAPI 1.5; the harness up-converts it and
-    drops Shepherd's 2.0 envelope members, so equal answers diff clean."""
-    from normalize import as_trapi2
+def test_strip_envelope_drops_only_the_envelope():
+    """The harness drops Shepherd's 2.0 envelope members before diffing and
+    converts nothing, so a 1.5 answer and a 2.0 one still differ in shape."""
+    from normalize import strip_envelope
 
-    relay = {
-        "message": {
-            "results": [
-                {
-                    "node_bindings": {"n0": [{"id": "X:1", "attributes": []}]},
-                    "analyses": [
-                        {
-                            "resource_id": "infores:a",
-                            "edge_bindings": {"e": [{"id": "e1", "attributes": []}]},
-                        }
-                    ],
-                }
-            ]
-        }
-    }
+    relay = {"message": {"results": [{"node_bindings": {"n0": [{"id": "X:1"}]}}]}}
     shepherd = {
-        "message": {
-            "results": [
-                {
-                    "node_bindings": {"n0": {"ids": ["X:1"]}},
-                    "analyses": [
-                        {
-                            "resource_id": "infores:a",
-                            "edge_bindings": {"e": {"ids": ["e1"]}},
-                        }
-                    ],
-                }
-            ]
-        },
+        "message": {"results": [{"node_bindings": {"n0": {"ids": ["X:1"]}}}]},
         "schema_version": "2.0.0",
         "biolink_version": "4.4.4",
         "parameters": {"log_level": "DEBUG"},
     }
-    assert diff(as_trapi2(relay), as_trapi2(shepherd)) == []
+    assert strip_envelope(shepherd) == {"message": shepherd["message"]}
+    assert strip_envelope(relay) == relay
+    assert diff(strip_envelope(relay), strip_envelope(shepherd)) != []

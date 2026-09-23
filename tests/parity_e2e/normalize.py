@@ -64,19 +64,16 @@ def normalize(obj: Any) -> Any:
 ENVELOPE_MEMBERS = ("schema_version", "biolink_version", "parameters")
 
 
-def as_trapi2(payload: Any) -> Any:
-    """A merged payload in TRAPI 2.0 form, envelope members dropped.
+def strip_envelope(payload: Any) -> Any:
+    """A merged payload with its envelope members dropped.
 
-    Relay answers in TRAPI 1.5 and Shepherd in 2.0; a 1.x payload is
-    up-converted with TOM's 1.6 -> 2.0 transforms (the same ones the golden
-    fixtures were translated with) so the diff is of answers, not shapes.
-    Needs the Shepherd venv (translator_tom).
+    Nothing is converted between TRAPI versions: Relay answers in 1.5 and
+    Shepherd in 2.0, so the merged-message diff also reports every place the
+    two shapes differ (bindings, knowledge_level / agent_type, ...).
     """
     if not isinstance(payload, dict):
         return payload
-    from shepherd_utils.trapi import upgrade_trapi_1_response
-
-    out = upgrade_trapi_1_response(json.loads(json.dumps(payload)))
+    out = json.loads(json.dumps(payload))
     for member in ENVELOPE_MEMBERS:
         out.pop(member, None)
     return out

@@ -40,8 +40,18 @@ per-property: optional properties with ``minItems``/``minProperties`` of 1
 ``Analysis.edge_bindings`` / ``support_graphs``, ``Edge.qualifiers``,
 ``RetrievalSource.upstream_resource_ids`` ...) must be omitted when empty,
 while ``Message.results`` SHOULD be ``[]`` when a query found nothing, and
-``KnowledgeGraph.nodes`` / ``.edges`` may be empty. ``finalize_response`` applies
-those rules once, at the point a response leaves Shepherd.
+``KnowledgeGraph.nodes`` / ``.edges`` may be empty. ``prune_response`` applies
+those rules; every stored response goes through it (``prepare_stored_response``).
+
+Stored vs delivered responses
+-----------------------------
+A query's response is stored between operations without the delivery envelope
+(``schema_version``, ``biolink_version``, ``parameters``, ``logs``): those come
+from the query and the log store when the response is delivered. That is what
+lets ``finish_query`` write the envelope around the stored bytes without
+decoding a response that can be hundreds of MB. Responses decoded anyway on
+their way out (the sync ``/query``, ``GET /response``) use
+``finalize_response``.
 """
 
 from __future__ import annotations
@@ -60,9 +70,7 @@ from translator_tom.model_dicts import (
     QueryDict,
     QueryParametersDict,
     ResponseDict,
-    dict_up_version,
 )
-from translator_tom.v1_6 import Response as V16Response
 from translator_tom.v2_0._version import SCHEMA_VERSION
 
 __all__ = [
@@ -74,7 +82,6 @@ __all__ = [
     "edge_binding_ids",
     "edge_support_graphs",
     "finalize_response",
-    "is_trapi_1_response",
     "make_binding",
     "node_binding_ids",
     "normalize_query_graph",
@@ -83,7 +90,6 @@ __all__ = [
     "query_bypass_cache",
     "query_log_level",
     "query_parameters",
-    "upgrade_trapi_1_response",
     "validate_query",
 ]
 
@@ -432,46 +438,6 @@ def validate_query(query: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def is_trapi_1_response(response: Mapping[str, Any]) -> bool:
-    """Whether a response from another service is still TRAPI 1.x shaped.
-
-    Looks for the two changes every non-empty 1.x response exhibits: a list of
-    node bindings per qnode, or an edge with neither top-level
-    ``knowledge_level`` nor ``agent_type``.
-    Only the first result/edge is inspected; a response is one version.
-
-    >>> is_trapi_1_response({"message": {"results": [{"node_bindings": {"n0": [{"id": "X"}]}}]}})
-    True
-    >>> is_trapi_1_response({"message": {"results": [{"node_bindings": {"n0": {"ids": ["X"]}}}]}})
-    False
-    """
-    message = response.get("message")
-    if not isinstance(message, dict):
-        return False
-    for result in message.get("results") or []:
-        for binding in (result.get("node_bindings") or {}).values():
-            return isinstance(binding, list)
-    edges = (message.get("knowledge_graph") or {}).get("edges") or {}
-    for edge in edges.values():
-        # Both missing: a 2.0 edge that merely lacks one is malformed, and
-        # converting it would reset every edge's values to ``not_provided``.
-        return "knowledge_level" not in edge and "agent_type" not in edge
-    return False
-
-
-def upgrade_trapi_1_response(response: dict[str, Any]) -> dict[str, Any]:
-    """Return ``response`` in TRAPI 2.0 form, converting it if it is 1.x.
-
-    Services Shepherd calls are moving to 2.0 on their own schedules, so a
-    response posted back in the 1.x shape is converted with TOM's own
-    1.6 -> 2.0 transforms instead of being mis-read (or crashing) downstream.
-    A 2.0 response is returned as-is, without a walk over it.
-    """
-    if not is_trapi_1_response(response):
-        return response
-    return cast("dict[str, Any]", dict_up_version(response, V16Response))
-
-
 def _prune_edge(edge: EdgeDict) -> None:
     """Keep one KG edge valid: no empty qualifiers or empty upstream lists."""
     if "qualifiers" in edge and not edge["qualifiers"]:
@@ -591,6 +557,34 @@ def finalize_response(
         response["logs"] = final_logs
     prune_response(response)
     return cast("ResponseDict", response)
+
+
+#: Response members added when a response is delivered, from the query and
+#: the log store. A stored response never carries them (see
+#: ``prepare_stored_response``), which is what lets ``finish_query`` add them
+#: to the stored bytes without decoding the response.
+ENVELOPE_MEMBERS = ("schema_version", "biolink_version", "parameters", "logs")
+
+
+def prepare_stored_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Put a response in the form it is stored in between operations, in place.
+
+    - The delivery envelope (``ENVELOPE_MEMBERS``) and query-only members are
+      removed: they are added when the response leaves Shepherd, from the
+      query and the log store, which are their only sources of truth. A
+      subservice's own answer (ARAX's, Retriever's) carries its own versions
+      and parameters, which are not Shepherd's to repeat.
+    - ``prune_response`` drops nulls and the empty containers 2.0 forbids, so
+      the message content is already valid when it is delivered.
+
+    >>> prepare_stored_response({"message": {"auxiliary_graphs": {}}, "logs": [],
+    ...     "parameters": {"timeout": 1}, "callback": "x", "workflow": [{"id": "lookup"}]})
+    {'message': {}, 'workflow': [{'id': 'lookup'}]}
+    """
+    for member in (*ENVELOPE_MEMBERS, *_QUERY_ONLY_MEMBERS):
+        response.pop(member, None)
+    prune_response(response)
+    return response
 
 
 def empty_message() -> MessageDict:

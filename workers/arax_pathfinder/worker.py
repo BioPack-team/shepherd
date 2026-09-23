@@ -13,8 +13,6 @@ from biolink_helper_pkg import BiolinkHelper
 from opentelemetry import context as otel_context
 from pathfinder.Pathfinder import Pathfinder
 from pathfinder.telemetry import child_bootstrap, flush_child, inject_context
-from translator_tom import v1_6
-from translator_tom.model_dicts import dict_up_version
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
@@ -26,7 +24,7 @@ from shepherd_utils.data_download import (
 )
 from shepherd_utils.db import (
     get_message_sync,
-    save_message_sync,
+    save_response_sync,
 )
 from shepherd_utils.inject_shepherd_arax_provenance import (
     add_shepherd_arax_to_edge_sources,
@@ -196,60 +194,6 @@ def parse_query_graph(qgraph):
     return pinned_node_keys, pinned_node_ids, intermediate_categories
 
 
-FALLBACK_CATEGORIES = ["biolink:NamedThing"]
-
-
-def _is_trapi_1_result(result: dict) -> bool:
-    for binding in (result.get("node_bindings") or {}).values():
-        return isinstance(binding, list)
-    for analysis in result.get("analyses") or []:
-        for key in ("edge_bindings", "path_bindings"):
-            for binding in (analysis.get(key) or {}).values():
-                return isinstance(binding, list)
-    return False
-
-
-def to_trapi_2(result, aux_graphs, knowledge_graph):
-    """Convert what the pathfinder library assembles to TRAPI 2.0, per object.
-
-    The catrax-pathfinder library still emits TRAPI 1.x results, auxiliary
-    graphs and edges, while the rehydrated knowledge graph comes from Retriever
-    and may already be 2.0. Each object is converted with TOM's 1.6 -> 2.0
-    transforms only when it is 1.x shaped: running the 1.6 Edge transform over a
-    2.0 edge would reset its knowledge_level / agent_type to ``not_provided``.
-
-    Returns ``(results, aux_graphs, knowledge_graph)``; ``aux_graphs`` is
-    ``None`` when there are none (an empty object is invalid in 2.0).
-    """
-    results = []
-    if result is not None:
-        if _is_trapi_1_result(result):
-            result = dict_up_version(result, v1_6.Result)
-        results.append(result)
-
-    upgraded_aux_graphs = {
-        aux_id: dict_up_version(aux_graph, v1_6.AuxiliaryGraph)
-        for aux_id, aux_graph in (aux_graphs or {}).items()
-    }
-
-    kg = knowledge_graph or {}
-    nodes = kg.get("nodes") or {}
-    edges = kg.get("edges") or {}
-    for node_id, node in nodes.items():
-        if not node.get("categories"):
-            node["categories"] = list(FALLBACK_CATEGORIES)
-        for key in [k for k, v in node.items() if v is None]:
-            del node[key]
-    for edge_id, edge in edges.items():
-        if "knowledge_level" not in edge or "agent_type" not in edge:
-            edges[edge_id] = dict_up_version(edge, v1_6.Edge)
-    return (
-        results,
-        upgraded_aux_graphs or None,
-        {**kg, "nodes": nodes, "edges": edges},
-    )
-
-
 def execute_pathfinding(
     pinned_node_ids, pinned_node_keys, intermediate_categories, logger
 ):
@@ -360,9 +304,9 @@ def _arax_pathfinder_task(
                 "node_bindings": result["node_bindings"],
                 "essence": "result",
             }
-        res, aux_graphs, knowledge_graph = to_trapi_2(
-            result, aux_graphs, knowledge_graph
-        )
+        res = [result] if result is not None else []
+        if knowledge_graph is None:
+            knowledge_graph = {"nodes": {}, "edges": {}}
         message["message"]["knowledge_graph"] = knowledge_graph
         if aux_graphs:
             message["message"]["auxiliary_graphs"] = aux_graphs
@@ -372,7 +316,7 @@ def _arax_pathfinder_task(
 
         message = add_shepherd_arax_to_edge_sources(message)
 
-        save_message_sync(response_id, message)
+        save_response_sync(response_id, message)
     logger.info(f"Task took {time.time() - start}")
 
 
