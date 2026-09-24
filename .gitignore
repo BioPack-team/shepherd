@@ -179,3 +179,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 .venv-relay/
+
+# The ARAX port keeps ARAX's own scripts/ packages (Infer, COHD_local)
+!shepherd_utils/arax/**/scripts/
