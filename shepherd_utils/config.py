@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     default_data_tier: int = 0
 
     # ARAX configs
+    # No longer used: the arax worker runs ARAX in-process (DEC-14). Kept so an
+    # existing .env that still sets ARAX_URL keeps validating.
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
     arax_biolink_version: str = "v4.2.5"
     # Where the ARAX port's BiolinkHelper caches its lookup-map pickle (must be

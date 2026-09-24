@@ -393,6 +393,13 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      # First run? The worker downloads the data files ARAX's actions read on
+      # startup (see README "Worker data (LMDB / sqlite) downloads"): the
+      # pathfinder's two sqlite dbs (NGD, the tier0 overlay used by FET) into
+      # the shared arax_pathfinder_dbs, and curie_to_pmids, ExplainableDTD, FDA
+      # drugs and COHD into arax_dbs.
+      - ./arax_pathfinder_dbs:/app/arax_pathfinder_dbs
+      - ./arax_dbs:/app/arax_dbs
   arax_pathfinder:
     container_name: arax_pathfinder
     build:

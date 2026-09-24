@@ -4,7 +4,11 @@ FROM ghcr.io/translatorsri/renci-python-image:3.12.13
 # Add image info
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
+# ARAX builds several lists from sets, so its output depends on the hash seed
 ENV PYTHONHASHSEED=0
+# Dump every thread's traceback on SIGABRT, including in a pool child that hangs
+# during import (see ProcessPoolManager's timeout handling)
+ENV PYTHONFAULTHANDLER=1
 
 # set up requirements
 WORKDIR /app
@@ -17,7 +21,6 @@ COPY ./shepherd_utils ./shepherd_utils
 COPY ./pyproject.toml .
 RUN pip install .
 
-# ... existing code ...
 COPY ./workers/arax/requirements.txt .
 RUN pip install -r requirements.txt
 
