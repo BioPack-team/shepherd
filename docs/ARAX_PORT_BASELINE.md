@@ -25,13 +25,13 @@ does.
 | DEC-1 | **Perfect parity by default.** Everything is ported to behave exactly like ARAX, bugs and oddities included, unless a decision here says otherwise. The plan is to finish the port and validate it against ARAX first, and only then fix bugs as a separate, later pass. | All. Every Part D defect is **reproduced** in the port. Part C items are only fixed where another decision says so (DEC-8). |
 | DEC-2 | **The ARAX UI itself stays external to Shepherd**, at least for now. **But Shepherd provides everything the ARAX UI needs, so the UI can keep working when pointed at Shepherd.** | AUX-03 (the UI code) is not hosted. The endpoints and behaviors the UI uses become required; see [UI contract](#ui-contract-what-the-arax-ui-requires). |
 | DEC-3 | **No KP response cache and no ARAX response storage.** Shepherd's existing Postgres state is used instead. | Not ported: EXP-31, CRT-05 and CON-05 (KP cache), OPS-05 (MySQL + S3 store), and the background cache refresh in OPS-07. `bypass_cache` (EXP-06) has nothing to bypass. Follow-up: API-07/API-08/OPS-06 depend on the store; see Part F Q7. D-5 does not apply. |
-| DEC-4 | **No SmartAPI: Retriever is used for everything.** All SmartAPI / KP-registry / meta-KG KP-selection machinery is removed, and every Expand query goes to Retriever. Retriever itself queries Gandalf, so ARAX's rtx-kg2 (Gandalf) and `infores:gandalf` routes are covered by Retriever too. | Not ported: EXP-07 (blocked KPs), EXP-25 (meta-KG KP selection), EXP-29 (KP info cache / SmartAPI), EXP-30 (dynamic roster), and the SmartAPI/KP-info parts of OPS-07 and API-09. The rtx-kg2-specific paths (the 600 s timeout in EXP-04, `return_minimal_metadata` in EXP-27, single-node queries in EXP-21) and FET's `rel_edge_key` Gandalf query (OVL-05) go to Retriever. D-3 and D-4 do not apply. |
+| DEC-4 | **Queries use only Retriever; SmartAPI is kept only for the UI.** During query processing, ARAX never touches SmartAPI / KP-registry / meta-KG KP selection: every Expand query goes to Retriever. Retriever itself queries Gandalf, so ARAX's rtx-kg2 (Gandalf) and `infores:gandalf` routes are covered by Retriever too. SmartAPI stays available for the UI-facing surfaces. | Not used in queries: EXP-07 (blocked KPs), EXP-25 (meta-KG KP selection), EXP-30 (dynamic roster). EXP-29 (SmartAPI client) is kept for the UI only: `/status?authorization=smartapi` (API-09). The rtx-kg2-specific paths (the 600 s timeout in EXP-04, `return_minimal_metadata` in EXP-27, single-node queries in EXP-21) and FET's `rel_edge_key` Gandalf query (OVL-05) go to Retriever. D-3 and D-4 do not apply to queries. |
 | DEC-5 | **Dead code: confirm with the ARAX team, then delete.** Items listed in Part E are not ported once the ARAX team confirms they are dead. | Part E; Part F Q4. |
 | DEC-6 | **Data dependencies are assumed to come the same way as the pathfinder DBs** (downloaded on worker startup via `shepherd_utils/data_download.py`, from `kg2webhost.rtx.ai/tier0`-style URLs). Exactly where each file comes from is still to be worked out. | Part B §20 (curie_to_pmids, ExplainableDTD, COHD, FDA pickle, autocomplete), OPS-08; Part F Q5. |
 | DEC-7 | **The ARAX pathfinder is obsolete and is dropped. Shepherd's current `arax_pathfinder` worker is kept as it is.** | CON-01…CON-05 are not parity targets. QGI-01 / QGI-03 route to Shepherd's `arax.pathfinder`. C-1 and C-3…C-7 are no longer parity gaps (under DEC-1 they can be revisited in the post-validation bug-fix pass). The catrax-pathfinder pin difference no longer matters. |
 | DEC-8 | **Ranker: bring Shepherd's `arax_rank` up to exactly the ARAX version.** | RNK-01…RNK-06; C-2 and C-10 become port work items, including ARAX's quirks per DEC-1 (the `"no value!"`→0 mutation, falsy-zero min test, the `confidence`-attribute override, `row_data`/`table_column_names`, no `edge["confidence"]` in the output, and ARAX's error behavior rather than soft-failing). D-20 is reproduced. Ranking must also run at the ARAX point in the pipeline (RNK-06 / ORC-09). |
 | DEC-9 | **No curie-prefix conversion.** All data is already normalized, and incoming queries are assumed to be normalized and matching too. | EXP-26 (KP-supported prefix conversion) is not ported. |
-| DEC-10 | **The `kp` parameter and the `fill` allowlist are left out for now.** With an updated TRAPI schema, filtering on those will actually be possible, so they will be revisited then. | EXP-01 (`expand(kp=…)`) and WF-03 (`fill` with `allowlist`/`qedge_keys`) are not ported for now. |
+| DEC-10 | **The `kp` parameter and the `fill` allowlist are included, at least for now.** (Later, an updated TRAPI schema should make filtering on those possible natively.) | EXP-01 (`expand(kp=…)`) and WF-03 (`fill` with `allowlist`/`qedge_keys`) are ported. Open: what they mean when Retriever is the only KP; see Part F Q2. |
 
 ### UI contract: what the ARAX UI requires
 
@@ -51,9 +51,9 @@ under a single Shepherd ARAX base path.
 | Original input query of a past run | `GET /status?id=` (7309) | OPS-01 / `get_status(id_)` | Returns the stored input query. |
 | Recent ARS PKs | `GET /status?mode=recent_pks&last_n_hours=&authorization=<ars host>` (6978) | API-09 | Calls the ARS `latest_pk` endpoint. |
 | KP cache listing | `GET /status?mode=kp_cache` (8301) | API-09, EXP-31 | Open: there is no KP cache (DEC-3). |
-| SmartAPI listing | `GET /status?authorization=smartapi` (7793) | API-09, EXP-29 | Open: SmartAPI is removed (DEC-4). |
+| SmartAPI listing | `GET /status?authorization=smartapi` (7793) | API-09, EXP-29 | Kept for the UI (DEC-4). |
 | Site configuration | `GET /status?mode=site_config` (9901) | API-09 | Versions and maturity. |
-| Meta-KG for the query builder | `GET /meta_knowledge_graph?format=simple` (6894) | AUX-01 | Open: ARAX builds this from Plover plus SmartAPI KP meta maps; the Retriever-only source needs deciding (DEC-4). |
+| Meta-KG for the query builder | `GET /meta_knowledge_graph?format=simple` (6894) | AUX-01 | Open: ARAX builds this from Plover plus the SmartAPI-derived KP meta maps. Since SmartAPI is kept for the UI (DEC-4), it could be built the same way, or from Retriever's meta-KG instead. |
 | Entity lookup | `GET /entity?q=` and `POST /entity` (9648, 9697, 9769) | API-06, SYN-02 | — |
 | Node-name autocomplete | `GET /rtxcomplete/nodeslike?word=&limit=15`, relative to the UI host (`rtxcompletenode.js:67`) | AUX-02 | Needs `autocomplete_v1.0_<tier>.sqlite` (DEC-6). |
 | Swagger link | `{baseAPI}/ui/` (80) | — | Shepherd serves `/docs`. |
@@ -608,11 +608,17 @@ not ported.
    everything in the [UI contract](#ui-contract-what-the-arax-ui-requires)).
    Still open: how Shepherd answers the UI calls that point at things removed
    by other decisions: `bypass_cache` and `/status?mode=kp_cache` (DEC-3),
-   `/status?authorization=smartapi` and the source for `/meta_knowledge_graph`
-   (DEC-4), and the pathfinder `query_options` the UI sends (DEC-7 / C-4).
-2. **KP roster** (decided: DEC-4, Retriever only, which covers Gandalf; DEC-9,
-   no curie-prefix conversion; DEC-10, `kp` and the `fill` allowlist left out
-   for now).
+   the source for `/meta_knowledge_graph` (ARAX's SmartAPI-based build, which
+   DEC-4 would allow for the UI, or Retriever's meta-KG), and the pathfinder `query_options` the UI sends (DEC-7 / C-4).
+2. **KP roster** (decided: DEC-4, queries use Retriever only, which covers
+   Gandalf; SmartAPI kept for the UI only; DEC-9, no curie-prefix conversion;
+   DEC-10, `kp` and the `fill` allowlist included for now). Still open: what
+   `expand(kp=…)` and `fill(allowlist=…)` do when Retriever is the only KP. In
+   ARAX, a `kp` value must be in the SmartAPI-derived `valid_kps` or it is an
+   `InvalidKP` error, and a user-chosen KP also bypasses the constraint
+   allowlist/denylist and the blocked-KP list (EXP-01). Options include
+   accepting only `infores:retriever`, or passing the list to Retriever as a
+   source filter.
 3. **Part D** (decided: DEC-1, reproduce everything, fix after validation).
 4. **Part E** (decided: DEC-5, confirm with the ARAX team, then delete). Still
    needed: the ARAX team's confirmation.
