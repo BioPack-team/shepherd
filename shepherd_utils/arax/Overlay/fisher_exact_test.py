@@ -1,0 +1,656 @@
+# Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Overlay/fisher_exact_test.py.
+# Changes from upstream:
+#   - import paths / sys.path hacks only
+#   - the tier0 overlay sqlite path comes from RTXConfiguration.kg2c_sqlite_path (Shepherd's pathfinder download) instead of RTX/code/ARAX/KnowledgeSources/KG2c/
+#   - the rel_edge_key background-count query goes to infores:retriever instead of infores:gandalf (DEC-4: Retriever queries Gandalf)
+# See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
+# ruff: noqa: E402
+# This class will perform fisher's exact test to evalutate the significance of connection between
+# a list of source nodes with certain qnode_id in KG and each of the target nodes with specified type.
+import asyncio
+import json
+import os
+import re
+import scipy.stats as stats
+import sqlite3
+import sys
+import traceback
+from datetime import datetime
+from pathlib import Path
+SCRIPT_DIR = Path(__file__).resolve().parent
+from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
+import shepherd_utils.arax.util as util
+import shepherd_utils.arax.Overlay.overlay_utilities as ou
+from shepherd_utils.arax.openapi_server.models.attribute import Attribute as EdgeAttribute
+from shepherd_utils.arax.openapi_server.models.edge import Edge
+from shepherd_utils.arax.openapi_server.models.q_edge import QEdge
+from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
+from shepherd_utils.arax.openapi_server.models.retrieval_source import RetrievalSource
+from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
+
+RTX_CONFIG = RTXConfiguration()
+
+
+class ComputeFTEST:
+
+    #### Constructor
+    def __init__(self, response, message, parameters):
+        self.response = response
+        self.message = message
+        self.parameters = parameters
+        self.nodesynonymizer = NodeSynonymizer()
+
+        ## construct the path to the kg2c sqlite file
+        self.sqlite_file_path = Path(RTX_CONFIG.kg2c_sqlite_path)
+
+
+    def fisher_exact_test(self):
+        """
+        Peform the fisher's exact test to expand or decorate the knowledge graph
+        :return: response
+        """
+
+        # check the input parameters
+        if 'subject_qnode_key' not in self.parameters:
+            self.response.error("The argument 'subject_qnode_key' is required for fisher_exact_test function")
+            return self.response
+        else:
+            subject_qnode_key = self.parameters['subject_qnode_key']
+        if 'virtual_relation_label' not in self.parameters:
+            self.response.error("The argument 'virtual_relation_label' is required for fisher_exact_test function")
+            return self.response
+        else:
+            virtual_relation_label = str(self.parameters['virtual_relation_label'])
+        if 'object_qnode_key' not in self.parameters:
+            self.response.error("The argument 'object_qnode_key' is required for fisher_exact_test function")
+            return self.response
+        else:
+            object_qnode_key = self.parameters['object_qnode_key']
+        rel_edge_key = self.parameters['rel_edge_key'] if 'rel_edge_key' in self.parameters else None
+        top_n = int(self.parameters['top_n']) if 'top_n' in self.parameters else None
+        cutoff = float(self.parameters['cutoff']) if 'cutoff' in self.parameters else None
+
+        self.response.info(f"Performing Fisher's Exact Test to add p-value to edge attribute of virtual edge {virtual_relation_label}")
+
+        sqlite_file_path = self.sqlite_file_path
+        if not os.path.exists(sqlite_file_path):
+            self.response.error(f"Unable to load KG2c sqlite file: {sqlite_file_path}")
+            return self.response
+
+        if rel_edge_key is not None:
+            self.response.warning(f"The 'rel_edge_key' option in FET is specified ({rel_edge_key}); it will cause slow for the calculation of the test.")
+
+        # initialize some variables
+        nodes_info = {}
+        # edge_expand_kp = []
+        subject_node_list = []
+        object_node_dict = {}
+        size_of_object = {}
+        subject_node_exist = False
+        object_node_exist = False
+        query_edge_key = set()
+        rel_edge_type = set()
+        subject_node_category = None
+        object_node_category = None
+        subject_node_ids = None
+        object_node_ids = None
+
+        message = self.message
+        qg = message.query_graph
+        kg = message.knowledge_graph
+
+        ## Check if subject_qnode_key and object_qnode_key are in the Query Graph
+        try:
+            if len(qg.nodes) != 0:
+                for node_key in qg.nodes:
+                    if node_key == subject_qnode_key:
+                        subject_node_exist = True
+                        subject_node_category = qg.nodes[node_key].categories
+                        subject_node_ids = qg.nodes[node_key].ids
+                    elif node_key == object_qnode_key:
+                        object_node_exist = True
+                        object_node_category = qg.nodes[node_key].categories
+                        object_node_ids = qg.nodes[node_key].ids
+                    else:
+                        pass
+            else:
+                self.response.error("There is no query node in QG")
+                return self.response
+        except Exception:
+            tb = traceback.format_exc()
+            error_type, error, _ = sys.exc_info()
+            self.response.error(tb, error_code=error_type.__name__)
+            self.response.error("Something went wrong with retrieving nodes in message QG")
+            return self.response
+
+        if subject_node_exist:
+            if object_node_exist:
+                pass
+            else:
+                self.response.error(f"No query node with object qnode key {object_qnode_key} detected in QG for Fisher's Exact Test")
+                return self.response
+        else:
+            self.response.error(f"No query node with subject qnode key {subject_qnode_key} detected in QG for Fisher's Exact Test")
+            return self.response
+
+        ## Check if there is a query edge connected to both subject_qnode_key and object_qnode_key in the Query Graph
+        try:
+            if len(qg.edges) != 0:
+                for edge_key in qg.edges:
+                    qedge_relation = None
+                    if hasattr(qg.edges[edge_key], "relation"):
+                        qedge_relation = qg.edges[edge_key].relation
+                    if qg.edges[edge_key].subject == subject_qnode_key and qg.edges[edge_key].object == object_qnode_key and qedge_relation is None:
+                        query_edge_key.update([edge_key])  # only actual query edge is added
+                    elif qg.edges[edge_key].subject == object_qnode_key and qg.edges[edge_key].object == subject_qnode_key and qedge_relation is None:
+                        query_edge_key.update([edge_key])  # only actual query edge is added
+                    else:
+                        continue
+            else:
+                self.response.error("There is no query edge in Query Graph")
+                return self.response
+        except Exception:
+            tb = traceback.format_exc()
+            error_type, error, _ = sys.exc_info()
+            self.response.error(tb, error_code=error_type.__name__)
+            self.response.error("Something went wrong with retrieving edges in message QG")
+            return self.response
+
+        if len(query_edge_key)!=0:
+            if rel_edge_key:
+                if rel_edge_key in query_edge_key:
+                    pass
+                else:
+                    self.response.error(f"No query edge with qedge key {rel_edge_key} connected to both subject node with qnode key {subject_qnode_key} and object node with qnode key {object_qnode_key} detected in QG for Fisher's Exact Test")
+                    return self.response
+            else:
+                pass
+        else:
+            self.response.error(
+                f"No query edge connected to both subject node with qnode key {subject_qnode_key} and object node with qnode key {object_qnode_key} detected in QG for Fisher's Exact Test")
+            return self.response
+
+        ## loop over all nodes in KG and collect their node information
+        try:
+            for node_key, node in kg.nodes.items():
+                node_qnode_keys = getattr(node, 'qnode_keys', None) or []
+                node_categories = node.categories
+                nodes_info[node_key] = {'qnode_keys': node_qnode_keys,
+                                        'category': next(iter(node_categories), None)}
+        except Exception:
+            tb = traceback.format_exc()
+            error_type, error, _ = sys.exc_info()
+            self.response.error(tb, error_code=error_type.__name__)
+            self.response.error("Something went wrong with retrieving nodes in message KG")
+            return self.response
+
+        ## loop over all edges in KG and create subject node list and target node dict based on subject_qnode_key, object_qnode_key as well as rel_edge_id (optional, otherwise all edges are considered)
+        try:
+            for edge_key, edge in kg.edges.items():
+
+                ## check if this edge is a compuated edge from ARAX, if so, skip it
+                edge_attributes = kg.edges[edge_key].attributes
+                edge_attribute_list = [x.value for x in edge_attributes if x.attribute_type_id == 'EDAM-DATA:1772'] if edge_attributes else []
+                if len(edge_attribute_list) == 0:
+                    if rel_edge_key:
+                        if rel_edge_key in (getattr(edge, "qedge_keys", None) or []):
+                            if subject_qnode_key in nodes_info[kg.edges[edge_key].subject]['qnode_keys']:
+                                # edge_expand_kp.extend(temp_kp)
+                                rel_edge_type.update([kg.edges[edge_key].predicate])
+                                subject_node_list.append(kg.edges[edge_key].subject)
+                                if kg.edges[edge_key].object not in object_node_dict.keys():
+                                    object_node_dict[kg.edges[edge_key].object] = {kg.edges[edge_key].subject}
+                                else:
+                                    object_node_dict[kg.edges[edge_key].object].update([kg.edges[edge_key].subject])
+                            else:
+                                # edge_expand_kp.extend(temp_kp)
+                                rel_edge_type.update([kg.edges[edge_key].predicate])
+                                subject_node_list.append(kg.edges[edge_key].object)
+                                if kg.edges[edge_key].subject not in object_node_dict.keys():
+                                    object_node_dict[kg.edges[edge_key].subject] = {kg.edges[edge_key].object}
+                                else:
+                                    object_node_dict[kg.edges[edge_key].subject].update([kg.edges[edge_key].object])
+                    else:
+                        if subject_qnode_key in nodes_info[kg.edges[edge_key].subject]['qnode_keys']:
+                            if object_qnode_key in nodes_info[kg.edges[edge_key].object]['qnode_keys']:
+                                # edge_expand_kp.extend(temp_kp)
+                                subject_node_list.append(kg.edges[edge_key].subject)
+                                if kg.edges[edge_key].object not in object_node_dict.keys():
+                                    object_node_dict[kg.edges[edge_key].object] = {kg.edges[edge_key].subject}
+                                else:
+                                    object_node_dict[kg.edges[edge_key].object].update([kg.edges[edge_key].subject])
+
+                        elif object_qnode_key in nodes_info[kg.edges[edge_key].subject]['qnode_keys']:
+                            if subject_qnode_key in nodes_info[kg.edges[edge_key].object]['qnode_keys']:
+                                # edge_expand_kp.extend(temp_kp)
+                                subject_node_list.append(kg.edges[edge_key].object)
+                                if kg.edges[edge_key].subject not in object_node_dict.keys():
+                                    object_node_dict[kg.edges[edge_key].subject] = {kg.edges[edge_key].object}
+                                else:
+                                    object_node_dict[kg.edges[edge_key].subject].update([kg.edges[edge_key].object])
+
+        except Exception:
+            tb = traceback.format_exc()
+            error_type, error, _ = sys.exc_info()
+            self.response.error(tb, error_code=error_type.__name__)
+            self.response.error("Something went wrong with retrieving edges in message KG")
+            return self.response
+
+        subject_node_list = list(set(subject_node_list)) ## remove the duplicate subject node key
+
+        ## check if there is no subject node in message KG
+        if len(subject_node_list) == 0:
+            self.response.error("No subject node found in message KG for Fisher's Exact Test")
+            return self.response
+
+        ## check if there is no object node in message KG
+        if len(object_node_dict) == 0:
+            self.response.error("No object node found in message KG for Fisher's Exact Test")
+            return self.response
+
+        ## check if the subject node type is None, if so, automatically set it to biolink:NamedThing
+        if subject_node_category is None:
+            if subject_node_ids is None:
+                self.response.error(f"The subject node with qnode key {subject_qnode_key} in Query Graph has no assigned category and ids.")
+            else:
+                normalized_subject_node = self.nodesynonymizer.get_canonical_curies(subject_node_ids[0])[subject_node_ids[0]]
+                if normalized_subject_node is None:
+                    self.response.info(f"No category is specified for the subject node with qnode key {subject_qnode_key} in Query Graph and no preferred category found for this query node. We will automatically assign it to 'biolink:NamedThing', otherwise please specify its node type.")
+                    subject_node_category = ['biolink:NamedThing']
+                else:
+                    subject_node_category = [normalized_subject_node['preferred_category']]
+                    self.response.info(f"No category is specified for the subject node with qnode key {subject_qnode_key} in Query Graph. We will automatically assign {subject_node_category} to it based on the node synonymizer, otherwise please specify its node type.")
+
+        ## check if the object node type is None, if so, automatically set it to biolink:NamedThing
+        if object_node_ids is None:
+            # self.response.error(f"The object node with qnode key {object_node_ids} in Query Graph has no assigned category and ids.")
+            # return self.response
+            if object_node_category is None:
+                object_node_category = ['biolink:NamedThing'] # for issue 1817
+        else:
+            normalized_object_node = self.nodesynonymizer.get_canonical_curies(object_node_ids[0])[object_node_ids[0]]
+            if normalized_object_node is None:
+                self.response.info(f"No category is specified for the object node with qnode key {object_qnode_key} in Query Graph and no preferred category found for this query node. We will automatically assign it to 'biolink:NamedThing', otherwise please specify its node type.")
+                object_node_category = ['biolink:NamedThing'] # for issue 1817
+            else:                    
+                object_node_category = [normalized_object_node['preferred_category']]
+                self.response.info(f"No category is specified for the object node with qnode key {object_qnode_key} in Query Graph. We will automatically assign {object_node_category} to it based on the node synonymizer, otherwise please specify its node type.")
+
+        ## always set 'infores:rtx-kg2' to kp because we only have statistics for kg2 to calcualte fisher exact test
+        kp = 'infores:rtx-kg2'
+
+        ## Print out some information used to calculate FET
+        if len(subject_node_list) == 1:
+            self.response.debug(f"{len(subject_node_list)} subject node with qnode key {subject_qnode_key} and node type {subject_node_category[0]} was found in message KG and used to calculate Fisher's Exact Test")
+        else:
+            self.response.debug(f"{len(subject_node_list)} subject nodes with qnode key {subject_qnode_key} and node type {subject_node_category[0]} was found in message KG and used to calculate Fisher's Exact Test")
+        if len(object_node_dict) == 1:
+            self.response.debug(f"{len(object_node_dict)} object node with qnode key {object_qnode_key} and node type {object_node_category[0]} was found in message KG and used to calculate Fisher's Exact Test")
+        else:
+            self.response.debug(f"{len(object_node_dict)} object nodes with qnode key {object_qnode_key} and node type {object_node_category[0]} was found in message KG and used to calculate Fisher's Exact Test")
+
+        # find all nodes with the same type of 'subject_qnode_key' nodes in specified KP ('ARAX/KG1','infores:rtx-kg2') that are adjacent to target nodes
+        # if rel_edge_key is not None, query adjacent node from database otherwise query adjacent node with DSL command by providing a list of query nodes to add_qnode()
+        ## Note: Regarding of whether kp='ARAX/KG1' or kp='infores:rtx-kg2', it will always query adjacent node count based on kg2c
+        if rel_edge_key:
+            if len(rel_edge_type) == 1:  # if the edge with rel_edge_key has only type, we use this rel_edge_predicate to find all subject nodes in KP
+                self.response.debug(f"{kp} and edge relation type {list(rel_edge_type)[0]} were used to calculate total object nodes in Fisher's Exact Test")
+                result = self.query_size_of_adjacent_nodes(node_curie=list(object_node_dict.keys()), source_type=object_node_category[0], adjacent_type=subject_node_category[0], kp=kp, rel_type=list(rel_edge_type)[0])
+            else:  # if the edge with rel_edge_key has more than one type or no edge, we ignore the edge predicate and use all categories to find all subject nodes in KP
+                if len(rel_edge_key) == 0:
+                    self.response.warning(f"The edges with specified qedge key {rel_edge_key} have no category, we ignore the edge predicate and use all categories to calculate Fisher's Exact Test")
+                else:
+                    self.response.warning(f"The edges with specified qedge key {rel_edge_key} have more than one category, we ignore the edge predicate and use all categories to calculate Fisher's Exact Test")
+                self.response.debug("infores:rtx-kg2 was used to calculate total object nodes in Fisher's Exact Test")
+                result = self.query_size_of_adjacent_nodes(node_curie=list(object_node_dict.keys()), source_type=object_node_category[0], adjacent_type=subject_node_category[0], kp='infores:rtx-kg2', rel_type=None)
+        else:  # if no rel_edge_key is specified, we ignore the edge predicate and use all categories to find all subject nodes in KP
+            self.response.debug("infores:rtx-kg2 was used to calculate total object nodes in Fisher's Exact Test")
+            result = self.query_size_of_adjacent_nodes(node_curie=list(object_node_dict.keys()), source_type=object_node_category[0], adjacent_type=subject_node_category[0], kp='infores:rtx-kg2', rel_type=None)
+
+        if result is None:
+            return self.response  ## Something wrong happened for querying the adjacent nodes
+        else:
+            res, removed_nodes = result
+            if len(removed_nodes)==0:
+                size_of_object = res
+            else:
+                if len(removed_nodes) == 1:
+                    self.response.warning(f"One object node which is {removed_nodes[0]} can't find its neighbors. This node will be ignored for FET calculation.")
+                else:
+                    self.response.warning(f"{len(removed_nodes)} object nodes which are "
+                                          f"{util.summarize_set_elements(removed_nodes)} "
+                                          "can't find their neighbors. These nodes will be ignored for FET calculation.")
+                for node in removed_nodes:
+                    del object_node_dict[node]
+                size_of_object = res
+
+        if len(object_node_dict) != 0:
+            ## Based on KP detected in message KG, find the total count of node with the same type of source node
+            ## Note: Regardless of what kp is specified in self.size_of_given_type_in_KP, it will always query total count based on kg2c
+            if kp=='infores:rtx-kg2':
+                size_of_total = self.size_of_given_type_in_KP(node_type=subject_node_category[0])
+                self.response.debug(f"Total {size_of_total} unique concepts with node category {subject_node_category[0]} was found in KG2c based on 'nodesynonymizer.get_total_entity_count' and this number will be used for Fisher's Exact Test")
+            else:
+                self.response.error("Only KG2 is allowable to calculate the Fisher's exact test temporally")
+                return self.response
+
+            size_of_query_sample = len(subject_node_list)
+
+            self.response.debug("Computing Fisher's Exact Test P-value")
+            # calculate FET p-value for each target node in parallel
+
+            parameter_list = []
+            del_list = []
+            for node in object_node_dict:
+                temp = [len(object_node_dict[node]), size_of_object[node]-len(object_node_dict[node]), size_of_query_sample - len(object_node_dict[node]), (size_of_total - size_of_object[node]) - (size_of_query_sample - len(object_node_dict[node]))]
+                if any([value < 0 for value in temp]) is True:
+                    del_list.append(node)
+                    self.response.warning(f"Skipping node {node} to calculate FET p-value due to issue1438 (which causes negative value).")
+
+            for del_node in del_list:
+                del object_node_dict[del_node]
+            parameter_list = [(node, len(object_node_dict[node]), size_of_object[node]-len(object_node_dict[node]), size_of_query_sample - len(object_node_dict[node]), (size_of_total - size_of_object[node]) - (size_of_query_sample - len(object_node_dict[node]))) for node in object_node_dict]
+
+            try:
+                # with multiprocessing.Pool() as executor:
+                #     FETpvalue_list = [elem for elem in executor.map(self._calculate_FET_pvalue_parallel, parameter_list)]
+                FETpvalue_list = [elem for elem in map(self._calculate_FET_pvalue_parallel, parameter_list)]
+            except Exception:
+                tb = traceback.format_exc()
+                error_type, error, _ = sys.exc_info()
+                self.response.error(tb, error_code=error_type.__name__)
+                self.response.error("Something went wrong with computing Fisher's Exact Test P-value")
+                return self.response
+
+            if any([type(elem) is list for elem in FETpvalue_list]):
+                for msg in [elem2 for elem1 in FETpvalue_list if type(elem1) is list for elem2 in elem1]:
+                    if type(msg) is tuple:
+                        self.response.error(msg[0], error_code=msg[1])
+                    else:
+                        self.response.error(msg)
+                return self.response
+            else:
+                output = dict(FETpvalue_list)
+
+            # check if the results need to be filtered
+            output = dict(sorted(output.items(), key=lambda x: x[1]))
+            if cutoff:
+                output = dict(filter(lambda x: x[1] < cutoff, output.items()))
+            else:
+                pass
+            if top_n:
+                output = dict(list(output.items())[:top_n])
+            else:
+                pass
+
+            # add the virtual edge with FET result to message KG
+            self.response.debug("Adding virtual edge with FET result to message KG")
+            count = 0
+            for index, value in enumerate([(virtual_relation_label, output[adj], node, adj) for adj in object_node_dict if adj in output.keys() for node in object_node_dict[adj]], 1):
+
+                edge_attribute_list =  [
+                    EdgeAttribute(attribute_type_id="EDAM-DATA:1669", original_attribute_name="fisher_exact_test_p-value", value=str(value[1]), value_url=None),
+                    EdgeAttribute(original_attribute_name="virtual_relation_label", value=value[0], attribute_type_id="EDAM-OPERATION:0226"),
+                    EdgeAttribute(original_attribute_name="defined_datetime", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), attribute_type_id="metatype:Datetime"),
+                    # EdgeAttribute(original_attribute_name=None, value="infores:arax", attribute_type_id="biolink:knowledge_source", attribute_source="infores:arax", value_type_id="biolink:InformationResource"),
+                    # EdgeAttribute(original_attribute_name=None, value="infores:arax", attribute_type_id="primary_knowledge_source", attribute_source="infores:arax", value_type_id="biolink:InformationResource"),
+                    # EdgeAttribute(original_attribute_name=None, value="infores:arax", attribute_type_id="aggregator_knowledge_source", attribute_source="infores:arax", value_type_id="biolink:InformationResource"),
+                    EdgeAttribute(original_attribute_name=None, value=True, attribute_type_id="EDAM-DATA:1772", attribute_source="infores:arax", value_type_id="metatype:Boolean", value_url=None, description="This edge is a container for a computed value between two nodes that is not directly attachable to other edges.")
+                ]
+                edge_id = f"{value[0]}_{index}"
+                retrieval_source = [
+                                        RetrievalSource(resource_id="infores:arax", resource_role="primary_knowledge_source")
+                    ]
+                edge = Edge(predicate='biolink:has_fisher_exact_test_p_value_with', subject=value[2], object=value[3],
+                            attributes=edge_attribute_list, sources=retrieval_source)
+                edge.qedge_keys = [value[0]]
+
+                kg.edges[edge_id] = edge
+
+                if self.message.results is not None and len(self.message.results) > 0:
+                    ou.update_results_with_overlay_edge(subject_knode_key=value[2], object_knode_key=value[3], kedge_key=edge_id, message=self.message, log=self.response)
+
+                count = count + 1
+
+            self.response.debug(f"{count} new virtual edges were added to message KG")
+
+            # add the virtual edge to message QG
+            if count > 0:
+                self.response.debug("Adding virtual edge to message QG")
+                edge_type = ["biolink:has_fisher_exact_test_p_value_with"]
+                option_group_id = ou.determine_virtual_qedge_option_group(subject_qnode_key, object_qnode_key,
+                                                                          qg, self.response)
+                qedge_id = virtual_relation_label
+                q_edge = QEdge(predicates=edge_type,
+                               subject=subject_qnode_key, object=object_qnode_key,
+                               option_group_id=option_group_id)
+                q_edge.relation = virtual_relation_label
+                q_edge.filled = True
+                qg.edges[qedge_id] = q_edge
+                self.response.debug("One virtual edge was added to message QG")
+
+        return self.response
+
+
+    def query_size_of_adjacent_nodes(self, node_curie, source_type, adjacent_type, kp="infores:rtx-kg2", rel_type=None):
+        """
+        Query adjacent nodes of a given source node based on adjacent node type.
+        :param node_curie: (required) the curie id of query node. It accepts both single curie id or curie id list eg. "UniProtKB:P14136" or ['UniProtKB:P02675', 'UniProtKB:P01903', 'UniProtKB:P09601', 'UniProtKB:Q02878']
+        :param source_type: (required) the type of source node, eg. "gene"
+        :param adjacent_type: (required) the type of adjacent node, eg. "biological_process"
+        :param kp: (optional) the knowledge provider to use, eg. "infores:rtx-kg2"(default)
+        :param rel_type: (optional) edge type to consider, eg. "involved_in"
+        :return a tuple with a dict containing the number of adjacent nodes for the query node and a list of removed nodes
+        """
+
+        res = None
+        source_type = ComputeFTEST.convert_string_to_snake_case(source_type.replace('biolink:',''))
+        source_type = ComputeFTEST.convert_string_biolinkformat(source_type)
+        adjacent_type = ComputeFTEST.convert_string_to_snake_case(adjacent_type.replace('biolink:',''))
+        adjacent_type = ComputeFTEST.convert_string_biolinkformat(adjacent_type)
+ 
+        if rel_type is None:
+            normalized_nodes = self.nodesynonymizer.get_canonical_curies(node_curie)
+            if not normalized_nodes:
+                self.response.warning(f"NodeSynonymizer returned no canonical curies for {node_curie} in FET.")
+                failed = list(node_curie) if isinstance(node_curie, list) else [node_curie]
+                return (dict(), failed)
+            failure_nodes = list()
+            mapping = {node: normalized_nodes[node]['preferred_curie']
+                       for node in normalized_nodes
+                       if normalized_nodes[node] is not None}
+            failure_nodes += list(normalized_nodes.keys() - mapping.keys())
+
+            query_nodes = list(set(mapping.values()))
+            # Get connected to kg2c sqlite
+            connection = sqlite3.connect(self.sqlite_file_path)
+            cursor = connection.cursor()
+            # Extract the neighbor count data
+            placeholders = ",".join("?" for _ in query_nodes)
+            sql_query = (
+                "SELECT N.id, N.neighbor_counts "
+                "FROM neighbors AS N "
+                f"WHERE N.id IN ({placeholders})"
+            )
+            cursor.execute(sql_query, query_nodes)
+            rows = cursor.fetchall()
+            connection.close()
+
+            # Load the counts into a dictionary
+            neighbor_counts_dict = {row[0]: json.loads(row[1]) for row in rows}
+
+            res_dict = {node:neighbor_counts_dict[mapping[node]].get(adjacent_type) for node in mapping if mapping[node] in neighbor_counts_dict and neighbor_counts_dict[mapping[node]].get(adjacent_type) is not None}
+            failure_nodes += list(mapping.keys() - res_dict.keys())
+
+            if len(failure_nodes) != 0:
+                return (res_dict, failure_nodes)
+            else:
+                return (res_dict, [])
+        else:
+            infores_key = "infores:retriever"
+            from shepherd_utils.arax.ARAX_expander import ARAXExpander
+            expander = ARAXExpander()
+            fet_e00 = {'subject': 'FET_n00', 'object': 'FET_n01'}
+            if rel_type is not None:
+                fet_e00['predicates'] = [rel_type]
+            query_graph_builtin = {'nodes':
+                                   {'FET_n00':
+                                    {'ids': node_curie,
+                                     'is_set': False},
+                                    'FET_n01':
+                                    {'categories': [adjacent_type],
+                                     'is_set': False}},
+                                   'edges':
+                                   {'FET_e00': fet_e00}}
+            query_graph = QueryGraph.from_dict(query_graph_builtin)
+            from shepherd_utils.arax.Expand.kp_selector import KPSelector
+            kp_selector = KPSelector(kg2_mode=False, log=self.response)
+            self.response.debug(f"FET querying {infores_key} at URL: "
+                                f"{kp_selector.kp_urls.get(infores_key)}")
+
+            try:
+
+                async def run_expand():
+                    return await expander.expand_edge_async(
+                        query_graph,
+                        kp_to_use=infores_key,
+                        user_specified_kp=False,
+                        kp_timeout=30,
+                        kp_selector=kp_selector,
+                        log=self.response,
+                        multiple_kps=False,
+                        be_creative_treats=False
+                    )
+
+                answer_kg, _, log = asyncio.run(run_expand())
+
+                if log.status != 'OK':
+                    self.response.error(f"Failed to query adjacent nodes from {infores_key} for {node_curie}")
+                    return res
+
+                res_dict = dict()
+                failure_nodes = list()
+                node_iter = node_curie if isinstance(node_curie, list) else (node_curie,)
+                check_empty = False
+                for node in node_iter:
+                    tmplist = set(edge_id for edge_id, edge in answer_kg.edges_by_qg_id.get('FET_e00', {}).items() if edge.subject == node or edge.object == node)
+                    if len(tmplist) == 0:
+                        self.response.warning(f"Failed to query adjacent nodes from {infores_key} for {node} in FET.")
+                        failure_nodes.append(node)
+                        check_empty = True
+                        continue
+                    res_dict[node] = len(tmplist)
+                if check_empty:
+                    return (res_dict, failure_nodes)
+                else:
+                    return (res_dict, [])
+            except Exception:
+                tb = traceback.format_exc()
+                error_type, error, _ = sys.exc_info()
+                self.response.error(tb, error_code=error_type.__name__)
+                self.response.error(f"Something went wrong with querying adjacent nodes from {infores_key} for {node_curie}")
+                return res
+
+
+    def size_of_given_type_in_KP(self, node_type):
+        """
+        find all nodes of a certain type in KP
+        :param node_type: the query node type
+        :param kg: only allowed for choosing 'KG1' or 'KG2' now. Will extend to BTE later
+        """
+        # TODO: extend this to KG2, BTE, and other KP's we know of
+
+        size_of_total = None
+
+        node_type = ComputeFTEST.convert_string_to_snake_case(node_type.replace('biolink:',''))
+        node_type = ComputeFTEST.convert_string_biolinkformat(node_type)
+
+        # Get connected to kg2c sqlite
+        connection = sqlite3.connect(self.sqlite_file_path)
+        cursor = connection.cursor()
+
+        # Extract total count of nodes with certain type in kg2c
+        sql_query = f"SELECT C.count " \
+                    f"FROM category_counts AS C " \
+                    f"WHERE C.category = '{node_type}'"
+
+        cursor.execute(sql_query)
+        rows = cursor.fetchall()
+        size_of_total = rows[0][0]
+        connection.close()
+
+        return size_of_total
+
+    def _calculate_FET_pvalue_parallel(self, this):
+        # *Note*: The arugment 'this' is a list containing five sub-arguments below since this function is exectued in parallel.
+        # This method is expected to be run within this class
+        """
+        Calculate Fisher Exact Test' p-value.
+        *param this is a list containing five sub-arguments below since this function is exectued in parallel.
+        :return a list of FET p-values
+        """
+        #:sub-argument node: (required) the curie name of node, eg. "UniProtKB:Q13330"
+        #:sub-argument a: (required) count of in_sample and in_pathway
+        #:sub-argument b: (required) count of not_in_sample but in_pathway
+        #:sub-argument c: (required) count of in_sample but not in_pathway
+        #:sub-argument d: (required) count of not in_sample and not in_pathway
+
+        # this should contain five variables and assign them to different variables
+        node, a, b, c, d = this
+        error_message = []
+
+        try:
+            contingency_table = [[a, b], [c, d]]
+            pvalue = stats.fisher_exact(contingency_table)[1]
+            return (node, pvalue)
+        except Exception:
+            tb = traceback.format_exc()
+            error_type, error, _ = sys.exc_info()
+            error_message.append((tb, error_type.__name__))
+            error_message.append(f"Something went wrong for target node {node} to calculate FET p-value")
+            error_message.append(f"a, b, c, d are respectively {a}, {b}, {c}, {d} ")
+            return error_message
+
+    @staticmethod
+    def convert_string_to_snake_case(input_string: str) -> str:
+        # Converts a string like 'ChemicalEntity' or 'chemicalEntity' to 'chemical_entity'
+        if len(input_string) > 1:
+            snake_string = input_string[0].lower()
+            for letter in input_string[1:]:
+                if letter.isupper():
+                    snake_string += "_"
+                snake_string += letter.lower()
+            return snake_string
+        else:
+            return input_string.lower()
+
+    @staticmethod
+    def convert_string_biolinkformat(input_string: str) -> str:
+
+        if 'biolink' in input_string:
+            return input_string
+        else:
+            if len(input_string) > 1:
+                modified_string = input_string[0].upper()
+                make_upper = False
+                for letter in input_string[1:]:
+                    if letter == '_':
+                        make_upper = True
+                        next
+                    else:
+                        if make_upper is True:
+                            modified_string += letter.upper()
+                            make_upper = False
+                        else:
+                            modified_string += letter
+                return 'biolink:'+ modified_string
+            else:
+                return input_string
+
+    @staticmethod
+    def _change_kp_name(name) -> list:
+
+        if type(name) is str:
+            return [re.sub("infores:", "", name)]
+        else:
+            return [re.sub("infores:", "", x) for x in name]

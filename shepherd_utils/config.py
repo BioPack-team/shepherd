@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     # ARAX configs
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
     arax_biolink_version: str = "v4.2.5"
+    # Where the ARAX port's BiolinkHelper caches its lookup-map pickle (must be
+    # writable; upstream writes next to its own source file).
+    arax_biolink_cache_dir: str = "/tmp/arax_biolink"
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
         "code/ARAX/KnowledgeSources/general_concepts.json"

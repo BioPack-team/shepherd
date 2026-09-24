@@ -286,6 +286,37 @@ the template choice, not just the operations.
 | EXP-31 | KP response cache (`trapi_query_cacher.py`) | SQLite index plus gzip pickles, keyed by sha256 of `{url, body}`. **Caches timeouts (-1)**. `ssl=False` (D-5). Background refresh: entries older than 6 h are re-queried, timeouts after 72 s. The cache is cleared at startup. `bypass_cache` skips it. |
 | EXP-32 | Query-plan telemetry | `response.update_query_plan(qedge, kp, status, description, query)` feeds API-02 streaming. |
 
+#### 6.4a Port status
+
+**Ported (DEC-14):**
+- **Expand:** `shepherd_utils/arax/ARAX_expander.py` and `Expand/` (`expand_utilities`, `kp_selector`, `trapi_querier`, `smartapi`).
+- **Its dependencies:** the messenger, `query_graph_info`, NodeSynonymizer, BiolinkHelper, `util`, the ranker, the overlay dispatcher with the Fisher exact test, and a Shepherd-backed `RTXConfiguration`.
+
+**Changes from upstream:** each file's header lists them. They are the recorded decisions:
+- DEC-4: queries go only to Retriever, at `SYNC_KG_RETRIEVAL_URL`, including single-node queries.
+- DEC-3: no KP cache.
+- DEC-9: no curie-prefix conversion.
+- DEC-10: the `kp` list is forwarded as `parameters.kp`.
+- DEC-12: every other SmartAPI KP is marked Skipped.
+
+**Parity check:** `tests/unit/arax/test_expand_parity.py` runs 34 cases against a mock Retriever. The expected outputs were recorded from upstream ARAX's own Expand (`expand_parity/run_upstream.py`). The port matches everything observable:
+- the KG, QG and aux graphs;
+- the in-memory `qnode_keys`/`qedge_keys`/`query_ids`/`filled` annotations and the excluded-edge info;
+- the query plan and INFO-and-above logs;
+- every request body sent to the KP.
+
+The test also covers pruning (the Fisher exact test, then Resultify and the ranker), the FDA and knowledge-source constraints, excluded edges, option groups, subclass `query_id` edges, HTTP errors and timeouts. Two differences are intended and asserted separately:
+- single-node queries go to Retriever;
+- the `kp` list is forwarded.
+
+The goldens need `PYTHONHASHSEED=0`, because ARAX builds several lists from sets. The Shepherd Dockerfiles pin that seed.
+
+**DEC-9 consequence:** pinned curies go to Retriever exactly as given. ARAX would first canonicalize, deduplicate and reorder them (`get_canonical_curies_list` returns `list(set(...))`). For normalized input, only the order differs, and that order is hash-seed dependent in ARAX itself.
+
+**Not yet:**
+- Inferred treats/affects qedges need `ARAX_infer`, which is not ported yet.
+- Expand is a library only. It is not wired into the `arax` worker, which comes with the orchestration port (`ARAX_query`, the QG interpreter).
+
 #### 6.5 Inferred and creative branches in Expand
 
 See INF-* and CRT-*. In summary: single-qedge inferred `treats`/`ameliorates`
