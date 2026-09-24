@@ -14,6 +14,23 @@ issues and a future parity register (like `ARS_PARITY_REGISTER.md`).
 - **Paths:** relative to `RTX/code/`, and `AQ/` means `RTX/code/ARAX/ARAXQuery/`,
   unless a path starts with `shepherd/`.
 
+## Decisions
+
+Recorded 2026-09-24. Where this section conflicts with the inventory below,
+**this section wins**. The inventory stays as the record of what upstream ARAX
+does.
+
+| ID | Decision | Inventory items affected |
+|---|---|---|
+| DEC-1 | **Perfect parity by default.** Everything is ported to behave exactly like ARAX, bugs and oddities included, unless a decision here says otherwise. The plan is to finish the port and validate it against ARAX first, and only then fix bugs as a separate, later pass. | All. Every Part D defect is **reproduced** in the port. Part C items are only fixed where another decision says so (DEC-8). |
+| DEC-2 | **The ARAX UI is out of scope** and should stay external to Shepherd, at least for now. | AUX-03. Follow-up: API-02 (streaming progress) and AUX-02 (autocomplete) mainly serve the UI; see Part F Q1. |
+| DEC-3 | **No KP response cache and no ARAX response storage.** Shepherd's existing Postgres state is used instead. | Not ported: EXP-31, CRT-05 and CON-05 (KP cache), OPS-05 (MySQL + S3 store), and the background cache refresh in OPS-07. `bypass_cache` (EXP-06) has nothing to bypass. Follow-up: API-07/API-08/OPS-06 depend on the store; see Part F Q7. D-5 does not apply. |
+| DEC-4 | **No SmartAPI: Retriever is used for everything.** All SmartAPI / KP-registry / meta-KG KP-selection machinery is removed, and every Expand query goes to Retriever. | Not ported: EXP-07 (blocked KPs), EXP-25 (meta-KG KP selection), EXP-29 (KP info cache / SmartAPI), EXP-30 (dynamic roster), and the SmartAPI/KP-info parts of OPS-07 and API-09. D-3 and D-4 do not apply. Follow-ups where ARAX behavior depended on a specific KP are listed in Part F Q2. |
+| DEC-5 | **Dead code: confirm with the ARAX team, then delete.** Items listed in Part E are not ported once the ARAX team confirms they are dead. | Part E; Part F Q4. |
+| DEC-6 | **Data dependencies are assumed to come the same way as the pathfinder DBs** (downloaded on worker startup via `shepherd_utils/data_download.py`, from `kg2webhost.rtx.ai/tier0`-style URLs). Exactly where each file comes from is still to be worked out. | Part B §20 (curie_to_pmids, ExplainableDTD, COHD, FDA pickle, autocomplete), OPS-08; Part F Q5. |
+| DEC-7 | **The ARAX pathfinder is obsolete and is dropped. Shepherd's current `arax_pathfinder` worker is kept as it is.** | CON-01…CON-05 are not parity targets. QGI-01 / QGI-03 route to Shepherd's `arax.pathfinder`. C-1 and C-3…C-7 are no longer parity gaps (under DEC-1 they can be revisited in the post-validation bug-fix pass). The catrax-pathfinder pin difference no longer matters. |
+| DEC-8 | **Ranker: bring Shepherd's `arax_rank` up to exactly the ARAX version.** | RNK-01…RNK-06; C-2 and C-10 become port work items, including ARAX's quirks per DEC-1 (the `"no value!"`→0 mutation, falsy-zero min test, the `confidence`-attribute override, `row_data`/`table_column_names`, no `edge["confidence"]` in the output, and ARAX's error behavior rather than soft-failing). D-20 is reproduced. Ranking must also run at the ARAX point in the pipeline (RNK-06 / ORC-09). |
+
 ## How to read this
 
 The **Shepherd** column in each table uses these values:
@@ -493,9 +510,10 @@ goes ahead.
 
 ## Part D: Latent ARAX defects (decision needed: reproduce or fix?)
 
-A faithful port has to pick a side for each of these. The recommended default
-is **reproduce unless the ARAX team says otherwise**, and to record every fix
-as a numbered deviation.
+**Decided (DEC-1): every defect below is reproduced in the port.** Fixes wait
+for a separate pass after the port has been validated, and each one is then
+recorded as a numbered deviation. D-3, D-4 and D-5 do not apply, because the
+code they live in is not ported (DEC-3, DEC-4).
 
 | ID | Defect | Where |
 |---|---|---|
@@ -523,6 +541,9 @@ as a numbered deviation.
 ---
 
 ## Part E: Dead, disabled or unreachable in ARAX (confirm drop)
+
+**Decided (DEC-5):** once the ARAX team confirms each item, it is deleted and
+not ported.
 
 - **E-1:** `overlay(predict_drug_treats_disease)` plus `Overlay/predictor`,
   `Overlay/GraphSage_train`, `Expand/DTD_querier.py` and
@@ -555,25 +576,29 @@ as a numbered deviation.
 
 ## Part F: Open questions for the ARAX team
 
-1. **Scope of "faithful".** Should the port match only what clients can observe
-   in TRAPI (results, KG, aux graphs, scores, logs)? Or should it also
-   reproduce the ARAX-specific surfaces: streaming progress (API-02), the query
-   plan, `/response/{id}` storage and validation, `/status`, `/entity`,
-   `/meta_knowledge_graph` and autocomplete?
-2. **KP roster.** Production Expand fans out to *every* SmartAPI TRAPI 1.6.0 KP
-   at the maturity (EXP-29/30). Should Shepherd reproduce the dynamic
-   SmartAPI/meta-KG selection, or pin the roster (for example Retriever +
-   Gandalf-as-KG2)? Please share the live roster from a production ARAX.
-3. **Part D.** Reproduce or fix, item by item? D-1 (creative elevation) and
-   D-15 (unsorted xDTD top-N) change answers the most.
-4. **Part E.** Confirm that everything listed can be dropped.
-5. **Data delivery.** Can the ExplainableDTD, curie_to_pmids, COHD and FDA
-   files be served from `kg2webhost.rtx.ai/tier0` the way the pathfinder DBs
-   are? Is the COHD DB (still on KG2.8.0) still maintained?
-6. **KP response cache (EXP-31).** Is it part of the expected behavior (for
-   example, cached timeouts), or just an optimization?
-7. **Result storage.** Must Shepherd-hosted ARAX responses still land in the
-   ARAX S3 store with `arax.ncats.io/?r=<id>` links?
-8. **Version pins.** Shepherd uses catrax-pathfinder 2.5.0 and
-   biolink-helper-pkg 1.0.0; ARAX uses 2.4.3 and 1.0.1. Should the two be
-   aligned?
+1. **Scope of "faithful"** (partly decided: DEC-1 parity, DEC-2 UI out of
+   scope). Still open: with the UI staying external, which non-TRAPI surfaces
+   does Shepherd need? Candidates are streaming progress (API-02) and the query
+   plan, `/status`, `/entity`, `/meta_knowledge_graph` and autocomplete
+   (AUX-02).
+2. **KP roster** (decided: DEC-4, Retriever only). Follow-ups where ARAX
+   depended on a specific KP:
+   - the rtx-kg2 (Gandalf) special cases: the 600 s timeout, the
+     `return_minimal_metadata` flag, and single-node queries (EXP-21), which
+     only rtx-kg2 serves;
+   - FET's `rel_edge_key` Gandalf query (OVL-05);
+   - curie-prefix conversion (EXP-26), which reads supported prefixes from the
+     SmartAPI-derived meta map;
+   - the `kp` parameter (EXP-01) and the `fill` allowlist (WF-03);
+   - AUX-01's Plover meta-KG source.
+3. **Part D** (decided: DEC-1, reproduce everything, fix after validation).
+4. **Part E** (decided: DEC-5, confirm with the ARAX team, then delete). Still
+   needed: the ARAX team's confirmation.
+5. **Data delivery** (assumed: DEC-6). Still open: where each file actually
+   comes from, and whether the COHD DB (still on KG2.8.0) is maintained.
+6. **KP response cache** (decided: DEC-3, not ported).
+7. **Result storage** (decided: DEC-3, Postgres only). Still open: what
+   replaces `/response/{id}` retrieval and validation (API-07, OPS-06) and the
+   `envelope.id` / `arax.ncats.io/?r=<id>` link, if anything.
+8. **Version pins.** The catrax-pathfinder pin is moot (DEC-7). Still open:
+   biolink-helper-pkg is 1.0.0 in Shepherd and 1.0.1 in ARAX.
