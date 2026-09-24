@@ -1,5 +1,5 @@
 catrax-pathfinder==2.5.0
-biolink-helper-pkg==1.0.0
+biolink-helper-pkg==1.0.1
 httpx==0.28.1
 # Needed for pathfinder.telemetry.child_bootstrap()'s RequestsInstrumentor;
 # shepherd's own otel deps (sdk, otlp exporter) already cover the rest of
