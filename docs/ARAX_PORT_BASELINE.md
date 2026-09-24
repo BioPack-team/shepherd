@@ -7,7 +7,8 @@ issues and a future parity register (like `ARS_PARITY_REGISTER.md`).
 
 - **Upstream:** [RTXteam/RTX](https://github.com/RTXteam/RTX), `master` at
   `9485431` (2026-09-21).
-- **Shepherd:** `main` at `e3bc720`.
+- **Shepherd:** inventoried at `main` `e3bc720`; the Shepherd columns reflect the port
+  on branch `claude/optimistic-gauss-bjtrzh`.
 - **Method:** static reading of the code. Nothing was executed against a live
   ARAX. SmartAPI and `kg2webhost.rtx.ai` could not be reached from the
   analysis environment, so the live KP roster (EXP-30) is inferred from code.
@@ -36,6 +37,8 @@ does.
 | DEC-13 | **`biolink-helper-pkg` is bumped to 1.0.1 to match ARAX.** Done in `workers/arax_pathfinder/requirements.txt`. The only upstream change is a fix inside `get_predicate_depth_map`, which Shepherd does not call. | BL-01. |
 | DEC-14 | **One in-process ARAX worker.** The ARAX plan (interpreter, ARAXi actions, auto-rank, ResultTransformer) runs in a single worker process, as it does in ARAX, calling the ported modules as a library. ARAX's hidden per-query state therefore stays in memory: KG `qnode_keys`/`qedge_keys`, qedge `filled`, the original QG, excluded-edge info, the query plan and the log. The library is `shepherd_utils/arax/`. It runs on ARAX's own OpenAPI-generated TRAPI model classes, vendored unchanged except for their import paths (`shepherd_utils/arax/openapi_server/`, pinned to `9485431`), so ARAX's in-memory attributes, validation and serialization carry over. Ported modules keep ARAX's filenames so they can be diffed against upstream. CPU-heavy parts may still use a process pool. The standalone `arax.rank` and `arax.pathfinder` workers stay available as workflow steps. | All ARAX modules. Resultify is ported first because Expand calls it after every qedge (EXP-19) and when pruning (EXP-13). |
 | DEC-11 | **`/meta_knowledge_graph` is built from Retriever's metadata** (Retriever's own `/meta_knowledge_graph`), not from Plover plus SmartAPI-derived KP meta maps. **ARAX's own additions are included**: the `knowledge_types` and `attributes` fill-in, the standard attribute constraints (`original_predicate`, `knowledge_level`, `agent_type`), the `format=simple` view (predicates by categories), the 1 h cache and hourly background refresh, and the JSON backups (keeps 3) with fallback to the newest backup. | AUX-01 (and API-05): only the Plover fetch and the KPInfoCacher merge are replaced. SmartAPI (DEC-4) is then only used by the UI's `/status?authorization=smartapi` view. |
+| DEC-15 | **`/arax/asyncquery` and `/arax/asyncquery_status` use Shepherd's server logic**, the same as every other ARA, not ARAX's: Shepherd replies with its own `job_id` and delivers the result to the callback itself. | API-03, API-04 (and the `asynchronous` mode in ORC-13, which Shepherd never uses). D-18's missing `job_id` does not apply. |
+| DEC-16 | **No concurrency limit.** ARAX's per-address cap and free-RAM floor (429 `OverLimit`) are not implemented. | ORC-14; the 429 in API-01. |
 
 ### UI contract: what the ARAX UI requires
 
@@ -46,68 +49,106 @@ under a single Shepherd ARAX base path.
 
 | UI need | UI call (rtx.js line) | Inventory item | Notes |
 |---|---|---|---|
-| Submit a query and follow its progress | `POST {query}` with `stream_progress: true` (609, 670) | API-01, API-02, EXP-32 | The streamed NDJSON must carry log entries, the `{pid, authorization}` token, `query_plan` updates (per-qedge/per-KP status, which drives the progress bar) and the final envelope. |
-| Query options set from the UI settings panel | `query_options.kp_timeout`, `prune_threshold`, `max_pathfinder_paths`, `max_path_length`, `bypass_cache` (610-634) | ORC-04, EXP-03/04/06, C-4 | `bypass_cache` is ignored by the ARAs (DEC-3). `max_pathfinder_paths`/`max_path_length` are ignored (DEC-7). |
+| Submit a query and follow its progress | `POST {query}` with `stream_progress: true` (609, 670) | API-01, API-02, EXP-32 | **Served**: ARAX's own stream (log entries, the kill token, `query_plan` updates, the final envelope), relayed from the worker (§2a). |
+| Query options set from the UI settings panel | `query_options.kp_timeout`, `prune_threshold`, `max_pathfinder_paths`, `max_path_length`, `bypass_cache` (610-634) | ORC-04, EXP-03/04/06, C-4 | **Served**. `bypass_cache` is ignored by the ARAs (DEC-3). `max_pathfinder_paths`/`max_path_length` are ignored (DEC-7). |
 | Cancel a running query | `GET /status?terminate_pid=&authorization=` (895) | OPS-02 | **Served:** ends the query's stream, as the UI sees ARAX's kill; the work still finishes in the worker (§2a). |
-| Load a response by id (numeric ids, and ARS PKs prefixed with `X`) | `GET /response/{id}` (130, 538, 1270, 1335, 1341, 6862) | API-07, OPS-06 | Full ARAX behavior, with responses read from Postgres (DEC-3). `X` means ARS lookup plus attribute stripping, and the `stats` view uses `validation_result` and `provenance_summary`. |
-| Attribute detail for a stripped response | `GET /response/{detail_lookup}` (4773), `Z` prefix (7357) | API-07 | Depends on the `json_cache` produced by the `X` path. |
-| Recent queries list / active queries | `GET /status?last_n_hours=N`, `GET /status?mode=active` (7156) | OPS-03 | Shepherd would build this from Postgres query state. |
-| Original input query of a past run | `GET /status?id=` (7309) | OPS-01 / `get_status(id_)` | Returns the stored input query. |
-| Recent ARS PKs | `GET /status?mode=recent_pks&last_n_hours=&authorization=<ars host>` (6978) | API-09 | Calls the ARS `latest_pk` endpoint. |
-| KP cache listing | `GET /status?mode=kp_cache` (8301) | API-09, EXP-31 | Accepted as broken: there is no KP cache (DEC-3). |
-| SmartAPI listing | `GET /status?authorization=smartapi` (7793) | API-09, EXP-29 | Kept for the UI (DEC-4). |
-| Site configuration | `GET /status?mode=site_config` (9901) | API-09 | Versions and maturity. |
-| Meta-KG for the query builder | `GET /meta_knowledge_graph?format=simple` (6894) | AUX-01 | Built from Retriever's metadata (DEC-11). |
+| Load a response by id (numeric ids, and ARS PKs prefixed with `X`) | `GET /response/{id}` (130, 538, 1270, 1335, 1341, 6862) | API-07, OPS-06 | **Served**: ARAX's `get_response`, reading Shepherd's storage and its own ARS (DEC-3). `X` means ARS lookup plus attribute stripping, and the `stats` view uses `validation_result` and `provenance_summary`. |
+| Attribute detail for a stripped response | `GET /response/{detail_lookup}` (4773), `Z` prefix (7357) | API-07 | **Served** (the component cache is in Shepherd's data store). |
+| Recent queries list / active queries | `GET /status?last_n_hours=N`, `GET /status?mode=active` (7156) | OPS-03 | **Served**, from Shepherd's query table. |
+| Original input query of a past run | `GET /status?id=` (7309) | OPS-01 / `get_status(id_)` | **Served**: returns the stored input query. |
+| Recent ARS PKs | `GET /status?mode=recent_pks&last_n_hours=&authorization=<ars host>` (6978) | API-09 | **Served**, from Shepherd's own ARS. |
+| KP cache listing | `GET /status?mode=kp_cache` (8301) | API-09, EXP-31 | Served empty: there is no KP cache (DEC-3). |
+| SmartAPI listing | `GET /status?authorization=smartapi` (7793) | API-09, EXP-29 | **Served**: kept for the UI (DEC-4). |
+| Site configuration | `GET /status?mode=site_config` (9901) | API-09 | **Served**: versions and maturity. |
+| Meta-KG for the query builder | `GET /meta_knowledge_graph?format=simple` (6894) | AUX-01 | **Served**: built from Retriever's metadata (DEC-11). |
 | Entity lookup | `GET /entity?q=` and `POST /entity` (9648, 9697, 9769) | API-06, SYN-02 | **Served** (§2a). |
-| Node-name autocomplete | `GET /rtxcomplete/nodeslike?word=&limit=15`, relative to the UI host (`rtxcompletenode.js:67`) | AUX-02 | Needs `autocomplete_v1.0_<tier>.sqlite` (DEC-6). |
+| Node-name autocomplete | `GET /rtxcomplete/nodeslike?word=&limit=15`, relative to the UI host (`rtxcompletenode.js:67`) | AUX-02 | **Served** at `/arax/rtxcomplete/nodeslike`; the UI's host must route `/rtxcomplete/` there. |
 | Swagger link | `{baseAPI}/ui/` (80) | — | Shepherd serves `/docs`. |
 | Calls that do not go to ARAX | ARS submit (523), PloverDB `EXT` (554), `uptime.rtx.ai` (8058, 8164), ARS test-runner artifacts (8449-8537), `rtx.version` (10107) | — | Not Shepherd's concern. |
 
+## Remaining work
+
+What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
+
+1. **ARAX's TRAPI workflow operations are rejected before ARAX sees them.**
+   `run_query` checks every `workflow` operation against Shepherd's own list,
+   whatever the target. So for `/arax/query` only `lookup`, `score`,
+   `filter_results_top_n`, `filter_kgraph_orphans` and `sort_results_score` get
+   through. `fill`, `bind`, `complete_results`, `lookup_and_score`, the
+   `overlay_*` operations, `annotate_nodes` and the `filter_kgraph_*`
+   operations fail with a `KeyError` (HTTP 500), although the ported library
+   runs all of them (WF-*; the query parity test calls it directly). *Needs a
+   decision:* for the ARAX target, skip Shepherd's check and let ARAX validate
+   the workflow itself (it answers `NotImplementedError` for an operation it
+   doesn't know).
+2. **Real data files (DEC-6).** The download URLs for curie_to_pmids,
+   ExplainableDTD, COHD, FDA drugs and autocomplete are placeholders, and the
+   parity tests ran on small synthetic stand-ins with the same schemas. Once
+   the real files exist: set the URLs, size the volumes (ExplainableDTD is
+   large), and check that the real schemas match.
+3. **Validation against a live ARAX.** Every parity test compares the port with
+   upstream ARAX's own code, but offline: a mock Retriever, synthetic data, and
+   stand-ins for NodeNorm, COHD's web lookup and reasoner-validator. A run of
+   real queries through a live ARAX and through Shepherd, compared, is the next
+   check. The upstream demo workflow corpus and its two-endpoint diff script
+   (§22) are a ready starting point. `add_node_pmids` (NCBI eUtils), xCRG and
+   Connect have only port-side tests so far.
+4. **Build and deploy.** The `arax` worker and server images have not been built
+   (the install steps were checked in fresh environments). The `arax` worker's
+   resources (`compose.test.yml`: 1 CPU, 3 GB) were sized for the old proxy.
+5. **UI deployment.** The UI calls autocomplete at `/rtxcomplete/nodeslike` on
+   its own host, which must route to `/arax/rtxcomplete/nodeslike`. Its Swagger
+   link (`{baseAPI}/ui/`) has no Shepherd equivalent (Shepherd serves `/docs`).
+6. **`GET /status/logs`** (API-10) is not served. The UI does not call it.
+7. **The bug-fix pass (DEC-1)**, after validation: the Part D defects (all
+   reproduced today), C-1 and C-3 to C-7 in `arax.pathfinder`, and C-12.
+
 ## How to read this
 
-The **Shepherd** column in each table uses these values:
+The **Shepherd** column in each table says where each item stands in the
+port (branch `claude/optimistic-gauss-bjtrzh`), using these values:
 
 | Mark | Meaning |
 |---|---|
-| **Ported** | A native Shepherd worker does this. Any divergence is listed in [Part C](#part-c--divergences-in-shepherds-existing-arax-ports). |
-| **Partial** | A Shepherd component does something similar, but the semantics differ. |
-| **Proxy** | Only available because `workers/arax` forwards the whole query to the ARAX HTTP service. |
-| **None** | Not available in Shepherd, not even through the proxy. |
-| **Dead** | Unreachable, disabled or broken in ARAX itself. The ARAX team should confirm whether to drop it ([Part E](#part-e--dead-disabled-or-unreachable-in-arax-confirm-drop)). |
-| **Infra** | ARAX operational plumbing that Shepherd already covers with its own design (Postgres/Redis state, callbacks, OTEL). A port should match what clients can observe, not re-implement the plumbing. |
+| **Ported** | Shepherd does it as ARAX does, through the ported library in `shepherd_utils/arax/` (run by the `arax` worker) or the `/arax` API. Changes a recorded decision requires are named in the cell. "Parity-tested" means a test compares it with upstream ARAX's own code. |
+| **Partial** | Some of it is ported, as the cell says. |
+| **Shepherd's own** | By decision, Shepherd's existing implementation is used instead of ARAX's. |
+| **Not ported** | Not done: by a decision where one is named, otherwise open (see [Remaining work](#remaining-work)). |
+| **Removed** | Dead code, not ported (DEC-5, Part E). |
+| **Infra** | ARAX operational plumbing that Shepherd covers with its own design (Postgres/Redis state, callbacks, OTEL). What clients observe is matched; the plumbing is not re-implemented. |
+| **External** | Stays outside Shepherd (DEC-2). |
 
-**Current Shepherd state, in one line:** `shepherd/workers/arax/worker.py`
-sends every non-pathfinder query to `settings.arax_url`
-(`https://arax.ncats.io/shepherd/api/arax/v1.4/query`, a dedicated ARAX
-instance on port 5005). Only `arax.pathfinder` (connect_nodes) and `arax.rank`
-(the ranker) are native. So today almost every row below is Proxy.
+The Details columns still describe what upstream ARAX does.
 
-**Update (DEC-14 implemented):** the `arax` worker now runs the ported library
-(`shepherd_utils/arax/`) in a process pool instead of proxying; see §2a. The
-"Shepherd" columns below record the state when this inventory was taken.
+**Current Shepherd state, in one line:** the `arax` worker runs the ported ARAX
+library in-process (DEC-14, §2a) for every non-pathfinder query, TRAPI
+pathfinder queries go to the `arax.pathfinder` worker (DEC-7), and the `/arax`
+API serves everything the ARAX UI calls. Before the port, the worker proxied
+each query to a remote ARAX service (`settings.arax_url`), and only
+`arax.pathfinder` and `arax.rank` were native.
 
 ---
 
 ## Part A: Summary matrix
 
-| Area | IDs | ARAX size | Shepherd today | Main data / service dependencies | Port difficulty |
+| Area | IDs | ARAX size | Shepherd now | Main data / service dependencies | Port difficulty (as estimated before the port) |
 |---|---|---|---|---|---|
-| HTTP API and envelope semantics | API-* | about 1.5k LOC (Flask server) | Partial (`/query`, `/asyncquery` only) | MySQL, S3, NodeNorm | Medium (mostly deciding what clients rely on) |
-| Orchestration, ARAXi DSL, workflow ops | ORC-*, DSL-*, WF-* | about 3k LOC | None (Shepherd has its own workflow model) | none | Medium |
-| QG interpreter and templates | QGI-* | about 1.3k LOC + YAML | None | NodeNorm (category lookup) | Low to medium |
-| Expand (KP querying, multi-hop, merging) | EXP-* | about 5k LOC | Partial (aragorn/bte lookups) | SmartAPI, KP meta-KGs, Retriever, Gandalf, NodeNorm, FDA pickle | **High** |
-| NodeSynonymizer / Biolink | SYN-*, BL-* | about 1k LOC | Partial | NodeNorm, Name Resolver, Biolink YAML | Low |
-| Overlay | OVL-* | about 3k LOC | None | curie_to_pmids, tier0 overlay sqlite, COHD sqlite + cohd.io, Gandalf, eUtils | Medium |
-| Filter_KG | FKG-* | about 2.4k LOC | None | general_concepts.json | Low to medium |
-| Filter_Results | FRS-* | about 1.3k LOC | Partial | none | Low |
-| Resultify | RES-* | about 1.75k LOC | None | none | **High** (subtle algorithm) |
-| Ranker | RNK-* | about 0.9k LOC | Ported, with divergences | none | Low (fix divergences) |
-| ResultTransformer | RTF-* | about 0.3k LOC | None | none | Medium (ordering matters) |
-| Infer (xDTD) + creative treats | INF-*, CRT-* | about 4k LOC | None | ExplainableDTD sqlite (large) | **High** |
-| Connect: pathfinder | CON-* | package | Ported, with divergences | curie_ngd, tier0 overlay sqlite, Retriever | Low (fix divergences) |
-| Connect: xCRG | XCR-* | package | None | curie_ngd, curie_to_pmids, Retriever | Low to medium (package wrap) |
-| Caching, tracking, background tasks | OPS-* | about 2.5k LOC | Infra / None | SQLite/MySQL, SmartAPI | Depends on scope |
-| Meta-KG, entity, autocomplete, UI | AUX-* | varies | None | Plover/Gandalf, NodeNorm, autocomplete sqlite | Scope decision |
+| HTTP API and envelope semantics | API-* | about 1.5k LOC (Flask server) | Ported under `/arax`; `/asyncquery` is Shepherd's own (DEC-15) | MySQL, S3, NodeNorm | Medium (mostly deciding what clients rely on) |
+| Orchestration, ARAXi DSL, workflow ops | ORC-*, DSL-*, WF-* | about 3k LOC | Ported (in-process library, DEC-14); Shepherd's server rejects most ARAX workflow ops (Remaining work, item 1) | none | Medium |
+| QG interpreter and templates | QGI-* | about 1.3k LOC + YAML | Ported (TRAPI `paths` go to `arax.pathfinder`, DEC-7) | NodeNorm (category lookup) | Low to medium |
+| Expand (KP querying, multi-hop, merging) | EXP-* | about 5k LOC | Ported, Retriever only (DEC-4), parity-tested | SmartAPI, KP meta-KGs, Retriever, Gandalf, NodeNorm, FDA pickle | **High** |
+| NodeSynonymizer / Biolink | SYN-*, BL-* | about 1k LOC | Ported | NodeNorm, Name Resolver, Biolink YAML | Low |
+| Overlay | OVL-* | about 3k LOC | Ported (ICEES removed, E-8) | curie_to_pmids, tier0 overlay sqlite, COHD sqlite + cohd.io, Gandalf, eUtils | Medium |
+| Filter_KG | FKG-* | about 2.4k LOC | Ported | general_concepts.json | Low to medium |
+| Filter_Results | FRS-* | about 1.3k LOC | Ported | none | Low |
+| Resultify | RES-* | about 1.75k LOC | Ported, with ARAX's own tests | none | **High** (subtle algorithm) |
+| Ranker | RNK-* | about 0.9k LOC | Ported, exact (DEC-8) | none | Low (fix divergences) |
+| ResultTransformer | RTF-* | about 0.3k LOC | Ported | none | Medium (ordering matters) |
+| Infer (xDTD) + creative treats | INF-*, CRT-* | about 4k LOC | Ported (legacy xCRG removed, E-2) | ExplainableDTD sqlite (large) | **High** |
+| Connect: pathfinder | CON-* | package | Shepherd's pathfinder (DEC-7) | curie_ngd, tier0 overlay sqlite, Retriever | Low (fix divergences) |
+| Connect: xCRG | XCR-* | package | Ported | curie_ngd, curie_to_pmids, Retriever | Low to medium (package wrap) |
+| Caching, tracking, background tasks | OPS-* | about 2.5k LOC | Shepherd's own, with ARAX's views (see OPS-*) | SQLite/MySQL, SmartAPI | Depends on scope |
+| Meta-KG, entity, autocomplete, UI | AUX-* | varies | Ported; the UI stays external (DEC-2) | Plover/Gandalf, NodeNorm, autocomplete sqlite | Scope decision |
 
 ---
 
@@ -120,40 +161,40 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 
 | ID | Endpoint / behavior | Details | Shepherd |
 |---|---|---|---|
-| API-01 | `POST /query` (sync) | Forks a child per query (RLIMIT_AS 32 GiB). Returns an envelope with an extra top-level `http_status` key. The HTTP status is 200, 400 (any `response.error()`) or 429 (OverLimit). `remote_address` comes from `X-Forwarded-For`. | Partial (`shepherd_server/aras/arax.py`) |
-| API-02 | `POST /query` with `stream_progress: true` | `text/event-stream` carrying raw NDJSON (not SSE `data:` framing). It emits, in order: log entries as they happen; a `{pid, authorization}` kill token; `query_plan` updates (per-qedge/per-KP status Waiting, Done, Timed out, Skipped, Error, Warning); a 180 s heartbeat; then the final envelope. On a NaN serialization failure it sends an emptied ERROR envelope. The status is always 200. The ARAX UI depends on this. | None |
-| API-03 | `POST /asyncquery` | `callback` is required (`^https?://`) and `http://localhost*` is rejected. The fork happens inside `execute_processing_plan`. The immediate reply is the envelope with `status: "Running"`. **No `job_id` is returned.** The child POSTs the result to the callback: 300 s timeout, 3 tries 10 s apart, 200/201 counts as success, and a read timeout also counts as success. | Partial (Shepherd returns its own ids) |
-| API-04 | `GET /asyncquery_status/{job_id}` | Tracker state, `response_url=https://arax.ncats.io/?r=<id>`, and `logs` is always `[]`. | None (Shepherd has its own status) |
-| API-05 | `GET /meta_knowledge_graph?format=full\|simple` | See AUX-01. | None |
-| API-06 | `GET/POST /entity` | `NodeSynonymizer.get_normalizer_results`, which calls NodeNorm and Name Resolver. | None |
-| API-07 | `GET /response/{id}` | Loads a stored response (see OPS-05). It runs `reasoner-validator` and adds `validation_result` and `provenance_summary`. It can also fetch ARS PKs/UUIDs from the ARS prod, test, ci and dev instances. | None |
-| API-08 | `POST /response` | Callback sink. Writes `data/callbacks/NNNNN.json` (cap 5000) and returns `"received!"`. | None |
-| API-09 | `GET /status` | `mode` values: `kp_cache`, `recent_pks`, `site_config`, `system_load`, `active`; also `terminate_pid` + `authorization` and `authorization=smartapi`. Default is the recent-query list. | None |
-| API-10 | `GET /status/logs` | Returns the whole server error log. | None |
-| API-11 | `POST /translate`, `GET /exampleQuestions` | Always 501. | Dead |
-| API-12 | `GET /PubmedMeshNgd/{t1}/{t2}` | Legacy NGD through NCBI eUtils. | Dead? (confirm) |
-| API-13 | Serialization | The custom JSON provider **drops null fields**. | Check parity |
-| API-14 | Startup | Must load BMT, else fatal. Checks DB versions (`ARAXDatabaseManager`), forks the background tasker (OPS-07), loads the general-concept block list, and sets up Jaeger OTEL. | Infra |
+| API-01 | `POST /query` (sync) | Forks a child per query (RLIMIT_AS 32 GiB). Returns an envelope with an extra top-level `http_status` key. The HTTP status is 200, 400 (any `response.error()`) or 429 (OverLimit). `remote_address` comes from `X-Forwarded-For`. | **Ported** (`/arax/query`): ARAX's own envelope, log and `http_status` (§2a). No 429 (DEC-16); `remote_address` is not recorded. |
+| API-02 | `POST /query` with `stream_progress: true` | `text/event-stream` carrying raw NDJSON (not SSE `data:` framing). It emits, in order: log entries as they happen; a `{pid, authorization}` kill token; `query_plan` updates (per-qedge/per-KP status Waiting, Done, Timed out, Skipped, Error, Warning); a 180 s heartbeat; then the final envelope. On a NaN serialization failure it sends an emptied ERROR envelope. The status is always 200. The ARAX UI depends on this. | **Ported**: ARAX's own stream, relayed from the worker (§2a). The kill token is Shepherd's (see OPS-02). |
+| API-03 | `POST /asyncquery` | `callback` is required (`^https?://`) and `http://localhost*` is rejected. The fork happens inside `execute_processing_plan`. The immediate reply is the envelope with `status: "Running"`. **No `job_id` is returned.** The child POSTs the result to the callback: 300 s timeout, 3 tries 10 s apart, 200/201 counts as success, and a read timeout also counts as success. | **Shepherd's own** (DEC-15) |
+| API-04 | `GET /asyncquery_status/{job_id}` | Tracker state, `response_url=https://arax.ncats.io/?r=<id>`, and `logs` is always `[]`. | **Shepherd's own** (DEC-15) |
+| API-05 | `GET /meta_knowledge_graph?format=full\|simple` | See AUX-01. | **Ported** (DEC-11) |
+| API-06 | `GET/POST /entity` | `NodeSynonymizer.get_normalizer_results`, which calls NodeNorm and Name Resolver. | **Ported** |
+| API-07 | `GET /response/{id}` | Loads a stored response (see OPS-05). It runs `reasoner-validator` and adds `validation_result` and `provenance_summary`. It can also fetch ARS PKs/UUIDs from the ARS prod, test, ci and dev instances. | **Ported** (DEC-3), parity-tested |
+| API-08 | `POST /response` | Callback sink. Writes `data/callbacks/NNNNN.json` (cap 5000) and returns `"received!"`. | **Ported**: kept in Shepherd's data store |
+| API-09 | `GET /status` | `mode` values: `kp_cache`, `recent_pks`, `site_config`, `system_load`, `active`; also `terminate_pid` + `authorization` and `authorization=smartapi`. Default is the recent-query list. | **Ported**, from Shepherd's query table. `kp_cache` is empty (DEC-3); `system_load` is `[]`. |
+| API-10 | `GET /status/logs` | Returns the whole server error log. | **Not ported** (open; not in the UI contract) |
+| API-11 | `POST /translate`, `GET /exampleQuestions` | Always 501. | **Removed** (DEC-5, E-7) |
+| API-12 | `GET /PubmedMeshNgd/{t1}/{t2}` | Legacy NGD through NCBI eUtils. | **Removed** (DEC-5, E-7) |
+| API-13 | Serialization | The custom JSON provider **drops null fields**. | **Ported**: `/query`, the stream and `/response` send dicts, which ARAX serializes with nulls kept too (the null-dropping applies only to model objects, which these endpoints don't return). Sync `/query` keys are not sorted. |
+| API-14 | Startup | Must load BMT, else fatal. Checks DB versions (`ARAXDatabaseManager`), forks the background tasker (OPS-07), loads the general-concept block list, and sets up Jaeger OTEL. | **Infra**: the worker and server fetch their data files at startup (DEC-6); BMT loads on first use. |
 
 ### 2. Orchestration (`AQ/ARAX_query.py`)
 
 | ID | Functionality | Details (refs) | Shepherd |
 |---|---|---|---|
-| ORC-01 | Input examination | Sets `have_operations`, `have_workflow`, `have_message` and `have_query_graph`. Errors: `NoQueryMessageOrOperations`; `OperationsNotSupported` in KG2 mode (AQ:430). | None |
-| ORC-02 | QG validation | Allowed qnode keys: `ids, categories, is_set, set_interpretation, set_id, member_ids, option_group_id, name, constraints`. Allowed qedge keys: `predicates, subject, object, option_group_id, exclude, relation, attribute_constraints, qualifier_constraints, knowledge_type`. A singular `predicate` gets a TRAPI 1.4 migration error. The QG must have `edges` or `paths` (AQ:499). | None |
-| ORC-03 | Dispatch precedence | Precedence is: `workflow`, then (TRAPI workflow → ARAXi, appended to `operations.actions`), then `operations`, then the QG interpreter. If both a QG and operations are given, the interpreter is skipped (AQ:287-426). | None |
-| ORC-04 | `query_options` honored | `kp_timeout`, `prune_threshold`, `return_minimal_metadata` (always overwrites the DSL value), `bypass_cache`, `max_path_length`, `max_pathfinder_paths`. A top-level `return_minimal_metadata` is copied into `query_options`. | None |
-| ORC-05 | Query fields **ignored** | Top-level `log_level`, `max_results`, `page_size`, `page_number`, `enforce_edge_directionality`, top-level `bypass_cache`, and `operations.options`. | n/a (port must not start honoring these silently) |
-| ORC-06 | Submitter derivation | Callback `http://localhost:8000/ars/…` gives `ARS`. Otherwise the `submitter` key is used if present (even null), otherwise the callback host, otherwise `?`. The host regex requires https. | Partial (Shepherd sets its own submitter) |
-| ORC-07 | Input messages | `operations.message_uris`: ARAX response URLs load locally, others are fetched by HTTP GET, and the last one wins. `operations.messages`: more than one gives a warning and **only the first is used** (no merging). Pre-existing KG edges trigger `recompute_qg_keys`, which fails if there are no results. | None |
-| ORC-08 | Original-QG preservation | `response.original_query_graph` is saved before processing and restored by the ResultTransformer. | None |
-| ORC-09 | Automatic ranking | Runs after every `resultify` (but not `scoreless_resultify`), unless the plan contains **any** `connect` action or the mode is RTXKG2 (AQ:853-867). | Partial (explicit `arax.rank` op) |
-| ORC-10 | Post-processing | Runs ResultTransformer (RTF-*). Sets `total_results_count`. Every result with a null `resource_id` gets `infores:arax`. `OK` becomes `Success`. Sets `envelope.query_options.query_plan`. Stores the response (OPS-05). `envelope.description` is set *before* the text becomes "…with N results", so clients see "Normal completion". | None |
-| ORC-11 | Implicit `return(response=true, store=true)` | **Every API query is stored.** An explicit `return()` defaults any missing key to `false`. | None |
-| ORC-12 | Error model | `response.error()` sets ERROR and HTTP 400 but does **not** stop the current action. After each action the loop stops if the status is not OK. An exception inside an action gives `UncaughtARAXiError`. `MemoryError` empties the results. The full log list (including DEBUG) is always returned in `envelope.logs`. | Partial |
-| ORC-13 | Modes | `ARAX` (sync), `asynchronous`, `RTXKG2` (one-hop only, `expand(kp=infores:rtx-kg2)`, no ranking or transform; resultify sets `resource_id=infores:rtx-kg2`; no caller in the repo). | RTXKG2 is Dead? |
-| ORC-14 | Concurrency limit | Per-remote-address cap of `round(cpu*50/16)` ongoing queries, plus a free-RAM floor of 15%. Denial gives 429 `OverLimit`. Submitter `infores:arax` and null are exempt. | Infra |
-| ORC-15 | Envelope defaults (`ARAX_messenger.create_envelope`) | `resource_id='ARAX'` (not the infores), `tool_version='ARAX <ver>'`, `schema_version=1.6.0`, `biolink_version=4.2.5`, `type='translator_reasoner_response'`, `context` = the Biolink jsonld URL, `datetime` format `%Y-%m-%d %H:%M:%S`. | Check parity |
+| ORC-01 | Input examination | Sets `have_operations`, `have_workflow`, `have_message` and `have_query_graph`. Errors: `NoQueryMessageOrOperations`; `OperationsNotSupported` in KG2 mode (AQ:430). | **Ported** |
+| ORC-02 | QG validation | Allowed qnode keys: `ids, categories, is_set, set_interpretation, set_id, member_ids, option_group_id, name, constraints`. Allowed qedge keys: `predicates, subject, object, option_group_id, exclude, relation, attribute_constraints, qualifier_constraints, knowledge_type`. A singular `predicate` gets a TRAPI 1.4 migration error. The QG must have `edges` or `paths` (AQ:499). | **Ported** |
+| ORC-03 | Dispatch precedence | Precedence is: `workflow`, then (TRAPI workflow → ARAXi, appended to `operations.actions`), then `operations`, then the QG interpreter. If both a QG and operations are given, the interpreter is skipped (AQ:287-426). | **Ported**, but Shepherd's server rejects most workflow operations before ARAX sees them (see WF-* and Remaining work, item 1) |
+| ORC-04 | `query_options` honored | `kp_timeout`, `prune_threshold`, `return_minimal_metadata` (always overwrites the DSL value), `bypass_cache`, `max_path_length`, `max_pathfinder_paths`. A top-level `return_minimal_metadata` is copied into `query_options`. | **Ported**. `bypass_cache` is ignored (DEC-3); `max_path_length` / `max_pathfinder_paths` are validated but ignored (DEC-7). |
+| ORC-05 | Query fields **ignored** | Top-level `log_level`, `max_results`, `page_size`, `page_number`, `enforce_edge_directionality`, top-level `bypass_cache`, and `operations.options`. | **Ported** (still ignored) |
+| ORC-06 | Submitter derivation | Callback `http://localhost:8000/ars/…` gives `ARS`. Otherwise the `submitter` key is used if present (even null), otherwise the callback host, otherwise `?`. The host regex requires https. | **Ported**, except that a query with no `submitter` gets Shepherd's `infores:shepherd-arax:…` from the worker (as the old proxy did), so the callback-host fallback never applies |
+| ORC-07 | Input messages | `operations.message_uris`: ARAX response URLs load locally, others are fetched by HTTP GET, and the last one wins. `operations.messages`: more than one gives a warning and **only the first is used** (no merging). Pre-existing KG edges trigger `recompute_qg_keys`, which fails if there are no results. | **Ported**: Shepherd response URLs load from Shepherd's store (DEC-3); other URIs as upstream |
+| ORC-08 | Original-QG preservation | `response.original_query_graph` is saved before processing and restored by the ResultTransformer. | **Ported** |
+| ORC-09 | Automatic ranking | Runs after every `resultify` (but not `scoreless_resultify`), unless the plan contains **any** `connect` action or the mode is RTXKG2 (AQ:853-867). | **Ported**: the ported ranker runs in-process at ARAX's point (DEC-8) |
+| ORC-10 | Post-processing | Runs ResultTransformer (RTF-*). Sets `total_results_count`. Every result with a null `resource_id` gets `infores:arax`. `OK` becomes `Success`. Sets `envelope.query_options.query_plan`. Stores the response (OPS-05). `envelope.description` is set *before* the text becomes "…with N results", so clients see "Normal completion". | **Ported** |
+| ORC-11 | Implicit `return(response=true, store=true)` | **Every API query is stored.** An explicit `return()` defaults any missing key to `false`. | **Ported**: stored under the query's Shepherd response id (DEC-3) |
+| ORC-12 | Error model | `response.error()` sets ERROR and HTTP 400 but does **not** stop the current action. After each action the loop stops if the status is not OK. An exception inside an action gives `UncaughtARAXiError`. `MemoryError` empties the results. The full log list (including DEBUG) is always returned in `envelope.logs`. | **Ported** |
+| ORC-13 | Modes | `ARAX` (sync), `asynchronous`, `RTXKG2` (one-hop only, `expand(kp=infores:rtx-kg2)`, no ranking or transform; resultify sets `resource_id=infores:rtx-kg2`; no caller in the repo). | **Ported** (`ARAX` mode). `asynchronous` mode is in the code but unused: Shepherd runs async queries itself (DEC-15). RTXKG2 is removed (E-5). |
+| ORC-14 | Concurrency limit | Per-remote-address cap of `round(cpu*50/16)` ongoing queries, plus a free-RAM floor of 15%. Denial gives 429 `OverLimit`. Submitter `infores:arax` and null are exempt. | **Not ported** (DEC-16) |
+| ORC-15 | Envelope defaults (`ARAX_messenger.create_envelope`) | `resource_id='ARAX'` (not the infores), `tool_version='ARAX <ver>'`, `schema_version=1.6.0`, `biolink_version=4.2.5`, `type='translator_reasoner_response'`, `context` = the Biolink jsonld URL, `datetime` format `%Y-%m-%d %H:%M:%S`. | **Ported** |
 
 #### 2a. Port status (orchestration, Infer, Connect)
 
@@ -221,23 +262,23 @@ Every row of the UI contract is now served under `/arax`. The two exceptions are
 
 | ID | Functionality | Details | Shepherd |
 |---|---|---|---|
-| DSL-01 | Grammar | One command per line, `name(k=v,…)`. A leading `#` is a comment. Values are always strings. A bare `k` means `k=true`. `[a,b]` is a list. No quoting or escaping; splitting is on every comma. A naked command has `parameters: None`, which most handlers crash on. A duplicate key: the last wins. | None |
-| DSL-02 | `create_message` / `create_envelope` | Resets the envelope but not the original QG. | None |
-| DSL-03 | `add_qnode(key, ids, name, categories, is_set, option_group_id)` | Auto keys `n00…`. `name` is resolved through the synonymizer (error `UnresolvableNodeName`). Enforces `option_group_id` with `is_set`. A single-id list forces `is_set=false`. | None |
-| DSL-04 | `add_qedge(key, subject, object, predicates, option_group_id, exclude)` | Auto keys `e00…`. | None |
-| DSL-05 | `add_qpath(key, subject, object)` | Converts to a `PathfinderQueryGraph` and **drops existing edges**. | None |
-| DSL-06 | `expand(...)` | See EXP-*. | Proxy |
-| DSL-07 | `overlay(action=…)` | See OVL-*. | Proxy |
-| DSL-08 | `filter_kg(action=…)` | See FKG-*. | Proxy |
-| DSL-09 | `filter_results(action=…)` | See FRS-*. | Proxy |
-| DSL-10 | `resultify(ignore_edge_direction)` / `scoreless_resultify` | See RES-*. `scoreless_` only suppresses the auto-rank. | Proxy |
-| DSL-11 | `rank_results()` | Explicit `aggregate_scores_dmk`. | Ported (`arax.rank`) |
-| DSL-12 | `infer(action=…)` | See INF-*. | Proxy |
-| DSL-13 | `connect(action=connect_nodes\|xcrg)` | See CON-*, XCR-*. | Ported / Proxy |
-| DSL-14 | `return(response, store)` | Stops the plan. | None |
-| DSL-15 | `fetch_message(uri)` | **Broken**: the fetched message is discarded. | Dead |
-| DSL-16 | `filter(...)` (legacy) | Broken or a no-op. | Dead |
-| DSL-17 | `remove_qedge` | Exists in the messenger but is not dispatched (`UnrecognizedCommand`). | Dead |
+| DSL-01 | Grammar | One command per line, `name(k=v,…)`. A leading `#` is a comment. Values are always strings. A bare `k` means `k=true`. `[a,b]` is a list. No quoting or escaping; splitting is on every comma. A naked command has `parameters: None`, which most handlers crash on. A duplicate key: the last wins. | **Ported** |
+| DSL-02 | `create_message` / `create_envelope` | Resets the envelope but not the original QG. | **Ported** |
+| DSL-03 | `add_qnode(key, ids, name, categories, is_set, option_group_id)` | Auto keys `n00…`. `name` is resolved through the synonymizer (error `UnresolvableNodeName`). Enforces `option_group_id` with `is_set`. A single-id list forces `is_set=false`. | **Ported** |
+| DSL-04 | `add_qedge(key, subject, object, predicates, option_group_id, exclude)` | Auto keys `e00…`. | **Ported** |
+| DSL-05 | `add_qpath(key, subject, object)` | Converts to a `PathfinderQueryGraph` and **drops existing edges**. | **Ported** |
+| DSL-06 | `expand(...)` | See EXP-*. | **Ported** (Retriever only, DEC-4) |
+| DSL-07 | `overlay(action=…)` | See OVL-*. | **Ported** (`overlay_exposures_data` removed, E-8) |
+| DSL-08 | `filter_kg(action=…)` | See FKG-*. | **Ported** |
+| DSL-09 | `filter_results(action=…)` | See FRS-*. | **Ported** |
+| DSL-10 | `resultify(ignore_edge_direction)` / `scoreless_resultify` | See RES-*. `scoreless_` only suppresses the auto-rank. | **Ported** |
+| DSL-11 | `rank_results()` | Explicit `aggregate_scores_dmk`. | **Ported** (in-process; `arax.rank` also remains a workflow step) |
+| DSL-12 | `infer(action=…)` | See INF-*. | **Ported** (xDTD; the legacy xCRG action is removed, E-2) |
+| DSL-13 | `connect(action=connect_nodes\|xcrg)` | See CON-*, XCR-*. | **Ported**: `xcrg` as upstream (DEC-4 Retriever); `connect_nodes` with Shepherd's pathfinder limits and data (DEC-7) |
+| DSL-14 | `return(response, store)` | Stops the plan. | **Ported** |
+| DSL-15 | `fetch_message(uri)` | **Broken**: the fetched message is discarded. | **Removed** (DEC-5, E-4) |
+| DSL-16 | `filter(...)` (legacy) | Broken or a no-op. | **Removed** (DEC-5, E-4, E-6) |
+| DSL-17 | `remove_qedge` | Exists in the messenger but is not dispatched (`UnrecognizedCommand`). | **Removed** (DEC-5, E-4) |
 
 ### 4. TRAPI workflow operations (`AQ/operation_to_ARAXi.py`)
 
@@ -245,35 +286,35 @@ The `x-trapi.operations` list in ARAX's OpenAPI spec matches this `implemented`
 set exactly. Only `operation.parameters` is read; `runner_parameters` is
 ignored.
 
-| ID | Operation | ARAXi emitted | Shepherd op today |
+| ID | Operation | ARAXi emitted | Shepherd |
 |---|---|---|---|
-| WF-01 | `lookup` | `expand()`, `scoreless_resultify(ignore_edge_direction=true)` | `lookup` exists but is Aragorn-shaped |
-| WF-02 | `lookup_and_score` | `expand()`, `resultify(ignore_edge_direction=true)`, which auto-ranks | None |
-| WF-03 | `fill` (`allowlist`, `qedge_keys`) | `expand(kp=[…], edge_key=[…])`. A `denylist` is an error. | None |
-| WF-04 | `bind`, `complete_results` | `scoreless_resultify(ignore_edge_direction=true)` | None |
-| WF-05 | `score` | `rank_results()` | `score` exists (Aragorn-shaped) / `arax.rank` |
-| WF-06 | `overlay_compute_ngd` (`virtual_relation_label`, `qnode_keys`) | NGD for every pair of qnode keys, `default_value=inf` | None |
-| WF-07 | `overlay_compute_jaccard` | `compute_jaccard` | None |
-| WF-08 | `overlay_fisher_exact_test` (optional `rel_edge_key`) | `fisher_exact_test` | None |
-| WF-09 | `overlay_connect_knodes` | NGD + COHD paired_freq + **predict_drug_treats_disease (now errors)** + FET both ways + Jaccard triples | Partly Dead |
-| WF-10 | `annotate_nodes` (`attributes` contains `pmids`) | `overlay(action=add_node_pmids)` | None |
-| WF-11 | `filter_results_top_n` (`max_results`, asserted int) | `limit_number_of_results, prune_kg=true` | Partial (`filter_results_top_n`, no prune) |
-| WF-12 | `filter_kgraph_orphans` | `filter_kg(action=remove_orphaned_nodes)` | Partial (**different semantics**; see C-9) |
-| WF-13 | `filter_kgraph_top_n` / `_std_dev` / `_percentile` / `_continuous_kedge_attribute` / `_discrete_kedge_attribute` | The corresponding `filter_kg` actions, with defaults `max_edges` 50, `threshold` 1 or 95, `keep_top_or_bottom` top, `remove_above_or_below` below | None |
-| WF-14 | `sort_results_score` (`ascending_or_descending`) | `sort_by_score` | Partial (`sort_results_score`) |
-| WF-15 | `sort_results_edge_attribute`, `sort_results_node_attribute` | **Always crash (NameError)** | Dead |
+| WF-01 | `lookup` | `expand()`, `scoreless_resultify(ignore_edge_direction=true)` | **Ported** (translated in the worker) |
+| WF-02 | `lookup_and_score` | `expand()`, `resultify(ignore_edge_direction=true)`, which auto-ranks | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-03 | `fill` (`allowlist`, `qedge_keys`) | `expand(kp=[…], edge_key=[…])`. A `denylist` is an error. | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1); the `allowlist` goes to Retriever as `parameters.kp` (DEC-10) |
+| WF-04 | `bind`, `complete_results` | `scoreless_resultify(ignore_edge_direction=true)` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-05 | `score` | `rank_results()` | **Ported** (translated in the worker) |
+| WF-06 | `overlay_compute_ngd` (`virtual_relation_label`, `qnode_keys`) | NGD for every pair of qnode keys, `default_value=inf` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-07 | `overlay_compute_jaccard` | `compute_jaccard` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-08 | `overlay_fisher_exact_test` (optional `rel_edge_key`) | `fisher_exact_test` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-09 | `overlay_connect_knodes` | NGD + COHD paired_freq + **predict_drug_treats_disease (now errors)** + FET both ways + Jaccard triples | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1); without the `predict_drug_treats_disease` step (E-4) |
+| WF-10 | `annotate_nodes` (`attributes` contains `pmids`) | `overlay(action=add_node_pmids)` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-11 | `filter_results_top_n` (`max_results`, asserted int) | `limit_number_of_results, prune_kg=true` | **Ported** (translated in the worker). For ARAX queries it means ARAX's action, not Shepherd's step of the same name (C-11) |
+| WF-12 | `filter_kgraph_orphans` | `filter_kg(action=remove_orphaned_nodes)` | **Ported** (translated in the worker). For ARAX queries it means ARAX's `remove_orphaned_nodes`, not Shepherd's step (C-9) |
+| WF-13 | `filter_kgraph_top_n` / `_std_dev` / `_percentile` / `_continuous_kedge_attribute` / `_discrete_kedge_attribute` | The corresponding `filter_kg` actions, with defaults `max_edges` 50, `threshold` 1 or 95, `keep_top_or_bottom` top, `remove_above_or_below` below | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-14 | `sort_results_score` (`ascending_or_descending`) | `sort_by_score` | **Ported** (translated in the worker). For ARAX queries it means ARAX's `sort_by_score` (C-11) |
+| WF-15 | `sort_results_edge_attribute`, `sort_results_node_attribute` | **Always crash (NameError)** | **Removed** (DEC-5, E-4) |
 
 ### 5. Query-graph interpreter (`AQ/ARAX_query_graph_interpreter.py`, `…_templates.yaml`, `AQ/query_graph_info.py`)
 
 | ID | Functionality | Details | Shepherd |
 |---|---|---|---|
-| QGI-01 | Pathfinder detection (TRAPI 1.6 `paths`) | Emits `connect(action=connect_nodes, max_path_length=<qo or 4>[, max_pathfinder_paths=<qo>])`. | Ported (routing in `workers/arax`) |
-| QGI-02 | xCRG MVP2 detection | `catrax-xcrg.is_xcrg_mvp2_query` gives `connect(action=xcrg)` (see XCR-01). | None |
-| QGI-03 | Legacy pathfinder detection | Any qedge with `knowledge_type=pathfinder`, or ≥2 `inferred` qedges, gives `connect_nodes, max_path_length=4` (ignores `query_options`). | None |
-| QGI-04 | `QueryGraphInfo.assess` | Errors on: zero nodes, 1 node with edges, no pinned node (`QueryGraphNoIds`, which applies **even to pathfinder/xCRG**), circular QG, bad subject/object. Looks up the preferred category of the first pinned id through NodeNorm. Skips virtual-predicate edges. Uses only the first predicate and first category. Walks from a singleton node and **truncates forks**. | None |
-| QGI-05 | Template scoring and match | Scores: ids+cat=value 10000, ids 1000, cat=value 100, cat 10, pred=value 90, pred 10. Highest score wins; on a tie, the first found. | None |
-| QGI-06 | Template → DSL remap | Maps `nNN`/`eNN` to real keys by walk order. The edge-placeholder bug is harmless today. | None |
-| QGI-07 | Fallback | Warns, then `expand()`, `resultify()`, `filter_results(limit 500)`. | None |
+| QGI-01 | Pathfinder detection (TRAPI 1.6 `paths`) | Emits `connect(action=connect_nodes, max_path_length=<qo or 4>[, max_pathfinder_paths=<qo>])`. | **Shepherd's `arax.pathfinder`** (DEC-7): the worker routes TRAPI `paths` queries there before ARAX runs |
+| QGI-02 | xCRG MVP2 detection | `catrax-xcrg.is_xcrg_mvp2_query` gives `connect(action=xcrg)` (see XCR-01). | **Ported** |
+| QGI-03 | Legacy pathfinder detection | Any qedge with `knowledge_type=pathfinder`, or ≥2 `inferred` qedges, gives `connect_nodes, max_path_length=4` (ignores `query_options`). | **Ported**: `connect_nodes` runs in-process with Shepherd's pathfinder limits (DEC-7) |
+| QGI-04 | `QueryGraphInfo.assess` | Errors on: zero nodes, 1 node with edges, no pinned node (`QueryGraphNoIds`, which applies **even to pathfinder/xCRG**), circular QG, bad subject/object. Looks up the preferred category of the first pinned id through NodeNorm. Skips virtual-predicate edges. Uses only the first predicate and first category. Walks from a singleton node and **truncates forks**. | **Ported** |
+| QGI-05 | Template scoring and match | Scores: ids+cat=value 10000, ids 1000, cat=value 100, cat 10, pred=value 90, pred 10. Highest score wins; on a tie, the first found. | **Ported** |
+| QGI-06 | Template → DSL remap | Maps `nNN`/`eNN` to real keys by walk order. The edge-placeholder bug is harmless today. | **Ported** |
+| QGI-07 | Fallback | Warns, then `expand()`, `resultify()`, `filter_results(limit 500)`. | **Ported** |
 
 **Templates that are reachable** (the others are unreachable; see E-3):
 
@@ -394,11 +435,11 @@ qedge, with creative-treats widening.
 
 | ID | Functionality | Details | Shepherd |
 |---|---|---|---|
-| SYN-01 | `get_canonical_curies(curies, names)` | NodeNorm `POST /get_normalized_nodes` in batches of 2500 (30 s), no conflate flags (server defaults apply). The name path goes through Name Resolver `/bulk-lookup` (batches of 50, 3 retries, prefers human taxon). | None |
-| SYN-02 | `get_equivalent_nodes`, `get_curie_names`, `get_preferred_names`, `get_curie_category` (deepest Biolink level), `get_normalizer_results` | Used by Expand, Overlay, Messenger and `/entity`. | None |
-| SYN-03 | Endpoints by maturity | dev/staging `nodenorm-es.ci.transltr.io`; testing `nodenorm-es.test.transltr.io`; prod `nodenorm.transltr.io/1.4`. Name Resolver is fixed at `name-resolution-sri.renci.org`. The config overrides are **unused**. | Partial (`tr_normalizer` for ARS) |
-| BL-01 | BiolinkHelper | `biolink-helper-pkg==1.0.1`, Biolink 4.2.5 (4.2.0 is forced to 4.2.1). Methods: `get_descendants` (conflations on by default), `get_ancestors`, `get_canonical_predicates`, `add_conflations`, root category/predicate. | Partial (arax_pathfinder uses 1.0.0) |
-| BL-02 | `bmt.Toolkit()` | Used by NodeSynonymizer and Infer. Note that `infer_utilities` uses **bmt's default Biolink version, not 4.2.5**. | Partial |
+| SYN-01 | `get_canonical_curies(curies, names)` | NodeNorm `POST /get_normalized_nodes` in batches of 2500 (30 s), no conflate flags (server defaults apply). The name path goes through Name Resolver `/bulk-lookup` (batches of 50, 3 retries, prefers human taxon). | **Ported** |
+| SYN-02 | `get_equivalent_nodes`, `get_curie_names`, `get_preferred_names`, `get_curie_category` (deepest Biolink level), `get_normalizer_results` | Used by Expand, Overlay, Messenger and `/entity`. | **Ported** |
+| SYN-03 | Endpoints by maturity | dev/staging `nodenorm-es.ci.transltr.io`; testing `nodenorm-es.test.transltr.io`; prod `nodenorm.transltr.io/1.4`. Name Resolver is fixed at `name-resolution-sri.renci.org`. The config overrides are **unused**. | **Ported**: the endpoint follows `SERVER_MATURITY` |
+| BL-01 | BiolinkHelper | `biolink-helper-pkg==1.0.1`, Biolink 4.2.5 (4.2.0 is forced to 4.2.1). Methods: `get_descendants` (conflations on by default), `get_ancestors`, `get_canonical_predicates`, `add_conflations`, root category/predicate. | **Ported** (1.0.1, DEC-13) |
+| BL-02 | `bmt.Toolkit()` | Used by NodeSynonymizer and Infer. Note that `infer_utilities` uses **bmt's default Biolink version, not 4.2.5**. | **Ported** |
 
 ### 8. Overlay (`AQ/ARAX_overlay.py`, `AQ/Overlay/*`)
 
@@ -421,7 +462,7 @@ qedge, with creative-treats widening.
 |---|---|---|---|---|
 | OVL-01 | `compute_ngd` | `default_value` (`inf`; `'0'` stays a string), `virtual_relation_label`, `subject_qnode_key`, `object_qnode_key` | `curie_to_pmids_v1.0_<tier>.sqlite` (read-only, chunks of 20k). Curies canonicalized through NodeNorm. N = 3.5e7×20. | Virtual `biolink:occurs_together_in_literature_with` edge (arax primary, `statistical_association`/`automated_agent`) with `EDAM-DATA:2526` `normalized_google_distance` = `str(ngd)` and up to 30 PMIDs in `biolink:publications` (non-deterministic subset). **Decorate mode** (no label): an attribute on every KG edge (`ngd_publications`). Three modes; mode (a) keeps only the last qnode pair (D-7). |
 | OVL-02 | `overlay_clinical_info` (COHD) | `COHD_method` ∈ {`paired_concept_frequency` (default), `observed_expected_ratio`, `chi_square`} or the equivalent boolean flags; label/subject/object | curie→OMOP via **cohd.io API** (`biolink_to_omop`); statistics from `COHDdatabase_v1.0_KG2.8.0.db` (dataset 3). Eligible categories: SmallMolecule, PhenotypicFeature, Disease, Drug. | Virtual `biolink:associated_with` edge (cohd primary, arax aggregator) with `EDAM-DATA:0951` = `str(value)`. max freq / max ln_ratio / p-value of the largest χ² (D-8). Decorate mode also exists. |
-| OVL-03 | `compute_jaccard` | `start_node_key`, `intermediate_node_key`, `end_node_key`, `virtual_relation_label` (all required) | KG only | `biolink:has_jaccard_index_with` start→end, including value 0. Value is a float, `EDAM-DATA:1772`. **Not bound to results.** The value is `|I(E)∩I(S)|/|I(S)|` (asymmetric). |
+| OVL-03 | `compute_jaccard` | `start_node_key`, `intermediate_node_key`, `end_node_key`, `virtual_relation_label` (all required) | KG only | `biolink:has_jaccard_index_with` start→end, including value 0. Value is a float, `EDAM-DATA:1772`. **Not bound to results.** The value is `\|I(E)∩I(S)\|/\|I(S)\|` (asymmetric). |
 | OVL-04 | `add_node_pmids` | `max_num` (100 or `all`) | curie_to_pmids sqlite (lookup-key bug, D-9), with NCBI eUtils fallback | Node attribute `EDAM-DATA:0971` `pubmed_ids` |
 | OVL-05 | `fisher_exact_test` | `subject_qnode_key`, `object_qnode_key`, `virtual_relation_label` (required); `rel_edge_key`; `filter_type` ∈ {top_n, cutoff} + `value` | Background counts from `tier0-info-for-overlay_v1.0_<tier>.sqlite` (`neighbors`, `category_counts`). With a single-predicate `rel_edge_key`, counts come from a **Gandalf** query (30 s). | `biolink:has_fisher_exact_test_p_value_with`, `EDAM-DATA:1669` = `str(p)`. Two-sided `scipy.stats.fisher_exact`. Cutoff is a strict `<`. Rows with a negative cell are skipped. |
 | OVL-06 | `overlay_exposures_data` (ICEES+) | label/subject/object | `icees.renci.org:16340` (likely defunct), `verify=False` | Virtual mode crashes (D-10). Decorate mode only. |
@@ -466,13 +507,13 @@ qedge, with creative-treats widening.
 
 | ID | Action | Semantics | Shepherd |
 |---|---|---|---|
-| FRS-01 | `limit_number_of_results(max_results)` | `results[:n]`, prune, `message.n_results = n` (requested, not actual) | Partial (`filter_results_top_n`: default 500, no prune, a negative n misbehaves) |
-| FRS-02 | `sort_by_score` | Key `analyses[0].score`, stable. A None score makes the action error. | Partial (`sort_results_score`: defaults descending, None→0, no prune) |
-| FRS-03 | `sort_by_edge_count` / `sort_by_node_count` | Total bindings. | None |
-| FRS-04 | `sort_by_edge_attribute(edge_attribute, edge_relation, qedge_keys)` | Per result, the **sum** of bound edges' values. Missing values become ∓inf. The `qedge_keys` bug excludes every edge (D-14). | None |
-| FRS-05 | `sort_by_node_attribute(node_attribute, node_category, qnode_keys)` | Same idea over nodes. For `pubmed_ids` it counts "PMID". Filter bugs D-14. | None |
-| FRS-06 | Legacy `filter()` | — | Dead |
-| FRS-07 | **KG pruning closure** (`analyze_message_get_referenced_IDs`) | Pass 1 collects bindings and support graphs, and **drops any result with a dangling binding**. Pass 2 iterates to a fixed point: (a) **any KG edge with both endpoints referenced is kept**, even if unbound, along with its support graphs; (b) aux graphs are expanded, and an aux graph with any dangling member is **rejected whole**. Shared with Resultify and the ResultTransformer. | Partial (`filter_kgraph_orphans`; see C-8) |
+| FRS-01 | `limit_number_of_results(max_results)` | `results[:n]`, prune, `message.n_results = n` (requested, not actual) | **Ported** (in ARAX queries; Shepherd's own `filter_results_top_n` step is unchanged, C-11) |
+| FRS-02 | `sort_by_score` | Key `analyses[0].score`, stable. A None score makes the action error. | **Ported** (in ARAX queries; Shepherd's own `sort_results_score` step is unchanged, C-11) |
+| FRS-03 | `sort_by_edge_count` / `sort_by_node_count` | Total bindings. | **Ported** |
+| FRS-04 | `sort_by_edge_attribute(edge_attribute, edge_relation, qedge_keys)` | Per result, the **sum** of bound edges' values. Missing values become ∓inf. The `qedge_keys` bug excludes every edge (D-14). | **Ported** |
+| FRS-05 | `sort_by_node_attribute(node_attribute, node_category, qnode_keys)` | Same idea over nodes. For `pubmed_ids` it counts "PMID". Filter bugs D-14. | **Ported** |
+| FRS-06 | Legacy `filter()` | — | **Removed** (DEC-5, E-6) |
+| FRS-07 | **KG pruning closure** (`analyze_message_get_referenced_IDs`) | Pass 1 collects bindings and support graphs, and **drops any result with a dangling binding**. Pass 2 iterates to a fixed point: (a) **any KG edge with both endpoints referenced is kept**, even if unbound, along with its support graphs; (b) aux graphs are expanded, and an aux graph with any dangling member is **rejected whole**. Shared with Resultify and the ResultTransformer. | **Ported** (in ARAX queries; Shepherd's own `filter_kgraph_orphans` step is unchanged, C-8) |
 
 ### 11. Resultify (`AQ/ARAX_resultify.py`)
 
@@ -540,54 +581,54 @@ qedge, with creative-treats widening.
 
 | ID | Functionality | Details | Shepherd |
 |---|---|---|---|
-| CON-01 | `connect(action=connect_nodes)` | `max_path_length` 1–5 (default 4), `max_pathfinder_paths` (default 500). Exactly 2 pinned qnodes and exactly 1 path. Source/destination come from **`path.subject`/`path.object`**. At most one `intermediate_categories` constraint. | Ported (C-1…C-6) |
-| CON-02 | Inputs to Pathfinder | Curies normalized through NodeNorm `preferred_curie`. Block list from the **repo's** `general_concepts.json`. `category_constraints` = descendants of the constraint, **or empty**. `prune_top_k=75`, `degree_threshold=10000`, `hops_numbers = max_hops_to_explore = max_path_length`. | Ported (C-1, C-3, C-7) |
-| CON-03 | Data | `curie_ngd_v1.0_<tier>.sqlite`, `tier0-info-for-overlay_v1.0_<tier>.sqlite`. Retriever by maturity (`retriever[.ci\|.test].transltr.io/query`), with env override `ARAX_XCRG_RETRIEVER_URL`. | Ported (settings-based) |
-| CON-04 | Output | Rehydrate (`/rehydrate`, tier 0, 30 s). One result `id="result"`, `essence="result"`, `PathfinderAnalysis` with `path_bindings {"p0": …}` (p0 hard-coded). The KG is **merged** into the existing KG. No ranker and no transform. **Zero paths give a warning and no results.** | Ported (C-5) |
-| CON-05 | Cache | Written to the KP cache, but the read is effectively never used. | None |
+| CON-01 | `connect(action=connect_nodes)` | `max_path_length` 1–5 (default 4), `max_pathfinder_paths` (default 500). Exactly 2 pinned qnodes and exactly 1 path. Source/destination come from **`path.subject`/`path.object`**. At most one `intermediate_categories` constraint. | **Ported with DEC-7's changes**: ARAX's validation is kept, but the search always uses 4 hops and 500 paths |
+| CON-02 | Inputs to Pathfinder | Curies normalized through NodeNorm `preferred_curie`. Block list from the **repo's** `general_concepts.json`. `category_constraints` = descendants of the constraint, **or empty**. `prune_top_k=75`, `degree_threshold=10000`, `hops_numbers = max_hops_to_explore = max_path_length`. | **Ported**, except the fixed limits (DEC-7). The block list is the vendored copy at the pinned commit. |
+| CON-03 | Data | `curie_ngd_v1.0_<tier>.sqlite`, `tier0-info-for-overlay_v1.0_<tier>.sqlite`. Retriever by maturity (`retriever[.ci\|.test].transltr.io/query`), with env override `ARAX_XCRG_RETRIEVER_URL`. | **Shepherd's**: the pathfinder data files, `SYNC_KG_RETRIEVAL_URL` (DEC-4, DEC-7) |
+| CON-04 | Output | Rehydrate (`/rehydrate`, tier 0, 30 s). One result `id="result"`, `essence="result"`, `PathfinderAnalysis` with `path_bindings {"p0": …}` (p0 hard-coded). The KG is **merged** into the existing KG. No ranker and no transform. **Zero paths give a warning and no results.** | **Ported**, rehydrating at `KG_REHYDRATE_URL` |
+| CON-05 | Cache | Written to the KP cache, but the read is effectively never used. | **Not ported** (DEC-3) |
 
 ### 17. Connect: xCRG (`catrax-xcrg` @ `c97da53`)
 
 | ID | Functionality | Details | Shepherd |
 |---|---|---|---|
-| XCR-01 | MVP2 detection | Exactly one qedge, `knowledge_type=inferred`, `biolink:affects`, exactly one pinned end, chemical↔gene categories, direction `increased`/`decreased`, aspect a descendant of `activity_or_abundance`. | None |
-| XCR-02 | `connect(action=xcrg)` config | Retriever URL (by maturity or env), `ngd_db_path`, `curie_to_pmids_db_path`, `timeout` (`ARAX_XCRG_TIMEOUT`, 210), `tf_batch_size` (`ARAX_XCRG_TF_BATCH_SIZE`, 200), `tiers=[0]`, `resource_id=infores:arax`, TRAPI 1.6.0, Biolink 4.2.5. The envelope's `parameters`/`submitter` are **not** passed. | None |
-| XCR-03 | Algorithm | Transcription-factor list (minus TP53 and the endpoints). A direct one-hop lookup plus two-hop lookups through TFs, in batches, with sign templates. Filters subclass/direction/TP53. Sorts: direct first, then by TF degree, id, specificity, IC, NGD. Rank score `(total−i)/total`. Output: `xcrg_support_*` / `xcrg_inferred_edge_*` / `xcrg_ngd_support_*`, up to `max_results` 500. | None |
-| XCR-04 | Envelope handling | The message is replaced. Sets `total_results_count`, `data.xcrg_connect=True` (skips RTF), query plan `arax-xcrg`. Errors give HTTP 500. | None |
+| XCR-01 | MVP2 detection | Exactly one qedge, `knowledge_type=inferred`, `biolink:affects`, exactly one pinned end, chemical↔gene categories, direction `increased`/`decreased`, aspect a descendant of `activity_or_abundance`. | **Ported** |
+| XCR-02 | `connect(action=xcrg)` config | Retriever URL (by maturity or env), `ngd_db_path`, `curie_to_pmids_db_path`, `timeout` (`ARAX_XCRG_TIMEOUT`, 210), `tf_batch_size` (`ARAX_XCRG_TF_BATCH_SIZE`, 200), `tiers=[0]`, `resource_id=infores:arax`, TRAPI 1.6.0, Biolink 4.2.5. The envelope's `parameters`/`submitter` are **not** passed. | **Ported**, Retriever at `SYNC_KG_RETRIEVAL_URL` (DEC-4; the env override is kept) |
+| XCR-03 | Algorithm | Transcription-factor list (minus TP53 and the endpoints). A direct one-hop lookup plus two-hop lookups through TFs, in batches, with sign templates. Filters subclass/direction/TP53. Sorts: direct first, then by TF degree, id, specificity, IC, NGD. Rank score `(total−i)/total`. Output: `xcrg_support_*` / `xcrg_inferred_edge_*` / `xcrg_ngd_support_*`, up to `max_results` 500. | **Ported** (the `catrax-xcrg` package) |
+| XCR-04 | Envelope handling | The message is replaced. Sets `total_results_count`, `data.xcrg_connect=True` (skips RTF), query plan `arax-xcrg`. Errors give HTTP 500. | **Ported** |
 
 ### 18. Operations and state (`AQ/ARAX_query_tracker.py`, `ARAX/ResponseCache/*`, `AQ/ARAX_background_tasker.py`, `AQ/ARAX_database_manager.py`)
 
 | ID | Functionality | Details | Shepherd |
 |---|---|---|---|
-| OPS-01 | Query tracker | MySQL tables `arax_query` and `arax_ongoing_query`. States: started, Running Async, Completed, Died, Reset, Denied. Dead-PID detection. | Infra (Postgres) |
-| OPS-02 | Kill token | `/status?terminate_pid=&authorization=hash('Pickles'+pid)` sends SIGTERM. | None |
-| OPS-03 | Recent-query listing | `get_status(last_n_hours, mode=active)`. | None |
-| OPS-04 | Load log | psutil samples written each minute to `ARAX_background_tasker_loadlog.txt`. | Infra (OTEL) |
-| OPS-05 | Response store | Row in `TRAPI_1_0_0_response` (MySQL in prod, SQLite otherwise) plus S3 `arax-response-storage[-2]` (bucket chosen by a config datetime). `envelope.id = https://arax.ncats.io/api/arax/v1.4/response/{id}`. Falls back to a local file. | None (Shepherd has Redis/Postgres + ARS cache) |
-| OPS-06 | Response retrieval and validation | See API-07: `reasoner-validator` 6.0.2 (the Biolink version is hard-coded to **4.4.2** here), provenance summary, ARS proxying, attribute stripping (`X`/`Z` prefixes). | None |
-| OPS-07 | Background tasker (every 60 s) | Hourly KP-info refresh (EXP-29), hourly meta-KG refresh (AUX-01), ongoing-query check, KP-cache refresh (EXP-31), load log. | None |
-| OPS-08 | Database manager | Downloads or symlinks the managed DBs (Part B §20) by rsync from `arax-databases.rtx.ai` or SFTP (ITRB). Tracks versions in `db_versions.json`. | Partial (`shepherd_utils/data_download.py`, pathfinder DBs only) |
+| OPS-01 | Query tracker | MySQL tables `arax_query` and `arax_ongoing_query`. States: started, Running Async, Completed, Died, Reset, Denied. Dead-PID detection. | **Shepherd's own** (its query table). `/status` shows it in ARAX's shape; `pid` is null, and there are no `Running Async` / `Reset` / `Denied` states or dead-pid checks. |
+| OPS-02 | Kill token | `/status?terminate_pid=&authorization=hash('Pickles'+pid)` sends SIGTERM. | **Ported with a difference**: terminating ends the query's stream (all an ARAX client sees); the work still finishes in the worker |
+| OPS-03 | Recent-query listing | `get_status(last_n_hours, mode=active)`. | **Ported** |
+| OPS-04 | Load log | psutil samples written each minute to `ARAX_background_tasker_loadlog.txt`. | **Not ported** (Infra; `system_load` is `[]`) |
+| OPS-05 | Response store | Row in `TRAPI_1_0_0_response` (MySQL in prod, SQLite otherwise) plus S3 `arax-response-storage[-2]` (bucket chosen by a config datetime). `envelope.id = https://arax.ncats.io/api/arax/v1.4/response/{id}`. Falls back to a local file. | **Shepherd's own** (DEC-3) |
+| OPS-06 | Response retrieval and validation | See API-07: `reasoner-validator` 6.0.2 (the Biolink version is hard-coded to **4.4.2** here), provenance summary, ARS proxying, attribute stripping (`X`/`Z` prefixes). | **Ported** (DEC-3), parity-tested |
+| OPS-07 | Background tasker (every 60 s) | Hourly KP-info refresh (EXP-29), hourly meta-KG refresh (AUX-01), ongoing-query check, KP-cache refresh (EXP-31), load log. | **Partial**: the hourly meta-KG refresh runs in the server; the SmartAPI list (query plan only) is cached for an hour in-process; the KP-cache refresh, ongoing-query check and load log don't apply |
+| OPS-08 | Database manager | Downloads or symlinks the managed DBs (Part B §20) by rsync from `arax-databases.rtx.ai` or SFTP (ITRB). Tracks versions in `db_versions.json`. | **Shepherd's own** (`shepherd_utils/data_download.py`, DEC-6); the URLs are placeholders |
 
 ### 19. Auxiliary services
 
 | ID | Functionality | Details | Shepherd |
 |---|---|---|---|
-| AUX-01 | ARAX `/meta_knowledge_graph` | Plover/Gandalf `/meta_knowledge_graph` (30 s) merged with every KP's meta map (edges tagged with a `biolink:knowledge_source` attribute) plus the standard attribute constraints (`original_predicate`, `knowledge_level`, `agent_type`). Cached for 1 h with JSON backups (keeps 3). The `simple` format gives predicates by category. | None |
-| AUX-02 | Autocomplete (`code/autocomplete`, Tornado :4999) | Only `/nodeslike` works (prefix, then substring search on `autocomplete_v1.0_<tier>.sqlite`). `/auto`, `/fuzzy` and `/autofuzzy` are dead. | None (UI-only?) |
-| AUX-03 | Interactive UI (`code/UI/interactive`) | Static SPA. Depends on API-02 streaming, `/response`, `/status`, `/meta_knowledge_graph?format=simple`, `/entity` and autocomplete. | Out of scope? |
+| AUX-01 | ARAX `/meta_knowledge_graph` | Plover/Gandalf `/meta_knowledge_graph` (30 s) merged with every KP's meta map (edges tagged with a `biolink:knowledge_source` attribute) plus the standard attribute constraints (`original_predicate`, `knowledge_level`, `agent_type`). Cached for 1 h with JSON backups (keeps 3). The `simple` format gives predicates by category. | **Ported** (DEC-11), parity-tested |
+| AUX-02 | Autocomplete (`code/autocomplete`, Tornado :4999) | Only `/nodeslike` works (prefix, then substring search on `autocomplete_v1.0_<tier>.sqlite`). `/auto`, `/fuzzy` and `/autofuzzy` are dead. | **Ported** at `/arax/rtxcomplete/nodeslike`, parity-tested. The UI calls it relative to its own host, so its deployment must route `/rtxcomplete/` there. |
+| AUX-03 | Interactive UI (`code/UI/interactive`) | Static SPA. Depends on API-02 streaming, `/response`, `/status`, `/meta_knowledge_graph?format=simple`, `/entity` and autocomplete. | **External** (DEC-2) |
 
 ### 20. Data files a faithful port needs
 
-| File (tier `tier0-20260621` unless noted) | Used by | Shepherd has it? |
+| File (tier `tier0-20260621` unless noted) | Used by | In Shepherd |
 |---|---|---|
-| `curie_ngd_v1.0_<tier>.sqlite` | CON-*, XCR-* | Yes (arax_pathfinder) |
-| `tier0-info-for-overlay_v1.0_<tier>.sqlite` (= `kg2c_sqlite`) | CON-*, OVL-05 (FET) | Yes (arax_pathfinder) |
-| `curie_to_pmids_v1.0_<tier>.sqlite` | OVL-01, OVL-04, XCR-* | No |
-| `ExplainableDTD_v1.0_<tier>-all_with_paths.db` | INF-* | No (large) |
-| `COHDdatabase_v1.0_KG2.8.0.db` (old KG) | OVL-02 | No |
-| `fda_approved_drugs_v1.0.pickle` (tier0-20260408) | EXP-24 | No |
-| `autocomplete_v1.0_<tier>.sqlite` | AUX-02 | No |
-| `general_concepts.json` | FKG-11, CON-02 | Yes (from GitHub `master`, never refreshed; C-7) |
+| `curie_ngd_v1.0_<tier>.sqlite` | CON-*, XCR-* | Yes (the pathfinder download, shared with the `arax` worker) |
+| `tier0-info-for-overlay_v1.0_<tier>.sqlite` (= `kg2c_sqlite`) | CON-*, OVL-05 (FET) | Yes (the pathfinder download, shared with the `arax` worker) |
+| `curie_to_pmids_v1.0_<tier>.sqlite` | OVL-01, OVL-04, XCR-* | Download set up (`arax` worker); placeholder URL (DEC-6) |
+| `ExplainableDTD_v1.0_<tier>-all_with_paths.db` | INF-* | Download set up (`arax` worker); placeholder URL (DEC-6) |
+| `COHDdatabase_v1.0_KG2.8.0.db` (old KG) | OVL-02 | Download set up (`arax` worker); placeholder URL (DEC-6) |
+| `fda_approved_drugs_v1.0.pickle` (tier0-20260408) | EXP-24 | Download set up (`arax` worker); placeholder URL (DEC-6) |
+| `autocomplete_v1.0_<tier>.sqlite` | AUX-02 | Download set up (server); placeholder URL (DEC-6) |
+| `general_concepts.json` | FKG-11, CON-02 | Yes: vendored in the ARAX library at the pinned commit. `arax.pathfinder` still reads GitHub `master` (C-7) |
 | `transcription_factors.json` (bundled in `catrax-xcrg`) | XCR-03 | n/a |
 | Biolink 4.2.5 YAML / BiolinkHelper pickle | BL-* | Yes |
 
@@ -621,6 +662,12 @@ defunct), the ARS instances (response retrieval), S3, MySQL, and GitHub raw
 These were found while comparing the native workers with upstream. **C-1 and
 C-2 affect results today** and are worth fixing whether or not the full port
 goes ahead.
+
+**Since the port:** C-2 and C-10 are fixed (DEC-8). C-1 and C-3 to C-6 remain in
+the `arax.pathfinder` worker, which answers TRAPI pathfinder queries; under DEC-7
+they are not parity gaps and wait for the bug-fix pass. C-7 now only affects that
+worker. C-8, C-9 and C-11 concern Shepherd's own workflow steps, which ARAX
+queries no longer use (ARAX runs its own actions in-process). C-12 still applies.
 
 | ID | Where | Divergence | Impact |
 |---|---|---|---|
@@ -729,3 +776,5 @@ code they live in is not ported (DEC-3, DEC-4).
    `{settings.server_url}/arax/response/{id}`). Nothing left open.
 8. **Version pins** (decided: DEC-7 makes the catrax-pathfinder pin moot;
    DEC-13 bumps biolink-helper-pkg to 1.0.1).
+9. **Async queries** (decided: DEC-15, Shepherd's own async logic).
+10. **Concurrency limit** (decided: DEC-16, none).
