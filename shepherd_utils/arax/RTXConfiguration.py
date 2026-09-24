@@ -33,6 +33,15 @@ class RTXConfiguration:
         # Same vocabulary as ARAX's: development / staging / testing / production
         return settings.server_maturity
 
+    # ARAX derives these from its git checkout and deployment domain, and only
+    # logs them (ARAX_query's startup debug line). Shepherd has neither.
+    current_branch_name = None
+    is_itrb_instance = False
+
+    @property
+    def is_production_server(self) -> bool:
+        return self.maturity == "production"
+
     @property
     def kg2c_sqlite_path(self) -> str:
         # ARAX's kg2c_sqlite and tier0_sqlite point at the same

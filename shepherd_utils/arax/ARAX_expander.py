@@ -7,7 +7,10 @@
 #   - no KP/xDTD response cache (DEC-3): KPQueryCacher is not created and the xDTD result is not stored
 #   - the FDA-approved-drugs pickle path comes from RTXConfiguration.fda_approved_drugs_path (DEC-6)
 #   - the unused plover_url attribute is dropped (dead code, DEC-5)
-#   - ARAX_infer is not ported yet: inferred treats/affects qedges fail on its import until it is
+#   - inferred 'affects' qedges (the legacy xCRG route, not MVP2) still call ARAXInfer's
+#     chemical_gene_regulation_graph_expansion, which the port removes as dead code (E-2,
+#     DEC-5), so they now end in ARAXInfer's UnknownAction error instead of upstream's
+#     failure on the missing xCRG models
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import asyncio
 import copy

@@ -1,6 +1,6 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_messenger.py.
 # Changes from upstream:
-#   - import paths / sys.path hacks only
+#   - import paths / sys.path hacks only (including class-name strings)
 #   - drop the unused import of knowledge_graph_info (dead code, DEC-5)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
@@ -920,7 +920,7 @@ class ARAXMessenger:
     #### Convert a Message as a dict to a Message as objects
     def from_dict(self, message):
 
-        if str(message.__class__) == "<class 'openapi_server.models.message.Message'>":
+        if str(message.__class__) == "<class 'shepherd_utils.arax.openapi_server.models.message.Message'>":
             return message
 
 
@@ -1026,7 +1026,7 @@ class ARAXMessenger:
         #    for result in message.results:
         #        if result.result_graph is not None:
         #            #eprint(str(result.result_graph.__class__))
-        #            if str(result.result_graph.__class__) != "<class 'openapi_server.models.knowledge_graph.KnowledgeGraph'>":
+        #            if str(result.result_graph.__class__) != "<class 'shepherd_utils.arax.openapi_server.models.knowledge_graph.KnowledgeGraph'>":
         #                result.result_graph = KnowledgeGraph().from_dict(result.result_graph)
 
         return message_obj

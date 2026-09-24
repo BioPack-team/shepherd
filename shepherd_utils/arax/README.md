@@ -20,3 +20,12 @@ Rules for this directory:
   `workers/arax/`, which is formatted as usual.
 - **TRAPI models** are ARAX's own generated classes, vendored in
   `openapi_server/` (see its README).
+- **Stand-ins, not ports.** Where ARAX talks to infrastructure Shepherd
+  replaces (config files, MySQL, S3), a small file keeps the upstream name and
+  interface but is backed by Shepherd: `RTXConfiguration.py`,
+  `ARAX_query_tracker.py`, `ResponseCache/response_cache.py` and
+  `Path_Finder/utility.py`. Their headers say so.
+
+Parity tests are in `tests/unit/arax/`: `test_expand_parity.py` (Expand) and
+`test_query_parity.py` (whole queries through `ARAXQuery`), each against goldens
+recorded from upstream ARAX.

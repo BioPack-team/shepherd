@@ -151,6 +151,37 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 | ORC-14 | Concurrency limit | Per-remote-address cap of `round(cpu*50/16)` ongoing queries, plus a free-RAM floor of 15%. Denial gives 429 `OverLimit`. Submitter `infores:arax` and null are exempt. | Infra |
 | ORC-15 | Envelope defaults (`ARAX_messenger.create_envelope`) | `resource_id='ARAX'` (not the infores), `tool_version='ARAX <ver>'`, `schema_version=1.6.0`, `biolink_version=4.2.5`, `type='translator_reasoner_response'`, `context` = the Biolink jsonld URL, `datetime` format `%Y-%m-%d %H:%M:%S`. | Check parity |
 
+#### 2a. Port status (orchestration, Infer, Connect)
+
+**Ported (DEC-14):** `ARAX_query.py`, `ARAX_query_graph_interpreter.py` (with its templates), `operation_to_ARAXi.py`, `result_transformer.py`, `ARAX_infer.py` with `Infer/scripts/` (`infer_utilities`, `ExplianableDTD_db`, `build_mapping_db`), and `ARAX_connect.py`. Each header lists its changes. Shepherd stand-ins (same interface, not ports): `ARAX_query_tracker.py`, `ResponseCache/response_cache.py`, `Path_Finder/utility.py`, and more attributes on `RTXConfiguration.py`.
+
+**Changes from upstream** (all recorded decisions):
+- DEC-3: `ResponseCache.add_new_response` assigns the id the caller passes (`ARAXQuery(response_id=...)`, else a new UUID), sets `envelope.id` to `{settings.server_url}/arax/response/{id}` and writes nothing; the caller saves the envelope. `get_response` reads Shepherd's store. The same URL is used in the "stored with id" log line, the `response=false` return and the `message_uris` match for a local response. No KP cache in Connect.
+- The query tracker is a no-op: no MySQL tracking and no per-address limit (ORC-14 is infrastructure).
+- DEC-5: removed the RTXKG2 mode (E-5), the `filter` and `fetch_message` DSL commands and `ARAXFilter` (E-4, E-6; they now give `UnrecognizedCommand`), the seven dead templates (E-3), the `sort_results_edge/node_attribute` workflow ops and the `predict_drug_treats_disease` step (E-4), the legacy xCRG infer action and `genrete_regulate_subgraphs` (E-2), and the xDTD build modes (E-10).
+- DEC-7: `connect(action=connect_nodes)` keeps ARAX's validation and TRAPI conversion, but searches with Shepherd's pathfinder limits (4 hops, 500 paths, whatever `max_path_length`/`max_pathfinder_paths` say), Shepherd's pathfinder data files, `SYNC_KG_RETRIEVAL_URL` and `KG_REHYDRATE_URL`. TRAPI `paths` queries still go to the `arax.pathfinder` worker.
+- DEC-4: `connect(action=xcrg)` uses `SYNC_KG_RETRIEVAL_URL` (the `ARAX_XCRG_RETRIEVER_URL` override is kept).
+- ARAX's class-name string checks (`"<class 'openapi_server.models.message.Message'>"`) follow the vendored models' package path.
+- `ARAXResponse.output` is not switched to STDERR at import.
+
+**Parity check:** `tests/unit/arax/test_query_parity.py` runs 37 queries end to end through `ARAXQuery.query()` against the Expand mock Retriever. The data files are small synthetic ones: tier0 overlay, curie_to_pmids, COHD, ExplainableDTD and FDA drugs. The goldens were recorded from upstream ARAX's own ARAXQuery (`query_parity/run_upstream.py`, with its tracker and response store stubbed and its KP cache always missing). The queries cover:
+- the QG templates;
+- ARAXi plans with every overlay except `add_node_pmids`, plus filter_kg, filter_results, scoreless resultify and `rank_results`;
+- the automatic ranker after `resultify`, and the ResultTransformer (aux graphs for virtual edges, option groups);
+- creative treats through Expand, and xDTD Infer with and without a QG;
+- TRAPI workflows;
+- input validation, query options, submitter derivation, parse, action and KP errors.
+
+The port matches the status, error code, final envelope and INFO-and-above log, and every KP request. The intended differences:
+- single-node queries go to Retriever (DEC-4);
+- the xDTD "stored in the cache" log lines are gone (DEC-3);
+- `overlay_exposures_data` is no longer listed as allowable (E-8);
+- `filter(...)` is unrecognized (E-4).
+
+Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 makes pathfinder parity a non-goal and xCRG runs in the same package on both sides. The stand-ins are checked by `test_ARAX_query_shepherd.py`.
+
+**Not yet:** the worker wiring, and the UI-facing API (streaming, `/response/{id}`, status views).
+
 ### 3. ARAXi DSL (`AQ/actions_parser.py`, `AQ/ARAX_messenger.py`)
 
 | ID | Functionality | Details | Shepherd |
@@ -313,9 +344,9 @@ The goldens need `PYTHONHASHSEED=0`, because ARAX builds several lists from sets
 
 **DEC-9 consequence:** pinned curies go to Retriever exactly as given. ARAX would first canonicalize, deduplicate and reorder them (`get_canonical_curies_list` returns `list(set(...))`). For normalized input, only the order differs, and that order is hash-seed dependent in ARAX itself.
 
-**Not yet:**
-- Inferred treats/affects qedges need `ARAX_infer`, which is not ported yet.
-- Expand is a library only. It is not wired into the `arax` worker, which comes with the orchestration port (`ARAX_query`, the QG interpreter).
+**Since ported:** `ARAX_infer` (xDTD), so inferred treats qedges run creative mode (see §2a). Inferred `affects` qedges outside MVP2 still route to the legacy xCRG infer action, which is removed (E-2), so they end in ARAXInfer's `UnknownAction` error instead of upstream's failure on the missing models.
+
+**Not yet:** the library is not wired into the `arax` worker.
 
 #### 6.5 Inferred and creative branches in Expand
 
