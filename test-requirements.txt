@@ -1,4 +1,5 @@
 aiohttp
+CacheControl==0.14.4
 biolink-helper-pkg==1.0.1
 bmt==1.4.8
 fakeredis

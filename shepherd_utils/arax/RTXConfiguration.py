@@ -6,6 +6,9 @@
 # See docs/ARAX_PORT_BASELINE.md (DEC-6, DEC-14).
 from shepherd_utils.config import settings
 from shepherd_utils.data_download import (
+    ARAX_COHD,
+    ARAX_CURIE_TO_PMIDS,
+    ARAX_EXPLAINABLE_DTD,
     ARAX_FDA_APPROVED_DRUGS,
     arax_db_path,
     arax_pathfinder_sqlite_paths,
@@ -39,3 +42,19 @@ class RTXConfiguration:
     @property
     def fda_approved_drugs_path(self) -> str:
         return arax_db_path(ARAX_FDA_APPROVED_DRUGS)
+
+    @property
+    def curie_to_pmids_path(self) -> str:
+        return arax_db_path(ARAX_CURIE_TO_PMIDS)
+
+    @property
+    def curie_ngd_path(self) -> str:
+        return arax_pathfinder_sqlite_paths()[0]
+
+    @property
+    def cohd_database_path(self) -> str:
+        return arax_db_path(ARAX_COHD)
+
+    @property
+    def explainable_dtd_db_path(self) -> str:
+        return arax_db_path(ARAX_EXPLAINABLE_DTD)

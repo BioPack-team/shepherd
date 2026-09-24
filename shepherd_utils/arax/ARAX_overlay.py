@@ -1,6 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_overlay.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - drop the overlay_exposures_data action (ICEES+ is defunct and its virtual mode crashes; dead code, DEC-5): its allowable_actions entry, command definition and method
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 
@@ -32,7 +33,6 @@ class ARAXOverlay:
             'add_node_pmids',
             # 'predict_drug_treats_disease',
             'fisher_exact_test',
-            'overlay_exposures_data'
         }
         self.report_stats = True
 
@@ -364,25 +364,6 @@ It can also allow you to filter out the user-defined insignificance of connectio
                     'rel_edge_key': self.rel_edge_key_info,
                     'filter_type': self.filter_type_info,
                     'value': self.fet_value_info
-                }
-            },
-            "overlay_exposures_data": {
-                "dsl_command": "overlay(action=overlay_exposures_data)",
-                "description": """
-`overlay_exposures_data` overlays edges with p-values obtained from the ICEES+ (Integrated Clinical and Environmental Exposures Service) knowledge provider.
-This information is included in edge attributes with the name `icees_p-value`.
-You have the choice of applying this to all edges in the knowledge graph, or only between specified subject/object qnode IDs. If the latter, the data is added in 'virtual' edges with the type `has_icees_p-value_with`.
-
-This can be applied to an arbitrary knowledge graph (i.e. not just those created/recognized by Expander Agent).
-                    """,
-                'brief_description': """
-overlay_exposures_data overlays edges with p-values obtained from the ICEES+ (Integrated Clinical and Environmental Exposures Service) knowledge provider.
-This information is included in edge attributes with the name 'icees_p-value'.
-                    """,
-                "parameters": {
-                    'virtual_relation_label': self.virtual_relation_label_info,
-                    'subject_qnode_key': self.subject_qnode_key_info,
-                    'object_qnode_key': self.object_qnode_key_info
                 }
             }
         }
@@ -966,47 +947,6 @@ This information is included in edge attributes with the name 'icees_p-value'.
         # now do the call out to FTEST
         FTEST = ComputeFTEST(self.response, self.message, self.parameters)
         response = FTEST.fisher_exact_test()
-        return response
-
-    def __overlay_exposures_data(self, describe=False):
-        """
-        This function applies the action overlay_exposures_data. It adds ICEES+ p-values either as virtual edges (if
-        the virtual_relation_label, subject_qnode_key, and object_qnode_key are provided) or as EdgeAttributes tacked onto
-        existing edges in the knowledge graph (applied to all edges).
-        return: ARAXResponse
-        """
-        message = self.message
-        parameters = self.parameters
-        response = self.response
-
-        # Make a list of the allowable parameters and their possible values
-        if message and parameters and hasattr(message, 'query_graph') and hasattr(message.query_graph, 'edges'):
-            allowable_parameters = {'action': {'overlay_exposures_data'},
-                                    'virtual_relation_label': {self.parameters.get('virtual_relation_label')},
-                                    'subject_qnode_key': {key for key in self.message.query_graph.nodes.keys()},
-                                    'object_qnode_key': {key for key in self.message.query_graph.nodes.keys()}}
-        else:
-            allowable_parameters = {'action': {'overlay_exposures_data'},
-                                    'virtual_relation_label': {
-                                        'any string label used to identify the virtual edge (optional, otherwise information is added as an attribute to all existing edges in the KG)'},
-                                    'subject_qnode_key': {
-                                        'a specific subject query node id (optional, otherwise applied to all edges)'},
-                                    'object_qnode_key': {
-                                        'a specific object query node id (optional, otherwise applied to all edges)'}}
-
-        # A little function to describe what this thing does
-        if describe:
-            description_dict = self.command_definitions['overlay_exposures_data']
-            return description_dict
-
-        # Make sure only allowable parameters and values have been passed
-        self.check_params(allowable_parameters)
-        if response.status != 'OK':
-            return response
-
-        from shepherd_utils.arax.Overlay.overlay_exposures_data import OverlayExposuresData
-        oed = OverlayExposuresData(response, message, parameters)
-        response = oed.overlay_exposures_data()
         return response
 
 
