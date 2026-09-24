@@ -24,6 +24,7 @@ dependencies = [
   "pyyaml~=6.0",
   "redis~=5.2",
   "scipy",
+  "six~=1.16",
   "uvicorn[standard]~=0.29",
   "zstandard~=0.23"
 ]
@@ -47,3 +48,9 @@ shepherd_utils = ["*.yml"]
 # The ARS port bundles its upstream blocklist and the schema DDL applied by
 # startup upgrades on pre-existing volumes.
 "shepherd_utils.ars" = ["blocklist.json", "*.sql"]
+
+[tool.black]
+# The ARAX port mirrors upstream RTX module-for-module (and vendors ARAX's
+# generated TRAPI models); it is kept unformatted so it stays diffable against
+# upstream. Shepherd-specific glue lives outside it. See shepherd_utils/arax/README.md.
+extend-exclude = "shepherd_utils/arax/"

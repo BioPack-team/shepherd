@@ -12,6 +12,10 @@ include =
   shepherd_server/*.py
   shepherd_server/**/*.py
 
+omit =
+  shepherd_utils/arax/openapi_server/*
+  shepherd_utils/arax/openapi_server/**/*
+
 [report]
 show_missing = true
 skip_covered = false
