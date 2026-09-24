@@ -48,6 +48,9 @@ shepherd_utils = ["*.yml"]
 # The ARS port bundles its upstream blocklist and the schema DDL applied by
 # startup upgrades on pre-existing volumes.
 "shepherd_utils.ars" = ["blocklist.json", "*.sql"]
+# The ARAX port bundles data files vendored from RTX at its pinned commit
+# (general_concepts.json, the QG interpreter templates, ...).
+"shepherd_utils.arax" = ["KnowledgeSources/*.json", "*.yaml"]
 
 [tool.black]
 # The ARAX port mirrors upstream RTX module-for-module (and vendors ARAX's
