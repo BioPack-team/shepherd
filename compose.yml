@@ -25,6 +25,9 @@ services:
       - ./shepherd_server/debug:/app/shepherd_server/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
+      # The ARAX API's autocomplete database (fetched on first start) and its
+      # meta-KG backups
+      - ./arax_dbs:/app/arax_dbs
     ports:
       - '5439:5439'
   shepherd_db:

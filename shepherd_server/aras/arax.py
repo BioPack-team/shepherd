@@ -8,6 +8,9 @@ arax worker, which runs the ported ARAX library in-process (DEC-14).
 import asyncio
 import json
 import logging
+import os
+import re
+import threading
 import time
 from datetime import datetime
 from typing import AsyncIterator, Optional
@@ -389,6 +392,127 @@ async def get_status(
     if id is not None:
         return _arax_json(await arax_status.query_by_id(id))
     return _arax_json(await arax_status.recent_queries(last_n_hours, mode))
+
+
+# ---------------------------------------------------------------------------
+# Entity lookup (API-06), meta-KG (API-05 / AUX-01), autocomplete (AUX-02)
+# ---------------------------------------------------------------------------
+
+
+def _normalizer_results(entities):
+    from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
+
+    return NodeSynonymizer().get_normalizer_results(entities)
+
+
+@ARAX.get("/entity")
+async def get_entity(request: Request) -> Response:
+    """ARAX's entity_controller.get_entity: q may be repeated."""
+    q = request.query_params.getlist("q")
+    return _arax_json(await asyncio.to_thread(_normalizer_results, q))
+
+
+@ARAX.post("/entity")
+async def post_entity(request: Request) -> Response:
+    """ARAX's entity_controller.post_entity: the body goes to the synonymizer as is."""
+    body = await request.json()
+    return _arax_json(await asyncio.to_thread(_normalizer_results, body))
+
+
+def _meta_knowledge_graph(format_):
+    from shepherd_utils.arax.KnowledgeSources.knowledge_source_metadata import (
+        KnowledgeSourceMetadata,
+    )
+
+    return KnowledgeSourceMetadata().get_meta_knowledge_graph(format_=format_)
+
+
+@ARAX.get("/meta_knowledge_graph")
+async def meta_knowledge_graph(format: Optional[str] = None) -> Response:
+    """ARAX's meta-KG, built from Retriever's (DEC-11)."""
+    return _arax_json(await asyncio.to_thread(_meta_knowledge_graph, format))
+
+
+# autocomplete's module-level sqlite connections are shared, so one lookup at a time
+_autocomplete_lock = threading.Lock()
+_autocomplete_loaded = False
+
+
+def sanitize_callback(callback):
+    """autocomplete/server.py's: keep a leading [a-zA-Z0-9_]+ run."""
+    if callback is None or not isinstance(callback, str):
+        return "autocomplete_callback"
+    match = re.match(r"([a-zA-Z0-9_]+).*$", callback)
+    if match:
+        callback = match.group(1)
+    else:
+        callback = "autocomplete_callback"
+    return callback
+
+
+def _nodes_like(word, limit, callback) -> str:
+    global _autocomplete_loaded
+    from shepherd_utils.arax.autocomplete import rtxcomplete
+
+    with _autocomplete_lock:
+        if not _autocomplete_loaded:
+            # sqlite would create an empty file in place of a missing one,
+            # which the startup download would then take for the real thing
+            if not os.path.exists(rtxcomplete.RTXConfig.autocomplete_path):
+                raise FileNotFoundError(rtxcomplete.RTXConfig.autocomplete_path)
+            os.makedirs(settings.arax_dbs_dir, exist_ok=True)
+            rtxcomplete.load()
+            _autocomplete_loaded = True
+        result = rtxcomplete.get_nodes_like(word, limit)
+    return callback + "(" + json.dumps(result) + ");"
+
+
+@ARAX.get("/rtxcomplete/nodeslike")
+async def nodes_like(request: Request) -> Response:
+    """autocomplete/server.py's nodesLikeSearch (JSONP): prefix, then substring,
+    matches from the autocomplete database. "error" on any failure, as upstream."""
+    params = request.query_params
+    try:
+        limit = params["limit"]
+        word = params["word"]
+        callback = sanitize_callback(params["callback"])
+        body = await asyncio.to_thread(_nodes_like, word, limit, callback)
+    except Exception as e:
+        logging.getLogger("shepherd.arax.autocomplete").warning(
+            f"nodeslike failed: {type(e).__name__}: {e}"
+        )
+        body = "error"
+    return Response(content=body, media_type="text/html; charset=UTF-8")
+
+
+# ARAX's background tasker refreshes the meta-KG hourly (OPS-07, DEC-11)
+META_KG_REFRESH_SEC = 3600
+
+
+def _refresh_meta_kg() -> bool:
+    from shepherd_utils.arax.KnowledgeSources.meta_kg_background_refresh import (
+        refresh_meta_kg,
+    )
+
+    return refresh_meta_kg()
+
+
+async def arax_background_tasks() -> None:
+    """Run for the server's lifetime: fetch the autocomplete database on first
+    start (DEC-6), then refresh the meta-KG every hour."""
+    log = logging.getLogger("shepherd.arax.background")
+    try:
+        from shepherd_utils.data_download import ARAX_AUTOCOMPLETE, ensure_arax_dbs
+
+        await asyncio.to_thread(ensure_arax_dbs, [ARAX_AUTOCOMPLETE], log)
+    except Exception as e:
+        log.error(f"Could not fetch the ARAX autocomplete database: {e}")
+    while True:
+        try:
+            await asyncio.to_thread(_refresh_meta_kg)
+        except Exception as e:
+            log.error(f"ARAX meta-KG refresh failed: {e}")
+        await asyncio.sleep(META_KG_REFRESH_SEC)
 
 
 ARAX.include_router(base_router, prefix="")

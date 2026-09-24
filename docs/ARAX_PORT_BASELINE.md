@@ -48,7 +48,7 @@ under a single Shepherd ARAX base path.
 |---|---|---|---|
 | Submit a query and follow its progress | `POST {query}` with `stream_progress: true` (609, 670) | API-01, API-02, EXP-32 | The streamed NDJSON must carry log entries, the `{pid, authorization}` token, `query_plan` updates (per-qedge/per-KP status, which drives the progress bar) and the final envelope. |
 | Query options set from the UI settings panel | `query_options.kp_timeout`, `prune_threshold`, `max_pathfinder_paths`, `max_path_length`, `bypass_cache` (610-634) | ORC-04, EXP-03/04/06, C-4 | `bypass_cache` is ignored by the ARAs (DEC-3). `max_pathfinder_paths`/`max_path_length` are ignored (DEC-7). |
-| Cancel a running query | `GET /status?terminate_pid=&authorization=` (895) | OPS-02 | — |
+| Cancel a running query | `GET /status?terminate_pid=&authorization=` (895) | OPS-02 | **Served:** ends the query's stream, as the UI sees ARAX's kill; the work still finishes in the worker (§2a). |
 | Load a response by id (numeric ids, and ARS PKs prefixed with `X`) | `GET /response/{id}` (130, 538, 1270, 1335, 1341, 6862) | API-07, OPS-06 | Full ARAX behavior, with responses read from Postgres (DEC-3). `X` means ARS lookup plus attribute stripping, and the `stats` view uses `validation_result` and `provenance_summary`. |
 | Attribute detail for a stripped response | `GET /response/{detail_lookup}` (4773), `Z` prefix (7357) | API-07 | Depends on the `json_cache` produced by the `X` path. |
 | Recent queries list / active queries | `GET /status?last_n_hours=N`, `GET /status?mode=active` (7156) | OPS-03 | Shepherd would build this from Postgres query state. |
@@ -58,7 +58,7 @@ under a single Shepherd ARAX base path.
 | SmartAPI listing | `GET /status?authorization=smartapi` (7793) | API-09, EXP-29 | Kept for the UI (DEC-4). |
 | Site configuration | `GET /status?mode=site_config` (9901) | API-09 | Versions and maturity. |
 | Meta-KG for the query builder | `GET /meta_knowledge_graph?format=simple` (6894) | AUX-01 | Built from Retriever's metadata (DEC-11). |
-| Entity lookup | `GET /entity?q=` and `POST /entity` (9648, 9697, 9769) | API-06, SYN-02 | — |
+| Entity lookup | `GET /entity?q=` and `POST /entity` (9648, 9697, 9769) | API-06, SYN-02 | **Served** (§2a). |
 | Node-name autocomplete | `GET /rtxcomplete/nodeslike?word=&limit=15`, relative to the UI host (`rtxcompletenode.js:67`) | AUX-02 | Needs `autocomplete_v1.0_<tier>.sqlite` (DEC-6). |
 | Swagger link | `{baseAPI}/ui/` (80) | — | Shepherd serves `/docs`. |
 | Calls that do not go to ARAX | ARS submit (523), PloverDB `EXT` (554), `uptime.rtx.ai` (8058, 8164), ARS test-runner artifacts (8449-8537), `rtx.version` (10107) | — | Not Shepherd's concern. |
@@ -210,7 +210,12 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
 - `terminate_pid` (OPS-02): Shepherd can't signal a worker's pool child in another container, and killing it would break the pool. So the server replaces ARAX's `{pid, authorization}` stream line with a deployment-unique token, and `terminate_pid` ends that query's stream, which is all an ARAX client sees when ARAX kills its child. The query itself still runs to completion in the worker.
 - The server image installs the `arax-api` extra: `reasoner-validator`, ARAX's `bmt` and `requests-cache` pins, `aiohttp`, `pandas` and `requests`.
 
-**Not yet:** `/entity`, `/meta_knowledge_graph` and autocomplete.
+- `GET/POST /entity` (API-06) goes to ARAX's `NodeSynonymizer.get_normalizer_results`, as upstream does.
+- `GET /meta_knowledge_graph` (API-05 / AUX-01) is ARAX's `KnowledgeSourceMetadata`, ported with only DEC-11's changes. The base comes from Retriever's `/meta_knowledge_graph`, and the KPInfoCacher merge is dropped. The fill-ins, standard attribute constraints, `format=simple`, the 1 h cache and the 3 JSON backups with fallback (in `ARAX_DBS_DIR`) are upstream's. The server runs ARAX's hourly `refresh_meta_kg` in the background.
+- `GET /rtxcomplete/nodeslike` (AUX-02) is ARAX's `rtxcomplete.get_nodes_like` over `autocomplete_v1.0_<tier>.sqlite`, JSONP with upstream's callback sanitizing and `"error"` on failure. The server fetches the database at startup (DEC-6), so its compose service now mounts `./arax_dbs`. The UI calls this path relative to *its own* host, so a deployment of the UI must route `/rtxcomplete/` to `/arax/rtxcomplete/`.
+- Parity: `tests/unit/arax/test_aux_parity.py` compares the full and simple meta-KG (backup fallback, no backup, and the refresh function) and a 15-lookup autocomplete sequence (the fragment cache carries over between lookups) with upstream's own modules. All of them are identical.
+
+Every row of the UI contract is now served under `/arax`. The two exceptions are recorded decisions: the KP-cache view is empty (DEC-3), and `terminate_pid` ends the stream rather than the work (see `/status` above).
 
 ### 3. ARAXi DSL (`AQ/actions_parser.py`, `AQ/ARAX_messenger.py`)
 

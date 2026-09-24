@@ -573,3 +573,132 @@ async def test_status_recent_pks_reads_shepherds_ars(status_client, mocker):
         },
         "sorted_pk_list": [pk],
     }
+
+
+# ---------------------------------------------------------------------------
+# /entity, /meta_knowledge_graph, /rtxcomplete/nodeslike; behavior parity for
+# the last two is in arax/test_aux_parity.py
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_entity_get_and_post_go_to_the_synonymizer(status_client, mocker):
+    calls = []
+
+    def fake(entities):
+        calls.append(entities)
+        return {"MONDO:1": {"id": {"identifier": "MONDO:1"}}}
+
+    mocker.patch.object(api, "_normalizer_results", side_effect=fake)
+    async with status_client as client:
+        got = await client.get("/entity", params=[("q", "MONDO:1"), ("q", "asthma")])
+        posted = await client.post("/entity", json=["MONDO:1"])
+    assert got.json() == posted.json() == {"MONDO:1": {"id": {"identifier": "MONDO:1"}}}
+    assert calls == [["MONDO:1", "asthma"], ["MONDO:1"]]
+
+
+@pytest.mark.asyncio
+async def test_meta_knowledge_graph_formats(status_client, mocker):
+    import shepherd_utils.arax.KnowledgeSources.knowledge_source_metadata as ksm
+
+    base = {
+        "nodes": {"biolink:Gene": {"id_prefixes": ["NCBIGene"]}},
+        "edges": [
+            {
+                "subject": "biolink:Gene",
+                "predicate": "biolink:interacts_with",
+                "object": "biolink:Gene",
+            }
+        ],
+    }
+    mocker.patch.object(
+        ksm.KnowledgeSourceMetadata,
+        "_fetch_retriever_meta_kg",
+        lambda self: json.loads(json.dumps(base)),
+    )
+    mocker.patch.object(
+        ksm.KnowledgeSourceMetadata, "cached_meta_knowledge_graph", None
+    )
+    mocker.patch.object(ksm.KnowledgeSourceMetadata, "cache_timestamp", None)
+    mocker.patch.object(
+        ksm.KnowledgeSourceMetadata, "_save_backup_meta_kg", lambda self, kg: True
+    )
+    async with status_client as client:
+        simple = (
+            await client.get("/meta_knowledge_graph", params={"format": "simple"})
+        ).json()
+        full = (await client.get("/meta_knowledge_graph")).json()
+    assert simple == {
+        "predicates_by_categories": {
+            "biolink:Gene": {"biolink:Gene": ["biolink:interacts_with"]}
+        },
+        "supported_predicates": ["biolink:interacts_with"],
+    }
+    assert full["edges"][0]["knowledge_types"] == ["lookup"]
+    assert [a["attribute_type_id"] for a in full["edges"][0]["attributes"]] == [
+        "biolink:original_predicate",
+        "biolink:knowledge_level",
+        "biolink:agent_type",
+    ]
+
+
+def test_retriever_meta_kg_url(mocker):
+    import shepherd_utils.arax.KnowledgeSources.knowledge_source_metadata as ksm
+
+    mocker.patch.object(
+        ksm.settings, "sync_kg_retrieval_url", "http://retriever.test/query"
+    )
+    assert ksm._retriever_meta_kg_url() == "http://retriever.test/meta_knowledge_graph"
+
+
+@pytest.mark.asyncio
+async def test_nodeslike_is_jsonp(status_client, mocker, tmp_path):
+    import sqlite3
+
+    from shepherd_utils.arax.autocomplete import rtxcomplete
+
+    db = tmp_path / "autocomplete.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE terms(term VARCHAR(255))")
+    con.executemany("INSERT INTO terms VALUES (?)", [("asthma",), ("astrocytoma",)])
+    con.commit()
+    con.close()
+    mocker.patch.object(type(rtxcomplete.RTXConfig), "autocomplete_path", str(db))
+    mocker.patch.object(api.settings, "arax_dbs_dir", str(tmp_path))
+    mocker.patch.object(api, "_autocomplete_loaded", False)
+    async with status_client as client:
+        ok = await client.get(
+            "/rtxcomplete/nodeslike",
+            params={"word": "ast", "limit": 15, "callback": "cb123();alert(1)"},
+        )
+        missing = await client.get("/rtxcomplete/nodeslike", params={"word": "ast"})
+    assert (
+        ok.text
+        == 'cb123([{"curie": "??", "name": "asthma", "type": "??"}, {"curie": "??", "name": "astrocytoma", "type": "??"}]);'
+    )
+    assert ok.headers["content-type"].startswith("text/html")
+    assert missing.text == "error"
+
+
+@pytest.mark.asyncio
+async def test_nodeslike_without_the_database_does_not_create_it(
+    status_client, mocker, tmp_path
+):
+    from shepherd_utils.arax.autocomplete import rtxcomplete
+
+    db = tmp_path / "missing.sqlite"
+    mocker.patch.object(type(rtxcomplete.RTXConfig), "autocomplete_path", str(db))
+    mocker.patch.object(api, "_autocomplete_loaded", False)
+    async with status_client as client:
+        response = await client.get(
+            "/rtxcomplete/nodeslike",
+            params={"word": "ast", "limit": 5, "callback": "cb"},
+        )
+    assert response.text == "error"
+    assert not db.exists()
+
+
+def test_sanitize_callback():
+    assert api.sanitize_callback(None) == "autocomplete_callback"
+    assert api.sanitize_callback("jQuery_123(x)") == "jQuery_123"
+    assert api.sanitize_callback("(evil)") == "autocomplete_callback"
