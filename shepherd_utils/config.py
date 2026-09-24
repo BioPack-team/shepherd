@@ -120,6 +120,33 @@ class Settings(BaseSettings):
         "tier0-info-for-overlay_v1.0_{version}.sqlite"
     )
     arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+
+    # Data files for the ARAX port's other workers (Overlay, Infer, Expand, the
+    # UI-facing API), set up the same way as the pathfinder DBs above: one
+    # volume-mounted directory, downloaded on first startup by
+    # shepherd_utils.data_download.ensure_arax_dbs. The two files pathfinder
+    # already downloads (curie_ngd, tier0-info-for-overlay) are not repeated
+    # here -- use arax_pathfinder_sqlite_paths() for those.
+    # {version} in a filename template is filled from arax_tier_version.
+    # Each *_url, when set, replaces the default {arax_dbs_base_url}/{filename}
+    # for that one file (the defaults are placeholders until the real files are
+    # published).
+    arax_dbs_dir: str = "arax_dbs"
+    arax_tier_version: str = "tier0-20260621"
+    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
+    arax_curie_to_pmids_url: str = ""
+    arax_explainable_dtd_db_filename: str = (
+        "ExplainableDTD_v1.0_{version}-all_with_paths.db"
+    )
+    arax_explainable_dtd_url: str = ""
+    arax_autocomplete_sqlite_filename: str = "autocomplete_v1.0_{version}.sqlite"
+    arax_autocomplete_url: str = ""
+    arax_fda_approved_drugs_filename: str = "fda_approved_drugs_v1.0.pickle"
+    arax_fda_approved_drugs_url: str = ""
+    # COHD stays on its KG2.8.0 build, as in ARAX (DEC-6).
+    arax_cohd_db_filename: str = "COHDdatabase_v1.0_KG2.8.0.db"
+    arax_cohd_url: str = ""
     # End of ARAX configs
 
     pathfinder_redis_host: str = "host.docker.internal"

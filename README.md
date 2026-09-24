@@ -22,6 +22,7 @@ commit to git (they're gitignored and volume-mounted from the host):
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
 - **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`, `general_concepts.json`)
+- **ARAX port workers** (Overlay, Infer, Expand, the UI-facing API; not wired up yet) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0_<tier-version>-all_with_paths.db`, `autocomplete_v1.0_<tier-version>.sqlite`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`)
 
 So a new developer doesn't have to source these by hand, each worker can fetch its dataset on first
 startup. Two download mechanisms are supported, depending on where the dataset lives:
@@ -49,6 +50,25 @@ The ARAX blocked-concept list (`general_concepts.json`, fetched from GitHub) lan
 directory, so it is downloaded once and then persists with the databases rather than being re-fetched
 by every new container. It is only fetched when absent — delete it from the volume to pick up an
 updated upstream list.
+
+**The ARAX port's data files** work the same way as the pathfinder databases: plain files over HTTPS,
+one volume-mounted directory (`ARAX_DBS_DIR`, default `arax_dbs`), fetched on first startup. Each
+worker requests only the files it opens (`ensure_arax_dbs([...])` in `shepherd_utils/data_download.py`),
+and `arax_db_path(name)` is the single place their on-disk paths come from. The tier-versioned
+filenames are filled from one variable, separate from pathfinder's:
+
+```dotenv
+ARAX_TIER_VERSION=tier0-20260621
+```
+
+By default each file is fetched from `ARAX_DBS_BASE_URL/<filename>`. These URLs are placeholders until
+the real files are published; a single file can be pointed elsewhere with its own override
+(`ARAX_CURIE_TO_PMIDS_URL`, `ARAX_EXPLAINABLE_DTD_URL`, `ARAX_AUTOCOMPLETE_URL`,
+`ARAX_FDA_APPROVED_DRUGS_URL`, `ARAX_COHD_URL`), and each filename can be changed with its
+`ARAX_*_FILENAME` setting. COHD stays on its KG2.8.0 build and the FDA pickle has no tier version, so
+`ARAX_TIER_VERSION` does not affect those two. The two databases the pathfinder already downloads
+(`curie_ngd`, `tier0-info-for-overlay`) are not duplicated here; ARAX workers that need them use
+`arax_pathfinder_sqlite_paths()`. The deployment notes below apply to `ARAX_DBS_DIR` in the same way.
 
 On startup, each worker checks whether its files already exist in the volume-mounted directory. If
 they're missing and a URL is configured, it fetches them into that directory — which lives on the

@@ -245,3 +245,105 @@ def test_ensure_arax_blocked_list_is_a_noop_once_present(tmp_path, mocker):
     data_download.ensure_arax_blocked_list(logger)
 
     spy.assert_not_called()
+
+
+# --- ARAX port data files ----------------------------------------------------
+
+
+def test_arax_db_paths_fill_the_tier_version(tmp_path, mocker):
+    mocker.patch.object(data_download.settings, "arax_dbs_dir", str(tmp_path / "d"))
+    mocker.patch.object(data_download.settings, "arax_tier_version", "tier0-X")
+
+    assert data_download.arax_db_path(data_download.ARAX_CURIE_TO_PMIDS) == str(
+        tmp_path / "d" / "curie_to_pmids_v1.0_tier0-X.sqlite"
+    )
+    assert data_download.arax_db_path(data_download.ARAX_EXPLAINABLE_DTD) == str(
+        tmp_path / "d" / "ExplainableDTD_v1.0_tier0-X-all_with_paths.db"
+    )
+    assert data_download.arax_db_path(data_download.ARAX_AUTOCOMPLETE) == str(
+        tmp_path / "d" / "autocomplete_v1.0_tier0-X.sqlite"
+    )
+    # Fixed names: the tier version does not apply.
+    assert data_download.arax_db_path(data_download.ARAX_COHD) == str(
+        tmp_path / "d" / "COHDdatabase_v1.0_KG2.8.0.db"
+    )
+    assert data_download.arax_db_path(data_download.ARAX_FDA_APPROVED_DRUGS) == str(
+        tmp_path / "d" / "fda_approved_drugs_v1.0.pickle"
+    )
+
+
+def test_arax_db_url_defaults_to_base_url_and_honors_override(mocker):
+    mocker.patch.object(data_download.settings, "arax_tier_version", "tier0-X")
+    mocker.patch.object(
+        data_download.settings, "arax_dbs_base_url", "https://host.example/tier0/"
+    )
+    mocker.patch.object(data_download.settings, "arax_cohd_url", "")
+    mocker.patch.object(
+        data_download.settings, "arax_curie_to_pmids_url", "https://elsewhere/p.sqlite"
+    )
+
+    assert (
+        data_download.arax_db_url(data_download.ARAX_COHD)
+        == "https://host.example/tier0/COHDdatabase_v1.0_KG2.8.0.db"
+    )
+    assert (
+        data_download.arax_db_url(data_download.ARAX_CURIE_TO_PMIDS)
+        == "https://elsewhere/p.sqlite"
+    )
+
+
+def test_ensure_arax_dbs_downloads_only_the_requested_files(tmp_path, mocker):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "COHDdatabase_v1.0_KG2.8.0.db").write_bytes(b"cohd")
+    (source / "curie_to_pmids_v1.0_tier0-X.sqlite").write_bytes(b"pmids")
+    target = tmp_path / "arax_dbs"
+    mocker.patch.object(data_download.settings, "arax_dbs_dir", str(target))
+    mocker.patch.object(data_download.settings, "arax_tier_version", "tier0-X")
+    mocker.patch.object(data_download.settings, "arax_dbs_base_url", source.as_uri())
+    for url_setting in (
+        "arax_cohd_url",
+        "arax_curie_to_pmids_url",
+        "arax_explainable_dtd_url",
+    ):
+        mocker.patch.object(data_download.settings, url_setting, "")
+
+    data_download.ensure_arax_dbs(
+        [data_download.ARAX_COHD, data_download.ARAX_CURIE_TO_PMIDS], logger
+    )
+
+    assert sorted(p.name for p in target.iterdir()) == [
+        "COHDdatabase_v1.0_KG2.8.0.db",
+        "curie_to_pmids_v1.0_tier0-X.sqlite",
+    ]
+    assert (target / "COHDdatabase_v1.0_KG2.8.0.db").read_bytes() == b"cohd"
+
+
+def test_ensure_arax_dbs_is_a_noop_once_present(tmp_path, mocker):
+    target = tmp_path / "arax_dbs"
+    target.mkdir()
+    (target / "COHDdatabase_v1.0_KG2.8.0.db").write_bytes(b"already here")
+    mocker.patch.object(data_download.settings, "arax_dbs_dir", str(target))
+    spy = mocker.patch.object(data_download, "_download")
+
+    data_download.ensure_arax_dbs([data_download.ARAX_COHD], logger)
+
+    spy.assert_not_called()
+
+
+def test_ensure_arax_dbs_rejects_unknown_names(mocker):
+    spy = mocker.patch.object(data_download, "_download")
+
+    with pytest.raises(ValueError, match="Unknown ARAX data file"):
+        data_download.ensure_arax_dbs([data_download.ARAX_COHD, "curie_ngd"], logger)
+    spy.assert_not_called()
+
+
+def test_ensure_arax_dbs_with_no_names_does_nothing(tmp_path, mocker):
+    mocker.patch.object(data_download.settings, "arax_dbs_dir", str(tmp_path / "d"))
+    spy = mocker.patch.object(data_download, "_download")
+
+    data_download.ensure_arax_dbs([], logger)
+
+    spy.assert_not_called()
+    assert not (tmp_path / "d").exists()

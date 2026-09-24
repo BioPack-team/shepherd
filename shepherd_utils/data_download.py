@@ -3,8 +3,8 @@ run so new developers can spin the stack up locally.
 
 Several workers read from datasets that are far too large to commit to git --
 they're gitignored and volume-mounted from the host (``./omnicorp_lmdb``,
-``./pathfinder_embeddings``, ``./arax_pathfinder_dbs``). In production these
-volumes are provisioned out of band, but a developer running
+``./pathfinder_embeddings``, ``./arax_pathfinder_dbs``, ``./arax_dbs``). In
+production these volumes are provisioned out of band, but a developer running
 ``docker compose up`` for the first time has empty directories, and the
 workers crash on startup trying to open missing files.
 
@@ -16,7 +16,8 @@ Two flavors of HTTP source are supported:
 * **Per-file** -- individual files fetched directly, no archive/extract step
   (``arax_pathfinder`` below, whose two sqlite databases are served as plain
   files rather than bundled into one archive, plus the ARAX blocked-concept
-  list that shares their directory).
+  list that shares their directory; and the ARAX port's other data files via
+  ``ensure_arax_dbs``).
 
 When a download source is configured (read via :mod:`shepherd_utils.config`),
 each worker calls its matching ``ensure_*`` helper at startup:
@@ -36,7 +37,7 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from shepherd_utils.config import settings
 
@@ -407,5 +408,102 @@ def ensure_arax_blocked_list(logger: Optional[logging.Logger] = None) -> None:
         # rather than handing makedirs an empty path.
         target_dir=os.path.dirname(arax_blocked_list_path()) or ".",
         file_sources={ARAX_BLOCKED_LIST_FILENAME: settings.arax_blocked_list_url},
+        logger=logger,
+    )
+
+
+# --- ARAX port data files ----------------------------------------------------
+#
+# The data files the ARAX port's workers read (Overlay, Infer, Expand, and the
+# UI-facing API), set up exactly like the pathfinder DBs: plain files over
+# HTTPS, one volume-mounted directory, fetched on first startup. Each worker
+# asks only for the files it opens, via the names below.
+
+ARAX_CURIE_TO_PMIDS = "curie_to_pmids"  # NGD overlay, add_node_pmids, xCRG
+ARAX_EXPLAINABLE_DTD = "explainable_dtd"  # Infer (xDTD) scores, paths, mappings
+ARAX_AUTOCOMPLETE = "autocomplete"  # UI node-name autocomplete
+ARAX_FDA_APPROVED_DRUGS = "fda_approved_drugs"  # Expand's FDA-approval constraint
+ARAX_COHD = "cohd"  # overlay_clinical_info
+
+# name -> (filename-template setting, per-file URL override setting)
+_ARAX_DB_SETTINGS = {
+    ARAX_CURIE_TO_PMIDS: (
+        "arax_curie_to_pmids_sqlite_filename",
+        "arax_curie_to_pmids_url",
+    ),
+    ARAX_EXPLAINABLE_DTD: (
+        "arax_explainable_dtd_db_filename",
+        "arax_explainable_dtd_url",
+    ),
+    ARAX_AUTOCOMPLETE: ("arax_autocomplete_sqlite_filename", "arax_autocomplete_url"),
+    ARAX_FDA_APPROVED_DRUGS: (
+        "arax_fda_approved_drugs_filename",
+        "arax_fda_approved_drugs_url",
+    ),
+    ARAX_COHD: ("arax_cohd_db_filename", "arax_cohd_url"),
+}
+ARAX_DB_NAMES = tuple(_ARAX_DB_SETTINGS)
+
+
+def _arax_db_setting_names(name: str) -> Tuple[str, str]:
+    try:
+        return _ARAX_DB_SETTINGS[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown ARAX data file {name!r}; expected one of {list(ARAX_DB_NAMES)}"
+        ) from None
+
+
+def arax_db_filename(name: str) -> str:
+    """The on-disk filename for ARAX data file ``name``, with ``{version}``
+    filled from ``arax_tier_version`` (templates without it are fixed names,
+    e.g. the KG2.8.0 COHD build)."""
+    filename_setting, _ = _arax_db_setting_names(name)
+    return getattr(settings, filename_setting).format(
+        version=settings.arax_tier_version
+    )
+
+
+def arax_db_path(name: str) -> str:
+    """Return the on-disk path of ARAX data file ``name``.
+
+    Single source of truth, as ``arax_pathfinder_sqlite_paths`` is for the
+    pathfinder DBs: ``ensure_arax_dbs`` uses it to know where to download, and
+    the workers use it to know what to open, so the two can never disagree.
+    """
+    return os.path.join(settings.arax_dbs_dir, arax_db_filename(name))
+
+
+def arax_db_url(name: str) -> str:
+    """Where ARAX data file ``name`` is downloaded from: its ``*_url`` setting
+    when set, otherwise ``{arax_dbs_base_url}/{filename}``."""
+    _, url_setting = _arax_db_setting_names(name)
+    override = getattr(settings, url_setting)
+    if override:
+        return override
+    return f"{settings.arax_dbs_base_url.rstrip('/')}/{arax_db_filename(name)}"
+
+
+def ensure_arax_dbs(
+    names: Iterable[str], logger: Optional[logging.Logger] = None
+) -> None:
+    """Ensure the named ARAX data files are present in ``arax_dbs_dir``.
+
+    Same mechanism and caveats as ``ensure_arax_pathfinder_dbs``: files that
+    are already present are left alone, missing ones are fetched one by one
+    (temp file + atomic rename), and the presence check is an exact match on
+    the directory and the (tier-versioned) filenames. Pass only the files the
+    calling worker opens, e.g. ``ensure_arax_dbs([ARAX_CURIE_TO_PMIDS,
+    ARAX_COHD])`` for the overlay worker.
+    """
+    names = list(dict.fromkeys(names))  # de-duplicate, keep order
+    for name in names:
+        _arax_db_setting_names(name)  # fail fast on an unknown name
+    if not names:
+        return
+    ensure_http_files_dataset(
+        name="arax_dbs",
+        target_dir=settings.arax_dbs_dir or ".",
+        file_sources={arax_db_filename(n): arax_db_url(n) for n in names},
         logger=logger,
     )
