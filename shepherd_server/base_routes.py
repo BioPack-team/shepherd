@@ -370,6 +370,33 @@ def apply_query_status(response: dict, status: Optional[str]) -> None:
     response.setdefault("description", f"Query finished with status {status}.")
 
 
+def query_timeout(query_dict: dict) -> float:
+    """How long a synchronous caller waits for the query (``parameters.timeout``)."""
+    return (query_dict.get("parameters") or {}).get("timeout", 360)
+
+
+async def wait_for_query(
+    query_id: str, logger: logging.Logger, timeout: float
+) -> Optional[tuple]:
+    """Poll until the query is COMPLETED; its state row, or None on timeout."""
+    start = time.time()
+    now = start
+    while now <= start + timeout:
+        now = time.time()
+        # poll for completed status
+        query_state = await get_query_state(query_id, logger)
+        if query_state is not None:
+            if query_state[9] == "COMPLETED":
+                return query_state
+        else:
+            # Debug, not warning: this fires every 0.5s while a query is still
+            # in flight (the row just isn't COMPLETED yet) and would otherwise
+            # flood the logs -- especially if the DB is unreachable.
+            logger.debug(f"Failed to get the query state of query id {query_id}")
+        await asyncio.sleep(0.5)
+    return None
+
+
 async def run_sync_query(
     target: ARATargetEnum,
     request: Request,
@@ -389,50 +416,34 @@ async def run_sync_query(
             content={"status": "ERROR", "description": str(e)},
             status_code=QUERY_UNAVAILABLE_CODE,
         )
-    start = time.time()
-    now = start
-    timeout = query_dict.get("parameters", {}).get("timeout", 360)
+    timeout = query_timeout(query_dict)
     logger.info(f"Query running with {timeout} second timeout.")
-    while now <= start + timeout:
-        now = time.time()
-        # poll for completed status
-        query_state = await get_query_state(query_id, logger)
-        if query_state is not None:
-            # logger.info(query_state)
-            state = query_state[9]
-            if state == "COMPLETED":
-                # grab final response
-                response_id = query_state[7]
-                response = await get_message(response_id, logger)
-                if response is None:
-                    return ORJSONResponse(
-                        content={
-                            "status": "ERROR",
-                            "description": "Unable to get response",
-                        },
-                        status_code=QUERY_ERROR_CODE,
-                    )
-                logs = await get_logs(response_id, logger)
-                response["logs"] = logs
-                # The stored status is the one thing that knows the query
-                # failed -- a response an operation never got to write looks
-                # exactly like one that legitimately found nothing. Report it
-                # rather than handing back a body that only says "here you go".
-                status = query_state[10]
-                apply_query_status(response, status)
-                # The body has said "status": "Error" since apply_query_status
-                # went in, but the HTTP code said 200 -- so a caller that
-                # checks the code (rather than parsing the payload for a status
-                # field) saw every failed query as a successful one.
-                return ORJSONResponse(
-                    content=response, status_code=query_status_code(status)
-                )
-        else:
-            # Debug, not warning: this fires every 0.5s while a query is still
-            # in flight (the row just isn't COMPLETED yet) and would otherwise
-            # flood the logs -- especially if the DB is unreachable.
-            logger.debug(f"Failed to get the query state of query id {query_id}")
-        await asyncio.sleep(0.5)
+    query_state = await wait_for_query(query_id, logger, timeout)
+    if query_state is not None:
+        # grab final response
+        response_id = query_state[7]
+        response = await get_message(response_id, logger)
+        if response is None:
+            return ORJSONResponse(
+                content={
+                    "status": "ERROR",
+                    "description": "Unable to get response",
+                },
+                status_code=QUERY_ERROR_CODE,
+            )
+        logs = await get_logs(response_id, logger)
+        response["logs"] = logs
+        # The stored status is the one thing that knows the query
+        # failed -- a response an operation never got to write looks
+        # exactly like one that legitimately found nothing. Report it
+        # rather than handing back a body that only says "here you go".
+        status = query_state[10]
+        apply_query_status(response, status)
+        # The body has said "status": "Error" since apply_query_status
+        # went in, but the HTTP code said 200 -- so a caller that
+        # checks the code (rather than parsing the payload for a status
+        # field) saw every failed query as a successful one.
+        return ORJSONResponse(content=response, status_code=query_status_code(status))
 
     logger.error("Query timed out")
     return ORJSONResponse(

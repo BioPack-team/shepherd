@@ -18,6 +18,7 @@ import uuid
 
 from opentelemetry.trace import get_current_span
 
+from shepherd_utils.arax_progress import finish_progress, push_progress
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import (
@@ -122,6 +123,43 @@ def run_arax(query: dict, response_id: str) -> tuple[dict, int]:
     return envelope_dict, http_status
 
 
+def run_arax_stream(query: dict, response_id: str) -> tuple[dict, int]:
+    """Answer a ``stream_progress`` query the way ARAX's streaming ``/query`` does.
+
+    ARAX's ``query_return_stream`` yields NDJSON lines: log entries, the
+    ``{pid, authorization}`` token, ``query_plan`` updates and heartbeats, and
+    last the response envelope. Every line but the last is relayed to the
+    server as it is yielded (``shepherd_utils.arax_progress``); the envelope is
+    returned to be saved as the response.
+
+    Returns ``(response, http_status)``. ARAX's stream itself is always HTTP
+    200; the status returned is the one its non-streaming ``/query`` would have
+    answered with, so the Shepherd query's outcome is the same either way.
+    """
+    from shepherd_utils.arax.ARAX_query import ARAXQuery
+
+    if "submitter" not in query:
+        query["submitter"] = default_submitter()
+    araxq = ARAXQuery(response_id=response_id)
+    last = None
+    for line in araxq.query_return_stream(query):
+        if last is not None:
+            push_progress(response_id, last)
+        last = line
+    if last is None:
+        # ARAX's stream checks whether the query thread is already done before
+        # its loop, so a query that finishes first (an input error, say)
+        # streams nothing at all, not even the envelope. The query did run;
+        # its envelope is the response, finished as the stream would have.
+        response = araxq.response
+        response.status = response.status.replace("DONE,", "")
+        if response.envelope.status == "OK":
+            response.envelope.status = "Success"
+        return response.envelope.to_dict(), getattr(response, "http_status", 200)
+    envelope = json.loads(last)
+    return envelope, getattr(araxq.response, "http_status", 200)
+
+
 def error_response(message: dict, error: ARAXServiceError) -> dict:
     """A TRAPI response reporting that ARAX could not return one.
 
@@ -156,7 +194,21 @@ def arax_query_task(query_id: str, response_id: str) -> dict:
     and log -- and reported with ARAX's HTTP status.
     """
     query = get_message_sync(query_id)
-    response, http_status = run_arax(query, response_id)
+    if not query.get("stream_progress"):
+        return _save_arax_response(query, response_id, *run_arax(query, response_id))
+    try:
+        return _save_arax_response(
+            query, response_id, *run_arax_stream(query, response_id)
+        )
+    finally:
+        # Also on failure, so a streaming client stops waiting
+        finish_progress(response_id)
+
+
+def _save_arax_response(
+    query: dict, response_id: str, response: dict, http_status: int
+) -> dict:
+    """Save ARAX's response (or an error response) and summarize it."""
     try:
         # ARAX serializes with allow_nan=False, and fails the request on NaN
         json.dumps(response, allow_nan=False)

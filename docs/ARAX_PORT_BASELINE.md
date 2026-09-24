@@ -186,7 +186,11 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
 
 **Worker:** `workers/arax/worker.py` runs each non-pathfinder query in a process-pool child, the way ARAX's non-streaming `/query` does: `ARAXQuery(response_id=...).query_return_message(query)`, then `to_dict()` plus `http_status`. The response is saved under the query's response id, whose URL becomes `envelope.id`. A successful response gets Shepherd's provenance (`infores:shepherd-arax`). ARAX's own error responses are saved as ARAX returns them, with its status, description and log, and the task fails with ARAX's HTTP status. A response ARAX could not serialize (NaN) is a 500, as it is in ARAX. On startup the worker fetches the pathfinder DBs plus curie_to_pmids, ExplainableDTD, FDA drugs and COHD. `arax_url` is no longer used.
 
-**Not yet:** the UI-facing API (streaming, `/response/{id}`, status views).
+**API (`shepherd_server/aras/arax.py`, mounted at `/arax`):**
+- `POST /query` returns ARAX's own envelope, with ARAX's log and ARAX's HTTP status (API-01). Shepherd's generic `/query` would replace the log with Shepherd's and answer any failure with 500. A response ARAX did not produce (a pathfinder query, or an error response the worker wrote) is finished the generic way.
+- With `stream_progress: true` (API-02), the worker runs ARAX's own `query_return_stream` and relays each NDJSON line it yields through a Redis list (`shepherd_utils/arax_progress.py`); the server streams the lines as they arrive, then the saved response, serialized as ARAX does. It is HTTP 200 whatever happens, as in ARAX. The server adds ARAX's 180 s heartbeat when nothing arrives (for queries the worker hands to `arax.pathfinder`).
+
+**Not yet:** `/response/{id}`, the `/status` views, `/entity`, `/meta_knowledge_graph` and autocomplete.
 
 ### 3. ARAXi DSL (`AQ/actions_parser.py`, `AQ/ARAX_messenger.py`)
 
@@ -639,6 +643,7 @@ code they live in is not ported (DEC-3, DEC-4).
 | D-18 | `envelope.description` is stale; `/asyncquery` returns no `job_id`; `/asyncquery_status` logs are always empty. | `ARAX_query.py:893,957`, tracker |
 | D-19 | Non-determinism: Resultify's start qnode is `list(set)[0]`; the NGD PMID subset uses `islice` on a set. | `ARAX_resultify.py`, `compute_ngd.py` |
 | D-20 | Ranker `UnboundLocalError` with publications n=0; `KeyError`s on dangling bindings. | `ARAX_ranker.py:431` |
+| D-21 | `query_return_stream` checks whether its query thread is already done *before* its loop, so a query that finishes first (an input error, say) streams **nothing**, not even the envelope. The Shepherd worker then saves the finished response's envelope, so the stream still ends with it. | `ARAX_query.py:98` |
 
 ---
 
