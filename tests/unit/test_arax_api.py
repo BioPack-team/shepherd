@@ -63,6 +63,10 @@ class FakeShepherd:
             "shepherd_server.base_routes.get_query_state", side_effect=self._state
         )
         mocker.patch.object(api, "get_message", side_effect=self._aget)
+        import fakeredis
+
+        self.redis = fakeredis.aioredis.FakeRedis()
+        mocker.patch.object(api.arax_status, "data_db_client", self.redis)
         mocker.patch.object(
             api,
             "get_logs",
@@ -134,6 +138,9 @@ async def test_stream_relays_arax_progress_then_the_response(mocker):
     assert any("Processing action 'add_qedge'" in m for m in messages)
     tokens = [x for x in lines if set(x) == {"pid", "authorization"}]
     assert len(tokens) == 1
+    # the server's own token, which /status?terminate_pid resolves to this query
+    assert tokens[0]["pid"] == 1
+    assert tokens[0]["authorization"] == api.arax_status.pid_authorization(1)
     # ... then the response, as saved
     final = lines[-1]
     assert final["status"] == "Success"
@@ -357,3 +364,212 @@ async def test_fetch_ars_reads_shepherds_own_ars(mocker):
 def test_ars_host_is_shepherds(mocker):
     mocker.patch.object(api.settings, "server_url", "https://shepherd.example.org/")
     assert api.ars_host() == "shepherd.example.org"
+
+
+# ---------------------------------------------------------------------------
+# /status (API-09)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_terminate_ends_the_stream(mocker):
+    shepherd = FakeShepherd(mocker, dict(PLAN, stream_progress=True))
+    shepherd.progress[:] = [
+        json.dumps({"timestamp": "t", "level": "INFO", "code": "", "message": "a"})
+        + "\n",
+        json.dumps({"pid": 4242, "authorization": "x"}) + "\n",
+    ]
+    response = await api.arax_stream_query(dict(PLAN, stream_progress=True))
+    lines = []
+    async for chunk in response.body_iterator:
+        line = json.loads(chunk)
+        lines.append(line)
+        if "pid" in line:
+            # the client asks to terminate as soon as it has the token
+            assert await api.arax_status.terminate(line["pid"], "wrong") == {
+                "status": "ERROR",
+                "description": "Invalid authorization provided",
+            }
+            assert await api.arax_status.terminate(
+                line["pid"], line["authorization"]
+            ) == {"status": "OK", "description": f"Process {line['pid']} terminated"}
+    # the stream ended there, with no final envelope
+    assert [set(x) for x in lines] == [
+        {"timestamp", "level", "code", "message"},
+        {"pid", "authorization"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminate_unknown_pid(mocker):
+    import fakeredis
+
+    mocker.patch.object(
+        api.arax_status, "data_db_client", fakeredis.aioredis.FakeRedis()
+    )
+    pid = 99
+    assert await api.arax_status.terminate(
+        pid, api.arax_status.pid_authorization(pid)
+    ) == {"status": "ERROR", "description": "ERROR: Attempt to terminate pid=99 failed"}
+
+
+@pytest.fixture
+def status_client():
+    import httpx
+
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api.ARAX), base_url="http://testserver"
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_recent_and_active_queries(status_client, mocker):
+    import datetime
+
+    start = datetime.datetime(2026, 9, 1, 12, 0, 0)
+    rows = [
+        (
+            "q1",
+            start,
+            start + datetime.timedelta(seconds=42),
+            "sub",
+            "1.2.3.4",
+            "arax",
+            "h",
+            "r1",
+            None,
+            "COMPLETED",
+            "OK",
+            "done",
+        ),
+        ("q2", start, None, None, None, "arax", None, "r2", None, "QUEUED", "OK", None),
+    ]
+    recent = mocker.patch.object(
+        api.arax_status,
+        "get_recent_queries",
+        new_callable=mocker.AsyncMock,
+        return_value=rows,
+    )
+    mocker.patch.object(
+        api.arax_status.settings, "server_url", "https://shepherd.example.org"
+    )
+    async with status_client as client:
+        body = (await client.get("/status", params={"last_n_hours": 5})).json()
+        await client.get("/status", params={"mode": "active"})
+    assert recent.await_args_list[0].args[:3] == ("arax", 5.0, False)
+    assert recent.await_args_list[1].args[:3] == ("arax", 24.0, True)
+    newest_first = [q["query_id"] for q in body["recent_queries"]]
+    assert newest_first == ["q2", "q1"]
+    q1 = body["recent_queries"][1]
+    assert q1 == {
+        "query_id": "q1",
+        "pid": None,
+        "start_datetime": "2026-09-01 12:00:00",
+        "domain": "shepherd.example.org",
+        "hostname": "h",
+        "instance_name": api.arax_status.settings.server_location,
+        "state": "Completed",
+        "elapsed": 42,
+        "submitter": "sub",
+        "response_id": "r1",
+        "status": "OK",
+        "description": "done",
+        "remote_address": "1.2.3.4",
+    }
+    assert body["recent_queries"][0]["state"] == "started"
+    assert "current_datetime" in body
+
+
+@pytest.mark.asyncio
+async def test_status_id_returns_the_input_query(status_client, mocker):
+    mocker.patch.object(
+        api.arax_status,
+        "get_message",
+        new_callable=mocker.AsyncMock,
+        return_value={"message": 1},
+    )
+    async with status_client as client:
+        body = (await client.get("/status", params={"id": "q1"})).json()
+    assert body == {"message": 1}
+
+
+@pytest.mark.asyncio
+async def test_status_site_config_kp_cache_and_system_load(status_client):
+    async with status_client as client:
+        config = (await client.get("/status", params={"mode": "site_config"})).json()
+        kp_cache = (await client.get("/status", params={"mode": "kp_cache"})).json()
+        load = (await client.get("/status", params={"mode": "system_load"})).json()
+    assert config["config"]["arax_version"] == "1.6.2"
+    assert config["config"]["cohd_database_version"] == "1.0_KG2.8.0"
+    assert kp_cache["cache_stats"]["n_cached_queries"] == 0
+    assert kp_cache["cache_data"] == []
+    assert kp_cache["column_data"][0]["key"] == "kp_query_id"
+    assert load == []
+
+
+@pytest.mark.asyncio
+async def test_status_recent_pks_reads_shepherds_ars(status_client, mocker):
+    import shepherd_utils.arax.NodeSynonymizer.node_synonymizer as ns
+
+    pk = "0b6a7f2c-7c3e-4ab0-9a55-1d2c3e4f5a6b"
+    latest = {"latest_3_pks": [pk]}
+    message = {"pk": pk, "fields": {"name": "ars-default-agent", "data": None}}
+    trace = {
+        "message": pk,
+        "status": "Done",
+        "timestamp": "2026-09-01 12:00:00",
+        "query_graph": {
+            "nodes": {"n0": {"ids": ["MONDO:1"]}, "n1": {}},
+            "edges": {"e0": {"predicates": ["biolink:treats"]}},
+        },
+        "children": [
+            {
+                "actor": {"agent": "ara-shepherd-arax"},
+                "code": 200,
+                "status": "Done",
+                "result_count": 4,
+            },
+            {"actor": {"agent": "ars-ars-agent"}, "code": 200, "status": "Done"},
+        ],
+    }
+
+    async def latest_pks(n):
+        assert n == 3
+        return 200, json.dumps(latest).encode()
+
+    async def fetch_ars(key, trace_):
+        return 200, json.dumps(trace if trace_ else message).encode()
+
+    mocker.patch.object(api, "_fetch_latest_pks", side_effect=latest_pks)
+    mocker.patch.object(api, "_fetch_ars", side_effect=fetch_ars)
+    mocker.patch.object(
+        ns.NodeSynonymizer,
+        "get_normalizer_results",
+        lambda self, entities=None, **kw: {entities: {"id": {"name": "a disease"}}},
+    )
+    mocker.patch.object(ns.NodeSynonymizer, "__init__", lambda self, *a, **k: None)
+    mocker.patch.object(api.settings, "server_url", "https://shepherd.example.org")
+    async with status_client as client:
+        body = (
+            await client.get(
+                "/status",
+                params={
+                    "mode": "recent_pks",
+                    "last_n_hours": 3,
+                    "authorization": "ars.ci.transltr.io",
+                },
+            )
+        ).json()
+    assert body == {
+        "agents_list": ["shepherd-arax"],
+        "pks": {
+            pk: {
+                "agents": {"shepherd-arax": {"status": "Done", "n_results": 4}},
+                "status": "Done",
+                "timestamp": "2026-09-01 12:00:00",
+                "query": "___ treats a disease",
+                "ars_host": "shepherd.example.org",
+            }
+        },
+        "sorted_pk_list": [pk],
+    }

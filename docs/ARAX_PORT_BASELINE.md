@@ -200,7 +200,17 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
 - `POST /response` (API-08) keeps the body in the data store, capped at 5000 like upstream's files, and answers `"received!"`.
 - Parity: `tests/unit/arax/test_response_parity.py` runs 28 lookups through the port and through upstream's `get_response`, with storage, URLs and the ARS fed the same data, and matches all of them. The cases cover local, URL, ARS parent and child, `X` then `Z` then cached, and every error path. Both sides use a deterministic stand-in for reasoner-validator, which is the same package on both and needs the network. The one intended difference, labelling results from Shepherd's agent names, is asserted separately.
 
-**Not yet:** the `/status` views, `/entity`, `/meta_knowledge_graph` and autocomplete.
+- `GET /status` (API-09, `shepherd_server/aras/arax_status.py`), in the shapes ARAX's tracker and controllers return:
+  - the recent-query list and `mode=active` come from Shepherd's query table (queries routed to ARAX). States map `QUEUED`→`started`, `COMPLETED`→`Completed`, `ABANDONED`→`Died`, and `pid` is null;
+  - `id=` returns the stored input query;
+  - `mode=site_config` returns the same keys as ARAX's `get_config_settings`, with the data-file versions taken from Shepherd's filenames;
+  - `mode=recent_pks` is ARAX's `RecentUUIDManager`, ported to read Shepherd's own ARS whichever host the UI names;
+  - `authorization=smartapi` is ARAX's SmartAPI client;
+  - `mode=kp_cache` is ARAX's listing of an empty cache (DEC-3), and `mode=system_load` is `[]` (OPS-04 is infrastructure).
+- `terminate_pid` (OPS-02): Shepherd can't signal a worker's pool child in another container, and killing it would break the pool. So the server replaces ARAX's `{pid, authorization}` stream line with a deployment-unique token, and `terminate_pid` ends that query's stream, which is all an ARAX client sees when ARAX kills its child. The query itself still runs to completion in the worker.
+- The server image installs the `arax-api` extra: `reasoner-validator`, ARAX's `bmt` and `requests-cache` pins, `aiohttp`, `pandas` and `requests`.
+
+**Not yet:** `/entity`, `/meta_knowledge_graph` and autocomplete.
 
 ### 3. ARAXi DSL (`AQ/actions_parser.py`, `AQ/ARAX_messenger.py`)
 

@@ -1301,6 +1301,31 @@ async def get_callback_query_id(
     return original_query
 
 
+async def get_recent_queries(
+    domain: str,
+    last_n_hours: float,
+    active_only: bool,
+    logger: logging.Logger,
+) -> List[tuple]:
+    """``shepherd_brain`` rows for one ARA's queries started in the last N hours,
+    oldest first (``domain`` holds the ARA a query was routed to). With
+    ``active_only``, only the ones still in flight."""
+    sql = """
+        SELECT * FROM shepherd_brain
+        WHERE domain = %s AND start_time >= NOW() - make_interval(secs => %s)
+    """
+    if active_only:
+        sql += " AND state NOT IN ('COMPLETED', 'ABANDONED')"
+    sql += " ORDER BY start_time"
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cursor = await conn.execute(sql, (domain, float(last_n_hours) * 3600))
+            return await cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to get recent queries: {e}")
+        return []
+
+
 async def get_query_state(
     query_id: str,
     logger: logging.Logger,

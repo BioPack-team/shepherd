@@ -4,8 +4,11 @@
 # class name and exposes only the attributes the ported modules read, backed by
 # Shepherd's settings. Add attributes here as more modules are ported.
 # See docs/ARAX_PORT_BASELINE.md (DEC-6, DEC-14).
+from urllib.parse import urlparse
+
 from shepherd_utils.config import settings
 from shepherd_utils.data_download import (
+    ARAX_AUTOCOMPLETE,
     ARAX_COHD,
     ARAX_CURIE_TO_PMIDS,
     ARAX_EXPLAINABLE_DTD,
@@ -67,3 +70,53 @@ class RTXConfiguration:
     @property
     def explainable_dtd_db_path(self) -> str:
         return arax_db_path(ARAX_EXPLAINABLE_DTD)
+
+    @property
+    def tier0_sqlite_path(self) -> str:
+        return self.kg2c_sqlite_path
+
+    @property
+    def autocomplete_path(self) -> str:
+        return arax_db_path(ARAX_AUTOCOMPLETE)
+
+    @property
+    def instance_name(self) -> str:
+        return settings.server_location
+
+    @property
+    def domain(self) -> str:
+        return urlparse(settings.server_url).netloc
+
+    @staticmethod
+    def _file_version(path: str, extension: str) -> str:
+        # ARAX's rule: the filename after its last "_v", minus the extension
+        return path.split("/")[-1].split("_v")[-1].replace(extension, "")
+
+    def get_config_settings(self) -> dict:
+        """ARAX's /status?mode=site_config: the same keys, in ARAX's order."""
+        config = {
+            "arax_version": self.arax_version,
+            "trapi_version": self.trapi_version,
+            "trapi_major_version": self.trapi_major_version,
+            "version": self.version,
+            "instance_name": self.instance_name,
+            "domain": self.domain,
+            "current_branch_name": self.current_branch_name,
+            "maturity": self.maturity,
+            "is_itrb_instance": self.is_itrb_instance,
+            "is_production_server": self.is_production_server,
+        }
+        for name, extension in (
+            ("cohd_database", ".db"),
+            ("curie_to_pmids", ".sqlite"),
+            ("curie_ngd", ".sqlite"),
+            ("kg2c_sqlite", ".sqlite"),
+            ("tier0_sqlite", ".sqlite"),
+            ("fda_approved_drugs", ".pickle"),
+            ("autocomplete", ".sqlite"),
+            ("explainable_dtd_db", ".db"),
+        ):
+            config[f"{name}_version"] = self._file_version(
+                getattr(self, f"{name}_path"), extension
+            )
+        return {"config": config}

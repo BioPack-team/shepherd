@@ -31,9 +31,16 @@ dependencies = [
 
 [project.optional-dependencies]
 # What the server's ARAX API (shepherd_server/aras/arax.py) needs on top of the
-# base install: /arax/response/{id} validates with ARAX's pinned validator.
+# base install: /arax/response/{id} validates with ARAX's pinned validator,
+# and /status, /entity and the recent-PK view use ARAX's SmartAPI client and
+# NodeSynonymizer (ARAX's pins where it has them).
 arax-api = [
+  "aiohttp",
+  "bmt==1.4.8",
+  "pandas",
   "reasoner-validator==6.0.2",
+  "requests",
+  "requests-cache==1.2.1",
 ]
 
 [build-system]

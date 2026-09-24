@@ -41,6 +41,7 @@ from shepherd_server.base_routes import (
     run_query,
     wait_for_query,
 )
+from shepherd_server.aras import arax_status
 from shepherd_server.openapi import set_open_api_schema
 from shepherd_utils.arax_progress import is_done, read_progress
 from shepherd_utils.config import settings
@@ -154,10 +155,18 @@ async def stream_query_progress(
             if is_done(line):
                 done = True
                 break
+            if line.startswith('{"pid": '):
+                # ARAX's kill token names its worker child's pid; hand out one
+                # that /status?terminate_pid can resolve to this stream
+                line = json.dumps(await arax_status.issue_pid_token(response_id)) + "\n"
             last_sent = time.time()
             yield line
         if done or finished:
             break
+        if await arax_status.is_terminated(response_id):
+            # As when ARAX's child is killed: the stream just ends
+            logger.info("Query stream terminated by the client")
+            return
         query_state = await get_query_state(query_id, logger)
         if query_state is not None and query_state[9] in TERMINAL_QUERY_STATES:
             # One more read for lines pushed just before it finished
@@ -312,6 +321,74 @@ async def post_response(request: Request) -> Response:
     body = await request.json()
     await asyncio.to_thread(response_lookup.store_callback, body)
     return JSONResponse(content="received!")
+
+
+# ---------------------------------------------------------------------------
+# Status (API-09)
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_latest_pks(n) -> tuple[int, bytes]:
+    from shepherd_server.aras.ars import ARS
+
+    transport = httpx.ASGITransport(app=ARS)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ars") as client:
+        response = await client.get(
+            f"/api/latest_pk/{n}", headers={"accept": "application/json"}
+        )
+    return response.status_code, response.content
+
+
+async def _in_thread(fn, *args):
+    return await asyncio.to_thread(fn, *args)
+
+
+@ARAX.get("/status")
+async def get_status(
+    last_n_hours: Optional[int] = None,
+    id: Optional[str] = None,
+    terminate_pid: Optional[int] = None,
+    authorization: Optional[str] = None,
+    mode: Optional[str] = None,
+) -> Response:
+    """ARAX's status_controller.get_status, backed by Shepherd (API-09)."""
+    if mode is not None:
+        if mode == "kp_cache":
+            return _arax_json(arax_status.kp_cache_listing())
+
+        if mode == "recent_pks":
+            from shepherd_utils.arax.ResponseCache.recent_uuid_manager import (
+                RecentUUIDManager,
+            )
+
+            # DEC-3: always Shepherd's own ARS, whichever host the UI names
+            manager = RecentUUIDManager(_fetch_latest_pks, _fetch_ars, _in_thread)
+            return _arax_json(
+                await manager.get_recent_uuids(
+                    ars_host=ars_host(), top_n_pks=last_n_hours
+                )
+            )
+
+        if mode == "site_config":
+            from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
+
+            return _arax_json(RTXConfiguration().get_config_settings())
+
+        if mode == "system_load":
+            # ARAX samples its host's load into a file every minute (OPS-04);
+            # Shepherd's load is in its telemetry instead
+            return _arax_json([])
+
+    if authorization is not None and authorization == "smartapi":
+        from shepherd_utils.arax.Expand.smartapi import SmartAPI
+
+        return _arax_json(await asyncio.to_thread(SmartAPI().get_trapi_endpoints))
+
+    if terminate_pid is not None:
+        return _arax_json(await arax_status.terminate(terminate_pid, authorization))
+    if id is not None:
+        return _arax_json(await arax_status.query_by_id(id))
+    return _arax_json(await arax_status.recent_queries(last_n_hours, mode))
 
 
 ARAX.include_router(base_router, prefix="")
