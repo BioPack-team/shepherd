@@ -29,6 +29,13 @@ dependencies = [
   "zstandard~=0.23"
 ]
 
+[project.optional-dependencies]
+# What the server's ARAX API (shepherd_server/aras/arax.py) needs on top of the
+# base install: /arax/response/{id} validates with ARAX's pinned validator.
+arax-api = [
+  "reasoner-validator==6.0.2",
+]
+
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"

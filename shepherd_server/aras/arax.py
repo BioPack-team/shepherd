@@ -11,12 +11,15 @@ import logging
 import time
 from datetime import datetime
 from typing import AsyncIterator, Optional
+from urllib.parse import urlparse
+
+import httpx
 
 from fastapi import FastAPI, Request, Response
 from fastapi.openapi.docs import (
     get_swagger_ui_html,
 )
-from fastapi.responses import ORJSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, ORJSONResponse, StreamingResponse
 from starlette.responses import HTMLResponse
 
 from shepherd_server.base_routes import (
@@ -40,6 +43,8 @@ from shepherd_server.base_routes import (
 )
 from shepherd_server.openapi import set_open_api_schema
 from shepherd_utils.arax_progress import is_done, read_progress
+from shepherd_utils.config import settings
+from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.db import get_logs, get_message, get_query_state
 
 ARAX = FastAPI(title="Shepherd ARAX")
@@ -216,6 +221,97 @@ async def sync_query(request: Request) -> Response:
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.ARAX, request)
     return response
+
+
+# ---------------------------------------------------------------------------
+# Stored responses (API-07, API-08)
+# ---------------------------------------------------------------------------
+
+# Validating and summarizing a response is CPU-bound (ARAX forks a child per
+# request for it), so those steps run in a small process pool, created on
+# first use.
+RESPONSE_POOL_WORKERS = 2
+# upstream's requests.get for a response URL has no timeout
+RESPONSE_URL_TIMEOUT_SEC = 120
+_response_pool: Optional[ProcessPoolManager] = None
+
+
+def _get_response_pool() -> ProcessPoolManager:
+    global _response_pool
+    if _response_pool is None:
+        _response_pool = ProcessPoolManager(
+            RESPONSE_POOL_WORKERS, name="arax response pool"
+        )
+    return _response_pool
+
+
+async def _run_in_pool(fn, *args):
+    return await _get_response_pool().run(asyncio.get_running_loop(), fn, *args)
+
+
+async def _fetch_url(url: str) -> tuple[int, bytes]:
+    async with httpx.AsyncClient(timeout=RESPONSE_URL_TIMEOUT_SEC) as client:
+        response = await client.get(url, headers={"accept": "application/json"})
+    return response.status_code, response.content
+
+
+async def _fetch_ars(pk: str, trace: bool) -> tuple[int, bytes]:
+    """GET /ars/api/messages/{pk}[?trace=y] from Shepherd's own ARS (DEC-3),
+    in-process, so the JSON is exactly what that endpoint serves."""
+    from shepherd_server.aras.ars import ARS
+
+    transport = httpx.ASGITransport(app=ARS)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ars") as client:
+        response = await client.get(
+            f"/api/messages/{pk}",
+            params={"trace": "y"} if trace else None,
+            headers={"accept": "application/json"},
+        )
+    return response.status_code, response.content
+
+
+def ars_host() -> str:
+    """Shepherd's host, which serves the ARS at /ars (upstream names the ARS
+    instance it read the message from)."""
+    return urlparse(settings.server_url).netloc
+
+
+def _arax_json(result) -> Response:
+    """Serialize as ARAX's Flask API does: plain json.dumps for a dict (nulls
+    and NaN kept), and a (body, status) tuple as that status."""
+    status_code = 200
+    if isinstance(result, tuple):
+        result, status_code = result
+    return Response(
+        content=json.dumps(result),
+        status_code=status_code,
+        media_type="application/json",
+    )
+
+
+@ARAX.get("/response/{response_id}")
+async def get_response(response_id: str) -> Response:
+    """A stored response: Shepherd's, or an ARS message from Shepherd's ARS (API-07)."""
+    from shepherd_utils.arax.ResponseCache import response_lookup
+
+    result = await response_lookup.get_response(
+        response_id,
+        fetch_url=_fetch_url,
+        fetch_ars=_fetch_ars,
+        ars_host=ars_host(),
+        run=_run_in_pool,
+    )
+    return _arax_json(result)
+
+
+@ARAX.post("/response")
+async def post_response(request: Request) -> Response:
+    """Callback sink: keep the posted body (API-08)."""
+    from shepherd_utils.arax.ResponseCache import response_lookup
+
+    body = await request.json()
+    await asyncio.to_thread(response_lookup.store_callback, body)
+    return JSONResponse(content="received!")
 
 
 ARAX.include_router(base_router, prefix="")

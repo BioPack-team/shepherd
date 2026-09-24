@@ -190,7 +190,17 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
 - `POST /query` returns ARAX's own envelope, with ARAX's log and ARAX's HTTP status (API-01). Shepherd's generic `/query` would replace the log with Shepherd's and answer any failure with 500. A response ARAX did not produce (a pathfinder query, or an error response the worker wrote) is finished the generic way.
 - With `stream_progress: true` (API-02), the worker runs ARAX's own `query_return_stream` and relays each NDJSON line it yields through a Redis list (`shepherd_utils/arax_progress.py`); the server streams the lines as they arrive, then the saved response, serialized as ARAX does. It is HTTP 200 whatever happens, as in ARAX. The server adds ARAX's 180 s heartbeat when nothing arrives (for queries the worker hands to `arax.pathfinder`).
 
-**Not yet:** `/response/{id}`, the `/status` views, `/entity`, `/meta_knowledge_graph` and autocomplete.
+- `GET /response/{id}` (API-07) is upstream's `get_response`, ported to `shepherd_utils/arax/ResponseCache/response_lookup.py`: the branch order, validator calls and result shapes, error tuples, actor lookups, `X` attribute stripping with `detail_lookup`, `Z` component reads and size strings are upstream's, including its quirks. One quirk: the URL branch's validation always ends in the "validator crashed" result, because it reads `validation_messages_text` before assigning it. What changes (DEC-3):
+  - a Shepherd response id replaces ARAX's integer ids;
+  - ARS PKs are read in-process from Shepherd's own `/ars` app, and `ars_host` is Shepherd's host;
+  - the component cache is in Shepherd's data store (7-day TTL) rather than a per-process directory;
+  - the actor lookup also knows Shepherd's `ara-shepherd-*` agent names.
+
+  Validation (`reasoner-validator==6.0.2`, ARAX's pin, installed through the `arax-api` extra in the server image) runs in a small process pool, as ARAX forks a child for it. The body is `json.dumps`, as Flask serializes a dict (nulls and NaN kept).
+- `POST /response` (API-08) keeps the body in the data store, capped at 5000 like upstream's files, and answers `"received!"`.
+- Parity: `tests/unit/arax/test_response_parity.py` runs 28 lookups through the port and through upstream's `get_response`, with storage, URLs and the ARS fed the same data, and matches all of them. The cases cover local, URL, ARS parent and child, `X` then `Z` then cached, and every error path. Both sides use a deterministic stand-in for reasoner-validator, which is the same package on both and needs the network. The one intended difference, labelling results from Shepherd's agent names, is asserted separately.
+
+**Not yet:** the `/status` views, `/entity`, `/meta_knowledge_graph` and autocomplete.
 
 ### 3. ARAXi DSL (`AQ/actions_parser.py`, `AQ/ARAX_messenger.py`)
 
