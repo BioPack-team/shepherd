@@ -702,3 +702,102 @@ def test_sanitize_callback():
     assert api.sanitize_callback(None) == "autocomplete_callback"
     assert api.sanitize_callback("jQuery_123(x)") == "jQuery_123"
     assert api.sanitize_callback("(evil)") == "autocomplete_callback"
+
+
+# ---------------------------------------------------------------------------
+# TRAPI workflows: ARAX validates and runs them itself
+# ---------------------------------------------------------------------------
+
+ARAX_WORKFLOW = [
+    {"id": "fill", "parameters": {"allowlist": ["infores:ctd"]}},
+    {"id": "bind"},
+    {
+        "id": "overlay_compute_ngd",
+        "parameters": {"virtual_relation_label": "N1", "qnode_keys": ["n0", "n1"]},
+    },
+    {"id": "complete_results"},
+]
+
+
+@pytest.fixture
+def intake(monkeypatch):
+    import shepherd_server.base_routes as base_routes
+
+    stored, tasks = [], []
+
+    async def fake_add_query(
+        query_id, response_id, query, callback_url, logger, target=None
+    ):
+        stored.append((query, target))
+
+    async def fake_add_task(queue, payload, _logger):
+        tasks.append((queue, payload))
+
+    monkeypatch.setattr(base_routes, "add_query", fake_add_query)
+    monkeypatch.setattr(base_routes, "add_task", fake_add_task)
+    return base_routes, stored, tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [api.ARATargetEnum.ARAX, "arax"])
+async def test_arax_workflow_is_left_for_arax(intake, target):
+    base_routes, stored, tasks = intake
+    query = {"message": {"query_graph": {}}, "workflow": ARAX_WORKFLOW}
+    await base_routes.run_query(target, query)
+    # stored as given, for the arax worker to translate ...
+    assert stored == [(query, "arax")]
+    # ... and not turned into Shepherd steps
+    ((queue, payload),) = tasks
+    assert queue == "arax"
+    assert json.loads(payload["workflow"]) is None
+
+
+@pytest.mark.asyncio
+async def test_arax_workflow_that_is_not_a_list_is_left_for_arax(intake):
+    base_routes, stored, _ = intake
+    await base_routes.run_query("arax", {"message": {}, "workflow": {"id": "lookup"}})
+    assert stored[0][0]["workflow"] == {"id": "lookup"}
+
+
+@pytest.mark.asyncio
+async def test_other_aras_still_get_shepherds_workflow_check(intake):
+    base_routes, _, tasks = intake
+    with pytest.raises(KeyError, match="is not supported"):
+        await base_routes.run_query(
+            "aragorn", {"message": {}, "workflow": ARAX_WORKFLOW}
+        )
+    with pytest.raises(TypeError):
+        await base_routes.run_query(
+            "bte", {"message": {}, "workflow": {"id": "lookup"}}
+        )
+    assert tasks == []
+    await base_routes.run_query(
+        "aragorn", {"message": {}, "workflow": [{"id": "aragorn.lookup"}]}
+    )
+    assert json.loads(tasks[0][1]["workflow"]) == [{"id": "aragorn.lookup"}]
+
+
+@pytest.mark.asyncio
+async def test_arax_rejects_a_workflow_operation_it_does_not_know(mocker):
+    """End to end through the real worker: the operation reaches ARAX, which
+    answers with its own error, as its /query does."""
+    query = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["CHEBI:5"]},
+                    "n1": {"categories": ["biolink:Disease"]},
+                },
+                "edges": {"e0": {"subject": "n0", "object": "n1"}},
+            }
+        },
+        "workflow": [{"id": "teleport"}],
+    }
+    shepherd = FakeShepherd(mocker, query)
+    shepherd.run_worker()
+    shepherd.state = _row(status="ERROR")
+    response = await api.arax_sync_query(query)
+    body = json.loads(bytes(response.body))
+    assert response.status_code == 400
+    assert body["status"] == "UnhandledError"
+    assert any(entry.get("code") == "NotImplementedError" for entry in body["logs"])

@@ -39,6 +39,7 @@ does.
 | DEC-11 | **`/meta_knowledge_graph` is built from Retriever's metadata** (Retriever's own `/meta_knowledge_graph`), not from Plover plus SmartAPI-derived KP meta maps. **ARAX's own additions are included**: the `knowledge_types` and `attributes` fill-in, the standard attribute constraints (`original_predicate`, `knowledge_level`, `agent_type`), the `format=simple` view (predicates by categories), the 1 h cache and hourly background refresh, and the JSON backups (keeps 3) with fallback to the newest backup. | AUX-01 (and API-05): only the Plover fetch and the KPInfoCacher merge are replaced. SmartAPI (DEC-4) is then only used by the UI's `/status?authorization=smartapi` view. |
 | DEC-15 | **`/arax/asyncquery` and `/arax/asyncquery_status` use Shepherd's server logic**, the same as every other ARA, not ARAX's: Shepherd replies with its own `job_id` and delivers the result to the callback itself. | API-03, API-04 (and the `asynchronous` mode in ORC-13, which Shepherd never uses). D-18's missing `job_id` does not apply. |
 | DEC-16 | **No concurrency limit.** ARAX's per-address cap and free-RAM floor (429 `OverLimit`) are not implemented. | ORC-14; the 429 in API-01. |
+| DEC-17 | **An ARAX query's TRAPI `workflow` is passed through to ARAX unchecked.** Shepherd's server checks workflow operations against its own list for the other ARAs; for ARAX, the workflow stays in the stored query and the task starts with no Shepherd workflow, so ARAX translates and validates it itself (`operation_to_ARAXi`, answering `NotImplementedError` for an operation it doesn't know). | WF-*, ORC-03. `shepherd_server/base_routes.py` (`run_query`). |
 
 ### UI contract: what the ARAX UI requires
 
@@ -70,37 +71,26 @@ under a single Shepherd ARAX base path.
 
 What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
 
-1. **ARAX's TRAPI workflow operations are rejected before ARAX sees them.**
-   `run_query` checks every `workflow` operation against Shepherd's own list,
-   whatever the target. So for `/arax/query` only `lookup`, `score`,
-   `filter_results_top_n`, `filter_kgraph_orphans` and `sort_results_score` get
-   through. `fill`, `bind`, `complete_results`, `lookup_and_score`, the
-   `overlay_*` operations, `annotate_nodes` and the `filter_kgraph_*`
-   operations fail with a `KeyError` (HTTP 500), although the ported library
-   runs all of them (WF-*; the query parity test calls it directly). *Needs a
-   decision:* for the ARAX target, skip Shepherd's check and let ARAX validate
-   the workflow itself (it answers `NotImplementedError` for an operation it
-   doesn't know).
-2. **Real data files (DEC-6).** The download URLs for curie_to_pmids,
+1. **Real data files (DEC-6).** The download URLs for curie_to_pmids,
    ExplainableDTD, COHD, FDA drugs and autocomplete are placeholders, and the
    parity tests ran on small synthetic stand-ins with the same schemas. Once
    the real files exist: set the URLs, size the volumes (ExplainableDTD is
    large), and check that the real schemas match.
-3. **Validation against a live ARAX.** Every parity test compares the port with
+2. **Validation against a live ARAX.** Every parity test compares the port with
    upstream ARAX's own code, but offline: a mock Retriever, synthetic data, and
    stand-ins for NodeNorm, COHD's web lookup and reasoner-validator. A run of
    real queries through a live ARAX and through Shepherd, compared, is the next
    check. The upstream demo workflow corpus and its two-endpoint diff script
    (§22) are a ready starting point. `add_node_pmids` (NCBI eUtils), xCRG and
    Connect have only port-side tests so far.
-4. **Build and deploy.** The `arax` worker and server images have not been built
+3. **Build and deploy.** The `arax` worker and server images have not been built
    (the install steps were checked in fresh environments). The `arax` worker's
    resources (`compose.test.yml`: 1 CPU, 3 GB) were sized for the old proxy.
-5. **UI deployment.** The UI calls autocomplete at `/rtxcomplete/nodeslike` on
+4. **UI deployment.** The UI calls autocomplete at `/rtxcomplete/nodeslike` on
    its own host, which must route to `/arax/rtxcomplete/nodeslike`. Its Swagger
    link (`{baseAPI}/ui/`) has no Shepherd equivalent (Shepherd serves `/docs`).
-6. **`GET /status/logs`** (API-10) is not served. The UI does not call it.
-7. **The bug-fix pass (DEC-1)**, after validation: the Part D defects (all
+5. **`GET /status/logs`** (API-10) is not served. The UI does not call it.
+6. **The bug-fix pass (DEC-1)**, after validation: the Part D defects (all
    reproduced today), C-1 and C-3 to C-7 in `arax.pathfinder`, and C-12.
 
 ## How to read this
@@ -134,7 +124,7 @@ each query to a remote ARAX service (`settings.arax_url`), and only
 | Area | IDs | ARAX size | Shepherd now | Main data / service dependencies | Port difficulty (as estimated before the port) |
 |---|---|---|---|---|---|
 | HTTP API and envelope semantics | API-* | about 1.5k LOC (Flask server) | Ported under `/arax`; `/asyncquery` is Shepherd's own (DEC-15) | MySQL, S3, NodeNorm | Medium (mostly deciding what clients rely on) |
-| Orchestration, ARAXi DSL, workflow ops | ORC-*, DSL-*, WF-* | about 3k LOC | Ported (in-process library, DEC-14); Shepherd's server rejects most ARAX workflow ops (Remaining work, item 1) | none | Medium |
+| Orchestration, ARAXi DSL, workflow ops | ORC-*, DSL-*, WF-* | about 3k LOC | Ported (in-process library, DEC-14) | none | Medium |
 | QG interpreter and templates | QGI-* | about 1.3k LOC + YAML | Ported (TRAPI `paths` go to `arax.pathfinder`, DEC-7) | NodeNorm (category lookup) | Low to medium |
 | Expand (KP querying, multi-hop, merging) | EXP-* | about 5k LOC | Ported, Retriever only (DEC-4), parity-tested | SmartAPI, KP meta-KGs, Retriever, Gandalf, NodeNorm, FDA pickle | **High** |
 | NodeSynonymizer / Biolink | SYN-*, BL-* | about 1k LOC | Ported | NodeNorm, Name Resolver, Biolink YAML | Low |
@@ -182,7 +172,7 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 |---|---|---|---|
 | ORC-01 | Input examination | Sets `have_operations`, `have_workflow`, `have_message` and `have_query_graph`. Errors: `NoQueryMessageOrOperations`; `OperationsNotSupported` in KG2 mode (AQ:430). | **Ported** |
 | ORC-02 | QG validation | Allowed qnode keys: `ids, categories, is_set, set_interpretation, set_id, member_ids, option_group_id, name, constraints`. Allowed qedge keys: `predicates, subject, object, option_group_id, exclude, relation, attribute_constraints, qualifier_constraints, knowledge_type`. A singular `predicate` gets a TRAPI 1.4 migration error. The QG must have `edges` or `paths` (AQ:499). | **Ported** |
-| ORC-03 | Dispatch precedence | Precedence is: `workflow`, then (TRAPI workflow → ARAXi, appended to `operations.actions`), then `operations`, then the QG interpreter. If both a QG and operations are given, the interpreter is skipped (AQ:287-426). | **Ported**, but Shepherd's server rejects most workflow operations before ARAX sees them (see WF-* and Remaining work, item 1) |
+| ORC-03 | Dispatch precedence | Precedence is: `workflow`, then (TRAPI workflow → ARAXi, appended to `operations.actions`), then `operations`, then the QG interpreter. If both a QG and operations are given, the interpreter is skipped (AQ:287-426). | **Ported**. Shepherd's server passes an ARAX query's workflow through unchecked, for ARAX to validate (DEC-17) |
 | ORC-04 | `query_options` honored | `kp_timeout`, `prune_threshold`, `return_minimal_metadata` (always overwrites the DSL value), `bypass_cache`, `max_path_length`, `max_pathfinder_paths`. A top-level `return_minimal_metadata` is copied into `query_options`. | **Ported**. `bypass_cache` is ignored (DEC-3); `max_path_length` / `max_pathfinder_paths` are validated but ignored (DEC-7). |
 | ORC-05 | Query fields **ignored** | Top-level `log_level`, `max_results`, `page_size`, `page_number`, `enforce_edge_directionality`, top-level `bypass_cache`, and `operations.options`. | **Ported** (still ignored) |
 | ORC-06 | Submitter derivation | Callback `http://localhost:8000/ars/…` gives `ARS`. Otherwise the `submitter` key is used if present (even null), otherwise the callback host, otherwise `?`. The host regex requires https. | **Ported**, except that a query with no `submitter` gets Shepherd's `infores:shepherd-arax:…` from the worker (as the old proxy did), so the callback-host fallback never applies |
@@ -289,19 +279,19 @@ ignored.
 | ID | Operation | ARAXi emitted | Shepherd |
 |---|---|---|---|
 | WF-01 | `lookup` | `expand()`, `scoreless_resultify(ignore_edge_direction=true)` | **Ported** (translated in the worker) |
-| WF-02 | `lookup_and_score` | `expand()`, `resultify(ignore_edge_direction=true)`, which auto-ranks | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
-| WF-03 | `fill` (`allowlist`, `qedge_keys`) | `expand(kp=[…], edge_key=[…])`. A `denylist` is an error. | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1); the `allowlist` goes to Retriever as `parameters.kp` (DEC-10) |
-| WF-04 | `bind`, `complete_results` | `scoreless_resultify(ignore_edge_direction=true)` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
+| WF-02 | `lookup_and_score` | `expand()`, `resultify(ignore_edge_direction=true)`, which auto-ranks | **Ported** (translated in the worker) |
+| WF-03 | `fill` (`allowlist`, `qedge_keys`) | `expand(kp=[…], edge_key=[…])`. A `denylist` is an error. | **Ported** (translated in the worker); the `allowlist` goes to Retriever as `parameters.kp` (DEC-10) |
+| WF-04 | `bind`, `complete_results` | `scoreless_resultify(ignore_edge_direction=true)` | **Ported** (translated in the worker) |
 | WF-05 | `score` | `rank_results()` | **Ported** (translated in the worker) |
-| WF-06 | `overlay_compute_ngd` (`virtual_relation_label`, `qnode_keys`) | NGD for every pair of qnode keys, `default_value=inf` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
-| WF-07 | `overlay_compute_jaccard` | `compute_jaccard` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
-| WF-08 | `overlay_fisher_exact_test` (optional `rel_edge_key`) | `fisher_exact_test` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
-| WF-09 | `overlay_connect_knodes` | NGD + COHD paired_freq + **predict_drug_treats_disease (now errors)** + FET both ways + Jaccard triples | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1); without the `predict_drug_treats_disease` step (E-4) |
-| WF-10 | `annotate_nodes` (`attributes` contains `pmids`) | `overlay(action=add_node_pmids)` | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
-| WF-11 | `filter_results_top_n` (`max_results`, asserted int) | `limit_number_of_results, prune_kg=true` | **Ported** (translated in the worker). For ARAX queries it means ARAX's action, not Shepherd's step of the same name (C-11) |
-| WF-12 | `filter_kgraph_orphans` | `filter_kg(action=remove_orphaned_nodes)` | **Ported** (translated in the worker). For ARAX queries it means ARAX's `remove_orphaned_nodes`, not Shepherd's step (C-9) |
-| WF-13 | `filter_kgraph_top_n` / `_std_dev` / `_percentile` / `_continuous_kedge_attribute` / `_discrete_kedge_attribute` | The corresponding `filter_kg` actions, with defaults `max_edges` 50, `threshold` 1 or 95, `keep_top_or_bottom` top, `remove_above_or_below` below | **Ported**, but rejected by Shepherd's server before ARAX sees it (Remaining work, item 1) |
-| WF-14 | `sort_results_score` (`ascending_or_descending`) | `sort_by_score` | **Ported** (translated in the worker). For ARAX queries it means ARAX's `sort_by_score` (C-11) |
+| WF-06 | `overlay_compute_ngd` (`virtual_relation_label`, `qnode_keys`) | NGD for every pair of qnode keys, `default_value=inf` | **Ported** (translated in the worker) |
+| WF-07 | `overlay_compute_jaccard` | `compute_jaccard` | **Ported** (translated in the worker) |
+| WF-08 | `overlay_fisher_exact_test` (optional `rel_edge_key`) | `fisher_exact_test` | **Ported** (translated in the worker) |
+| WF-09 | `overlay_connect_knodes` | NGD + COHD paired_freq + **predict_drug_treats_disease (now errors)** + FET both ways + Jaccard triples | **Ported** (translated in the worker); without the `predict_drug_treats_disease` step (E-4) |
+| WF-10 | `annotate_nodes` (`attributes` contains `pmids`) | `overlay(action=add_node_pmids)` | **Ported** (translated in the worker) |
+| WF-11 | `filter_results_top_n` (`max_results`, asserted int) | `limit_number_of_results, prune_kg=true` | **Ported** (translated in the worker). For an ARAX query it means ARAX's action, not Shepherd's step of the same name (C-11) |
+| WF-12 | `filter_kgraph_orphans` | `filter_kg(action=remove_orphaned_nodes)` | **Ported** (translated in the worker). For an ARAX query it means ARAX's `remove_orphaned_nodes`, not Shepherd's step (C-9) |
+| WF-13 | `filter_kgraph_top_n` / `_std_dev` / `_percentile` / `_continuous_kedge_attribute` / `_discrete_kedge_attribute` | The corresponding `filter_kg` actions, with defaults `max_edges` 50, `threshold` 1 or 95, `keep_top_or_bottom` top, `remove_above_or_below` below | **Ported** (translated in the worker) |
+| WF-14 | `sort_results_score` (`ascending_or_descending`) | `sort_by_score` | **Ported** (translated in the worker). For an ARAX query it means ARAX's `sort_by_score` (C-11) |
 | WF-15 | `sort_results_edge_attribute`, `sort_results_node_attribute` | **Always crash (NameError)** | **Removed** (DEC-5, E-4) |
 
 ### 5. Query-graph interpreter (`AQ/ARAX_query_graph_interpreter.py`, `…_templates.yaml`, `AQ/query_graph_info.py`)
@@ -778,3 +768,4 @@ code they live in is not ported (DEC-3, DEC-4).
    DEC-13 bumps biolink-helper-pkg to 1.0.1).
 9. **Async queries** (decided: DEC-15, Shepherd's own async logic).
 10. **Concurrency limit** (decided: DEC-16, none).
+11. **TRAPI workflows for ARAX** (decided: DEC-17, passed through for ARAX to validate).

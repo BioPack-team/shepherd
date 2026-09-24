@@ -274,8 +274,19 @@ async def run_query(
             "filter_analyses_top_n",
         ]
     )
+    # ``target`` is either an ARATargetEnum (which subclasses str -- value
+    # like "aragorn") or already a plain string for workflow-driven queries.
+    target_name = target.value if hasattr(target, "value") else target
     workflow = None
-    if "workflow" in query and query["workflow"] is not None:
+    # ARAX runs a query's TRAPI workflow itself (operation_to_ARAXi, in the
+    # arax worker) and validates it against its own operations, so for ARAX
+    # the workflow stays in the stored query, unchecked here and not turned
+    # into Shepherd steps: the arax task starts like one with no workflow.
+    if (
+        target_name != ARATargetEnum.ARAX.value
+        and "workflow" in query
+        and query["workflow"] is not None
+    ):
         workflow = query["workflow"]
         if not isinstance(workflow, list):
             raise TypeError("Query workflow must be a list.")
@@ -285,10 +296,6 @@ async def run_query(
 
     # save query to db
     try:
-
-        # ``target`` is either an ARATargetEnum (which subclasses str -- value
-        # like "aragorn") or already a plain string for workflow-driven queries.
-        target_name = target.value if hasattr(target, "value") else target
         await add_query(
             query_id,
             response_id,
