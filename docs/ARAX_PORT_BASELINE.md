@@ -31,8 +31,8 @@ does.
 | DEC-7 | **The ARAX pathfinder is obsolete and is dropped. Shepherd's current `arax_pathfinder` worker is kept as it is.** | CON-01…CON-05 are not parity targets. QGI-01 / QGI-03 route to Shepherd's `arax.pathfinder`. C-1 and C-3…C-7 are no longer parity gaps (under DEC-1 they can be revisited in the post-validation bug-fix pass). The catrax-pathfinder pin difference no longer matters. |
 | DEC-8 | **Ranker: bring Shepherd's `arax_rank` up to exactly the ARAX version.** | RNK-01…RNK-06; C-2 and C-10 become port work items, including ARAX's quirks per DEC-1 (the `"no value!"`→0 mutation, falsy-zero min test, the `confidence`-attribute override, `row_data`/`table_column_names`, no `edge["confidence"]` in the output, and ARAX's error behavior rather than soft-failing). D-20 is reproduced. Ranking must also run at the ARAX point in the pipeline (RNK-06 / ORC-09). |
 | DEC-9 | **No curie-prefix conversion.** All data is already normalized, and incoming queries are assumed to be normalized and matching too. | EXP-26 (KP-supported prefix conversion) is not ported. |
-| DEC-10 | **A `kp` list is forwarded to Retriever as `parameters.kp`** (a forward-looking deviation from DEC-1). The intended meaning of `kp` is to filter returned edges to those whose `sources` list the named infores. ARAX does not do that: a user-specified `kp` only chooses which endpoint(s) are queried (`ARAX_expander.py:431-435`). In the port, the query still only goes to Retriever, and the `kp` list (from `expand(kp=…)`, or from the `fill` allowlist via WF-03) is sent in the Retriever request body as `parameters.kp`, alongside `parameters.tiers`, so Retriever can apply the filtering. Retriever decides which values are valid, so ARAX's `valid_kps` / `InvalidKP` check is dropped. With a user-specified `kp`, the knowledge-source constraint allowlist/denylist and the blocked-KP list are still skipped, as in ARAX (DEC-1). (An updated TRAPI schema may later formalize this filtering.) | EXP-01, WF-03 and EXP-27 (request body). Open: Retriever support for `parameters.kp`; see Part F Q2. |
-| DEC-12 | **Query-plan entries (for the UI): every provider except Retriever is always marked "Skipped", whether or not a `kp` list was given.** Retriever carries the real status (Waiting / Done / Timed out / Error / Warning). This keeps the UI's per-provider progress display meaningful now that only Retriever is queried. | EXP-32, API-02, and the query-plan parts of EXP-07, EXP-16, EXP-25 and EXP-01. Open: which provider list the Skipped entries are drawn from (see Part F Q2). |
+| DEC-10 | **A `kp` list is forwarded to Retriever as `parameters.kp`** (a forward-looking deviation from DEC-1). The intended meaning of `kp` is to filter returned edges to those whose `sources` list the named infores. ARAX does not do that: a user-specified `kp` only chooses which endpoint(s) are queried (`ARAX_expander.py:431-435`). In the port, the query still only goes to Retriever, and the `kp` list (from `expand(kp=…)`, or from the `fill` allowlist via WF-03) is sent in the Retriever request body as `parameters.kp`, alongside `parameters.tiers`, so Retriever can apply the filtering. The value is the list of infores exactly as given (no reformatting). Retriever decides which values are valid, so ARAX's `valid_kps` / `InvalidKP` check is dropped. With a user-specified `kp`, the knowledge-source constraint allowlist/denylist and the blocked-KP list are still skipped, as in ARAX (DEC-1). (An updated TRAPI schema may later formalize this filtering.) | EXP-01, WF-03 and EXP-27 (request body). |
+| DEC-12 | **Query-plan entries (for the UI): ARAX reads the provider list from SmartAPI and always marks every provider except Retriever "Skipped", whether or not a `kp` list was given.** Retriever carries the real status (Waiting / Done / Timed out / Error / Warning). This keeps the UI's per-provider progress display meaningful now that only Retriever is queried. | EXP-32, API-02, and the query-plan parts of EXP-07, EXP-16, EXP-25 and EXP-01. The provider list is read from SmartAPI, which is otherwise kept only for the UI (DEC-4). This is a query-plan display read only: it never decides which provider is queried. |
 | DEC-11 | **`/meta_knowledge_graph` is built from Retriever's metadata** (Retriever's own `/meta_knowledge_graph`), not from Plover plus SmartAPI-derived KP meta maps. **ARAX's own additions are included**: the `knowledge_types` and `attributes` fill-in, the standard attribute constraints (`original_predicate`, `knowledge_level`, `agent_type`), the `format=simple` view (predicates by categories), the 1 h cache and hourly background refresh, and the JSON backups (keeps 3) with fallback to the newest backup. | AUX-01 (and API-05): only the Plover fetch and the KPInfoCacher merge are replaced. SmartAPI (DEC-4) is then only used by the UI's `/status?authorization=smartapi` view. |
 
 ### UI contract: what the ARAX UI requires
@@ -612,15 +612,12 @@ not ported.
    by other decisions: `bypass_cache` and `/status?mode=kp_cache` (DEC-3),
    and the pathfinder `query_options` the UI sends (DEC-7 / C-4).
 2. **KP roster** (decided: DEC-4, queries use Retriever only, which covers
-   Gandalf; SmartAPI kept for the UI only; DEC-9, no curie-prefix conversion;
-   DEC-10, a `kp`/`fill` list is forwarded to Retriever as `parameters.kp`;
-   DEC-11, the meta-KG comes from Retriever, with ARAX's additions; DEC-12,
-   every non-Retriever provider is shown as Skipped). Still open:
-   - whether Retriever supports `parameters.kp` yet, and what list format it
-     expects (the infores list as given is assumed);
-   - which provider list DEC-12's Skipped entries come from. ARAX uses the
-     SmartAPI-derived `valid_kps`. SmartAPI is kept for the UI, but queries do
-     not use it.
+   Gandalf; SmartAPI kept for the UI and for the query-plan provider list only;
+   DEC-9, no curie-prefix conversion; DEC-10, a `kp`/`fill` list is forwarded
+   to Retriever as `parameters.kp`, as the infores list given; DEC-11, the
+   meta-KG comes from Retriever, with ARAX's additions; DEC-12, every
+   SmartAPI-listed provider except Retriever is shown as Skipped). Nothing
+   left open.
 3. **Part D** (decided: DEC-1, reproduce everything, fix after validation).
 4. **Part E** (decided: DEC-5, confirm with the ARAX team, then delete). Still
    needed: the ARAX team's confirmation.
