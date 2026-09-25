@@ -14,6 +14,7 @@ TRAPI pathfinder queries (``query_graph.paths``) still go to the
 import asyncio
 import json
 import logging
+import time
 import uuid
 
 from opentelemetry.trace import get_current_span
@@ -276,6 +277,34 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter, loop, 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
 
+def warm_biolink_cache(logger: logging.Logger) -> None:
+    """Build ARAX's Biolink lookup map before the first query does.
+
+    BiolinkHelper caches the map in ``settings.arax_biolink_cache_dir``
+    (downloading the Biolink model YAML on a cold cache) and builds it on first
+    use, which otherwise lands on the first query after each container start.
+    The pool children read the same cached files. A failure only logs: the
+    first query then builds it, as before.
+    """
+    started = time.monotonic()
+    try:
+        from shepherd_utils.arax.BiolinkHelper.biolink_helper import (
+            get_biolink_helper,
+        )
+
+        get_biolink_helper()
+    except Exception as e:
+        logger.warning(
+            f"Could not warm the Biolink cache ({type(e).__name__}: {e}); "
+            "the first query will build it"
+        )
+        return
+    logger.info(
+        f"Biolink lookup map ready in {settings.arax_biolink_cache_dir} "
+        f"({time.monotonic() - started:.1f}s)"
+    )
+
+
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     # First run: fetch the data files ARAX's actions read (DEC-6). No-ops once
@@ -283,6 +312,7 @@ async def poll_for_tasks():
     ensure_arax_pathfinder_dbs(LOGGER)
     ensure_arax_dbs(ARAX_WORKER_DBS, LOGGER)
     loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, warm_biolink_cache, LOGGER)
     # ARAX's plan is CPU-heavy (Resultify, the ranker, overlays) and starts its
     # own event loops (Expand, FET), so each query runs in a pool child. Size the
     # pool by the pod's CPU allocation; POOL_MAX_WORKERS overrides.

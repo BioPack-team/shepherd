@@ -257,3 +257,37 @@ async def test_pathfinder_query_is_routed_without_running_arax(db, mocker):
     assert not run.called
     assert store == {}
     assert json.loads(task[1]["workflow"]) == [{"id": "arax.pathfinder"}]
+
+
+def test_warm_biolink_cache_builds_the_lookup_map(tmp_path, mocker, caplog):
+    """The worker builds the map at startup; the first query then finds it."""
+    import os
+    import shutil
+
+    mocker.patch.object(worker.settings, "arax_biolink_cache_dir", str(tmp_path))
+    shutil.copy(
+        os.path.join(
+            os.path.dirname(__file__),
+            "arax",
+            "expand_parity",
+            "biolink_lookup_map_4.2.5_v5.pickle",
+        ),
+        tmp_path,
+    )
+    caplog.set_level(logging.INFO)
+
+    worker.warm_biolink_cache(logger)
+
+    assert "Biolink lookup map ready" in caplog.text
+    assert (tmp_path / "biolink_lookup_map_4.2.5_v5.pickle").exists()
+
+
+def test_warm_biolink_cache_failure_only_warns(mocker, caplog):
+    mocker.patch(
+        "shepherd_utils.arax.BiolinkHelper.biolink_helper.get_biolink_helper",
+        side_effect=OSError("no network"),
+    )
+
+    worker.warm_biolink_cache(logger)  # does not raise
+
+    assert "Could not warm the Biolink cache (OSError: no network)" in caplog.text
