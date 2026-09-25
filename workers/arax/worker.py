@@ -210,9 +210,13 @@ def _save_arax_response(
 ) -> dict:
     """Save ARAX's response (or an error response) and summarize it."""
     try:
-        # ARAX serializes with allow_nan=False, and fails the request on NaN
-        json.dumps(response, allow_nan=False)
-    except ValueError as e:
+        # ARAX serializes with the stdlib json and allow_nan=False, and fails
+        # the request on NaN. Saving what that produces also turns the numpy
+        # floats some actions put in attributes (e.g. Infer's pandas scores;
+        # json writes them as floats) into plain floats, which Shepherd's
+        # store (orjson) would otherwise reject.
+        response = json.loads(json.dumps(response, allow_nan=False))
+    except (ValueError, TypeError) as e:
         error = ARAXServiceError(
             f"ARAX's response could not be serialized to JSON: {e}", INTERNAL_ERROR
         )

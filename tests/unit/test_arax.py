@@ -12,6 +12,7 @@ import pytest
 
 import workers.arax.worker as worker
 from workers.arax.worker import INTERNAL_ERROR, ARAXServiceError, arax
+from shepherd_utils.db import encode_message
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,44 @@ async def test_unserializable_response_is_an_internal_error(db, span, mocker):
     assert f"[HTTP {INTERNAL_ERROR}]" in saved["description"]
     assert saved["message"]["query_graph"] == query["message"]["query_graph"]
     assert saved["message"]["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_numpy_values_are_saved_as_json_numbers(db, span, mocker):
+    """ARAX's stdlib json writes numpy floats as numbers; Shepherd's store
+    (orjson) rejects them, so the worker saves the serialized form."""
+    import numpy as np
+
+    store = db({"message": {}})
+    mocker.patch(
+        "workers.arax.worker.run_arax",
+        return_value=(
+            {"status": "Success", "message": {"results": [], "score": np.float64(0.5)}},
+            200,
+        ),
+    )
+
+    await arax(_task(), logger)
+
+    saved = store["response_id"]
+    assert type(saved["message"]["score"]) is float
+    assert saved["message"]["score"] == 0.5
+    encode_message(saved)  # what save_message_sync stores
+
+
+@pytest.mark.asyncio
+async def test_non_json_value_is_an_internal_error(db, span, mocker):
+    store = db({"message": {}})
+    mocker.patch(
+        "workers.arax.worker.run_arax",
+        return_value=({"status": "Success", "x": object()}, 200),
+    )
+
+    with pytest.raises(ARAXServiceError) as excinfo:
+        await arax(_task(), logger)
+
+    assert excinfo.value.status_code == INTERNAL_ERROR
+    assert store["response_id"]["status"] == "Error"
 
 
 @pytest.mark.asyncio
