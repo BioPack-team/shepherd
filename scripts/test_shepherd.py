@@ -91,8 +91,25 @@ def generate_query(curie: str) -> dict:
         "parameters": {},
         "log_level": "DEBUG",
         # "bypass_cache": True,
-        "submitter": "Max"
+        "submitter": "Max",
     }
+
+
+def parse_response(content: bytes) -> tuple[dict, int]:
+    """Parse a response body into (TRAPI response, number of progress lines).
+
+    A plain query returns one JSON document. An ARAX query sent with
+    ``"stream_progress": true`` returns newline-delimited JSON instead: one
+    progress line per log entry / query_plan update / heartbeat while it runs,
+    then the TRAPI response as the last line.
+    """
+    try:
+        return json.loads(content), 0
+    except json.JSONDecodeError as e:
+        if not e.msg.startswith("Extra data"):
+            raise
+    lines = [line for line in content.splitlines() if line.strip()]
+    return json.loads(lines[-1]), len(lines) - 1
 
 
 def extract_response_stats(response_json: dict) -> dict:
@@ -162,6 +179,7 @@ async def single_lookup(curie: str, target: str) -> dict:
         "num_kg_nodes": 0,
         "num_kg_edges": 0,
         "num_auxiliary_graphs": 0,
+        "num_stream_progress_lines": 0,
         "error": None,
     }
 
@@ -199,7 +217,7 @@ async def single_lookup(curie: str, target: str) -> dict:
 
                 response.raise_for_status()
 
-        response_json = json.loads(content)
+        response_json, metrics["num_stream_progress_lines"] = parse_response(content)
         metrics.update(extract_response_stats(response_json))
 
     except httpx.HTTPStatusError as e:
@@ -234,6 +252,8 @@ async def single_lookup(curie: str, target: str) -> dict:
         f"transfer={metrics['network_transfer_time_seconds']}s, "
         f"total={metrics['total_time_seconds']}s"
     )
+    if metrics["num_stream_progress_lines"]:
+        summary += f" (streamed {metrics['num_stream_progress_lines']} progress lines)"
     if metrics["error"]:
         summary += f" [ERROR: {metrics['error']}]"
     print(summary)
