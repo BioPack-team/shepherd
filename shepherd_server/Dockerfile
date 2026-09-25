@@ -29,6 +29,9 @@ RUN pip install -e ".[arax-api]"
 
 
 # switch to the non-root user (nru). defined in the base image
+# bmt imports bioregistry, which creates a PyStow data dir at import time;
+# nru's home is not writable, so point it at /tmp (as score_paths does)
+ENV PYSTOW_HOME=/tmp/pystow
 USER nru
 
 # Copy in files
