@@ -80,6 +80,36 @@ Downloads are bounded by `DATASET_DOWNLOAD_TIMEOUT_SEC` (default 60), which appl
 operation rather than to the whole transfer — a large file downloads for as long as it needs, but a
 connection that opens and then stalls fails loudly instead of hanging worker startup.
 
+#### Mock ARAX data for local testing
+
+Until the real files are published, `shepherd_utils/arax_mock_data.py` writes small mock versions in
+exactly their shape (same filenames, tables, columns and value formats), so the whole ARAX stack runs
+locally. Generate them into the volume-mounted directories before `docker compose up`; the startup
+check then finds them and skips the download:
+
+```bash
+python -m shepherd_utils.arax_mock_data --pathfinder
+# writes ./arax_dbs/ (curie_to_pmids, ExplainableDTD, COHD, FDA drugs, autocomplete)
+# and, with --pathfinder, ./arax_pathfinder_dbs/ (curie_ngd, tier0 overlay)
+```
+
+The content comes from a seed of about 30 real curies (e.g. `MONDO:0005148` type 2 diabetes,
+`CHEBI:6801` metformin, `NCBIGene:5468` PPARG) and their edges. The values are made up
+(deterministically) but consistent: NGD comes from the PMID sets, and every xDTD prediction has
+explanation paths built from edges in its own edge mapping. To cover more nodes, add the knowledge
+graph of saved TRAPI responses, e.g. a Retriever response or one from `/arax/query`:
+
+```bash
+python -m shepherd_utils.arax_mock_data --pathfinder --force --from-trapi response1.json response2.json
+```
+
+The clinical-info overlay maps curies to OMOP ids through the live cohd.io API at query time, so the
+generator asks cohd.io for the same ids; with `--no-network` it makes ids up instead, and COHD then
+finds nothing at query time. Existing files are never replaced without `--force`. Use `--out` and
+`--pathfinder-out` to write somewhere other than `ARAX_DBS_DIR` and `ARAX_PATHFINDER_DBS_DIR`.
+Delete the mock files (or run with the real URLs into an empty directory) when switching to the
+real data, because a file that is already present is never downloaded.
+
 #### Deploying these workers
 
 The presence check is an exact match on the configured directory **and** the tier-versioned filenames.

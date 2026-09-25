@@ -75,7 +75,10 @@ What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
    ExplainableDTD, COHD, FDA drugs and autocomplete are placeholders, and the
    parity tests ran on small synthetic stand-ins with the same schemas. Once
    the real files exist: set the URLs, size the volumes (ExplainableDTD is
-   large), and check that the real schemas match.
+   large), and check that the real schemas match. Until then,
+   `python -m shepherd_utils.arax_mock_data --pathfinder` writes mock files
+   in the same shape for local testing (README, "Mock ARAX data";
+   `tests/unit/arax/test_mock_data.py` runs every reader over them).
 2. **Validation against a live ARAX.** Every parity test compares the port with
    upstream ARAX's own code, but offline: a mock Retriever, synthetic data, and
    stand-ins for NodeNorm, COHD's web lookup and reasoner-validator. A run of
