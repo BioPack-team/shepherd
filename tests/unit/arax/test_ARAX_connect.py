@@ -1,10 +1,12 @@
-"""Shepherd-specific behavior of the ported ARAX Connect (DEC-3, DEC-4, DEC-7).
+"""Shepherd-specific behavior of the ported ARAX Connect (DEC-4, DEC-7, DEC-18).
 
 Upstream parity for the pathfinder is not a target (DEC-7), and xCRG runs in
 the catrax-xcrg package on both sides, so these check the port's wiring: which
 Retriever, data files and limits it uses, and how the results land in the
 envelope.
 """
+
+import json
 
 import pytest
 
@@ -183,10 +185,28 @@ def test_connect_nodes_with_no_paths_warns_and_adds_no_results(pathfinder, monke
     )
 
 
-def test_connect_does_not_log_cache_activity(pathfinder):
-    response = _response(PATHFINDER_QG)
-    ARAXConnect().apply(response, {"action": "connect_nodes"})
-    assert not any("cache" in m["message"].lower() for m in response.messages)
+def _cached_kp_curies(store):
+    return sorted(
+        json.loads(store.get(key))["kp_curie"]
+        for key in store.scan_iter(match="arax_kp_cache:record:*")
+    )
+
+
+def test_connect_nodes_stores_its_result_but_does_not_read_it_back(
+    pathfinder, arax_kp_cache_store
+):
+    """As upstream (CON-05): the PathFinder result is stored, but a cached one
+    is only used when the incoming message already has results."""
+    for _ in range(2):
+        response = _response(PATHFINDER_QG)
+        ARAXConnect().apply(response, {"action": "connect_nodes"})
+        assert response.status == "OK", response.show()
+        assert any(
+            m["message"] == "Storing resulting dict in the cache"
+            for m in response.messages
+        )
+    assert len(FakePathfinder.instances) == 2
+    assert _cached_kp_curies(arax_kp_cache_store) == ["PathFinder"]
 
 
 XCRG_QG = {
@@ -252,6 +272,38 @@ def test_xcrg_uses_shepherds_retriever_and_data(xcrg):
     plan = response.query_plan["qedge_keys"]["t"]["arax-xcrg"]
     assert plan["status"] == "Done"
     assert any(m["message"] == "xcrg ran with 3 TFs" for m in response.messages)
+
+
+def test_xcrg_result_is_read_back_from_the_cache(xcrg, arax_kp_cache_store):
+    first = _response(XCRG_QG)
+    ARAXConnect().apply(first, {"action": "xcrg"})
+    second = _response(XCRG_QG)
+    ARAXConnect().apply(second, {"action": "xcrg"})
+
+    assert len(xcrg) == 1  # the second query did not run xCRG
+    assert second.status == "OK", second.show()
+    assert any(
+        m["message"].startswith(
+            "Found a cached result with response_code=200, n_results=2"
+        )
+        for m in second.messages
+    )
+    assert second.data["xcrg_connect"] is True
+    assert second.total_results_count == 2
+    assert len(second.envelope.message.results) == 2
+    assert _cached_kp_curies(arax_kp_cache_store) == ["xCRG"]
+
+
+def test_xcrg_bypass_cache_runs_it_again(xcrg):
+    ARAXConnect().apply(_response(XCRG_QG), {"action": "xcrg"})
+    response = _response(XCRG_QG)
+    response.envelope.query_options = {"bypass_cache": True}
+    ARAXConnect().apply(response, {"action": "xcrg"})
+    assert len(xcrg) == 2
+    assert any(
+        m["message"] == "bypass_cache is set; skipping cache lookup for xCRG"
+        for m in response.messages
+    )
 
 
 def test_xcrg_env_overrides(xcrg, monkeypatch):

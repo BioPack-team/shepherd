@@ -16,6 +16,8 @@ DATA = tempfile.mkdtemp(prefix="query_parity_")
 os.environ["SYNC_KG_RETRIEVAL_URL"] = f"http://127.0.0.1:{S.PORT}/query"
 os.environ["ARAX_PATHFINDER_DBS_DIR"] = os.path.join(DATA, "pathfinder")
 os.environ["ARAX_DBS_DIR"] = os.path.join(DATA, "arax")
+# as upstream's goldens were recorded: the KP cache always misses, stores nothing
+os.environ["ARAX_KP_CACHE_ENABLED"] = "false"
 os.environ["ARAX_BIOLINK_CACHE_DIR"] = os.path.join(DATA, "biolink")
 os.environ["SERVER_MATURITY"] = "development"
 os.environ["SERVER_URL"] = "http://shepherd.test"

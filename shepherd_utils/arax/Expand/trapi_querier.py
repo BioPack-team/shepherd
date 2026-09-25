@@ -1,7 +1,6 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Expand/trapi_querier.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
-#   - no KP response cache (DEC-3): the KPQueryCacher.get_result call is replaced by _post_query_async, which is KPQueryCacher.async_post_query_to_web_service minus the cache (TLS is verified; D-5 does not apply); a timeout still maps to http code -1
 #   - new forwarded_kps argument: a user-specified kp list is sent to Retriever as parameters.kp, exactly as given (DEC-10)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import copy
@@ -22,7 +21,7 @@ from shepherd_utils.arax.Expand.expand_utilities import QGOrganizedKnowledgeGrap
 from shepherd_utils.arax.Expand.kp_selector import KPSelector
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
-import aiohttp
+from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax import util
 from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_biolink_helper
 
@@ -401,18 +400,16 @@ class TRAPIQuerier:
         start = time.time()
         self.log.debug(f"{self.kp_infores_curie}: Sending query to {self.kp_infores_curie} API ({self.kp_endpoint}) with timeout={query_timeout}")
 
-        # Send the query graph to the KP's TRAPI API (no cache, DEC-3)
+        # Send the query graph to the KP's TRAPI API
+        cacher = KPQueryCacher()
         r = None
         try:
-            try:
-                response_data, http_code, elapsed_time, error = await self._post_query_async(f"{self.kp_endpoint}/query",
-                                                                                             request_body,
-                                                                                             timeout=query_timeout)
-            except TimeoutError:
-                response_data = None
-                http_code = -1
-                elapsed_time = query_timeout
-                error = 'Timeout'
+            response_data, http_code, elapsed_time, error = await cacher.get_result(f"{self.kp_endpoint}/query",
+                                                                                    request_body,
+                                                                                    kp_curie=self.kp_infores_curie,
+                                                                                    timeout=query_timeout,
+                                                                                    bypass_cache=bypass_cache,
+                                                                                    async_session=True)
             if http_code == 200:
                 r = response_data
 
@@ -539,21 +536,6 @@ class TRAPIQuerier:
         json_response = cast(dict[str, Any], json_response)
 
         return self._load_kp_json_response(json_response, query_graph)
-
-    @staticmethod
-    async def _post_query_async(query_url: str, query_object: dict, timeout: int = 30) -> tuple:
-        """
-        ARAX's KPQueryCacher.async_post_query_to_web_service, without the cache.
-        HTTP errors (aiohttp.ClientResponseError) propagate to the caller, as upstream.
-        :return: A tuple of (response_data, http_status_code, elapsed_time, error_message)
-        """
-        start_time = time.time()
-        async with aiohttp.ClientSession() as session:
-            async with session.post(query_url, json=query_object, timeout=timeout, headers={'accept': 'application/json'}) as response:
-                elapsed = time.time() - start_time
-                response.raise_for_status()
-                json_response = await response.json()
-                return json_response, response.status, elapsed, None
 
     def _get_prepped_request_body(self, qg: QueryGraph) -> dict:
         # Liberally use is_set to improve performance since we don't need individual results

@@ -31,7 +31,12 @@ from shepherd_utils.data_download import (
     ensure_arax_dbs,
     ensure_arax_pathfinder_dbs,
 )
-from shepherd_utils.db import get_message, get_message_sync, save_message_sync
+from shepherd_utils.db import (
+    _get_sync_data_db,
+    get_message,
+    get_message_sync,
+    save_message_sync,
+)
 from shepherd_utils.inject_shepherd_arax_provenance import (
     add_shepherd_arax_to_edge_sources,
 )
@@ -307,6 +312,50 @@ def warm_biolink_cache(logger: logging.Logger) -> None:
     )
 
 
+# One KP-cache refresh pass runs at a time across every arax worker replica
+KP_CACHE_REFRESH_LOCK_KEY = "arax_kp_cache:refresh_lock"
+# A pass stops starting queries after 60 s (REFRESH_TIME_LIMIT_SECONDS), and each
+# refresh query times out after 30 s
+KP_CACHE_REFRESH_LOCK_TTL_SEC = 120
+BACKGROUND_TASKS: set = set()
+
+
+def refresh_kp_cache_once(logger: logging.Logger) -> bool:
+    """One pass of ARAX's KP-cache refresh (KPQueryCacher.refresh_cache), unless
+    another replica is running one. Returns whether this call ran it."""
+    from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
+
+    db = _get_sync_data_db()
+    token = uuid.uuid4().hex
+    if not db.set(
+        KP_CACHE_REFRESH_LOCK_KEY, token, nx=True, ex=KP_CACHE_REFRESH_LOCK_TTL_SEC
+    ):
+        return False
+    try:
+        KPQueryCacher().refresh_cache()
+    except Exception as e:
+        logger.warning(f"KP cache refresh failed: {type(e).__name__}: {e}")
+    finally:
+        if db.get(KP_CACHE_REFRESH_LOCK_KEY) == token.encode():
+            db.delete(KP_CACHE_REFRESH_LOCK_KEY)
+    return True
+
+
+async def kp_cache_refresh_loop(loop, logger: logging.Logger) -> None:
+    """ARAX's background tasker's KP-cache refresh: a pass every
+    ``arax_kp_cache_refresh_interval_sec`` (a minute by default, as in ARAX)."""
+    interval = settings.arax_kp_cache_refresh_interval_sec
+    if not settings.arax_kp_cache_enabled or interval <= 0:
+        return
+    while True:
+        started = time.monotonic()
+        try:
+            await loop.run_in_executor(None, refresh_kp_cache_once, logger)
+        except Exception as e:
+            logger.warning(f"KP cache refresh failed: {type(e).__name__}: {e}")
+        await asyncio.sleep(max(1.0, interval - (time.monotonic() - started)))
+
+
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     # First run: fetch the data files ARAX's actions read (DEC-6). No-ops once
@@ -315,6 +364,8 @@ async def poll_for_tasks():
     ensure_arax_dbs(ARAX_WORKER_DBS, LOGGER)
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, warm_biolink_cache, LOGGER)
+    # held so the task isn't garbage-collected
+    BACKGROUND_TASKS.add(asyncio.create_task(kp_cache_refresh_loop(loop, LOGGER)))
     # ARAX's plan is CPU-heavy (Resultify, the ranker, overlays) and starts its
     # own event loops (Expand, FET), so each query runs in a pool child. Size the
     # pool by the pod's CPU allocation; POOL_MAX_WORKERS overrides.

@@ -25,7 +25,7 @@ does.
 |---|---|---|
 | DEC-1 | **Perfect parity by default.** Everything is ported to behave exactly like ARAX, bugs and oddities included, unless a decision here says otherwise. The plan is to finish the port and validate it against ARAX first, and only then fix bugs as a separate, later pass. | All. Every Part D defect is **reproduced** in the port. Part C items are only fixed where another decision says so (DEC-8). |
 | DEC-2 | **The ARAX UI itself stays external to Shepherd**, at least for now. **But Shepherd provides everything the ARAX UI needs, so the UI can keep working when pointed at Shepherd.** | AUX-03 (the UI code) is not hosted. The endpoints and behaviors the UI uses become required; see [UI contract](#ui-contract-what-the-arax-ui-requires). |
-| DEC-3 | **No KP response cache. ARAX's MySQL/S3 response store is replaced by Shepherd's Postgres, but `/response/{id}` does everything it does in ARAX.** `bypass_cache` is an ARS field: the ARS keeps honoring it, while the ARAs ignore it and never hit any cache. | Not ported: EXP-31, CRT-05 and CON-05 (KP cache), the MySQL + S3 write path in OPS-05, and the KP-cache refresh in OPS-07. `bypass_cache` (EXP-06, ORC-04) is accepted and ignored. **Ported in full, reading responses from Postgres:** API-07 / OPS-06 (validation with `reasoner-validator` and ARAX's pinned versions, `validation_result`, `provenance_summary`, the ARS PK/UUID paths (read from **Shepherd's own hosted ARS in Postgres**, not from the remote ARS prod/test/ci/dev instances), `X` attribute stripping with `detail_lookup`, `Z` cache reads, `n_nodes`/`n_edges`/size figures, error tuples) and API-08 (`POST /response` callback sink). `envelope.id` becomes **`{settings.server_url}/arax/response/{id}`**, the Shepherd endpoint that serves the response (the ARAX app is mounted at `/arax`, `shepherd_server/server.py:54`). The same applies to the stored-response URL in ARAX's log line and in `response=false` returns. The UI's `/status?mode=kp_cache` view (API-09) is **accepted as broken**. D-5 does not apply. |
+| DEC-3 | **ARAX's MySQL/S3 response store is replaced by Shepherd's Postgres, but `/response/{id}` does everything it does in ARAX.** (DEC-3 first also left out the KP response cache; DEC-18 supersedes that part.) | Not ported: the MySQL + S3 write path in OPS-05. **Ported in full, reading responses from Postgres:** API-07 / OPS-06 (validation with `reasoner-validator` and ARAX's pinned versions, `validation_result`, `provenance_summary`, the ARS PK/UUID paths (read from **Shepherd's own hosted ARS in Postgres**, not from the remote ARS prod/test/ci/dev instances), `X` attribute stripping with `detail_lookup`, `Z` cache reads, `n_nodes`/`n_edges`/size figures, error tuples) and API-08 (`POST /response` callback sink). `envelope.id` becomes **`{settings.server_url}/arax/response/{id}`**, the Shepherd endpoint that serves the response (the ARAX app is mounted at `/arax`, `shepherd_server/server.py:54`). The same applies to the stored-response URL in ARAX's log line and in `response=false` returns. |
 | DEC-4 | **Queries use only Retriever; SmartAPI is kept only for the UI.** During query processing, ARAX never touches SmartAPI / KP-registry / meta-KG KP selection: every Expand query goes to Retriever. Retriever itself queries Gandalf, so ARAX's rtx-kg2 (Gandalf) and `infores:gandalf` routes are covered by Retriever too. SmartAPI stays available for the UI-facing surfaces. | Not used in queries: EXP-07 (blocked KPs), EXP-25 (meta-KG KP selection), EXP-30 (dynamic roster). EXP-29 (SmartAPI client) is kept for the UI only: `/status?authorization=smartapi` (API-09). The rtx-kg2-specific paths (the 600 s timeout in EXP-04, `return_minimal_metadata` in EXP-27, single-node queries in EXP-21) and FET's `rel_edge_key` Gandalf query (OVL-05) go to Retriever. D-3 and D-4 do not apply to queries. |
 | DEC-5 | **All dead code is removed.** Nothing in Part E is ported, and no further confirmation is needed. | Part E. |
 | DEC-6 | **Each data file is set up exactly like the pathfinder DBs are today:** a settings-driven URL and tier version, a presence check against the volume-mounted directory, download on worker startup via `shepherd_utils/data_download.py`, and a compose volume mount. URLs are placeholders following the `kg2webhost.rtx.ai/tier0` pattern, to be adjusted once the real files are available. **The COHD DB to use is `COHDdatabase_v1.0_KG2.8.0.db`**, as in ARAX. **Implemented:** `ensure_arax_dbs` / `arax_db_path` in `shepherd_utils/data_download.py`, with `ARAX_DBS_DIR`, `ARAX_TIER_VERSION`, `ARAX_DBS_BASE_URL`, and a per-file URL override and filename setting for each file. `curie_ngd` and `tier0-info-for-overlay` reuse the pathfinder downloads (`arax_pathfinder_sqlite_paths()`). The workers call it once they exist; compose volume mounts (`./arax_dbs`) are added with them. | Part B §20 (curie_to_pmids, ExplainableDTD, COHD, FDA pickle, autocomplete), OPS-08. |
@@ -40,6 +40,7 @@ does.
 | DEC-15 | **`/arax/asyncquery` and `/arax/asyncquery_status` use Shepherd's server logic**, the same as every other ARA, not ARAX's: Shepherd replies with its own `job_id` and delivers the result to the callback itself. | API-03, API-04 (and the `asynchronous` mode in ORC-13, which Shepherd never uses). D-18's missing `job_id` does not apply. |
 | DEC-16 | **No concurrency limit.** ARAX's per-address cap and free-RAM floor (429 `OverLimit`) are not implemented. | ORC-14; the 429 in API-01. |
 | DEC-17 | **An ARAX query's TRAPI `workflow` is passed through to ARAX unchecked.** Shepherd's server checks workflow operations against its own list for the other ARAs; for ARAX, the workflow stays in the stored query and the task starts with no Shepherd workflow, so ARAX translates and validates it itself (`operation_to_ARAXi`, answering `NotImplementedError` for an operation it doesn't know). | WF-*, ORC-03. `shepherd_server/base_routes.py` (`run_query`). |
+| DEC-18 | **ARAX's KP response cache is ported, stored in Shepherd's Redis data store.** `KPQueryCacher` keeps upstream's logic: the sha256 key of `{url, body}` (categories sorted, in place), what is cached (every Expand KP response, timeouts as `-1`; Connect's PathFinder and xCRG results; the xDTD result, whose read stays disabled), hits and misses, `bypass_cache` (EXP-06, ORC-04), the record fields and statistics, and the `/status?mode=kp_cache` listing. The arax worker runs upstream's refresh (`refresh_cache`: entries older than 6 h re-queried, timeouts after 72 s, each pass capped at 60 s) every minute, behind a Redis lock so one replica refreshes at a time. **Deliberate differences, all from the shared, persistent store:** entries expire `ARAX_KP_CACHE_TTL_SEC` (3 days) after their last request (a refresh does not extend them), and the cache is not cleared at startup; a data-store error is a miss (lookup) or a skipped store; TLS is verified (D-5's `ssl=False` does not apply). `ARAX_KP_CACHE_ENABLED=false` turns it off (every lookup misses, every store is a no-op), which is how the parity tests run, matching upstream's goldens. | EXP-31, CRT-05, CON-05, OPS-07 (KP-cache refresh), API-09 (`kp_cache`), EXP-06, ORC-04. `shepherd_utils/arax/Expand/trapi_query_cacher.py`, `workers/arax/worker.py` (`kp_cache_refresh_loop`), `shepherd_server/aras/arax_status.py`. |
 
 ### UI contract: what the ARAX UI requires
 
@@ -51,14 +52,14 @@ under a single Shepherd ARAX base path.
 | UI need | UI call (rtx.js line) | Inventory item | Notes |
 |---|---|---|---|
 | Submit a query and follow its progress | `POST {query}` with `stream_progress: true` (609, 670) | API-01, API-02, EXP-32 | **Served**: ARAX's own stream (log entries, the kill token, `query_plan` updates, the final envelope), relayed from the worker (§2a). |
-| Query options set from the UI settings panel | `query_options.kp_timeout`, `prune_threshold`, `max_pathfinder_paths`, `max_path_length`, `bypass_cache` (610-634) | ORC-04, EXP-03/04/06, C-4 | **Served**. `bypass_cache` is ignored by the ARAs (DEC-3). `max_pathfinder_paths`/`max_path_length` are ignored (DEC-7). |
+| Query options set from the UI settings panel | `query_options.kp_timeout`, `prune_threshold`, `max_pathfinder_paths`, `max_path_length`, `bypass_cache` (610-634) | ORC-04, EXP-03/04/06, C-4 | **Served**. `bypass_cache` skips the KP cache, as in ARAX (DEC-18). `max_pathfinder_paths`/`max_path_length` are ignored (DEC-7). |
 | Cancel a running query | `GET /status?terminate_pid=&authorization=` (895) | OPS-02 | **Served:** ends the query's stream, as the UI sees ARAX's kill; the work still finishes in the worker (§2a). |
 | Load a response by id (numeric ids, and ARS PKs prefixed with `X`) | `GET /response/{id}` (130, 538, 1270, 1335, 1341, 6862) | API-07, OPS-06 | **Served**: ARAX's `get_response`, reading Shepherd's storage and its own ARS (DEC-3). `X` means ARS lookup plus attribute stripping, and the `stats` view uses `validation_result` and `provenance_summary`. |
 | Attribute detail for a stripped response | `GET /response/{detail_lookup}` (4773), `Z` prefix (7357) | API-07 | **Served** (the component cache is in Shepherd's data store). |
 | Recent queries list / active queries | `GET /status?last_n_hours=N`, `GET /status?mode=active` (7156) | OPS-03 | **Served**, from Shepherd's query table. |
 | Original input query of a past run | `GET /status?id=` (7309) | OPS-01 / `get_status(id_)` | **Served**: returns the stored input query. |
 | Recent ARS PKs | `GET /status?mode=recent_pks&last_n_hours=&authorization=<ars host>` (6978) | API-09 | **Served**, from Shepherd's own ARS. |
-| KP cache listing | `GET /status?mode=kp_cache` (8301) | API-09, EXP-31 | Served empty: there is no KP cache (DEC-3). |
+| KP cache listing | `GET /status?mode=kp_cache` (8301) | API-09, EXP-31 | **Served**: ARAX's listing of the KP cache in Shepherd's data store (DEC-18). |
 | SmartAPI listing | `GET /status?authorization=smartapi` (7793) | API-09, EXP-29 | **Served**: kept for the UI (DEC-4). |
 | Site configuration | `GET /status?mode=site_config` (9901) | API-09 | **Served**: versions and maturity. |
 | Meta-KG for the query builder | `GET /meta_knowledge_graph?format=simple` (6894) | AUX-01 | **Served**: built from Retriever's metadata (DEC-11). |
@@ -162,7 +163,7 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 | API-06 | `GET/POST /entity` | `NodeSynonymizer.get_normalizer_results`, which calls NodeNorm and Name Resolver. | **Ported** |
 | API-07 | `GET /response/{id}` | Loads a stored response (see OPS-05). It runs `reasoner-validator` and adds `validation_result` and `provenance_summary`. It can also fetch ARS PKs/UUIDs from the ARS prod, test, ci and dev instances. | **Ported** (DEC-3), parity-tested |
 | API-08 | `POST /response` | Callback sink. Writes `data/callbacks/NNNNN.json` (cap 5000) and returns `"received!"`. | **Ported**: kept in Shepherd's data store |
-| API-09 | `GET /status` | `mode` values: `kp_cache`, `recent_pks`, `site_config`, `system_load`, `active`; also `terminate_pid` + `authorization` and `authorization=smartapi`. Default is the recent-query list. | **Ported**, from Shepherd's query table. `kp_cache` is empty (DEC-3); `system_load` is `[]`. |
+| API-09 | `GET /status` | `mode` values: `kp_cache`, `recent_pks`, `site_config`, `system_load`, `active`; also `terminate_pid` + `authorization` and `authorization=smartapi`. Default is the recent-query list. | **Ported**, from Shepherd's query table. `kp_cache` lists the KP cache (DEC-18); `system_load` is `[]`. |
 | API-10 | `GET /status/logs` | Returns the whole server error log. | **Not ported** (open; not in the UI contract) |
 | API-11 | `POST /translate`, `GET /exampleQuestions` | Always 501. | **Removed** (DEC-5, E-7) |
 | API-12 | `GET /PubmedMeshNgd/{t1}/{t2}` | Legacy NGD through NCBI eUtils. | **Removed** (DEC-5, E-7) |
@@ -176,7 +177,7 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 | ORC-01 | Input examination | Sets `have_operations`, `have_workflow`, `have_message` and `have_query_graph`. Errors: `NoQueryMessageOrOperations`; `OperationsNotSupported` in KG2 mode (AQ:430). | **Ported** |
 | ORC-02 | QG validation | Allowed qnode keys: `ids, categories, is_set, set_interpretation, set_id, member_ids, option_group_id, name, constraints`. Allowed qedge keys: `predicates, subject, object, option_group_id, exclude, relation, attribute_constraints, qualifier_constraints, knowledge_type`. A singular `predicate` gets a TRAPI 1.4 migration error. The QG must have `edges` or `paths` (AQ:499). | **Ported** |
 | ORC-03 | Dispatch precedence | Precedence is: `workflow`, then (TRAPI workflow → ARAXi, appended to `operations.actions`), then `operations`, then the QG interpreter. If both a QG and operations are given, the interpreter is skipped (AQ:287-426). | **Ported**. Shepherd's server passes an ARAX query's workflow through unchecked, for ARAX to validate (DEC-17) |
-| ORC-04 | `query_options` honored | `kp_timeout`, `prune_threshold`, `return_minimal_metadata` (always overwrites the DSL value), `bypass_cache`, `max_path_length`, `max_pathfinder_paths`. A top-level `return_minimal_metadata` is copied into `query_options`. | **Ported**. `bypass_cache` is ignored (DEC-3); `max_path_length` / `max_pathfinder_paths` are validated but ignored (DEC-7). |
+| ORC-04 | `query_options` honored | `kp_timeout`, `prune_threshold`, `return_minimal_metadata` (always overwrites the DSL value), `bypass_cache`, `max_path_length`, `max_pathfinder_paths`. A top-level `return_minimal_metadata` is copied into `query_options`. | **Ported**. `bypass_cache` skips the KP cache (DEC-18); `max_path_length` / `max_pathfinder_paths` are validated but ignored (DEC-7). |
 | ORC-05 | Query fields **ignored** | Top-level `log_level`, `max_results`, `page_size`, `page_number`, `enforce_edge_directionality`, top-level `bypass_cache`, and `operations.options`. | **Ported** (still ignored) |
 | ORC-06 | Submitter derivation | Callback `http://localhost:8000/ars/…` gives `ARS`. Otherwise the `submitter` key is used if present (even null), otherwise the callback host, otherwise `?`. The host regex requires https. | **Ported**, except that a query with no `submitter` gets Shepherd's `infores:shepherd-arax:…` from the worker (as the old proxy did), so the callback-host fallback never applies |
 | ORC-07 | Input messages | `operations.message_uris`: ARAX response URLs load locally, others are fetched by HTTP GET, and the last one wins. `operations.messages`: more than one gives a warning and **only the first is used** (no merging). Pre-existing KG edges trigger `recompute_qg_keys`, which fails if there are no results. | **Ported**: Shepherd response URLs load from Shepherd's store (DEC-3); other URIs as upstream |
@@ -194,7 +195,7 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 **Ported (DEC-14):** `ARAX_query.py`, `ARAX_query_graph_interpreter.py` (with its templates), `operation_to_ARAXi.py`, `result_transformer.py`, `ARAX_infer.py` with `Infer/scripts/` (`infer_utilities`, `ExplianableDTD_db`, `build_mapping_db`), and `ARAX_connect.py`. Each header lists its changes. Shepherd stand-ins (same interface, not ports): `ARAX_query_tracker.py`, `ResponseCache/response_cache.py`, `Path_Finder/utility.py`, and more attributes on `RTXConfiguration.py`.
 
 **Changes from upstream** (all recorded decisions):
-- DEC-3: `ResponseCache.add_new_response` assigns the id the caller passes (`ARAXQuery(response_id=...)`, else a new UUID), sets `envelope.id` to `{settings.server_url}/arax/response/{id}` and writes nothing; the caller saves the envelope. `get_response` reads Shepherd's store. The same URL is used in the "stored with id" log line, the `response=false` return and the `message_uris` match for a local response. No KP cache in Connect.
+- DEC-3: `ResponseCache.add_new_response` assigns the id the caller passes (`ARAXQuery(response_id=...)`, else a new UUID), sets `envelope.id` to `{settings.server_url}/arax/response/{id}` and writes nothing; the caller saves the envelope. `get_response` reads Shepherd's store. The same URL is used in the "stored with id" log line, the `response=false` return and the `message_uris` match for a local response. Connect reads and stores through the KP cache as upstream (DEC-18).
 - The query tracker is a no-op: no MySQL tracking and no per-address limit (ORC-14 is infrastructure).
 - DEC-5: removed the RTXKG2 mode (E-5), the `filter` and `fetch_message` DSL commands and `ARAXFilter` (E-4, E-6; they now give `UnrecognizedCommand`), the seven dead templates (E-3), the `sort_results_edge/node_attribute` workflow ops and the `predict_drug_treats_disease` step (E-4), the legacy xCRG infer action and `genrete_regulate_subgraphs` (E-2), and the xDTD build modes (E-10).
 - DEC-7: `connect(action=connect_nodes)` keeps ARAX's validation and TRAPI conversion, but searches with Shepherd's pathfinder limits (4 hops, 500 paths, whatever `max_path_length`/`max_pathfinder_paths` say), Shepherd's pathfinder data files, `SYNC_KG_RETRIEVAL_URL` and `KG_REHYDRATE_URL`. TRAPI `paths` queries still go to the `arax.pathfinder` worker.
@@ -202,7 +203,7 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 - ARAX's class-name string checks (`"<class 'openapi_server.models.message.Message'>"`) follow the vendored models' package path.
 - `ARAXResponse.output` is not switched to STDERR at import.
 
-**Parity check:** `tests/unit/arax/test_query_parity.py` runs 37 queries end to end through `ARAXQuery.query()` against the Expand mock Retriever. The data files are small synthetic ones: tier0 overlay, curie_to_pmids, COHD, ExplainableDTD and FDA drugs. The goldens were recorded from upstream ARAX's own ARAXQuery (`query_parity/run_upstream.py`, with its tracker and response store stubbed and its KP cache always missing). The queries cover:
+**Parity check:** `tests/unit/arax/test_query_parity.py` runs 37 queries end to end through `ARAXQuery.query()` against the Expand mock Retriever. The data files are small synthetic ones: tier0 overlay, curie_to_pmids, COHD, ExplainableDTD and FDA drugs. The goldens were recorded from upstream ARAX's own ARAXQuery (`query_parity/run_upstream.py`, with its tracker and response store stubbed and its KP cache always missing; the port runs with `ARAX_KP_CACHE_ENABLED=false`, which does the same). The queries cover:
 - the QG templates;
 - ARAXi plans with every overlay except `add_node_pmids`, plus filter_kg, filter_results, scoreless resultify and `rank_results`;
 - the automatic ranker after `resultify`, and the ResultTransformer (aux graphs for virtual edges, option groups);
@@ -212,7 +213,6 @@ Biolink 4.2.5, `infores:arax`, `asyncquery: true`. There is no authentication.
 
 The port matches the status, error code, final envelope and INFO-and-above log, and every KP request. The intended differences:
 - single-node queries go to Retriever (DEC-4);
-- the xDTD "stored in the cache" log lines are gone (DEC-3);
 - `overlay_exposures_data` is no longer listed as allowable (E-8);
 - `filter(...)` is unrecognized (E-4).
 
@@ -240,7 +240,7 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
   - `mode=site_config` returns the same keys as ARAX's `get_config_settings`, with the data-file versions taken from Shepherd's filenames;
   - `mode=recent_pks` is ARAX's `RecentUUIDManager`, ported to read Shepherd's own ARS whichever host the UI names;
   - `authorization=smartapi` is ARAX's SmartAPI client;
-  - `mode=kp_cache` is ARAX's listing of an empty cache (DEC-3), and `mode=system_load` is `[]` (OPS-04 is infrastructure).
+  - `mode=kp_cache` is ARAX's listing of the KP cache in Shepherd's data store (DEC-18), and `mode=system_load` is `[]` (OPS-04 is infrastructure).
 - `terminate_pid` (OPS-02): Shepherd can't signal a worker's pool child in another container, and killing it would break the pool. So the server replaces ARAX's `{pid, authorization}` stream line with a deployment-unique token, and `terminate_pid` ends that query's stream, which is all an ARAX client sees when ARAX kills its child. The query itself still runs to completion in the worker.
 - The server image installs the `arax-api` extra: `reasoner-validator`, ARAX's `bmt` and `requests-cache` pins, `aiohttp`, `pandas` and `requests`.
 
@@ -249,7 +249,7 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
 - `GET /rtxcomplete/nodeslike` (AUX-02) is ARAX's `rtxcomplete.get_nodes_like` over `autocomplete_v1.0_<tier>.sqlite`, JSONP with upstream's callback sanitizing and `"error"` on failure. The server fetches the database at startup (DEC-6), so its compose service now mounts `./arax_dbs`. The UI calls this path relative to *its own* host, so a deployment of the UI must route `/rtxcomplete/` to `/arax/rtxcomplete/`.
 - Parity: `tests/unit/arax/test_aux_parity.py` compares the full and simple meta-KG (backup fallback, no backup, and the refresh function) and a 15-lookup autocomplete sequence (the fragment cache carries over between lookups) with upstream's own modules. All of them are identical.
 
-Every row of the UI contract is now served under `/arax`. The two exceptions are recorded decisions: the KP-cache view is empty (DEC-3), and `terminate_pid` ends the stream rather than the work (see `/status` above).
+Every row of the UI contract is now served under `/arax`. The one exception is a recorded decision: `terminate_pid` ends the stream rather than the work (see `/status` above).
 
 ### 3. ARAXi DSL (`AQ/actions_parser.py`, `AQ/ARAX_messenger.py`)
 
@@ -394,7 +394,7 @@ the template choice, not just the operations.
 
 **Changes from upstream:** each file's header lists them. They are the recorded decisions:
 - DEC-4: queries go only to Retriever, at `SYNC_KG_RETRIEVAL_URL`, including single-node queries.
-- DEC-3: no KP cache.
+- DEC-18: the KP cache is kept in Shepherd's data store.
 - DEC-9: no curie-prefix conversion.
 - DEC-10: the `kp` list is forwarded as `parameters.kp`.
 - DEC-12: every other SmartAPI KP is marked Skipped.
@@ -578,7 +578,7 @@ qedge, with creative-treats widening.
 | CON-02 | Inputs to Pathfinder | Curies normalized through NodeNorm `preferred_curie`. Block list from the **repo's** `general_concepts.json`. `category_constraints` = descendants of the constraint, **or empty**. `prune_top_k=75`, `degree_threshold=10000`, `hops_numbers = max_hops_to_explore = max_path_length`. | **Ported**, except the fixed limits (DEC-7). The block list is the vendored copy at the pinned commit. |
 | CON-03 | Data | `curie_ngd_v1.0_<tier>.sqlite`, `tier0-info-for-overlay_v1.0_<tier>.sqlite`. Retriever by maturity (`retriever[.ci\|.test].transltr.io/query`), with env override `ARAX_XCRG_RETRIEVER_URL`. | **Shepherd's**: the pathfinder data files, `SYNC_KG_RETRIEVAL_URL` (DEC-4, DEC-7) |
 | CON-04 | Output | Rehydrate (`/rehydrate`, tier 0, 30 s). One result `id="result"`, `essence="result"`, `PathfinderAnalysis` with `path_bindings {"p0": …}` (p0 hard-coded). The KG is **merged** into the existing KG. No ranker and no transform. **Zero paths give a warning and no results.** | **Ported**, rehydrating at `KG_REHYDRATE_URL` |
-| CON-05 | Cache | Written to the KP cache, but the read is effectively never used. | **Not ported** (DEC-3) |
+| CON-05 | Cache | Written to the KP cache, but the read is effectively never used. | **Ported** (DEC-18): xCRG results are read back; a PathFinder result only when the incoming message already has results, as upstream |
 
 ### 17. Connect: xCRG (`catrax-xcrg` @ `c97da53`)
 
@@ -599,7 +599,7 @@ qedge, with creative-treats widening.
 | OPS-04 | Load log | psutil samples written each minute to `ARAX_background_tasker_loadlog.txt`. | **Not ported** (Infra; `system_load` is `[]`) |
 | OPS-05 | Response store | Row in `TRAPI_1_0_0_response` (MySQL in prod, SQLite otherwise) plus S3 `arax-response-storage[-2]` (bucket chosen by a config datetime). `envelope.id = https://arax.ncats.io/api/arax/v1.4/response/{id}`. Falls back to a local file. | **Shepherd's own** (DEC-3) |
 | OPS-06 | Response retrieval and validation | See API-07: `reasoner-validator` 6.0.2 (the Biolink version is hard-coded to **4.4.2** here), provenance summary, ARS proxying, attribute stripping (`X`/`Z` prefixes). | **Ported** (DEC-3), parity-tested |
-| OPS-07 | Background tasker (every 60 s) | Hourly KP-info refresh (EXP-29), hourly meta-KG refresh (AUX-01), ongoing-query check, KP-cache refresh (EXP-31), load log. | **Partial**: the hourly meta-KG refresh runs in the server; the SmartAPI list (query plan only) is cached for an hour in-process; the KP-cache refresh, ongoing-query check and load log don't apply |
+| OPS-07 | Background tasker (every 60 s) | Hourly KP-info refresh (EXP-29), hourly meta-KG refresh (AUX-01), ongoing-query check, KP-cache refresh (EXP-31), load log. | **Partial**: the hourly meta-KG refresh runs in the server; the SmartAPI list (query plan only) is cached for an hour in-process; the KP-cache refresh runs every minute in the arax worker (DEC-18); the ongoing-query check and load log don't apply |
 | OPS-08 | Database manager | Downloads or symlinks the managed DBs (Part B §20) by rsync from `arax-databases.rtx.ai` or SFTP (ITRB). Tracks versions in `db_versions.json`. | **Shepherd's own** (`shepherd_utils/data_download.py`, DEC-6); the URLs are placeholders |
 
 ### 19. Auxiliary services
@@ -683,8 +683,9 @@ queries no longer use (ARAX runs its own actions in-process). C-12 still applies
 
 **Decided (DEC-1): every defect below is reproduced in the port.** Fixes wait
 for a separate pass after the port has been validated, and each one is then
-recorded as a numbered deviation. D-3, D-4 and D-5 do not apply, because the
-code they live in is not ported (DEC-3, DEC-4).
+recorded as a numbered deviation. D-3 and D-4 do not apply, because the
+code they live in is not ported (DEC-4). D-5 applies in part (DEC-18): timeouts
+are cached and aiohttp HTTP errors propagate, as upstream, but TLS is verified.
 
 | ID | Defect | Where |
 |---|---|---|
@@ -749,7 +750,7 @@ code they live in is not ported (DEC-3, DEC-4).
 
 1. **Scope of "faithful"** (decided: DEC-1 parity; DEC-2 Shepherd serves
    everything in the [UI contract](#ui-contract-what-the-arax-ui-requires);
-   DEC-3 `bypass_cache` is ignored by the ARAs and the KP-cache view breaks;
+   DEC-18 the KP cache is kept, in Shepherd's data store;
    DEC-7 the pathfinder options are ignored). Nothing left open.
 2. **KP roster** (decided: DEC-4, queries use Retriever only, which covers
    Gandalf; SmartAPI kept for the UI and for the query-plan provider list only;
@@ -762,7 +763,8 @@ code they live in is not ported (DEC-3, DEC-4).
 4. **Part E** (decided: DEC-5, all removed).
 5. **Data delivery** (decided: DEC-6, same mechanism as the pathfinder DBs,
    with placeholder URLs to adjust later; COHD stays on KG2.8.0).
-6. **KP response cache** (decided: DEC-3, not ported).
+6. **KP response cache** (decided: DEC-18, ported, in Shepherd's data store;
+   first left out by DEC-3).
 7. **Result storage** (decided: DEC-3, `/response/{id}` does everything it
    does in ARAX, reading from Postgres. ARS PK/UUID paths read from Shepherd's
    hosted ARS in Postgres. `envelope.id` is

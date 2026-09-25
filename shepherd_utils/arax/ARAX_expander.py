@@ -4,7 +4,6 @@
 #   - every KP query goes to infores:retriever (DEC-4); with a user-specified kp list, Retriever is queried with that list forwarded as parameters.kp (DEC-10), and every other valid KP is marked Skipped in the query plan (DEC-12)
 #   - the kp parameter is no longer validated against valid_kps (InvalidKP); it is kept exactly as given, since Retriever decides what is valid (DEC-10)
 #   - single-node queries go to infores:retriever instead of infores:rtx-kg2 (DEC-4), with the kp list forwarded
-#   - no KP/xDTD response cache (DEC-3): KPQueryCacher is not created and the xDTD result is not stored
 #   - the FDA-approved-drugs pickle path comes from RTXConfiguration.fda_approved_drugs_path (DEC-6)
 #   - the unused plover_url attribute is dropped (dead code, DEC-5)
 #   - inferred 'affects' qedges (the legacy xCRG route, not MVP2) still call ARAXInfer's
@@ -38,6 +37,7 @@ from shepherd_utils.arax.openapi_server.models.attribute import Attribute
 from shepherd_utils.arax.openapi_server.models.retrieval_source import RetrievalSource
 from shepherd_utils.arax.openapi_server.models.auxiliary_graph import AuxiliaryGraph
 from shepherd_utils.arax.Expand.trapi_querier import TRAPIQuerier
+from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax.Expand.kp_selector import RETRIEVER_INFORES, SKIPPED_NOT_RETRIEVER_MESSAGE
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 
@@ -937,6 +937,7 @@ class ARAXExpander:
                                               'drug_curie': subject_curie}
 
                     #### Check the cache to see if we have this query cached already
+                    cacher = KPQueryCacher()
                     enable_caching = False
                     kp_curie = "xDTD"
                     kp_url = "xDTD"
@@ -972,6 +973,17 @@ class ARAXExpander:
                             response_object['message']['knowledge_graph']['nodes'][node_key]['qnode_keys'] = node.qnode_keys
                         for edge_key, edge in response.envelope.message.knowledge_graph.edges.items():
                             response_object['message']['knowledge_graph']['edges'][edge_key]['qedge_keys'] = edge.qedge_keys
+                        response.info("Storing result in the cache")
+                        cacher.store_response(
+                            kp_curie=kp_curie,
+                            query_url=kp_url,
+                            query_object=infer_input_parameters,
+                            response_object=response_object,
+                            http_code=200,
+                            elapsed_time=elapsed_time,
+                            status="OK"
+                        )
+                        response.info("Stored result in the cache.")
 
                     # return infer_response
                     response = infer_response  # these are already always the same object?

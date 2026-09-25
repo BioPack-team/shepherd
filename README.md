@@ -80,6 +80,26 @@ Downloads are bounded by `DATASET_DOWNLOAD_TIMEOUT_SEC` (default 60), which appl
 operation rather than to the whole transfer — a large file downloads for as long as it needs, but a
 connection that opens and then stalls fails loudly instead of hanging worker startup.
 
+#### ARAX's KP response cache
+
+The arax worker caches every Retriever (KP) response ARAX's Expand gets, and Connect's PathFinder
+and xCRG results, as ARAX does (DEC-18 in `docs/ARAX_PORT_BASELINE.md`). The cache lives in
+Shepherd's Redis data store, so it is shared by every arax worker replica and survives restarts; the
+server lists it at `/arax/status?mode=kp_cache` (the UI's KP-cache view). A query with
+`"query_options": {"bypass_cache": true}` skips it. Each worker re-queries entries older than 6 h in
+the background, one replica at a time, and an entry is dropped 3 days after it was last requested.
+
+```dotenv
+ARAX_KP_CACHE_ENABLED=true               # false: never read or write the cache
+ARAX_KP_CACHE_TTL_SEC=259200             # an entry's lifetime after its last request
+ARAX_KP_CACHE_REFRESH_INTERVAL_SEC=60    # seconds between refresh passes; 0 turns the refresh off
+```
+
+To inspect or clear it, run ARAX's cacher CLI in the arax container, e.g.
+`python -m shepherd_utils.arax.Expand.trapi_query_cacher --summarize` (also `--list`,
+`--dump_response ID`, `--delete_query ID`, `--delete_query_url_match URL`, `--refresh`,
+`--initialize_cache`).
+
 #### Mock ARAX data for local testing
 
 Until the real files are published, `shepherd_utils/arax_mock_data.py` writes small mock versions in

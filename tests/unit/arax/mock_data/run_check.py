@@ -22,6 +22,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "..", "..")))
 
 DATA = tempfile.mkdtemp(prefix="arax_mock_data_")
 os.environ["ARAX_DBS_DIR"] = os.path.join(DATA, "arax")
+# as upstream's goldens were recorded: the KP cache always misses, stores nothing
+os.environ["ARAX_KP_CACHE_ENABLED"] = "false"
 os.environ["ARAX_PATHFINDER_DBS_DIR"] = os.path.join(DATA, "pathfinder")
 os.environ["ARAX_BIOLINK_CACHE_DIR"] = os.path.join(DATA, "biolink")
 os.environ["SERVER_URL"] = "http://shepherd.test"

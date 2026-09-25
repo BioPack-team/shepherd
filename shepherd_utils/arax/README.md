@@ -14,7 +14,8 @@ Rules for this directory:
   identical.
 - **Parity first (DEC-1).** Upstream bugs and quirks are kept. Changes are only
   the ones a recorded decision requires (for example, DEC-4 Retriever-only,
-  DEC-3 no KP cache), and each is listed in the file header.
+  DEC-18 the KP cache in Shepherd's data store), and each is listed in the file
+  header.
 - **Not reformatted.** The directory is excluded from Black (`pyproject.toml`)
   to keep the upstream diff small. Shepherd-specific glue lives in
   `workers/arax/`, which is formatted as usual.

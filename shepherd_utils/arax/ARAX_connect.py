@@ -1,8 +1,6 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_connect.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
-#   - no KP cache (DEC-3): KPQueryCacher is not imported, and apply() always runs the
-#     action; the cache lookup/store, bypass_cache handling and their log lines are removed
 #   - Retriever (connect_nodes and xcrg) is settings.sync_kg_retrieval_url, the Retriever
 #     every Shepherd query uses (DEC-4), instead of a per-maturity URL table. The
 #     ARAX_XCRG_RETRIEVER_URL override is kept. Rehydration posts to
@@ -34,6 +32,7 @@ import copy
 import time
 
 from shepherd_utils.arax.Path_Finder.utility import get_curie_ngd_path, get_curie_to_pmids_path, get_kg2c_db_path
+from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 
 from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
@@ -274,15 +273,97 @@ class ARAXConnect:
         self.response.data['parameters'] = parameters
         self.parameters = parameters
 
-        self.response.debug(f"Applying Connect to Message with parameters {parameters}")
+        #### Check the cache to see if we have this query cached already
+        start = time.time()
+        cacher = KPQueryCacher()
+        is_xcrg_action = parameters.get('action') == 'xcrg'
+        kp_curie = "xCRG" if is_xcrg_action else "PathFinder"
+        kp_url = "xCRG" if is_xcrg_action else "PathFinder"
+        response_envelope_as_dict = self.response.envelope.to_dict()
+        cleaned_parameters = self._clean_parameters(parameters)
+        pathfinder_input_data = {'query_graph': response_envelope_as_dict['message']['query_graph'],
+                                 'parameters': cleaned_parameters}
 
-        #### This will effectively call __connect_nodes() unless the user injects something else
-        getattr(self, '_' + self.__class__.__name__ + '__' + parameters[
-            'action'])()  # thank you https://stackoverflow.com/questions/11649848/call-methods-by-string
+        query_options = self.response.envelope.query_options
+        if query_options is not None and "bypass_cache" in query_options:
+            bypass_cache = query_options["bypass_cache"] is not None and str(query_options["bypass_cache"]).lower() != 'false'
+        else:
+            bypass_cache = False
+        if bypass_cache:
+            self.response.debug(f"bypass_cache is set; skipping cache lookup for {kp_curie}")
+            response_code = -2
+        else:
+            self.response.info(f"Looking for a previously cached result from {kp_curie}")
+            response_data, response_code, elapsed_time, error = cacher.get_cached_result(kp_curie, pathfinder_input_data)
+        if (
+                response_code != -2
+                and response_code == 200
+                and (is_xcrg_action or self.response.envelope.message.results)
+        ):
+            n_results = cacher._get_n_results(response_data)
+            # Note: This logging message is keyed off to provide progress updates to the RTX front-end.
+            self.response.info(
+                f"Found a cached result with response_code={response_code}, n_results={n_results} from the cache in {elapsed_time:.3f} seconds")
+            self.response.envelope.message = ARAXMessenger().from_dict(response_data['message'])
+
+            if is_xcrg_action:
+                self.response.envelope.schema_version = (
+                    response_data.get("schema_version") or self.response.envelope.schema_version
+                )
+                self.response.envelope.biolink_version = (
+                    response_data.get("biolink_version") or self.response.envelope.biolink_version
+                )
+                self.response.data["xcrg_connect"] = True
+                self.response.total_results_count = len(response_data['message'].get("results") or [])
+            else:
+                # Hack to explicitly convert the analyses to PathfinderAnalysis objects because this doesn't work automatically. It should. Maybe move this into Messenger? FIXME
+                i_analysis = 0
+                for analysis_dict in response_data['message']['results'][0]['analyses']:
+                    analysis_obj = PathfinderAnalysis.from_dict(analysis_dict)
+                    self.response.envelope.message.results[0].analyses[i_analysis] = analysis_obj
+                    i_analysis += 1
+
+        else:
+            self.response.debug(f"Applying Connect to Message with parameters {parameters}")
+
+            #### This will effectively call __connect_nodes() unless the user injects something else
+            result = getattr(self, '_' + self.__class__.__name__ + '__' + parameters[
+                'action'])()  # thank you https://stackoverflow.com/questions/11649848/call-methods-by-string
+
+            status = 'OK'
+            http_status = 200
+            if result is not None and getattr(result, 'http_status', None) is not None:
+                http_status = result.http_status
+                status = result.status
+
+            #### Store the result into the cache for next time
+            elapsed_time = time.time() - start
+            self.response.info(f"Got result from ARAX {kp_curie} Connect after {elapsed_time}. Converting to_dict()")
+            response_object = self.response.envelope.to_dict()
+            self.response.info(f"Storing resulting dict in the cache")
+            cacher.store_response(
+                kp_curie=kp_curie,
+                query_url=kp_url,
+                query_object=pathfinder_input_data,
+                response_object=response_object,
+                http_code=http_status,
+                elapsed_time=elapsed_time,
+                status=status
+            )
+            self.response.info(f"Stored result in the cache.")
 
         if self.report_stats:  # helper to report information in debug if class self.report_stats = True
             self.response = self.report_response_stats(self.response)
         return self.response
+
+    #### During processing, sometimes these parameters change from a string (of an integer) to an integer, so just force them all to strings for the purpose of cache comparison
+    def _clean_parameters(self, parameters):
+        cleaned_parameters = parameters.copy()
+        if 'max_path_length' in cleaned_parameters:
+            cleaned_parameters['max_path_length'] = str(cleaned_parameters['max_path_length'])
+        if 'max_pathfinder_paths' in cleaned_parameters:
+            cleaned_parameters['max_pathfinder_paths'] = str(cleaned_parameters['max_pathfinder_paths'])
+        return cleaned_parameters
 
     def get_pinned_nodes(self):
         pinned_nodes = []

@@ -37,9 +37,6 @@ FIELDS = [
     "logs",
     "requests",
 ]
-# Log lines upstream writes and the port does not, because the port has no KP
-# cache (DEC-3): Expand stores the xDTD result in the cache after inferring.
-NO_CACHE_LOGS = {"Storing result in the cache", "Stored result in the cache."}
 # overlay_exposures_data is removed (E-8), so it is not listed as allowable
 REMOVED_OVERLAY = "'overlay_exposures_data', "
 # Fields exempt from comparison, by case
@@ -55,8 +52,6 @@ EXPECTED_DIFFERENCES = {
 
 def _upstream_view(field, value):
     """Upstream's value with the intended, line-level differences applied."""
-    if field == "logs":
-        value = [x for x in value if x[2] not in NO_CACHE_LOGS]
     return json.loads(json.dumps(value).replace(REMOVED_OVERLAY, ""))
 
 

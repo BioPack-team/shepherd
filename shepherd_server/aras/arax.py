@@ -357,7 +357,7 @@ async def get_status(
     """ARAX's status_controller.get_status, backed by Shepherd (API-09)."""
     if mode is not None:
         if mode == "kp_cache":
-            return _arax_json(arax_status.kp_cache_listing())
+            return _arax_json(await asyncio.to_thread(arax_status.kp_cache_listing))
 
         if mode == "recent_pks":
             from shepherd_utils.arax.ResponseCache.recent_uuid_manager import (

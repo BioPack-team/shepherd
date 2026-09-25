@@ -118,6 +118,15 @@ class Settings(BaseSettings):
     # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so
     # the cache survives restarts; see arax_biolink_cache_path().
     arax_biolink_cache_dir: str = ""
+    # ARAX's KP response cache (DEC-18): Expand's KP queries and Connect's results,
+    # kept in the data store and shared by every arax worker and the server. An
+    # entry lives this long after its last request; the arax worker re-queries
+    # entries older than 6 h in the background, as ARAX does.
+    arax_kp_cache_enabled: bool = True
+    arax_kp_cache_ttl_sec: int = 259200  # 3 days
+    # Seconds between KP-cache refresh passes (ARAX's background tasker runs one a
+    # minute, each capped at 60 s); 0 turns the refresh off
+    arax_kp_cache_refresh_interval_sec: int = 60
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
         "code/ARAX/KnowledgeSources/general_concepts.json"

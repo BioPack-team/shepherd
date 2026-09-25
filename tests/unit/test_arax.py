@@ -301,3 +301,44 @@ def test_biolink_cache_defaults_to_the_arax_data_volume(mocker):
     assert arax_biolink_cache_path() == "/data/arax_dbs/biolink"
     mocker.patch.object(worker.settings, "arax_biolink_cache_dir", "/cache")
     assert arax_biolink_cache_path() == "/cache"
+
+
+def test_kp_cache_refresh_runs_one_pass_at_a_time(mocker, arax_kp_cache_store):
+    mocker.patch.object(worker, "_get_sync_data_db", return_value=arax_kp_cache_store)
+    refresh = mocker.patch(
+        "shepherd_utils.arax.Expand.trapi_query_cacher.KPQueryCacher.refresh_cache"
+    )
+
+    assert worker.refresh_kp_cache_once(logger) is True
+    refresh.assert_called_once()
+    assert arax_kp_cache_store.get(worker.KP_CACHE_REFRESH_LOCK_KEY) is None
+
+    # another replica holds the lock
+    arax_kp_cache_store.set(worker.KP_CACHE_REFRESH_LOCK_KEY, "other", ex=100)
+    assert worker.refresh_kp_cache_once(logger) is False
+    refresh.assert_called_once()
+    assert arax_kp_cache_store.get(worker.KP_CACHE_REFRESH_LOCK_KEY) == b"other"
+
+
+def test_kp_cache_refresh_failure_releases_the_lock(
+    mocker, arax_kp_cache_store, caplog
+):
+    mocker.patch.object(worker, "_get_sync_data_db", return_value=arax_kp_cache_store)
+    mocker.patch(
+        "shepherd_utils.arax.Expand.trapi_query_cacher.KPQueryCacher.refresh_cache",
+        side_effect=RuntimeError("kp down"),
+    )
+    assert worker.refresh_kp_cache_once(logger) is True
+    assert "KP cache refresh failed: RuntimeError: kp down" in caplog.text
+    assert arax_kp_cache_store.get(worker.KP_CACHE_REFRESH_LOCK_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_kp_cache_refresh_loop_is_off_when_disabled(mocker):
+    once = mocker.patch.object(worker, "refresh_kp_cache_once")
+    mocker.patch.object(worker.settings, "arax_kp_cache_refresh_interval_sec", 0)
+    await worker.kp_cache_refresh_loop(None, logger)
+    mocker.patch.object(worker.settings, "arax_kp_cache_refresh_interval_sec", 60)
+    mocker.patch.object(worker.settings, "arax_kp_cache_enabled", False)
+    await worker.kp_cache_refresh_loop(None, logger)
+    once.assert_not_called()

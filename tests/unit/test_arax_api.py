@@ -508,6 +508,30 @@ async def test_status_site_config_kp_cache_and_system_load(status_client):
 
 
 @pytest.mark.asyncio
+async def test_status_kp_cache_lists_the_cached_kp_queries(status_client):
+    """The KP cache the arax workers fill (DEC-18), as ARAX lists it."""
+    from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
+
+    KPQueryCacher().store_response(
+        kp_curie="infores:retriever",
+        query_url="http://retriever.test/query",
+        query_object={"message": {}},
+        response_object={"message": {"results": [{}, {}]}},
+        http_code=200,
+        elapsed_time=1.234,
+    )
+    async with status_client as client:
+        kp_cache = (await client.get("/status", params={"mode": "kp_cache"})).json()
+    assert kp_cache["cache_stats"]["n_cached_queries"] == 1
+    # JSON object keys: the status code is a string here, as from ARAX
+    assert kp_cache["cache_stats"]["http_status_codes"] == {"200": 1}
+    (entry,) = kp_cache["cache_data"]
+    assert entry["kp_curie"] == "infores:retriever"
+    assert entry["first_query_n_results"] == 2
+    assert entry["first_query_elapsed"] == 1.23
+
+
+@pytest.mark.asyncio
 async def test_status_recent_pks_reads_shepherds_ars(status_client, mocker):
     import shepherd_utils.arax.NodeSynonymizer.node_synonymizer as ns
 
