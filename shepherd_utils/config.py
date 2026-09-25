@@ -113,9 +113,11 @@ class Settings(BaseSettings):
     # existing .env that still sets ARAX_URL keeps validating.
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
     arax_biolink_version: str = "v4.2.5"
-    # Where the ARAX port's BiolinkHelper caches its lookup-map pickle (must be
-    # writable; upstream writes next to its own source file).
-    arax_biolink_cache_dir: str = "/tmp/arax_biolink"
+    # Where the ARAX port's BiolinkHelper caches the Biolink model and its
+    # lookup map (must be writable; upstream writes next to its own source
+    # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so
+    # the cache survives restarts; see arax_biolink_cache_path().
+    arax_biolink_cache_dir: str = ""
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
         "code/ARAX/KnowledgeSources/general_concepts.json"

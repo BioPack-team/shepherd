@@ -474,6 +474,14 @@ def arax_db_path(name: str) -> str:
     return os.path.join(settings.arax_dbs_dir, arax_db_filename(name))
 
 
+def arax_biolink_cache_path() -> str:
+    """Where ARAX's BiolinkHelper caches the Biolink model and lookup map:
+    ``arax_biolink_cache_dir`` when set, else ``{arax_dbs_dir}/biolink``."""
+    return settings.arax_biolink_cache_dir or os.path.join(
+        settings.arax_dbs_dir, "biolink"
+    )
+
+
 def arax_db_url(name: str) -> str:
     """Where ARAX data file ``name`` is downloaded from: its ``*_url`` setting
     when set, otherwise ``{arax_dbs_base_url}/{filename}``."""

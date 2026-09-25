@@ -291,3 +291,13 @@ def test_warm_biolink_cache_failure_only_warns(mocker, caplog):
     worker.warm_biolink_cache(logger)  # does not raise
 
     assert "Could not warm the Biolink cache (OSError: no network)" in caplog.text
+
+
+def test_biolink_cache_defaults_to_the_arax_data_volume(mocker):
+    from shepherd_utils.data_download import arax_biolink_cache_path
+
+    mocker.patch.object(worker.settings, "arax_dbs_dir", "/data/arax_dbs")
+    mocker.patch.object(worker.settings, "arax_biolink_cache_dir", "")
+    assert arax_biolink_cache_path() == "/data/arax_dbs/biolink"
+    mocker.patch.object(worker.settings, "arax_biolink_cache_dir", "/cache")
+    assert arax_biolink_cache_path() == "/cache"

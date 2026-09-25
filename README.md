@@ -22,7 +22,7 @@ commit to git (they're gitignored and volume-mounted from the host):
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
 - **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`, `general_concepts.json`)
-- **arax** (the in-process ARAX port) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0_<tier-version>-all_with_paths.db`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`), plus the arax_pathfinder sqlite dbs in `./arax_pathfinder_dbs/`. The server's ARAX API fetches `autocomplete_v1.0_<tier-version>.sqlite` into the same `./arax_dbs/` (and keeps its meta-KG backups there).
+- **arax** (the in-process ARAX port) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0_<tier-version>-all_with_paths.db`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`), plus the arax_pathfinder sqlite dbs in `./arax_pathfinder_dbs/`. The server's ARAX API fetches `autocomplete_v1.0_<tier-version>.sqlite` into the same `./arax_dbs/` (and keeps its meta-KG backups there). The arax worker also caches the Biolink model and ARAX's Biolink lookup map in `./arax_dbs/biolink/`, built at startup so it survives restarts (`ARAX_BIOLINK_CACHE_DIR` moves it).
 
 So a new developer doesn't have to source these by hand, each worker can fetch its dataset on first
 startup. Two download mechanisms are supported, depending on where the dataset lives:

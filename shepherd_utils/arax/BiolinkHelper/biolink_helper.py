@@ -2,7 +2,7 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - the Biolink version is ARAX's pinned 4.2.5 (RTXConfiguration.BIOLINK_VERSION) instead of being read from ARAX's OpenAPI YAML/JSON
-#   - the lookup-map cache lives in settings.arax_biolink_cache_dir (writable) instead of beside this file
+#   - the lookup-map cache lives in arax_biolink_cache_path() (writable; on the ARAX data volume by default) instead of beside this file
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """
 Usage:  python biolink_helper.py [biolink version number, e.g. 3.0.3]
@@ -19,7 +19,7 @@ import yaml
 from biolink_helper_pkg import BiolinkHelper
 
 from shepherd_utils.arax.RTXConfiguration import BIOLINK_VERSION
-from shepherd_utils.config import settings
+from shepherd_utils.data_download import arax_biolink_cache_path
 
 
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -35,7 +35,7 @@ def get_biolink_helper(biolink_version: Optional[str] = None):
                f"treats predicates in 4.2.0")
         biolink_version = "4.2.1"
 
-    biolink_helper_dir = settings.arax_biolink_cache_dir
+    biolink_helper_dir = arax_biolink_cache_path()
     os.makedirs(biolink_helper_dir, exist_ok=True)
 
     return BiolinkHelper(biolink_version, biolink_helper_dir)

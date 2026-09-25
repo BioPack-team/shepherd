@@ -27,6 +27,7 @@ from shepherd_utils.data_download import (
     ARAX_CURIE_TO_PMIDS,
     ARAX_EXPLAINABLE_DTD,
     ARAX_FDA_APPROVED_DRUGS,
+    arax_biolink_cache_path,
     ensure_arax_dbs,
     ensure_arax_pathfinder_dbs,
 )
@@ -280,7 +281,8 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter, loop, 
 def warm_biolink_cache(logger: logging.Logger) -> None:
     """Build ARAX's Biolink lookup map before the first query does.
 
-    BiolinkHelper caches the map in ``settings.arax_biolink_cache_dir``
+    BiolinkHelper caches the map in ``arax_biolink_cache_path()`` (on the
+    mounted ``arax_dbs`` volume by default, so it survives restarts)
     (downloading the Biolink model YAML on a cold cache) and builds it on first
     use, which otherwise lands on the first query after each container start.
     The pool children read the same cached files. A failure only logs: the
@@ -300,7 +302,7 @@ def warm_biolink_cache(logger: logging.Logger) -> None:
         )
         return
     logger.info(
-        f"Biolink lookup map ready in {settings.arax_biolink_cache_dir} "
+        f"Biolink lookup map ready in {arax_biolink_cache_path()} "
         f"({time.monotonic() - started:.1f}s)"
     )
 
