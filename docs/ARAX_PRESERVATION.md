@@ -150,8 +150,9 @@ cover more with `--arax-live`.
 
 **Found:** upstream defects that CQS-style workflows hit. The port reproduces
 them (DEC-1):
-- **D-23:** the `filter_kgraph_*` operations crash after `lookup` or an
-  overlay, because those edges lack `qedge_keys`.
+- **D-23:** the `filter_kgraph_*` operations crash whenever the KP's answer
+  includes support-graph edges, because those edges are kept without
+  `qedge_keys`.
 - **D-24:** `filter_results_top_n` with a string `max_results` fails an
   assertion.
 - **D-26:** `overlay_connect_knodes` fails in Jaccard. The port's E-4 change
