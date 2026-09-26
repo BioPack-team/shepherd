@@ -469,3 +469,9 @@ CASES = [
         ),
     ),
 ]
+
+# The cases for what the ARAX team asked to be preserved (ARAXi, workflows,
+# not/any/all/names, xDTD, xCRG): see preservation_cases.py
+from preservation_cases import CASES as _PRESERVATION_CASES  # noqa: E402
+
+CASES += _PRESERVATION_CASES

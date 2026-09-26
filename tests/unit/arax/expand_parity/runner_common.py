@@ -14,7 +14,7 @@ def fetch_requests():
 
 def norm_text(s):
     s = re.sub(r"127\.0\.0\.1:\d+", "127.0.0.1:PORT", s)
-    s = re.sub(r'File "[^"]*/(ARAX_[a-z_]+\.py|[a-z_]+\.py)"', r'File "\1"', s)
+    s = re.sub(r'File "[^"]*/([A-Za-z0-9_]+\.py)"', r'File "\1"', s)
     s = re.sub(r", line \d+,", ", line N,", s)
     s = re.sub(r"\d+\.\d+ seconds", "N seconds", s)
     s = re.sub(r"after \d+(\.\d+)? seconds", "after N seconds", s)

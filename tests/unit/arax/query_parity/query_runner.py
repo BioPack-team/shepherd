@@ -35,7 +35,7 @@ def record(response, exc):
     # attribute values stamped with the current time (e.g. FET's)
     env = json.loads(
         re.sub(
-            r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(\.\d+)?",
+            r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(\.\d+)?(\+00:00|Z)?",
             "DATETIME",
             json.dumps(env, sort_keys=True),
         )

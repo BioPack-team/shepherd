@@ -37,6 +37,46 @@ def write_curie_to_pmids(path, seed=11):
     con.executemany("INSERT INTO curie_to_pmids VALUES (?,?)", rows)
     con.commit()
     con.close()
+    return {curie: set(json.loads(pmids)) for curie, pmids in rows}
+
+
+def _ngd(a, b, n=3.5e7 * 20):
+    """ARAX's normalized Google distance formula (compute_ngd.py)."""
+    import math
+
+    both = len(a & b)
+    if not a or not b or both == 0:
+        return float("inf")
+    fa, fb = math.log(len(a)), math.log(len(b))
+    return (max(fa, fb) - math.log(both)) / (math.log(n) - min(fa, fb))
+
+
+def write_curie_ngd(path, pmids):
+    """xCRG's (and the pathfinder's) curie_ngd(curie, ngd, pmid_length), from the
+    same PMID sets as curie_to_pmids: ngd lists [neighbor, ngd] for each
+    universe neighbor with a finite NGD."""
+    import math
+
+    neighbors = {}
+    for e in EDGES.values():
+        neighbors.setdefault(e["subject"], set()).add(e["object"])
+        neighbors.setdefault(e["object"], set()).add(e["subject"])
+    con = _fresh(path)
+    con.execute(
+        "CREATE TABLE curie_ngd (curie TEXT PRIMARY KEY, ngd TEXT, pmid_length INTEGER)"
+    )
+    rows = []
+    for curie in sorted(pmids):
+        pairs = []
+        for neighbor in sorted(neighbors.get(curie, ())):
+            if neighbor in pmids:
+                value = _ngd(pmids[curie], pmids[neighbor])
+                if math.isfinite(value):
+                    pairs.append([neighbor, round(value, 6)])
+        rows.append((curie, json.dumps(pairs), len(pmids[curie])))
+    con.executemany("INSERT INTO curie_ngd VALUES (?,?,?)", rows)
+    con.commit()
+    con.close()
 
 
 # COHD: curie -> OMOP concept id, answered by a stub of COHD's biolink_to_omop API
@@ -257,7 +297,9 @@ def write_xdtd(path, seed=17):
     con.close()
 
 
-def write_all(curie_to_pmids, cohd, xdtd):
-    write_curie_to_pmids(curie_to_pmids)
+def write_all(curie_to_pmids, cohd, xdtd, curie_ngd=None):
+    pmids = write_curie_to_pmids(curie_to_pmids)
+    if curie_ngd:
+        write_curie_ngd(curie_ngd, pmids)
     write_cohd(cohd)
     write_xdtd(xdtd)

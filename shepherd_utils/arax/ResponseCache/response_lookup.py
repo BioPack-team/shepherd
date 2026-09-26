@@ -4,6 +4,10 @@
 #   - responses are read from Shepherd's storage, not MySQL + S3 + local files.
 #     ARAX's local ids are integers; Shepherd's are its response ids, so any id
 #     that is not URL-like or ARS-like (len > 30) is looked up there
+#   - a short id with the UI's X prefix (the UI adds it to every non-numeric id)
+#     is looked up without it: Shepherd's response ids are hex, not ARAX's
+#     integers, so the UI's load-by-id, ?r= links and history would otherwise
+#     miss every Shepherd response (DEC-19)
 #   - ARS PKs/UUIDs are read from Shepherd's own hosted ARS (/ars), not from
 #     ars-prod / ars.test / ars.ci / ars-dev: the fetchers are injected, and
 #     ars_host is Shepherd's host
@@ -531,6 +535,11 @@ async def get_response(response_id, *, fetch_url, fetch_ars, ars_host, run):
         return( { "status": 404, "title": "Cannot find Response (in 'fields' and 'data') in ARS response packet", "detail": "Cannot decode ARS response_id="+str(response_id)+" to a Translator Response", "type": "about:blank" }, 404)
 
     #### Otherwise it is a Shepherd response id (ARAX's integer local ids)
+    #### The UI prefixes every id that is not a number with X (isNaN(id) ? "X"+id : id),
+    #### meant for ARS PKs; Shepherd's ids are hex (no X), so a short X... id is
+    #### the UI's X on one of them (DEC-19)
+    if response_id.startswith('X'):
+        response_id = response_id[1:]
     return await run(load_and_finish_local_response, response_id)
 
 

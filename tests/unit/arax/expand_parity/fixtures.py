@@ -12,7 +12,19 @@ def fake_canonical(
     curies=None, names=None, return_all_categories=False, debug=False, **kw
 ):
     out = {}
+    by_name = {n["name"]: k for k, n in NODES.items()}
     for c in (curies if isinstance(curies, list) else ([curies] if curies else [])):
+        if c in by_name:  # a name (NameRes): its node
+            k = by_name[c]
+            info = {
+                "preferred_curie": k,
+                "preferred_name": c,
+                "preferred_category": U.CATS[k.split(":")[0]],
+            }
+            if return_all_categories:
+                info["all_categories"] = {info["preferred_category"]: 1}
+            out[c] = info
+            continue
         p = c.split(":")[0]
         if p in U.CATS:
             info = {

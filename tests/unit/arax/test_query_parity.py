@@ -47,6 +47,27 @@ EXPECTED_DIFFERENCES = {
     # E-4 / E-6: the legacy `filter` command is removed; see
     # test_removed_filter_command_is_unrecognized
     "dsl_removed_filter_command": {"error_code", "message", "logs", "envelope"},
+    # E-4: overlay_connect_knodes no longer emits the disabled
+    # predict_drug_treats_disease overlay (which fails the plan upstream), so
+    # the plan runs on to the next overlay; see
+    # test_connect_knodes_translation_is_upstreams_minus_the_disabled_action
+    "wf_connect_knodes": {"error_code", "message", "logs", "envelope", "status"},
+    # DEC-10: a user-specified KP list (fill's allowlist) is forwarded to
+    # Retriever as parameters.kp instead of being checked against SmartAPI
+    # metadata, which in upstream rejects the query
+    "wf_fill_qedge_keys_and_allowlist": {
+        "error_code",
+        "message",
+        "logs",
+        "envelope",
+        "status",
+        "http_status",
+        "requests",
+    },
+    # DEC-9: no curie-prefix conversion before the KP query, so one fewer
+    # "NodeSynonymizer did not recognize" warning for an unknown id; the KP
+    # request itself is identical
+    "trapi_set_interpretation_all": {"logs"},
 }
 
 
@@ -108,3 +129,52 @@ def test_stored_response_url_is_shepherds(outputs):
             "",
             "Result was stored with id R1. It can be viewed at URL",
         ) in [tuple(x) for x in port[name]["logs"]]
+
+
+def test_set_interpretation_differs_only_by_the_curie_conversion_warning(outputs):
+    """DEC-9: the one log line upstream writes before converting curie prefixes
+    for the KP; everything else, and the KP request, is upstream's."""
+    upstream, port = outputs
+    case = "trapi_set_interpretation_all"
+    warning = ["WARNING", "", "NodeSynonymizer did not recognize: {'uuid:set1'}"]
+    want = list(upstream[case]["logs"])
+    want.remove(warning)  # the first of upstream's two
+    got = [
+        x
+        for x in port[case]["logs"]
+        if x[2] != "loading blocklist file of overly general concept nodes"
+    ]
+    want = [
+        x
+        for x in want
+        if x[2] != "loading blocklist file of overly general concept nodes"
+    ]
+    assert got == want
+    assert port[case]["requests"] == upstream[case]["requests"]
+
+
+def test_fill_allowlist_is_forwarded_to_retriever(outputs):
+    """DEC-10: fill's allowlist becomes Retriever's parameters.kp."""
+    _, port = outputs
+    rec = port["wf_fill_qedge_keys_and_allowlist"]
+    assert rec["status"] == "OK"
+    (forwarded,) = [
+        r for r in rec["requests"] if (r["body"].get("parameters") or {}).get("kp")
+    ]
+    assert forwarded["body"]["parameters"]["kp"] == ["infores:retriever"]
+
+
+def test_connect_knodes_translation_is_upstreams_minus_the_disabled_action(outputs):
+    """E-4: upstream's plan fails on predict_drug_treats_disease; the port's runs
+    the same actions without it."""
+    upstream, port = outputs
+    case = "wf_connect_knodes"
+
+    def actions(rec):
+        return rec["envelope"]["operations"]["actions"]
+
+    want = [
+        a for a in actions(upstream[case]) if "predict_drug_treats_disease" not in a
+    ]
+    assert len(want) == len(actions(upstream[case])) - 1
+    assert actions(port[case]) == want

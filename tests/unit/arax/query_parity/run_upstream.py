@@ -4,7 +4,7 @@ Usage: PYTHONHASHSEED=0 RTX_CODE=/path/to/RTX/code python run_upstream.py
 Needs the same RTX checkout and offline config as expand_parity/run_upstream.py.
 ARAX's query tracker and response store (MySQL/S3) are replaced by stubs, as
 is the legacy creativeCRG module (dead code, not exercised by any case), and
-ARAX's KP cache always misses (DEC-3).
+ARAX's KP cache always misses.
 """
 
 import gzip, json, os, sys, types, warnings
@@ -25,6 +25,7 @@ S.write_data(
     os.path.join(KS, "NormalizedGoogleDistance"),
     os.path.join(KS, "COHD_local", "data"),
     os.path.join(KS, "Prediction"),
+    os.path.join(KS, "NormalizedGoogleDistance"),
 )
 
 from query_runner import RESPONSE_ID, run_all  # noqa: E402
@@ -106,18 +107,33 @@ for mod in list(sys.modules.values()):
         cls._load_cached_kp_info = lambda self: (META, dict(URLS), set(), set())
 S.F.patch_synonymizer_classes()
 assert S.patch_cohd_api()
+sys.path.insert(0, os.path.join(RTX, "reasoningtool", "kg-construction"))
+import NormGoogleDistance  # noqa: E402,F401
 
-# DEC-3: no KP cache. Every lookup misses and nothing is stored, so the goldens
-# don't depend on what an earlier run left in ARAX's cache database.
+assert S.patch_eutils()
+
+# The KP cache always misses and stores nothing (the port runs with
+# ARAX_KP_CACHE_ENABLED=false), so the goldens don't depend on what an earlier
+# run left in ARAX's cache database.
+# ARAX imports the cacher under two module names (trapi_query_cacher from
+# Expand's querier, Expand.trapi_query_cacher from the expander and Connect), so
+# every loaded copy of the class is patched.
 import trapi_query_cacher as tqc  # noqa: E402
+import Expand.trapi_query_cacher  # noqa: E402,F401
 
-tqc.KPQueryCacher.get_cached_result = lambda self, *a, **k: (
-    None,
-    tqc.NO_CACHED_RESPONSE,
-    0.0,
-    None,
-)
-tqc.KPQueryCacher.store_response = lambda self, *a, **k: None
+n_cachers = 0
+for mod in list(sys.modules.values()):
+    cls = getattr(mod, "KPQueryCacher", None)
+    if isinstance(cls, type):
+        cls.get_cached_result = lambda self, *a, **k: (
+            None,
+            tqc.NO_CACHED_RESPONSE,
+            0.0,
+            None,
+        )
+        cls.store_response = lambda self, *a, **k: None
+        n_cachers += 1
+assert n_cachers >= 2, n_cachers
 
 from query_cases import CASES  # noqa: E402
 

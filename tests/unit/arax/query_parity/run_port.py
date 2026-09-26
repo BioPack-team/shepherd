@@ -27,7 +27,14 @@ shutil.copy(
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
 arax = os.path.join(DATA, "arax")
-S.write_data(os.path.join(DATA, "pathfinder"), arax, arax, arax, arax)
+S.write_data(
+    os.path.join(DATA, "pathfinder"),
+    arax,
+    arax,
+    arax,
+    arax,
+    os.path.join(DATA, "pathfinder"),
+)
 
 from shepherd_utils.arax.ARAX_query import ARAXQuery  # noqa: E402
 import shepherd_utils.arax.Expand.kp_selector as ks  # noqa: E402
@@ -38,6 +45,9 @@ from query_cases import CASES  # noqa: E402
 ks.get_smartapi_kp_names = lambda log: set(S.F.OTHER_KPS)
 S.F.patch_synonymizer_classes()
 assert S.patch_cohd_api()
+import shepherd_utils.arax.reasoningtool.kg_construction.NormGoogleDistance  # noqa: E402,F401
+
+assert S.patch_eutils()
 
 only = sys.argv[2:]
 out = run_all(

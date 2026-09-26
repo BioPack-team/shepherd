@@ -70,4 +70,6 @@ shepherd_utils = ["*.yml"]
 # The ARAX port mirrors upstream RTX module-for-module (and vendors ARAX's
 # generated TRAPI models); it is kept unformatted so it stays diffable against
 # upstream. Shepherd-specific glue lives outside it. See shepherd_utils/arax/README.md.
-extend-exclude = "shepherd_utils/arax/"
+# Upstream ARAX's own test files (tests/unit/arax/upstream_suite/test_*.py) are
+# vendored verbatim for the same reason.
+extend-exclude = "(shepherd_utils/arax/|tests/unit/arax/upstream_suite/test_)"

@@ -81,6 +81,8 @@ def answer(body):
                         ],
                     }
                 )
+    elif len(qedges) > 1:
+        return 200, {"message": answer_multi_hop(qg)}
     else:
         ((ek, qe),) = qedges.items()
         sq, oq = qnodes[qe["subject"]], qnodes[qe["object"]]
@@ -133,6 +135,70 @@ def answer(body):
     if aux_used:
         msg["auxiliary_graphs"] = aux_used
     return 200, {"message": msg}
+
+
+def edge_matches(qe, sq, oq):
+    """(edge id, subject id, object id) for every universe edge fulfilling qe."""
+    out = []
+    for eid in sorted(EDGES):
+        e = EDGES[eid]
+        if eid.startswith("support") or not pred_ok(
+            e["predicate"], qe.get("predicates")
+        ):
+            continue
+        orientations = [(e["subject"], e["object"])]
+        if e["predicate"] in U.SYMMETRIC:
+            orientations.append((e["object"], e["subject"]))
+        for s, o in orientations:
+            if match_node(s, sq) is not None and match_node(o, oq) is not None:
+                out.append((eid, s, o))
+                break
+    return out
+
+
+def answer_multi_hop(qg, max_results=200):
+    """A multi-edge (e.g. xCRG's two-hop) query: each qedge's matches joined on
+    the qnodes they share, in a fixed order."""
+    qnodes, qedges = qg["nodes"], qg["edges"]
+    rows = [{}]  # partial results: qnode -> node id, plus "_edges"
+    for ek in sorted(qedges):
+        qe = qedges[ek]
+        matches = edge_matches(qe, qnodes[qe["subject"]], qnodes[qe["object"]])
+        new_rows = []
+        for row in rows:
+            for eid, s, o in matches:
+                if row.get(qe["subject"], s) != s or row.get(qe["object"], o) != o:
+                    continue
+                r = dict(row)
+                r[qe["subject"]], r[qe["object"]] = s, o
+                r["_edges"] = {**row.get("_edges", {}), ek: eid}
+                new_rows.append(r)
+        rows = new_rows[:max_results]
+    kg_nodes, kg_edges, results = {}, {}, []
+    for row in rows:
+        for qk in qnodes:
+            kg_nodes[row[qk]] = NODES[row[qk]]
+        for eid in row["_edges"].values():
+            kg_edges[eid] = EDGES[eid]
+        results.append(
+            {
+                "node_bindings": {qk: [{"id": row[qk]}] for qk in sorted(qnodes)},
+                "analyses": [
+                    {
+                        "resource_id": "infores:retriever",
+                        "edge_bindings": {
+                            ek: [{"id": eid}]
+                            for ek, eid in sorted(row["_edges"].items())
+                        },
+                    }
+                ],
+            }
+        )
+    return {
+        "query_graph": qg,
+        "knowledge_graph": {"nodes": kg_nodes, "edges": kg_edges},
+        "results": results,
+    }
 
 
 class H(BaseHTTPRequestHandler):

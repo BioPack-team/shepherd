@@ -290,6 +290,27 @@ async def test_get_response_serves_a_stored_response_validated(arax_client, mock
 
 
 @pytest.mark.asyncio
+async def test_get_response_ignores_the_uis_x_prefix_on_a_shepherd_id(
+    arax_client, mocker
+):
+    """DEC-19: the UI sends X+id for every non-numeric id (its load box, ?r=
+    links, history); Shepherd's ids are hex, so X916eaac7 is response 916eaac7."""
+    stored = {"message": {"knowledge_graph": {"nodes": {}, "edges": {}}}}
+    requested = []
+
+    def get(message_id):
+        requested.append(message_id)
+        return {"916eaac7": stored}[message_id]
+
+    mocker.patch("shepherd_utils.db.get_message_sync", side_effect=get)
+    async with arax_client as client:
+        response = await client.get("/response/X916eaac7")
+    assert response.status_code == 200
+    assert requested == ["916eaac7"]
+    assert response.json()["validation_result"]["status"] == "PASS"
+
+
+@pytest.mark.asyncio
 async def test_get_response_not_found_is_arax_404(arax_client, mocker):
     mocker.patch("shepherd_utils.db.get_message_sync", side_effect=KeyError)
     async with arax_client as client:

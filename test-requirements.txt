@@ -3,6 +3,8 @@ CacheControl==0.14.4
 biolink-helper-pkg==1.0.1
 bmt==1.4.8
 fakeredis
+# imported by upstream ARAX's test suite (tests/unit/arax/upstream_suite)
+graphviz
 httpx
 lmdb
 networkx

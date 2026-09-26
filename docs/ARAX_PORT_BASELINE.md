@@ -41,6 +41,7 @@ does.
 | DEC-16 | **No concurrency limit.** ARAX's per-address cap and free-RAM floor (429 `OverLimit`) are not implemented. | ORC-14; the 429 in API-01. |
 | DEC-17 | **An ARAX query's TRAPI `workflow` is passed through to ARAX unchecked.** Shepherd's server checks workflow operations against its own list for the other ARAs; for ARAX, the workflow stays in the stored query and the task starts with no Shepherd workflow, so ARAX translates and validates it itself (`operation_to_ARAXi`, answering `NotImplementedError` for an operation it doesn't know). | WF-*, ORC-03. `shepherd_server/base_routes.py` (`run_query`). |
 | DEC-18 | **ARAX's KP response cache is ported, stored in Shepherd's Redis data store.** `KPQueryCacher` keeps upstream's logic: the sha256 key of `{url, body}` (categories sorted, in place), what is cached (every Expand KP response, timeouts as `-1`; Connect's PathFinder and xCRG results; the xDTD result, whose read stays disabled), hits and misses, `bypass_cache` (EXP-06, ORC-04), the record fields and statistics, and the `/status?mode=kp_cache` listing. The arax worker runs upstream's refresh (`refresh_cache`: entries older than 6 h re-queried, timeouts after 72 s, each pass capped at 60 s) every minute, behind a Redis lock so one replica refreshes at a time. **Deliberate differences, all from the shared, persistent store:** entries expire `ARAX_KP_CACHE_TTL_SEC` (3 days) after their last request (a refresh does not extend them), and the cache is not cleared at startup; a data-store error is a miss (lookup) or a skipped store; TLS is verified (D-5's `ssl=False` does not apply). `ARAX_KP_CACHE_ENABLED=false` turns it off (every lookup misses, every store is a no-op), which is how the parity tests run, matching upstream's goldens. | EXP-31, CRT-05, CON-05, OPS-07 (KP-cache refresh), API-09 (`kp_cache`), EXP-06, ORC-04. `shepherd_utils/arax/Expand/trapi_query_cacher.py`, `workers/arax/worker.py` (`kp_cache_refresh_loop`), `shepherd_server/aras/arax_status.py`. |
+| DEC-19 | **`/response/{id}` accepts the UI's `X` prefix on a Shepherd response id.** The UI sends `X`+id for every id that is not a number (`isNaN(id) ? "X"+id : id` in its load box, `?r=` links, session history and workflow import), meaning an ARS PK. ARAX's own ids are integers, but Shepherd's are 8 hex digits (`916eaac7`), so every UI lookup of a Shepherd response would miss. Hex ids never contain `X`, so a short `X…` id (30 characters or fewer; ARS PKs are longer) is looked up without it. | API-07, the UI contract's load-by-id row. `shepherd_utils/arax/ResponseCache/response_lookup.py`; `tests/unit/test_arax_api.py`. |
 
 ### UI contract: what the ARAX UI requires
 
@@ -80,22 +81,23 @@ What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
    `python -m shepherd_utils.arax_mock_data --pathfinder` writes mock files
    in the same shape for local testing (README, "Mock ARAX data";
    `tests/unit/arax/test_mock_data.py` runs every reader over them).
-2. **Validation against a live ARAX.** Every parity test compares the port with
+2. **Validation against a live ARAX.** The offline evidence, point by point for what the ARAX team asked to keep, is in [ARAX_PRESERVATION.md](ARAX_PRESERVATION.md); upstream's own test suite runs against the port with `--arax-live` (`tests/unit/arax/upstream_suite/`). Every parity test compares the port with
    upstream ARAX's own code, but offline: a mock Retriever, synthetic data, and
    stand-ins for NodeNorm, COHD's web lookup and reasoner-validator. A run of
    real queries through a live ARAX and through Shepherd, compared, is the next
    check. The upstream demo workflow corpus and its two-endpoint diff script
-   (§22) are a ready starting point. `add_node_pmids` (NCBI eUtils), xCRG and
-   Connect have only port-side tests so far.
+   (§22) are a ready starting point. `connect_nodes` (whose limits are
+   Shepherd's, DEC-7) has only port-side tests; `add_node_pmids` and the xCRG
+   MVP2 route are parity-tested with NCBI eUtils and the Retriever stubbed.
 3. **Build and deploy.** The `arax` worker and server images have not been built
    (the install steps were checked in fresh environments). The `arax` worker's
    resources (`compose.test.yml`: 1 CPU, 3 GB) were sized for the old proxy.
-4. **UI deployment.** The UI calls autocomplete at `/rtxcomplete/nodeslike` on
+4. **UI deployment.** The real UI was confirmed working against Shepherd, set up as a deployment should be (see [ARAX_PRESERVATION.md](ARAX_PRESERVATION.md)). The UI calls autocomplete at `/rtxcomplete/nodeslike` on
    its own host, which must route to `/arax/rtxcomplete/nodeslike`. Its Swagger
    link (`{baseAPI}/ui/`) has no Shepherd equivalent (Shepherd serves `/docs`).
 5. **`GET /status/logs`** (API-10) is not served. The UI does not call it.
 6. **The bug-fix pass (DEC-1)**, after validation: the Part D defects (all
-   reproduced today), C-1 and C-3 to C-7 in `arax.pathfinder`, and C-12.
+   reproduced today), C-1 and C-3 to C-7 in `arax.pathfinder`, and C-12. Found since, while checking what the ARAX team asked to keep: D-22 to D-26. D-22 (an empty response in the UI whenever the TRAPI validator raises) and D-23 (the `filter_kgraph_*` workflow operations crashing after a lookup) are the ones users would hit first.
 
 ## How to read this
 
@@ -710,6 +712,11 @@ are cached and aiohttp HTTP errors propagate, as upstream, but TLS is verified.
 | D-19 | Non-determinism: Resultify's start qnode is `list(set)[0]`; the NGD PMID subset uses `islice` on a set. | `ARAX_resultify.py`, `compute_ngd.py` |
 | D-20 | Ranker `UnboundLocalError` with publications n=0; `KeyError`s on dangling bindings. | `ARAX_ranker.py:431` |
 | D-21 | `query_return_stream` checks whether its query thread is already done *before* its loop, so a query that finishes first (an input error, say) streams **nothing**, not even the envelope. The Shepherd worker then saves the finished response's envelope, so the stream still ends with it. | `ARAX_query.py:98` |
+| D-22 | `/response/{id}` returns the response with its `message` emptied whenever reasoner-validator raises (for example, when it cannot fetch the TRAPI schema from standards.ncats.io): the validator pops `message`, validates against a `{}` stub and only restores it at the end. The UI then shows an empty response. Fix: validate a copy. | `response_cache.py` `get_response` (validation block); reasoner-validator 6.0.2 `check_compliance_of_trapi_response` |
+| D-23 | `filter_kg`'s `remove_edges_by_top_n`, `remove_edges_by_percentile`, `remove_edges_by_std_dev`, `remove_edges_by_continuous_attribute`, `remove_edges_by_discrete_attribute`, and `filter_results(..., prune_kg=true)`, read `edge.qedge_keys` of every KG edge. Edges made by an overlay, or that went through `resultify`, don't have it, so these crash (`'Edge' object has no attribute 'qedge_keys'`) after any overlay or `lookup`. That covers the `filter_kgraph_*` workflow operations as CQS-style workflows use them. | `ARAX_filter_kg.py` (the `'qedge_keys': set([...])` in each of those actions) |
+| D-24 | `filter_kg(action=remove_edges_by_stats)` is defined (`command_definitions`, `describe_me`) but not in `allowable_actions`, so it is always refused. `filter_results(action=sort_by_node_attribute)` on a string attribute raises in `sort_results.py`. A workflow's `filter_results_top_n` with a string `max_results` fails an `assert` as an unhandled error. | `ARAX_filter_kg.py`, `Filter_Results/sort_results.py`, `operation_to_ARAXi.py` |
+| D-25 | A TRAPI qnode's `name` is accepted but not resolved ("QueryGraph has no nodes with ids"); query by name works through ARAXi's `add_qnode(name=...)`. A set qnode's `member_ids` (and its categories, with `set_interpretation: ALL`) are not forwarded to the KP. | `ARAX_query.py` (allowed qnode attributes), `trapi_querier.py` (`_strip_empty_properties`) |
+| D-26 | `overlay_connect_knodes` computes Jaccard over every node triple, which divides by zero when a pair shares no neighbors, failing the plan. The port's E-4 change removes the disabled overlay action that made the operation fail even earlier upstream. | `operation_to_ARAXi.py`, `Overlay/compute_jaccard.py` |
 
 ---
 
