@@ -359,7 +359,8 @@ case(
     "lookup_single_node",
     "lookup",
     trapi({"n0": {"ids": [METFORMIN]}}, {}),
-    min_results=1,
+    checks=[log_contains("422")],
+    note="Retriever refuses a query with no edges (422); upstream sends these to rtx-kg2 (DEC-4)",
 )
 case(
     "lookup_kp_list_forwarded",
@@ -591,7 +592,7 @@ case(
             "e1": {"subject": "n1", "object": "n2", "option_group_id": "o1"},
         },
     ),
-    min_results=1,
+    known_defect="D-27",
     timeout=600,
 )
 case(

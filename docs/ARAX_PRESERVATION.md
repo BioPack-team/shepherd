@@ -164,7 +164,7 @@ them (DEC-1):
 |---|---|---|
 | "not" (`exclude: true`) | As ARAX (Expand's kryptonite edges) | `araxi_exclude`, `trapi_exclude`, `trapi_optional_and_exclude_mixed`; Expand parity `kryptonite`, `fda_constraint_not` |
 | "any" / "all" (`is_set`, `set_interpretation`, `member_ids`) | As ARAX: accepted and sent to the KP. `member_ids` and a set qnode's categories are not forwarded, upstream included (D-25) | `trapi_set_interpretation_all`, `trapi_set_interpretation_many_and_is_set`, `araxi_is_set_and_option_group` |
-| Optional groups | As ARAX | `optional_group_query`, `araxi_is_set_and_option_group`, Expand parity `optional_group` |
+| Optional groups | As ARAX, including its crash when a result lacks the optional part (D-27) | `optional_group_query`, `araxi_is_set_and_option_group`, Expand parity `optional_group` |
 | Query by name | ARAXi's `add_qnode(name=...)`, resolved through NameRes. A TRAPI qnode's `name` is not resolved, upstream included (D-25). The UI resolves names itself, through autocomplete and `/entity` | `araxi_create_envelope_and_name`, `araxi_unknown_name`, `trapi_qnode_name`, `dsl_infer_no_qg` |
 
 ## Needs live services
