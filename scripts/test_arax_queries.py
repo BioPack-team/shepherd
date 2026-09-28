@@ -5,6 +5,7 @@
     python test_arax_queries.py --only mvp1 dsl_     # cases whose name contains any of these
     python test_arax_queries.py --group workflows    # one group
     python test_arax_queries.py --base http://localhost:5439/arax --workers 4
+    python test_arax_queries.py --from-saved --only lookup_two_hop   # re-read saved responses' logs
 
 Groups: lookup (TRAPI one-hop to three-hop), creative (MVP1 xDTD, MVP2 xCRG,
 pathfinder), flexible (not / any / all / optional groups / constraints),
@@ -31,7 +32,10 @@ the saved response (--out) shows which.
 
 Every response is saved under --out (default responses/arax-validation/), and
 a summary is written to <out>/summary.json. The exit code is 1 if any case
-FAILed.
+FAILed. A case that fails prints its response's WARNING and ERROR log lines,
+which is where ARAX says why (a KP's HTTP error, an empty hop, a timeout).
+--from-saved prints those lines from an earlier run's saved responses, without
+querying again.
 """
 
 import argparse
@@ -1336,6 +1340,7 @@ class Outcome:
     n_results: Optional[int] = None
     status: Optional[str] = None
     http: Optional[int] = None
+    log_lines: list = field(default_factory=list)
 
 
 def check_query_response(c: Case, http_status: int, body: dict) -> list:
@@ -1380,6 +1385,40 @@ def read_stream(resp) -> tuple[dict, list]:
     if "logs" not in final:
         problems.append("the last line is not the response envelope")
     return final, problems
+
+
+def problem_log_lines(body: dict, limit: int = 12) -> list:
+    """The WARNING and ERROR lines of a response's log, shortened."""
+    lines = []
+    for entry in body.get("logs") or []:
+        if not isinstance(entry, dict) or entry.get("level") not in (
+            "WARNING",
+            "ERROR",
+        ):
+            continue
+        text = " ".join(str(entry.get("message") or "").split())
+        lines.append(f"{entry['level']}: {text[:400]}")
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"... {len(lines) - limit} more in the saved response"]
+    return lines
+
+
+def print_saved_logs(out_dir: Path, cases: list) -> int:
+    for c in cases:
+        path = out_dir / f"{c.name}.json"
+        if not path.exists():
+            continue
+        try:
+            body = json.loads(path.read_text())
+        except ValueError:
+            continue
+        if not isinstance(body, dict) or "logs" not in body:
+            continue
+        n = len(_msg(body).get("results") or [])
+        print(f"{c.name}: status {body.get('status')!r}, {n} results")
+        for line in problem_log_lines(body) or ["(no WARNING or ERROR lines)"]:
+            print(f"        {line}")
+    return 0
 
 
 class Runner:
@@ -1440,6 +1479,8 @@ class Runner:
         out = self._outcome(c, problems, seconds)
         out.n_results = len(_msg(result).get("results") or [])
         out.status, out.http = result.get("status"), http_status
+        if problems:
+            out.log_lines = problem_log_lines(result)
         return out
 
     def run_endpoint(self, c: Case) -> Outcome:
@@ -1520,6 +1561,11 @@ def main():
     parser.add_argument(
         "--out", default="responses/arax-validation", help="where responses are saved"
     )
+    parser.add_argument(
+        "--from-saved",
+        action="store_true",
+        help="print the WARNING/ERROR log lines of responses saved in --out, without querying",
+    )
     args = parser.parse_args()
 
     selected = [
@@ -1538,6 +1584,8 @@ def main():
         return 0
 
     out_dir = Path(args.out)
+    if args.from_saved:
+        return print_saved_logs(out_dir, selected)
     out_dir.mkdir(parents=True, exist_ok=True)
     runner = Runner(args.base, out_dir)
     first = [c for c in selected if not c.after]
@@ -1563,6 +1611,8 @@ def main():
         )
         for p in o.problems:
             print(f"        - {p}")
+        for line in o.log_lines:
+            print(f"          {line}")
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for o in pool.map(runner.run, first):
@@ -1592,6 +1642,7 @@ def main():
             "status": o.status,
             "n_results": o.n_results,
             "known_defect": o.case.known_defect,
+            "log_lines": o.log_lines,
         }
         for o in outcomes
     ]
