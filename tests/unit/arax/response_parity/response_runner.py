@@ -51,7 +51,10 @@ class FakeValidator:
 
 
 def normalize(obj):
-    """Z-component ids are uuid4s: number them in order of appearance."""
+    """Z-component ids are uuid4s: number them in order of appearance.
+
+    Timestamps and the reasoner-validator version are blanked.
+    """
     text = json.dumps(obj, sort_keys=True)
     seen = {}
     for z in re.findall(
@@ -61,6 +64,9 @@ def normalize(obj):
     for z, token in seen.items():
         text = text.replace(z, token)
     text = re.sub(r'"timestamp": "\d{4}-\d\d-\d\dT[\d:.]+"', '"timestamp": "T"', text)
+    # the installed reasoner-validator's version, or "" when it isn't installed
+    # (as where the goldens were recorded): not ARAX's behavior
+    text = re.sub(r'"validator_version": "[^"]*"', '"validator_version": ""', text)
     return json.loads(text)
 
 

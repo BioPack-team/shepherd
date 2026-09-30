@@ -5,7 +5,9 @@ get_response (RTXteam/RTX @ 9485431), with its storage and the ARS reached
 through the same case data the port's fetchers get, and a deterministic
 stand-in for reasoner-validator on both sides (the package is the same version
 for both, and needs the network). This runs the cases through the port and
-requires identical results.
+requires identical results. The validator version each response reports is the
+installed package's (or "" without the server's arax-api extra, as in CI), so
+it is blanked on both sides.
 """
 
 import gzip
@@ -21,6 +23,7 @@ RP = os.path.join(HERE, "response_parity")
 sys.path.insert(0, RP)
 sys.path.insert(0, HERE)
 from response_cases import CASES  # noqa: E402
+from response_runner import normalize  # noqa: E402
 from test_expand_parity import _first_diff  # noqa: E402
 
 # Cases whose difference is intended, checked separately below
@@ -41,6 +44,8 @@ def outputs(tmp_path_factory):
         port = json.load(f)
     with gzip.open(os.path.join(RP, "goldens.json.gz"), "rt") as f:
         upstream = json.load(f)
+    # the goldens predate blanking the validator version: blank it there too
+    upstream = {case: [normalize(r) for r in rs] for case, rs in upstream.items()}
     return upstream, port
 
 

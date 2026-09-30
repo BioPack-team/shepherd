@@ -137,7 +137,9 @@ def test_empty_list_and_no_results_do_nothing():
     ou.update_results_with_overlay_edge_list([], message, Log())
     assert bindings(message) == before
     no_results = Message(query_graph=message.query_graph, results=[])
-    ou.update_results_with_overlay_edge_list([(("G:0", "D:0"), "F1_0")], no_results, Log())
+    ou.update_results_with_overlay_edge_list(
+        [(("G:0", "D:0"), "F1_0")], no_results, Log()
+    )
     assert no_results.results == []
 
 
