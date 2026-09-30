@@ -337,6 +337,29 @@ Behavioral deviations:
     validated child cannot be recorded in the index, fails that child
     E/500 rather than leaving its parent waiting on a merge that never
     comes.
+18. **Node annotation runs in premerge by default** (post-parity change,
+    accepted 2026-09-23; `ars_annotation_mode`). Upstream annotated the
+    merged knowledge graph in every merge's post-process, under the
+    parent's merge lock, so each ARA's annotation (the slowest post-process
+    stage -- ~9s for ARAX's ~300 curies in a traced query) serialized every
+    later merge of the query behind it. With the default `"premerge"`, the
+    `ars_premerge` pool child annotates each validated `ara-` response
+    before handing it to the merge, so responses annotate in parallel and
+    off the lock, and the merge's post-process skips the stage. The merged
+    output is the same on success: annotation is a per-node lookup, a node
+    already carrying `biothings_annotations` is skipped, and the fold
+    unions a node's list-valued `biothings_annotations` from two responses.
+    Three differences: an annotation failure is logged on that response
+    (the same "node annotation internal error" entry) and its nodes merge
+    unannotated, instead of marking the merged version E/444; a curie the
+    annotator does not find is asked once per response instead of again
+    at every later merge; and blocklisted nodes are annotated before the
+    merge's blocklist pass removes them. `"merge"` restores upstream's
+    placement exactly (the parity e2e overlay pins it); `"off"` skips
+    annotation entirely. Separately, `pool_prewarm` spawns the
+    `ars_premerge` / `ars_merge` pool children at startup, so the first
+    response a fresh worker handles no longer pays the spawn's module
+    re-import (~1.2-1.5s each, in both workers).
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 

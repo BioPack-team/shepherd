@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import shepherd_utils.ars.annotate as annotate_mod
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.broker as broker_mod
 from workers.ars_merge import worker as merge_worker
@@ -449,7 +450,7 @@ def bt_annotator(mocker):
     class (upstream uses the same package; no HTTP is involved)."""
     inst = mocker.MagicMock()
     inst.annotate_curie_list = AsyncMock(return_value=ANNOTATIONS)
-    mocker.patch.object(merge_worker.annotator, "Annotator", return_value=inst)
+    mocker.patch.object(annotate_mod.annotator, "Annotator", return_value=inst)
     # any HTTP during post-process is a regression: the Appraiser and the
     # annotator API transport are both gone
     mocker.patch(
@@ -568,7 +569,7 @@ async def test_postprocess_annotator_failure_is_444(mocker):
     the 444 sticks through the successful later stages, as upstream."""
     inst = mocker.MagicMock()
     inst.annotate_curie_list = AsyncMock(side_effect=RuntimeError("annotator down"))
-    mocker.patch.object(merge_worker.annotator, "Annotator", return_value=inst)
+    mocker.patch.object(annotate_mod.annotator, "Annotator", return_value=inst)
     data = load_corpus("response_aragorn.json")
     outcome = await merge_worker.postprocess_message(
         data, _merged_row(), "ara-shepherd-aragorn", LOGGER
@@ -580,6 +581,31 @@ async def test_postprocess_annotator_failure_is_444(mocker):
         entry["message"].startswith("node annotation internal error")
         for entry in data.get("logs", [])
     )
+
+
+async def test_postprocess_without_annotation(bt_annotator):
+    """annotate=False (ars_annotation_mode "premerge" or "off") skips the
+    stage; the rest of the post-process still completes D/200."""
+    data = load_corpus("response_aragorn.json")
+    outcome = await merge_worker.postprocess_message(
+        data, _merged_row(), "ara-shepherd-aragorn", LOGGER, annotate=False
+    )
+    bt_annotator.annotate_curie_list.assert_not_awaited()
+    assert outcome["status"] == "D"
+    assert outcome["code"] == 200
+    assert all("ordering_components" in r for r in data["message"]["results"])
+
+
+@pytest.mark.parametrize(
+    "mode,annotate", [("merge", True), ("premerge", False), ("off", False)]
+)
+async def test_merge_annotates_only_in_merge_mode(monkeypatch, mocker, mode, annotate):
+    monkeypatch.setattr(merge_worker.settings, "ars_annotation_mode", mode)
+    child = mocker.patch.object(
+        merge_worker, "merge_and_postprocess_in_child", return_value={}
+    )
+    await merge_worker._run_merge_in_pool(None, "c", "n", "ara-x", None, {}, LOGGER)
+    assert child.call_args.args[-1] is annotate
 
 
 def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):

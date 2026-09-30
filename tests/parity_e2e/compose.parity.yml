@@ -37,3 +37,12 @@ services:
   shepherd_server:
     environment:
       TR_NORMALIZER: http://mockworld:8099/get_normalized_nodes
+
+  # Upstream annotates in the merge's post-process; pin that placement so
+  # the two stacks annotate the same graphs at the same step.
+  ars_premerge:
+    environment:
+      ARS_ANNOTATION_MODE: merge
+  ars_merge:
+    environment:
+      ARS_ANNOTATION_MODE: merge

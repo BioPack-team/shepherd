@@ -27,6 +27,13 @@ Redis client, processes it, and writes it back, and only the verdict crosses
 IPC (the same pattern as ars_merge and merge_message). Nothing large stays
 resident in this process past the intake.
 
+With ``ars_annotation_mode = "premerge"`` the pool child also annotates a
+validated ARA response's nodes (shepherd_utils.ars.annotate) before saving
+it, so annotation runs per response and in parallel rather than under the
+parent's merge lock; ars_merge then skips the stage. A failed annotation is
+logged on the response and the nodes are left unannotated -- the response
+still merges.
+
 finish_query enqueues {intake_child_pk, response_id} when an ARA pipeline
 finishes an ARS-originated query (the de-federated ARS receives every
 response over the broker; there is no callback endpoint), and
@@ -46,12 +53,15 @@ from opentelemetry.propagate import extract, inject
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 from shepherd_utils.ars import aras
+from shepherd_utils.ars.annotate import annotate_nodes
 from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
+    add_log_entry,
     get_safe,
     pre_merge_process,
     remove_phantom_support_graphs,
+    timestamp_hms,
 )
 from shepherd_utils.ars.statuses import coerce_status
 from shepherd_utils.ars.trapi import validate
@@ -81,14 +91,40 @@ _pool = None
 _loop = None
 
 
+def _warm_pool_child():
+    """Pool prewarm hook: the spawn already imported this module; set up the
+    child's tracer too, so a real task pays for neither."""
+    setup_pool_child_tracer(STREAM)
+
+
+def _annotate_in_child(data, agent_name, child_pk) -> None:
+    """Annotate a validated response's nodes in place. A failure never fails
+    the response: it is logged (and noted in the message's logs, as the
+    merge's annotation stage does) and the response merges unannotated."""
+    logger = logging.getLogger(f"shepherd.ars.premerge.child.{child_pk}")
+    try:
+        asyncio.run(annotate_nodes(data, agent_name, logger))
+    except Exception as e:
+        logger.exception(f"node annotation failed for {agent_name} pk {child_pk}")
+        add_log_entry(
+            data,
+            [
+                f"node annotation internal error: {str(e)}",
+                timestamp_hms(),
+                "DEBUG",
+            ],
+        )
+
+
 def premerge_in_child(
-    child_pk, agent_name, inforesid, do_validate, otel_carrier=None
+    child_pk, agent_name, inforesid, do_validate, otel_carrier=None, annotate=False
 ) -> bool:
     """Pool-side premerge: fetch the child's blob by pk, process it in place,
     write it back, and return the validation verdict.
 
     The processed payload is saved whether or not it validates, as upstream
     saved the (already premerged) data on both branches of its view.
+    ``annotate`` adds node annotations to a response that validated.
     ``otel_carrier`` is the parent's span context; the stage span starts
     under it (see shepherd_utils.otel.setup_pool_child_tracer).
     """
@@ -107,6 +143,9 @@ def premerge_in_child(
             valid = validate(data)
         else:
             valid = True
+        span.set_attribute("premerge.annotate", bool(annotate and valid))
+        if annotate and valid:
+            _annotate_in_child(data, agent_name, child_pk)
         save_message_sync(str(child_pk), data)
         span.set_attribute("premerge.valid", bool(valid))
     return bool(valid)
@@ -115,8 +154,12 @@ def premerge_in_child(
 async def _run_premerge_in_pool(
     child_pk, agent_name, inforesid, do_validate, otel_carrier, logger
 ):
-    """Indirection for tests; production runs premerge_in_child in the pool."""
-    args = (child_pk, agent_name, inforesid, do_validate, otel_carrier)
+    """Indirection for tests; production runs premerge_in_child in the pool.
+    Only responses headed for the merge (ara- agents) are annotated here."""
+    annotate = settings.ars_annotation_mode == "premerge" and str(
+        agent_name
+    ).startswith("ara-")
+    args = (child_pk, agent_name, inforesid, do_validate, otel_carrier, annotate)
     if _pool is not None and _loop is not None:
         return await _pool.run(_loop, premerge_in_child, *args)
     return await asyncio.to_thread(premerge_in_child, *args)
@@ -378,6 +421,7 @@ async def poll_for_tasks():
         max_tasks_per_child=settings.pool_max_tasks_per_child,
         name="ars_premerge process pool",
         task_timeout=settings.pool_task_timeout_sec,
+        warmup=_warm_pool_child if settings.pool_prewarm else None,
     )
     while True:
         try:

@@ -36,7 +36,7 @@ import os
 import signal
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from typing import Optional
+from typing import Callable, Optional
 
 from .otel import POOL_CHILD_ENV
 
@@ -88,6 +88,12 @@ class ProcessPoolManager:
         task_timeout: per-task ceiling in seconds. When a task exceeds it, the
             running child is killed, the pool is rebuilt, and ``run`` raises
             ``asyncio.TimeoutError``. ``None`` / <= 0 disables the timeout.
+        warmup: a picklable, argument-less callable. When given, every
+            executor this manager creates (the first and each rebuild) is
+            submitted ``max_workers`` calls of it straight away, so all its
+            children spawn -- and pay the spawn's module re-import plus
+            whatever ``warmup`` does -- before real work arrives instead of on
+            a query's critical path. ``None`` keeps children lazy.
     """
 
     def __init__(
@@ -96,11 +102,13 @@ class ProcessPoolManager:
         max_tasks_per_child: Optional[int] = None,
         name: str = "process pool",
         task_timeout: Optional[float] = None,
+        warmup: Optional[Callable[[], object]] = None,
     ):
         self._max_workers = max_workers
         self._max_tasks_per_child = max_tasks_per_child
         self._name = name
         self._task_timeout = task_timeout
+        self._warmup = warmup
         self._lock = asyncio.Lock()
         # Spawn: see module docstring -- fork would risk deadlocking the event
         # loop thread when the pool is rebuilt after a child death.
@@ -123,7 +131,20 @@ class ProcessPoolManager:
         # positive value; None / 0 / negative means "don't recycle".
         if self._max_tasks_per_child and self._max_tasks_per_child > 0:
             kwargs["max_tasks_per_child"] = self._max_tasks_per_child
-        return ProcessPoolExecutor(**kwargs)
+        executor = ProcessPoolExecutor(**kwargs)
+        if self._warmup is not None:
+            # The executor spawns a child per submission while none is idle,
+            # so max_workers back-to-back submits bring up the whole pool.
+            # Best effort: a failed warmup only means a cold first task.
+            for _ in range(self._max_workers):
+                try:
+                    executor.submit(self._warmup).add_done_callback(
+                        _consume_future_exception
+                    )
+                except Exception as e:
+                    logging.warning(f"{self._name}: pool warmup failed: {e}")
+                    break
+        return executor
 
     async def run(self, loop, fn, *args):
         """Run ``fn(*args)`` in the pool, self-healing on breakage or timeout."""
