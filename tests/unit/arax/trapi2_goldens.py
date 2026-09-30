@@ -103,6 +103,12 @@ Hand rules on top (what TOM does not own):
     ``set_interpretation: COLLATE`` (``collated_qnodes``) echoes both in the
     envelope's query graph: the vendored QNode reads COLLATE as ``is_set``
     and keeps the client's own value.
+  - H13 a qnode's ``member_ids`` (a MANY / ALL set's members) are echoed in
+    the envelope's query graph as the query gave them: upstream's generated
+    QNode had no ``member_ids`` and dropped them, and the port's 2.0 QNode
+    keeps them, as a TRAPI 2.0 server echoing its query graph should, and
+    forwards them to the KP (request bodies and the query plan's queries),
+    since 2.0 says ``member_ids`` MUST be given under MANY / ALL.
   - H10 nulls go wherever the port's ``to_dict`` omits them, which is in
     every ARAX model object, including ARAX's own envelope ``operations``
     (an Operations model TOM sees as an opaque extra); plain-dict members
@@ -449,10 +455,49 @@ def collated_qnodes(case: tuple) -> list:
     )
 
 
-def query_goldens(g16: dict) -> dict:
-    collated = {
-        c[0]: collated_qnodes(c) for c in load_inputs16("query_parity")["CASES"]
+def member_ids_qnodes(case: tuple) -> dict:
+    """H13: the recorded query's ``member_ids`` per qnode key."""
+    qg = (case[1].get("message") or {}).get("query_graph") or {}
+    return {
+        key: qnode["member_ids"]
+        for key, qnode in (qg.get("nodes") or {}).items()
+        if qnode.get("member_ids")
     }
+
+
+def _add_member_ids(golden: dict, members: dict) -> None:
+    """H13, for the query graphs ARAX sends on (Retriever request bodies and
+    the query plan's recorded queries): a qnode bound to a set carries its
+    ``member_ids``, which 2.0 says MUST be given under MANY / ALL."""
+    graphs = [
+        (request.get("body") or {}).get("message", {}).get("query_graph")
+        for request in golden.get("requests") or []
+    ]
+    plan = (golden["envelope"].get("query_options") or {}).get("query_plan")
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            query = obj.get("query")
+            if isinstance(query, dict):
+                graphs.append((query.get("message") or {}).get("query_graph"))
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(plan)
+    for graph in graphs:
+        for key, member_ids in members.items():
+            node = ((graph or {}).get("nodes") or {}).get(key)
+            if node is not None:
+                node["member_ids"] = member_ids
+
+
+def query_goldens(g16: dict) -> dict:
+    inputs = load_inputs16("query_parity")["CASES"]
+    collated = {c[0]: collated_qnodes(c) for c in inputs}
+    members = {c[0]: member_ids_qnodes(c) for c in inputs}
     out = {}
     for case, rec in g16.items():
         new = copy.deepcopy(rec)
@@ -461,10 +506,15 @@ def query_goldens(g16: dict) -> dict:
         for key in collated.get(case, []):  # H12
             if key in (qg.get("nodes") or {}):
                 qg["nodes"][key]["set_interpretation"] = "COLLATE"
+        for key, member_ids in members.get(case, {}).items():  # H13
+            if key in (qg.get("nodes") or {}):
+                qg["nodes"][key]["member_ids"] = member_ids
         qo = new["envelope"].get("query_options")
         if isinstance(qo, dict) and "query_plan" in qo:
             qo["query_plan"] = query_plan(qo["query_plan"])
         new["requests"] = requests(rec["requests"])
+        if members.get(case):  # H13
+            _add_member_ids(new, members[case])
         out[case] = new
     return out
 

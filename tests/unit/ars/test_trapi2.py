@@ -68,22 +68,21 @@ def test_null_on_a_required_member_fails_once_stripped():
     assert not validate(strip_nulls(data))
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda m: m["results"][0]["analyses"][0].pop("edge_bindings"),
-        lambda m: m["query_graph"].pop("edges"),
-    ],
-    ids=["analysis_without_bindings", "query_graph_without_edges_or_paths"],
-)
-def test_validate_enforces_the_schema_any_of_rules(mutate):
-    """2.0 merged 1.5's Analysis/PathfinderAnalysis and QueryGraph/
-    PathfinderQueryGraph into one object each with an anyOf, which TOM's
-    pydantic models do not express."""
+def test_validate_enforces_the_schema_any_of_rule():
+    """2.0 merged 1.5's Analysis/PathfinderAnalysis into one object with an
+    anyOf (edge_bindings and/or path_bindings), which TOM's pydantic models
+    do not express."""
     data = load("response_aragorn.json")
-    mutate(data["message"])
+    data["message"]["results"][0]["analyses"][0].pop("edge_bindings")
     Response.from_dict(data)  # the models alone accept it...
     assert not validate(data)  # ...the ARS verdict does not
+
+
+def test_validate_accepts_a_node_only_query_graph():
+    """A 2.0 QueryGraph requires only nodes; edges and paths are optional."""
+    data = load("response_aragorn.json")
+    data["message"]["query_graph"].pop("edges")
+    assert validate(data)
 
 
 def test_strip_nulls_leaves_free_form_values_alone():
