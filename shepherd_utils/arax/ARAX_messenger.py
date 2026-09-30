@@ -5,8 +5,6 @@
 #   - TRAPI 2.0: one QueryGraph class (no PathfinderQueryGraph): add_qpath adds the path
 #     to the query graph's `paths` and drops its (empty) `edges`, which is what the 1.x
 #     conversion to a PathfinderQueryGraph did; from_dict reads a QG with paths as a QueryGraph
-#   - TRAPI 2.0 set_interpretation COLLATE (an unpinned qnode whose matches are collated into
-#     one result) is what ARAX's is_set=true means, so from_dict sets is_set on such qnodes
 #   - create_envelope keeps the query's TRAPI 2.0 `parameters` from a previous envelope
 #   - TRAPI 2.0 forbids an empty QNode.constraints: add_qnode / from_dict leave it unset
 #     rather than the model's [] default
@@ -972,12 +970,9 @@ class ARAXMessenger:
         message_obj = Message().from_dict(message)
 
         #### (TRAPI 2.0 has a single QueryGraph class for both edges and paths)
-        #### TRAPI 2.0 set_interpretation COLLATE on an unpinned qnode is ARAX's is_set=true;
-        #### and no empty constraints list (the QNode model's default when there are none)
+        #### TRAPI 2.0: no empty constraints list (the QNode model's default when there are none)
         if message_obj.query_graph is not None and message_obj.query_graph.nodes is not None:
             for qnode in message_obj.query_graph.nodes.values():
-                if qnode.set_interpretation == 'COLLATE':
-                    qnode.is_set = True
                 if not qnode.constraints:
                     qnode.constraints = None
 

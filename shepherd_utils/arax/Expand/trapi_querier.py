@@ -539,6 +539,14 @@ class TRAPIQuerier:
         # Strip non-essential and 'empty' properties off of our qnodes and qedges
         stripped_qnodes = {qnode_key: self._strip_empty_properties(qnode)
                            for qnode_key, qnode in qg.nodes.items()}
+        # TRAPI 2.0 (Shepherd change): a query's set_interpretation COLLATE is
+        # ARAX's is_set, which ARAX honours itself (resultify), and which the
+        # request above already carries as is_set. It is not forwarded: ARAX
+        # never asked the KP to collate, and COLLATE is only valid on a qnode
+        # without ids, which a later hop's qnode has.
+        for stripped_qnode in stripped_qnodes.values():
+            if stripped_qnode.get("set_interpretation") == "COLLATE":
+                del stripped_qnode["set_interpretation"]
         stripped_qedges = {qedge_key: self._strip_empty_properties(qedge)
                            for qedge_key, qedge in qg.edges.items()}
 

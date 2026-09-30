@@ -25,7 +25,10 @@
 #     TRAPI 2.0.0 with translator_tom (schema + TOM's semantic checks), through a
 #     stand-in with reasoner-validator's interface, since reasoner-validator (pinned
 #     6.0.2) only knows TRAPI <= 1.6; the ValidatorFailed log entries it adds carry
-#     an RFC 3339 timestamp with offset, as 2.0 LogEntry requires
+#     an RFC 3339 timestamp with offset, as 2.0 LogEntry requires; the X view's
+#     stripped node/edge `attributes` and edge `sources` are omitted, not null
+#   - get_response takes an optional load_local (an async loader for a Shepherd
+#     response id), so the server can finish its stored form; default: upstream's
 # Everything else -- the branch order, the validator calls and result shapes,
 # the error tuples, the actor lookups, the attribute stripping, the size
 # strings -- is upstream's, including its quirks (DEC-1): the URL branch refers
@@ -452,7 +455,7 @@ def finish_ars_child_response(response_id, original_response_id, attribute_cachi
             for node_key, node in envelope['message']['knowledge_graph']['nodes'].items():
                 component_uuid = 'Z' + str(uuid.uuid4())
                 component_cache_put(component_uuid, node)
-                node['attributes'] = None
+                node.pop('attributes', None)  # upstream: set to None (TRAPI 2.0 has no nulls)
                 node['detail_lookup'] = component_uuid
         eprint(f"attribute_caching={attribute_caching}")
         if attribute_caching is True and 'edges' in envelope['message']['knowledge_graph'] and envelope['message']['knowledge_graph']['edges'] is not None:
@@ -464,8 +467,8 @@ def finish_ars_child_response(response_id, original_response_id, attribute_cachi
                 component_uuid = 'Z' + str(uuid.uuid4())
                 component_cache_put(component_uuid, edge)
                 edge['detail_lookup'] = component_uuid
-                edge['attributes'] = None
-                edge['sources'] = None
+                edge.pop('attributes', None)  # upstream: set to None (TRAPI 2.0 has no nulls)
+                edge.pop('sources', None)
 
         content_size = len(json.dumps(envelope,indent=2))
         envelope['validation_result']['size'] = _size_string(content_size)
@@ -476,11 +479,14 @@ def finish_ars_child_response(response_id, original_response_id, attribute_cachi
 
 ##################################################################################################
 #### Fetch a stored response (upstream's get_response control flow)
-async def get_response(response_id, *, fetch_url, fetch_ars, ars_host, run):
+async def get_response(response_id, *, fetch_url, fetch_ars, ars_host, run, load_local=None):
     """
     fetch_url(url) -> (status_code, content bytes); raises on a connection error
     fetch_ars(pk, trace) -> (status_code, content bytes) from Shepherd's ARS
     run(fn, *args) -> awaitable running a sync step off the event loop
+    load_local(response_id) -> awaitable returning a Shepherd response, finished
+        (validated and summarized, as load_and_finish_local_response does), or an
+        error tuple; by default run(load_and_finish_local_response, response_id)
     """
 
     if response_id is None:
@@ -585,6 +591,8 @@ async def get_response(response_id, *, fetch_url, fetch_ars, ars_host, run):
     #### the UI's X on one of them (DEC-19)
     if response_id.startswith('X'):
         response_id = response_id[1:]
+    if load_local is not None:
+        return await load_local(response_id)
     return await run(load_and_finish_local_response, response_id)
 
 

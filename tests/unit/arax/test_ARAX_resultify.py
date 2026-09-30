@@ -1246,14 +1246,9 @@ def test_trapi2_one_binding_per_qnode_and_qedge():
     }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the vendored QNode model still has the 1.x set_interpretation enum "
-    "(BATCH/ALL/MANY) and rejects COLLATE; remove once it is regenerated for 2.0",
-)
 def test_trapi2_collate_is_honoured_like_is_set():
     """set_interpretation COLLATE on an unpinned qnode (2.0) is ARAX's
-    is_set=true: ARAXMessenger.from_dict marks it, so resultify collates it."""
+    is_set=true (the QNode model reports is_set for it), so resultify collates it."""
     query_graph, knowledge_graph = _set_qg_and_kg()
     qg_dict = query_graph.to_dict()
     qg_dict["nodes"]["n01"].pop("is_set")
