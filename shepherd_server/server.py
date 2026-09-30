@@ -1,5 +1,6 @@
 """Shepherd ARA."""
 
+import asyncio
 import json
 import time
 import uuid
@@ -16,13 +17,14 @@ from starlette.responses import HTMLResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from shepherd_server.aras.aragorn import ARAGORN
-from shepherd_server.aras.arax import ARAX
+from shepherd_server.aras.arax import ARAX, arax_background_tasks
 from shepherd_server.aras.ars import ARS
 from shepherd_server.aras.bte import BTE
 from shepherd_server.aras.sipr import SIPR
 from shepherd_server.base_routes import base_router
 from shepherd_server.openapi import set_open_api_schema
 from shepherd_utils.broker import add_task
+from shepherd_utils.config import settings
 from shepherd_utils.db import (
     initialize_db,
     shutdown_db,
@@ -36,9 +38,14 @@ tracer = setup_tracer("shepherd-server")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handle db connection."""
+    """Handle db connection, and the ARAX API's background work."""
     await initialize_db()
+    arax_tasks = None
+    if settings.arax_background_tasks:
+        arax_tasks = asyncio.create_task(arax_background_tasks())
     yield
+    if arax_tasks is not None:
+        arax_tasks.cancel()
     await shutdown_db()
 
 

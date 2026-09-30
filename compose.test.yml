@@ -62,8 +62,15 @@ services:
     cpus: 4
     mem_limit: 10g
   arax:
-    cpus: 1
-    mem_limit: 3g
+    # Runs ARAX's whole plan in-process (DEC-14): one pool child per query, so
+    # cpus is how many queries run at once. A large multi-hop answer's KG and
+    # results live in one child, hence about 3 GB per child.
+    cpus: 4
+    mem_limit: 12g
+    environment:
+      # ARAX puts no ceiling on a query, and Expand waits up to 120 s per hop,
+      # so the shared 300 s default would kill slow multi-hop queries.
+      POOL_TASK_TIMEOUT_SEC: "900"
   arax_pathfinder:
     cpus: 6
     mem_limit: 22g

@@ -1,4 +1,5 @@
 import re
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -106,8 +107,27 @@ class Settings(BaseSettings):
     default_data_tier: int = 0
 
     # ARAX configs
+    # The server's ARAX API: fetch the autocomplete database at startup and
+    # refresh the meta-KG hourly (off in tests)
+    arax_background_tasks: bool = True
+    # No longer used: the arax worker runs ARAX in-process (DEC-14). Kept so an
+    # existing .env that still sets ARAX_URL keeps validating.
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
     arax_biolink_version: str = "v4.2.5"
+    # Where the ARAX port's BiolinkHelper caches the Biolink model and its
+    # lookup map (must be writable; upstream writes next to its own source
+    # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so
+    # the cache survives restarts; see arax_biolink_cache_path().
+    arax_biolink_cache_dir: str = ""
+    # ARAX's KP response cache (DEC-18): Expand's KP queries and Connect's results,
+    # kept in the data store and shared by every arax worker and the server. An
+    # entry lives this long after its last request; the arax worker re-queries
+    # entries older than 6 h in the background, as ARAX does.
+    arax_kp_cache_enabled: bool = True
+    arax_kp_cache_ttl_sec: int = 259200  # 3 days
+    # Seconds between KP-cache refresh passes (ARAX's background tasker runs one a
+    # minute, each capped at 60 s); 0 turns the refresh off
+    arax_kp_cache_refresh_interval_sec: int = 60
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
         "code/ARAX/KnowledgeSources/general_concepts.json"
@@ -120,6 +140,33 @@ class Settings(BaseSettings):
         "tier0-info-for-overlay_v1.0_{version}.sqlite"
     )
     arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+
+    # Data files for the ARAX port's other workers (Overlay, Infer, Expand, the
+    # UI-facing API), set up the same way as the pathfinder DBs above: one
+    # volume-mounted directory, downloaded on first startup by
+    # shepherd_utils.data_download.ensure_arax_dbs. The two files pathfinder
+    # already downloads (curie_ngd, tier0-info-for-overlay) are not repeated
+    # here -- use arax_pathfinder_sqlite_paths() for those.
+    # {version} in a filename template is filled from arax_tier_version.
+    # Each *_url, when set, replaces the default {arax_dbs_base_url}/{filename}
+    # for that one file (the defaults are placeholders until the real files are
+    # published).
+    arax_dbs_dir: str = "arax_dbs"
+    arax_tier_version: str = "tier0-20260621"
+    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
+    arax_curie_to_pmids_url: str = ""
+    arax_explainable_dtd_db_filename: str = (
+        "ExplainableDTD_v1.0_{version}-all_with_paths.db"
+    )
+    arax_explainable_dtd_url: str = ""
+    arax_autocomplete_sqlite_filename: str = "autocomplete_v1.0_{version}.sqlite"
+    arax_autocomplete_url: str = ""
+    arax_fda_approved_drugs_filename: str = "fda_approved_drugs_v1.0.pickle"
+    arax_fda_approved_drugs_url: str = ""
+    # COHD stays on its KG2.8.0 build, as in ARAX (DEC-6).
+    arax_cohd_db_filename: str = "COHDdatabase_v1.0_KG2.8.0.db"
+    arax_cohd_url: str = ""
     # End of ARAX configs
 
     pathfinder_redis_host: str = "host.docker.internal"
@@ -318,6 +365,13 @@ class Settings(BaseSettings):
     # override via POOL_MAX_TASKS_PER_CHILD; 0 disables recycling.
     pool_max_tasks_per_child: int = 100
 
+    # Spawn every process-pool child when the pool is created (and again when
+    # it is rebuilt) instead of on first use. A spawned child re-imports its
+    # worker module before it can run anything, which put ~1.2-1.5s on the
+    # first ARS response a fresh ars_premerge / ars_merge handled. Costs each
+    # child's idle memory from startup. Used by the pools that opt in.
+    pool_prewarm: bool = True
+
     # Event-loop liveness watchdog. A daemon thread force-exits the process if
     # the asyncio loop stops ticking for this long, turning any loop wedge (an
     # unexpected blocking call, a deadlock) into a Kubernetes restart instead of
@@ -367,12 +421,26 @@ class Settings(BaseSettings):
     ars_enabled_aras: str = ""
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
     # Node annotation runs the biothings_annotator package in-process (as
-    # upstream), in the ars_merge worker's pool children, which inherit the
-    # container's environment. The package's own env vars configure it, not
+    # upstream), in the ars_premerge or ars_merge worker's pool children (see
+    # ars_annotation_mode below), which inherit the container's environment. The package's own env vars configure it, not
     # a Shepherd setting: SERVICE_PROVIDER_API_HOST (the BioThings host) and
     # ANNOTATOR_QUERY_BACKEND ("biothings", the package default, or
     # "elasticsearch" with ELASTICSEARCH_CONNECTION) -- the same variable
     # upstream Relay's deployment sets (Relay PR #888).
+    # Where node annotation runs:
+    #   "merge"    -- upstream's placement: in ars_merge's post-process, over
+    #                 every merged version, under the parent's merge lock.
+    #   "premerge" -- in ars_premerge, over each ARA response once it has
+    #                 validated. Responses annotate in parallel and off the
+    #                 merge lock, so a slow annotation no longer holds up
+    #                 every later merge of the same query; the merge skips
+    #                 the stage. An annotation failure is logged on the
+    #                 response instead of marking the merged version E/444.
+    #   "off"      -- never annotate (e.g. when the graph already carries
+    #                 biothings_annotations attributes).
+    # Nodes already carrying a biothings_annotations attribute are skipped in
+    # every mode.
+    ars_annotation_mode: Literal["merge", "premerge", "off"] = "premerge"
     # AES key for decrypting stored notification-client secrets (upstream env
     # AES_MASTER_KEY). Empty disables signed notifications.
     aes_master_key: str = ""

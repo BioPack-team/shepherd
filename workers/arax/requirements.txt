@@ -1,0 +1,14 @@
+# The in-process ARAX port (shepherd_utils/arax/, DEC-14), pinned to ARAX's
+# versions where ARAX pins them.
+aiohttp
+biolink-helper-pkg==1.0.1
+bmt==1.4.8
+CacheControl==0.14.4
+catrax-pathfinder==2.5.0
+catrax-xcrg @ git+https://github.com/Translator-CATRAX/xCRG.git@c97da5349a432e29d7a6432ee272a8c1311de9da
+networkx>=3.0
+numpy>=1.24.0
+pandas
+python-dateutil
+requests
+requests-cache==1.2.1

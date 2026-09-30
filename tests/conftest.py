@@ -99,3 +99,17 @@ def redis_mock(monkeypatch):
         "lock": lock_redis,
         "logs": logs_redis,
     }
+
+
+@pytest.fixture(autouse=True)
+def arax_kp_cache_store(monkeypatch):
+    """ARAX's KP cache (DEC-18) in a fresh fakeredis per test, so a test never
+    reaches a real data store or sees another test's cached KP responses."""
+    import fakeredis as sync_fakeredis
+
+    store = sync_fakeredis.FakeRedis()
+    monkeypatch.setattr(
+        "shepherd_utils.arax.Expand.trapi_query_cacher._get_sync_data_db",
+        lambda: store,
+    )
+    return store
