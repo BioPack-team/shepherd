@@ -19,7 +19,15 @@ from shepherd_utils.data_download import (
 
 # ARAX's UI/OpenAPI/python-flask-server/openapi_server/openapi/openapi.yaml @ 9485431
 ARAX_VERSION = "1.6.2"  # info.version
-TRAPI_VERSION = "1.6.0"  # info.x-trapi.version
+# The port speaks TRAPI 2.0 (upstream: 1.6.0), the version of Shepherd's models
+# (shepherd_utils.trapi.SCHEMA_VERSION); ARAX stamps it on its envelopes.
+TRAPI_VERSION = "2.0.0"  # info.x-trapi.version
+# ARAX's own pinned Biolink version, kept rather than Shepherd's
+# (shepherd_utils.trapi.BIOLINK_VERSION): BiolinkHelper builds its category and
+# predicate hierarchies from it, which decide what Expand, the QG interpreter
+# and Resultify match, and the parity goldens were recorded with it. A
+# response leaving Shepherd carries Shepherd's biolink_version (the envelope is
+# added on delivery, finalize_response / finish_query).
 BIOLINK_VERSION = "4.2.5"  # info.x-translator.biolink-version
 
 

@@ -1,6 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Overlay/compute_jaccard.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type; upstream sets none, so they take compute_ngd's values for ARAX's virtual edges (statistical_association / automated_agent)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This class will add a virtual edge to the KG decorated with the Jaccard index value on it.
 # relevant issue is #611
@@ -125,7 +126,8 @@ class ComputeJaccard:
                         EdgeAttribute(original_attribute_name=None, value=True, attribute_type_id="EDAM-DATA:1772", attribute_source="infores:arax", value_type_id="metatype:Boolean", value_url=None, description="This edge is a container for a computed value between two nodes that is not directly attachable to other edges.")
                     ]
                     edge = Edge(predicate=edge_type, subject=subject_key, object=object_key,
-                                attributes=edge_attribute_list, sources=retrieval_source)
+                                attributes=edge_attribute_list, sources=retrieval_source,
+                                knowledge_level="statistical_association", agent_type="automated_agent")
                     edge.qedge_keys = qedge_keys
                     message.knowledge_graph.edges[id] = edge
 

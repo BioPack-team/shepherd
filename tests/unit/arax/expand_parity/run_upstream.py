@@ -1,9 +1,16 @@
-"""Regenerate goldens.json.gz by running the same cases against upstream ARAX.
+"""Record goldens_trapi16.json.gz by running the cases against upstream ARAX.
 
 Usage: PYTHONHASHSEED=0 RTX_CODE=/path/to/RTX/code python run_upstream.py
 Needs an RTX checkout at the commit pinned in shepherd_utils/arax/README.md,
 ARAX's Python requirements, a dummy code/config_secrets_local.json and
 code/maturity_override.txt ("development") so RTXConfiguration starts offline.
+
+Upstream speaks TRAPI 1.6, so it runs on the recorded 1.6 inputs
+(inputs_trapi16.json.gz) against the mock Retriever's 1.6 mode.
+This records upstream's TRAPI 1.6 behaviour, the goldens_trapi16.json.gz kept
+as recorded. The parity test compares against goldens.json.gz, their TRAPI
+2.0 translation: after recording, run ``python ../trapi2_goldens.py`` (in the
+Shepherd venv) to regenerate it.
 """
 
 import gzip, json, os, sys, warnings
@@ -15,6 +22,7 @@ sys.path.insert(0, HERE)
 for p in ("", "ARAX/ARAXQuery", "ARAX/ARAXQuery/Expand"):
     sys.path.insert(0, os.path.join(RTX, p))
 
+os.environ["MOCK_RETRIEVER_TRAPI"] = "1.6"
 import mock_retriever  # noqa: E402
 
 os.environ["EXPAND_PARITY_MOCK_URL"] = f"http://127.0.0.1:{mock_retriever.start()}"
@@ -65,7 +73,15 @@ for mod in list(sys.modules.values()):
         cls._load_cached_kp_info = lambda self: (META, dict(URLS), set(), set())
 F.patch_synonymizer_classes()
 
-out = run_all(ARAXResponse, ARAXMessenger, ARAXExpander)
-with gzip.open(os.path.join(HERE, "goldens.json.gz"), "wt") as f:
+sys.path.insert(0, os.path.join(HERE, ".."))
+from trapi2_goldens import load_inputs16  # noqa: E402
+
+out = run_all(
+    ARAXResponse,
+    ARAXMessenger,
+    ARAXExpander,
+    cases=load_inputs16("expand_parity")["CASES"],
+)
+with gzip.open(os.path.join(HERE, "goldens_trapi16.json.gz"), "wt") as f:
     json.dump(out, f, sort_keys=True, default=str)
 print("wrote goldens for", len(out), "cases")

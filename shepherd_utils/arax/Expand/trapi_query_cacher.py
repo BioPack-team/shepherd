@@ -20,6 +20,9 @@
 #     SQLite is local; a transient Redis error should not fail the KP query)
 #   - total_cache_size_MiB is the stored (compressed) response size
 #   - main(): the --query_number test query (hard-wired KP URLs) is dropped
+#   - TRAPI 2.0: the key is still the sha256 of {url, body}, so 2.0 request bodies (constraints
+#     object, parameters) key differently from 1.x ones; a parameters.bypass_cache flag forwarded
+#     to the KP is left out of the key, so a bypassing query refreshes the same entry as upstream's
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 
 """
@@ -259,6 +262,12 @@ class KPQueryCacher:
                 if 'categories' in node:
                     if node['categories'] is not None:
                         node['categories'] = sorted(node['categories'])
+
+        # TRAPI 2.0: a forwarded parameters.bypass_cache is not part of the key (the body sent is unchanged)
+        body = query_object.get('query_object')
+        if isinstance(body, dict) and isinstance(body.get('parameters'), dict) and 'bypass_cache' in body['parameters']:
+            body = dict(body, parameters={name: value for name, value in body['parameters'].items() if name != 'bypass_cache'})
+            query_object = dict(query_object, query_object=body)
 
         return query_object
 

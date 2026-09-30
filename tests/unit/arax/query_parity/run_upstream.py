@@ -1,10 +1,17 @@
-"""Regenerate goldens.json.gz by running the cases through upstream ARAXQuery.
+"""Record goldens_trapi16.json.gz by running the cases through upstream ARAXQuery.
 
 Usage: PYTHONHASHSEED=0 RTX_CODE=/path/to/RTX/code python run_upstream.py
 Needs the same RTX checkout and offline config as expand_parity/run_upstream.py.
 ARAX's query tracker and response store (MySQL/S3) are replaced by stubs, as
 is the legacy creativeCRG module (dead code, not exercised by any case), and
 ARAX's KP cache always misses.
+
+Upstream speaks TRAPI 1.6, so it runs on the recorded 1.6 inputs
+(inputs_trapi16.json.gz) against the mock Retriever's 1.6 mode.
+This records upstream's TRAPI 1.6 behaviour, the goldens_trapi16.json.gz kept
+as recorded. The parity test compares against goldens.json.gz, their TRAPI
+2.0 translation: after recording, run ``python ../trapi2_goldens.py`` (in the
+Shepherd venv) to regenerate it.
 """
 
 import gzip, json, os, sys, types, warnings
@@ -16,6 +23,7 @@ sys.path.insert(0, HERE)
 for p in ("", "ARAX/ARAXQuery", "ARAX/ARAXQuery/Expand"):
     sys.path.insert(0, os.path.join(RTX, p))
 
+os.environ["MOCK_RETRIEVER_TRAPI"] = "1.6"
 import setup_common as S  # noqa: E402
 
 KS = os.path.join(RTX, "ARAX", "KnowledgeSources")
@@ -135,9 +143,10 @@ for mod in list(sys.modules.values()):
         n_cachers += 1
 assert n_cachers >= 2, n_cachers
 
-from query_cases import CASES  # noqa: E402
+sys.path.insert(0, os.path.join(HERE, ".."))
+from trapi2_goldens import load_inputs16  # noqa: E402
 
-out = run_all(lambda: ARAXQuery(), CASES)
-with gzip.open(os.path.join(HERE, "goldens.json.gz"), "wt") as f:
+out = run_all(lambda: ARAXQuery(), load_inputs16("query_parity")["CASES"])
+with gzip.open(os.path.join(HERE, "goldens_trapi16.json.gz"), "wt") as f:
     json.dump(out, f, sort_keys=True, default=str)
 print("wrote goldens for", len(out), "cases")

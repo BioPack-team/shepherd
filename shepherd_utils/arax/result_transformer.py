@@ -1,6 +1,10 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/result_transformer.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - TRAPI 2.0 bindings: one NodeBinding / EdgeBinding per qnode / qedge, read and
+#     rebuilt through their `ids` (a binding pruned to no ids stays in memory as an
+#     empty one, like upstream's empty list; ARAX_query drops it from the Response);
+#     AuxiliaryGraph has no `attributes` in 2.0
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import os
 import sys
@@ -12,6 +16,8 @@ from shepherd_utils.arax.ARAX_resultify import analyze_message_get_referenced_ID
 from shepherd_utils.arax.openapi_server.models.auxiliary_graph import AuxiliaryGraph
 from shepherd_utils.arax.openapi_server.models.attribute import Attribute
 from shepherd_utils.arax.openapi_server.models.edge import Edge
+from shepherd_utils.arax.openapi_server.models.edge_binding import EdgeBinding
+from shepherd_utils.arax.openapi_server.models.node_binding import NodeBinding
 from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
 
 
@@ -121,7 +127,7 @@ class ResultTransformer:
             for virtual_qedge_key in virtual_qedge_keys:
                 virtual_qedge = message.query_graph.edges[virtual_qedge_key]
                 option_group_id = virtual_qedge.option_group_id
-                virtual_edge_keys = {edge_binding.id for edge_binding in edge_bindings[virtual_qedge_key]}
+                virtual_edge_keys = set(edge_bindings[virtual_qedge_key].ids)
                 virtual_edge_groups_dict[option_group_id] = \
                     virtual_edge_groups_dict[option_group_id].union(virtual_edge_keys)
                 # Note: All edges not belonging to an option group are lumped together under 'None' key
@@ -139,7 +145,7 @@ class ResultTransformer:
                 aux_graph_key = f"aux_graph_{aux_graph_id_str}{group_id_str}"
                 # Create and save the aux graph in the central location (on Message), if it doesn't yet exist
                 if aux_graph_key not in message.auxiliary_graphs:
-                    message.auxiliary_graphs[aux_graph_key] = AuxiliaryGraph(edges=list(group_edge_keys),attributes=[])
+                    message.auxiliary_graphs[aux_graph_key] = AuxiliaryGraph(edges=list(group_edge_keys))
 
                 # Refer to this aux graph from the current Result or Edge (if this is an Infer support graph)
                 if group_id and group_id.startswith("creative_"):
@@ -168,9 +174,9 @@ class ResultTransformer:
                         return
                     else:
                         inferred_qedge_key = inferred_qedge_keys[0]
-                        inferred_edge_keys = {edge_binding.id for edge_binding in
-                                              first_analysis.edge_bindings[inferred_qedge_key]
-                                              if group_id_prefix in edge_binding.id}
+                        inferred_edge_keys = {edge_id for edge_id in
+                                              first_analysis.edge_bindings[inferred_qedge_key].ids
+                                              if group_id_prefix in edge_id}
                         # Refer to the support graph from the proper edge(s)
                         for inferred_edge_key in inferred_edge_keys:
                             inferred_edge = kg_edges[inferred_edge_key]
@@ -204,15 +210,15 @@ class ResultTransformer:
             # Delete bindings for any subclass parent nodes that are now orphans (they'll still be in the KG)
             qedge_keys_in_result = set(first_analysis.edge_bindings)  # May not include 'optional' edges in QG
             for non_orphan_qnode_key in non_orphan_qnode_keys:
-                node_keys = {binding.id for binding in node_bindings[non_orphan_qnode_key]}
+                node_keys = set(node_bindings[non_orphan_qnode_key].ids)
                 node_keys_used_by_result_edges = {node_key for qedge_key in qedge_keys_in_result
-                                                  for binding in first_analysis.edge_bindings[qedge_key]
-                                                  for node_key in {kg_edges[binding.id].subject,
-                                                                   kg_edges[binding.id].object}}
+                                                  for edge_id in first_analysis.edge_bindings[qedge_key].ids
+                                                  for node_key in {kg_edges[edge_id].subject,
+                                                                   kg_edges[edge_id].object}}
                 orphan_node_keys = node_keys.difference(node_keys_used_by_result_edges)
-                non_orphan_node_bindings = [binding for binding in node_bindings[non_orphan_qnode_key]
-                                            if binding.id not in orphan_node_keys]
-                node_bindings[non_orphan_qnode_key] = non_orphan_node_bindings
+                non_orphan_node_ids = [node_id for node_id in node_bindings[non_orphan_qnode_key].ids
+                                       if node_id not in orphan_node_keys]
+                node_bindings[non_orphan_qnode_key] = NodeBinding(ids=non_orphan_node_ids)
 
 
             # Creative-mode-only NGD-inf filter.
@@ -237,8 +243,9 @@ class ResultTransformer:
             if is_creative_qg:
                 excludable_edge_ids: set[str] = set()
                 for inferred_qedge_key in inferred_qedge_keys:
-                    for binding in first_analysis.edge_bindings.get(inferred_qedge_key, []):
-                        inferred_edge = kg_edges.get(binding.id)
+                    inferred_qedge_binding = first_analysis.edge_bindings.get(inferred_qedge_key)
+                    for binding_id in (inferred_qedge_binding.ids if inferred_qedge_binding else []):
+                        inferred_edge = kg_edges.get(binding_id)
                         if inferred_edge is None:
                             continue
                         sg_keys: list[str] = []
@@ -248,7 +255,7 @@ class ResultTransformer:
                                     sg_keys.append(str(v))
                         if not sg_keys:
                             # case (a): inferred edge has no support graph at all
-                            excludable_edge_ids.add(binding.id)
+                            excludable_edge_ids.add(binding_id)
                             continue
                         # case (b): a support graph breaks under inf-NGD removal
                         for sg_key in sg_keys:
@@ -259,16 +266,16 @@ class ResultTransformer:
                                     aux, kg_edges,
                                     src=inferred_edge.subject,
                                     dst=inferred_edge.object):
-                                excludable_edge_ids.add(binding.id)
+                                excludable_edge_ids.add(binding_id)
                                 break
 
                 # Tentatively prune excludable bindings from every qedge
-                surviving_bindings = {qk: [b for b in bs if b.id not in excludable_edge_ids]
-                                      for qk, bs in first_analysis.edge_bindings.items()}
+                surviving_bindings = {qk: EdgeBinding(ids=[i for i in b.ids if i not in excludable_edge_ids])
+                                      for qk, b in first_analysis.edge_bindings.items()}
 
                 # Cover check: drop the result if any original qedge has no
                 # surviving binding (then it no longer answers the user's QG)
-                if not all(surviving_bindings.get(qk) for qk in original_qedge_keys):
+                if not all(surviving_bindings.get(qk) and surviving_bindings[qk].ids for qk in original_qedge_keys):
                     continue
 
                 first_analysis.edge_bindings = surviving_bindings
@@ -276,16 +283,16 @@ class ResultTransformer:
                 # Re-prune any node bindings that no surviving edge references
                 qedge_keys_after_filter = set(surviving_bindings)
                 for non_orphan_qnode_key in non_orphan_qnode_keys:
-                    node_keys = {b.id for b in node_bindings[non_orphan_qnode_key]}
+                    node_keys = set(node_bindings[non_orphan_qnode_key].ids)
                     node_keys_used = {nk
                                       for qk in qedge_keys_after_filter
-                                      for binding in surviving_bindings[qk]
-                                      for nk in (kg_edges[binding.id].subject,
-                                                 kg_edges[binding.id].object)}
+                                      for binding_id in surviving_bindings[qk].ids
+                                      for nk in (kg_edges[binding_id].subject,
+                                                 kg_edges[binding_id].object)}
                     orphan_node_keys = node_keys - node_keys_used
-                    node_bindings[non_orphan_qnode_key] = [
-                        b for b in node_bindings[non_orphan_qnode_key]
-                        if b.id not in orphan_node_keys]
+                    node_bindings[non_orphan_qnode_key] = NodeBinding(ids=[
+                        node_id for node_id in node_bindings[non_orphan_qnode_key].ids
+                        if node_id not in orphan_node_keys])
 
                 new_results.append(result)
             else:

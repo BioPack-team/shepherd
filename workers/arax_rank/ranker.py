@@ -3,8 +3,21 @@ ARAX Ranker Module
 
 A behavior-for-behavior port of RTX/code/ARAX/ARAXQuery/ARAX_ranker.py
 (RTXteam/RTX @ 9485431), adapted only in that it reads and writes Shepherd's
-dict-based TRAPI envelope instead of ARAX's openapi_server model objects.
+dict-based TRAPI 2.0 envelope instead of ARAX's openapi_server model objects.
 See docs/ARAX_PORT_BASELINE.md (DEC-1, DEC-8, RNK-*).
+
+What TRAPI 2.0 moved (the data is read from its new place; the logic is
+ARAX's):
+
+- An EdgeBinding is one ``{"ids": [...]}`` object per qedge, not a list of
+  ``{"id"}`` objects; the ids are taken in the same order.
+- The manual-agent override reads the top-level ``agent_type`` Edge property,
+  not a ``biolink:agent_type`` attribute. (ARAX reads nothing else from
+  ``knowledge_level`` / ``agent_type``.)
+- An empty ``analyses`` / ``edge_bindings`` is omitted in 2.0; a result or
+  analysis without them is ranked as ARAX ranks one whose container is empty.
+  A result with no analyses has nowhere to keep its score, so it only sorts
+  it and goes into ``row_data``.
 
 Parity is deliberate, including ARAX's quirks; do not "fix" them here without
 recording a deviation in the baseline doc:
@@ -75,11 +88,13 @@ def _process_valid_edge_ids(
         results[qedge_key]["scores"] = []
 
         same_edge_ids: Dict[str, List[float]] = {}
-        for edge_binding in edge_info["edge_binding_list"]:
-            edge_id = edge_binding["id"].split(":", 2)[-1]
+        # TRAPI 2.0: one EdgeBinding per qedge, its "ids" in the order of
+        # ARAX's 1.x list of EdgeBinding objects
+        for kg_edge_id in edge_info["edge_binding"]["ids"]:
+            edge_id = kg_edge_id.split(":", 2)[-1]
             if edge_id not in same_edge_ids:
                 same_edge_ids[edge_id] = []
-            same_edge_ids[edge_id].append(edge_confidences[edge_binding["id"]])
+            same_edge_ids[edge_id].append(edge_confidences[kg_edge_id])
 
         # Take the average of the scores for each edge id
         for edge_id, scores in same_edge_ids.items():
@@ -97,13 +112,15 @@ def _get_weighted_graph_networkx_from_result_graph(
     }
 
     valid_edge_id_info = {}
-    for analysis in result["analyses"]:
-        for qedge_key, edge_binding_list in analysis["edge_bindings"].items():
+    # TRAPI 2.0 omits an empty analyses list / edge_bindings map (minItems 1),
+    # which is what a 1.x result or analysis that bound no edges becomes
+    for analysis in result.get("analyses") or ():
+        for qedge_key, edge_binding in (analysis.get("edge_bindings") or {}).items():
             if "creative_" not in qedge_key:  # ignore all xDTD/xCRG supported edges
                 qedge_tuple = qg_edge_key_to_edge_tuple[qedge_key]
                 valid_edge_id_info[qedge_key] = {
                     "edge_tuple": qedge_tuple,
-                    "edge_binding_list": edge_binding_list,
+                    "edge_binding": edge_binding,
                 }
 
     processed_valid_edge_ids = _process_valid_edge_ids(
@@ -605,16 +622,15 @@ class ARAXRanker:
                 edge_attributes = {
                     x.get("original_attribute_name"): x.get("value") for x in attributes
                 }
-                for edge_attribute in attributes:
-                    if (
-                        edge_attribute.get("attribute_type_id") == "biolink:agent_type"
-                        and edge_attribute.get("value") == "manual_agent"
-                    ):
-                        edge_attributes["confidence"] = EDGE_CONFIDENCE_MANUAL_AGENT
-                        self.edge_confidences[edge_key] = EDGE_CONFIDENCE_MANUAL_AGENT
-                        break
             else:
                 edge_attributes = {}
+            # ARAX reads a biolink:agent_type attribute; TRAPI 2.0 makes
+            # agent_type a required top-level Edge property instead. (In 1.x an
+            # edge with that attribute always had attributes, so the check no
+            # longer needs to sit inside the attributes branch.)
+            if edge.get("agent_type") == "manual_agent":
+                edge_attributes["confidence"] = EDGE_CONFIDENCE_MANUAL_AGENT
+                self.edge_confidences[edge_key] = EDGE_CONFIDENCE_MANUAL_AGENT
 
             if edge_attributes.get("confidence", None):
                 self.edge_confidences[edge_key] = edge_attributes["confidence"]
@@ -646,15 +662,27 @@ class ARAXRanker:
 
         result_scores = sum(ranks_list) / float(len(ranks_list))
 
+        # A TRAPI 2.0 result may have no analyses (the 2.0 form of a 1.x result
+        # whose one analysis bound no edges). It is scored like that result,
+        # but with no Analysis to hold its score, the score only sorts it and
+        # goes into its row_data. An explicit (invalid) "analyses": [] still
+        # raises IndexError, as in ARAX.
+        score_holders: Dict[int, Dict] = {}
+
+        def first_analysis(result: Dict) -> Dict:
+            if "analyses" not in result:
+                return score_holders.setdefault(id(result), {})
+            return result["analyses"][0]  # only ever one Analysis per Result
+
         for result, score in zip(results, result_scores):
-            result["analyses"][0]["score"] = score  # only ever one Analysis per Result
+            first_analysis(result)["score"] = score
 
             # Make all scores at least 0.001
-            if result["analyses"][0]["score"] < 0.001:
-                result["analyses"][0]["score"] += 0.001
+            if first_analysis(result)["score"] < 0.001:
+                first_analysis(result)["score"] += 0.001
 
             # Round to reasonable precision. Keep only 3 digits after the decimal
-            score = int(result["analyses"][0]["score"] * 1000 + 0.5) / 1000.0
+            score = int(first_analysis(result)["score"] * 1000 + 0.5) / 1000.0
 
             result["row_data"] = [
                 score,
@@ -665,13 +693,13 @@ class ARAXRanker:
         envelope["table_column_names"] = ["score", "essence", "essence_category"]
 
         # Re-sort the final results
-        results.sort(key=lambda result: result["analyses"][0]["score"], reverse=True)
+        results.sort(key=lambda result: first_analysis(result)["score"], reverse=True)
         # break ties and preserve order, round to 3 digits and make sure none are < 0
-        scores_with_ties = [result["analyses"][0]["score"] for result in results]
+        scores_with_ties = [first_analysis(result)["score"] for result in results]
         scores_without_ties = _break_ties_and_preserve_order(scores_with_ties)
         for result, score in zip(results, scores_without_ties):
             score = _to_builtin(score)
-            result["analyses"][0]["score"] = score
+            first_analysis(result)["score"] = score
             result["row_data"][0] = score
         logger.debug("Results have been ranked and sorted")
 

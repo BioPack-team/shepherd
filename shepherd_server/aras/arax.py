@@ -17,6 +17,7 @@ from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
 
 import httpx
+import orjson
 
 from fastapi import FastAPI, Request, Response
 from fastapi.openapi.docs import (
@@ -28,6 +29,7 @@ from starlette.responses import HTMLResponse
 from shepherd_server.base_routes import (
     QUERY_BODY_ERROR_CODE,
     QUERY_ERROR_CODE,
+    QUERY_INVALID_CODE,
     QUERY_TIMEOUT_CODE,
     QUERY_UNAVAILABLE_CODE,
     TERMINAL_QUERY_STATES,
@@ -50,6 +52,7 @@ from shepherd_utils.arax_progress import is_done, read_progress
 from shepherd_utils.config import settings
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.db import get_logs, get_message, get_query_state
+from shepherd_utils.trapi import TRAPIRequestError, finalize_response, validate_query
 
 ARAX = FastAPI(title="Shepherd ARAX")
 
@@ -86,25 +89,71 @@ def is_arax_envelope(response: dict) -> bool:
     return isinstance(tool_version, str) and tool_version.startswith("ARAX ")
 
 
+def validate_arax_query(query: dict) -> None:
+    """Validate the TRAPI 2.0 members of a body posted to ARAX's ``/query``.
+
+    ARAX's ``/query`` also takes its own members (``operations``,
+    ``stream_progress``, ``query_options``, ``return_minimal_metadata``, ...),
+    which the 2.0 Query allows as additional properties, and a body with only
+    ARAXi ``operations`` and no ``message`` (TRAPI's Query requires one):
+    ARAX answers a body with neither itself (``NoQueryMessageOrOperations``).
+    So a body without ``message`` is validated as if it had an empty one. The
+    rest is ``validate_query``: TOM's model (``workflow`` left to ARAX,
+    DEC-17), and a 400 for a 1.x spelling (top-level ``log_level`` /
+    ``bypass_cache``, ``qualifier_constraints`` / ``attribute_constraints``,
+    ``intermediate_categories``), as for every other ARA.
+
+    Raises:
+        TRAPIRequestError: with a client-safe description of the problem.
+    """
+    if "message" in query:
+        validate_query(query)
+    else:
+        validate_query({**query, "message": {}})
+
+
+async def parse_arax_query_body(request: Request) -> dict:
+    """``parse_query_body``, with ``validate_arax_query``'s rules.
+
+    Raises ``QueryBodyError`` / ``TRAPIRequestError`` as ``parse_query_body``.
+    """
+    try:
+        return await parse_query_body(request)
+    except TRAPIRequestError:
+        # parse_query_body got as far as a JSON object; Starlette keeps the
+        # body, so read it again for ARAX's message-less bodies
+        query = orjson.loads(await request.body())
+        if "message" in query:
+            raise
+        validate_arax_query(query)
+        return query
+
+
 async def arax_final_response(
-    query_state: tuple, logger: logging.Logger
+    query_state: tuple, logger: logging.Logger, query: dict
 ) -> tuple[Optional[dict], int]:
     """The finished query's response and the HTTP status to answer with.
 
-    A response ARAX produced carries ARAX's own log and (from the
-    non-streaming path) ``http_status``, and is returned as ARAX's ``/query``
-    returns it. Anything else (an error response
-    the worker wrote because ARAX could not answer, or a pathfinder query's
-    response) is finished the way Shepherd's generic ``/query`` does it.
+    The stored response is envelope-free (``save_response``), so it is
+    finished as a TRAPI 2.0 Response: ``schema_version``,
+    ``biolink_version``, the query's ``parameters`` and the query's logs --
+    for an ARAX query, ARAX's own log, which the arax worker put in the log
+    store -- are added (``finalize_response``).
+
+    A response ARAX produced carries (from the non-streaming path)
+    ``http_status``, and is answered with it, as ARAX's ``/query`` does.
+    Anything else (an error response the worker wrote because ARAX could not
+    answer, or a pathfinder query's response) is finished the way Shepherd's
+    generic ``/query`` does it.
     """
     response_id = query_state[7]
     status = query_state[10]
     response = await get_message(response_id, logger)
     if response is None:
         return None, QUERY_ERROR_CODE
+    finalize_response(response, query, await get_logs(response_id, logger))
     if is_arax_envelope(response):
         return response, response.get("http_status", 200)
-    response["logs"] = await get_logs(response_id, logger)
     apply_query_status(response, status)
     return response, query_status_code(status)
 
@@ -127,7 +176,7 @@ async def arax_sync_query(query: dict) -> Response:
             content={"status": "TIMEOUT", "description": "Query timeout"},
             status_code=QUERY_TIMEOUT_CODE,
         )
-    response, status_code = await arax_final_response(query_state, logger)
+    response, status_code = await arax_final_response(query_state, logger, query)
     if response is None:
         return ORJSONResponse(
             content={"status": "ERROR", "description": "Unable to get response"},
@@ -137,7 +186,11 @@ async def arax_sync_query(query: dict) -> Response:
 
 
 async def stream_query_progress(
-    query_id: str, response_id: str, logger: logging.Logger, timeout: float
+    query_id: str,
+    response_id: str,
+    logger: logging.Logger,
+    timeout: float,
+    query: dict,
 ) -> AsyncIterator[str]:
     """ARAX's ``stream_progress`` NDJSON (API-02), relayed from the worker.
 
@@ -193,7 +246,7 @@ async def stream_query_progress(
     if query_state is None:
         yield _error_line("Query timeout", status="TIMEOUT")
         return
-    response, _ = await arax_final_response(query_state, logger)
+    response, _ = await arax_final_response(query_state, logger, query)
     if response is None:
         yield _error_line("Unable to get response")
         return
@@ -210,7 +263,9 @@ async def arax_stream_query(query: dict) -> Response:
         )
     # ARAX streams with HTTP 200 whatever happens; the outcome is in the body
     return StreamingResponse(
-        stream_query_progress(query_id, response_id, logger, query_timeout(query)),
+        stream_query_progress(
+            query_id, response_id, logger, query_timeout(query), query
+        ),
         media_type="text/event-stream",
     )
 
@@ -218,11 +273,16 @@ async def arax_stream_query(query: dict) -> Response:
 @ARAX.post("/query", openapi_extra=query_openapi_extra())
 async def sync_query(request: Request) -> Response:
     try:
-        query = await parse_query_body(request)
+        query = await parse_arax_query_body(request)
     except QueryBodyError as e:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
             status_code=QUERY_BODY_ERROR_CODE,
+        )
+    except TRAPIRequestError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_INVALID_CODE,
         )
     if query.get("stream_progress", False):
         return await arax_stream_query(query)
@@ -301,6 +361,43 @@ def _arax_json(result) -> Response:
     )
 
 
+def finish_stored_response(response_id: str, parameters: dict, logs: list):
+    """``response_lookup.load_and_finish_local_response`` for a response in
+    Shepherd's stored form (runs in a pool child).
+
+    A stored response has no delivery envelope (``save_response``), so it is
+    finished as a TRAPI 2.0 Response (``finalize_response``: versions, the
+    query's ``parameters``, the query's logs) before ARAX validates and
+    summarizes it, as it is when delivered.
+    """
+    from shepherd_utils.arax.ResponseCache import response_lookup
+    from shepherd_utils.db import get_message_sync
+
+    try:
+        envelope = get_message_sync(response_id)
+    except KeyError:
+        return response_lookup.not_found(response_id)
+    if not isinstance(envelope, dict) or "message" not in envelope:
+        return response_lookup.not_found(response_id)
+    finalize_response(envelope, {"parameters": parameters}, logs)
+    return response_lookup.finish_local_response(envelope)
+
+
+async def _run_response_step(fn, *args):
+    """``get_response``'s ``run``: its local-response step reads Shepherd's
+    stored form, so it becomes ``finish_stored_response``, with the query's
+    parameters and logs read here (async). The other steps run as given."""
+    from shepherd_utils.arax.ResponseCache import response_lookup
+
+    if fn is response_lookup.load_and_finish_local_response:
+        (response_id,) = args
+        logger = logging.getLogger("shepherd.arax.response")
+        parameters = await arax_status.query_parameters_for_response(response_id)
+        logs = await get_logs(response_id, logger)
+        return await _run_in_pool(finish_stored_response, response_id, parameters, logs)
+    return await _run_in_pool(fn, *args)
+
+
 @ARAX.get("/response/{response_id}")
 async def get_response(response_id: str) -> Response:
     """A stored response: Shepherd's, or an ARS message from Shepherd's ARS (API-07)."""
@@ -311,7 +408,7 @@ async def get_response(response_id: str) -> Response:
         fetch_url=_fetch_url,
         fetch_ars=_fetch_ars,
         ars_host=ars_host(),
-        run=_run_in_pool,
+        run=_run_response_step,
     )
     return _arax_json(result)
 

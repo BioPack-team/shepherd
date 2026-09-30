@@ -2,7 +2,11 @@
 
 Copied from RTXteam/RTX @ 9485431, code/ARAX/test/test_ARAX_resultify.py:
 every test that runs offline (no live KPs / ARAXQuery), unchanged apart from
-imports and the envelope setup in ``_run_resultify_directly`` (noted inline).
+imports and the envelope setup in ``_run_resultify_directly`` (noted inline),
+and reading TRAPI 2.0 bindings: one NodeBinding / EdgeBinding per qnode / qedge,
+whose ``ids`` list the bound KG nodes / edges (upstream: a list of bindings,
+each with one ``id``). The tests after ``test_multi_node_edgeless_qg`` are
+Shepherd's, for the 2.0 binding shapes and set_interpretation COLLATE.
 """
 
 from typing import List, Dict, Tuple, Set, Iterable
@@ -23,6 +27,10 @@ from shepherd_utils.arax.openapi_server.models.result import Result
 from shepherd_utils.arax.openapi_server.models.message import Message
 from shepherd_utils.arax.openapi_server.models.response import Response
 from shepherd_utils.arax.openapi_server.models.retrieval_source import RetrievalSource
+from shepherd_utils.arax.openapi_server.models.node_binding import NodeBinding
+from shepherd_utils.arax.openapi_server.models.edge_binding import EdgeBinding
+from shepherd_utils.arax.openapi_server.models.q_path import QPath
+from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 
 DIABETES_CURIE = "MONDO:0005015"
 TYPE_1_DIABETES_CURIE = "MONDO:0005147"
@@ -101,20 +109,20 @@ def _print_results_for_debug(message: Message):
     kg = message.knowledge_graph
     for result in message.results:
         print(result.essence)
-        for qnode_key, node_bindings_list in result.node_bindings.items():
+        for qnode_key, node_binding in result.node_bindings.items():
             qnode = qg.nodes[qnode_key]
             print(
                 f"  qnode {qnode_key}{f' (option group {qnode.option_group_id})' if qnode.option_group_id else ''}:"
             )
-            for node_binding in node_bindings_list:
-                print(f"    {node_binding.id} {kg.nodes[node_binding.id].name}")
-        for qedge_key, edge_bindings_list in result.analyses[0].edge_bindings.items():
+            for node_id in node_binding.ids:
+                print(f"    {node_id} {kg.nodes[node_id].name}")
+        for qedge_key, edge_binding in result.analyses[0].edge_bindings.items():
             qedge = qg.edges[qedge_key]
             print(
                 f"  qedge {qedge_key}{f' (option group {qedge.option_group_id})' if qedge.option_group_id else ''}:"
             )
-            for edge_binding in edge_bindings_list:
-                print(f"    {edge_binding.id}")
+            for edge_id in edge_binding.ids:
+                print(f"    {edge_id}")
     # Display the query graph
     import graphviz
 
@@ -139,17 +147,14 @@ def _print_results_for_debug(message: Message):
 
 def _get_result_node_keys_by_qg_key(result: Result) -> Dict[str, Set[str]]:
     return {
-        qnode_key: {node_binding.id for node_binding in result.node_bindings[qnode_key]}
+        qnode_key: set(result.node_bindings[qnode_key].ids)
         for qnode_key in result.node_bindings
     }
 
 
 def _get_result_edge_keys_by_qg_key(result: Result) -> Dict[str, Set[str]]:
     return {
-        qedge_key: {
-            edge_binding.id
-            for edge_binding in result.analyses[0].edge_bindings[qedge_key]
-        }
+        qedge_key: set(result.analyses[0].edge_bindings[qedge_key].ids)
         for qedge_key in result.analyses[0].edge_bindings
     }
 
@@ -1048,15 +1053,9 @@ def test_issue833_extraneous_intermediate_nodes():
     response, message = _run_resultify_directly(query_graph, knowledge_graph)
     assert response.status == "OK"
     for result in message.results:
-        result_n01_nodes = {
-            node_binding.id for node_binding in result.node_bindings["n01"]
-        }
-        result_e01_edges = {
-            edge_binding.id for edge_binding in result.analyses[0].edge_bindings["e01"]
-        }
-        result_e00_edges = {
-            edge_binding.id for edge_binding in result.analyses[0].edge_bindings["e00"]
-        }
+        result_n01_nodes = set(result.node_bindings["n01"].ids)
+        result_e01_edges = set(result.analyses[0].edge_bindings["e01"].ids)
+        result_e00_edges = set(result.analyses[0].edge_bindings["e00"].ids)
         for n01_node_key in result_n01_nodes:
             kg_edges_using_this_node = _get_kg_edge_keys_using_node(
                 n01_node_key, message.knowledge_graph
@@ -1189,3 +1188,156 @@ def test_multi_node_edgeless_qg():
     response, message = _run_resultify_directly(query_graph, knowledge_graph)
     assert response.status == "OK"
     assert len(message.results) == 1
+
+
+# --------------------------------------------------------------------------
+# Shepherd: TRAPI 2.0 binding shapes and set_interpretation COLLATE
+# --------------------------------------------------------------------------
+
+
+def _set_qg_and_kg():
+    shorthand_qnodes = {"n00": "", "n01": "is_set", "n02": ""}
+    shorthand_qedges = {"e00": "n00--n01", "e01": "n01--n02"}
+    query_graph = _convert_shorthand_to_qg(shorthand_qnodes, shorthand_qedges)
+    shorthand_kg_nodes = {
+        "n00": ["DOID:1"],
+        "n01": ["PR:1", "PR:2"],
+        "n02": ["CHEBI:1", "CHEBI:2"],
+    }
+    shorthand_kg_edges = {
+        "e00": ["DOID:1--PR:1", "DOID:1--PR:2"],
+        "e01": ["PR:1--CHEBI:1", "PR:2--CHEBI:1", "PR:2--CHEBI:2"],
+    }
+    return query_graph, _convert_shorthand_to_kg(shorthand_kg_nodes, shorthand_kg_edges)
+
+
+def test_trapi2_one_binding_per_qnode_and_qedge():
+    query_graph, knowledge_graph = _set_qg_and_kg()
+    response, message = _run_resultify_directly(query_graph, knowledge_graph)
+    assert response.status == "OK"
+    # n00 and n02 are not sets: one result per CHEBI node
+    assert len(message.results) == 2
+    by_chebi = {}
+    for result in message.results:
+        assert set(result.node_bindings) == {"n00", "n01", "n02"}
+        for binding in result.node_bindings.values():
+            assert isinstance(binding, NodeBinding)
+            assert binding.ids
+        assert len(result.analyses) == 1
+        analysis = result.analyses[0]
+        assert set(analysis.edge_bindings) == {"e00", "e01"}
+        for binding in analysis.edge_bindings.values():
+            assert isinstance(binding, EdgeBinding)
+            assert binding.ids
+        (chebi,) = result.node_bindings["n02"].ids
+        by_chebi[chebi] = result
+    # the is_set qnode's one binding lists every node in the set
+    assert set(by_chebi["CHEBI:1"].node_bindings["n01"].ids) == {"PR:1", "PR:2"}
+    assert by_chebi["CHEBI:2"].node_bindings["n01"].ids == ["PR:2"]
+    assert set(by_chebi["CHEBI:1"].analyses[0].edge_bindings["e01"].ids) == {
+        "e01:PR:1--CHEBI:1",
+        "e01:PR:2--CHEBI:1",
+    }
+    # serialized: {"ids": [...]} only (no 1.x id / query_id / attributes)
+    result_dict = by_chebi["CHEBI:2"].to_dict()
+    assert result_dict["node_bindings"]["n01"] == {"ids": ["PR:2"]}
+    assert result_dict["analyses"][0]["edge_bindings"]["e01"] == {
+        "ids": ["e01:PR:2--CHEBI:2"]
+    }
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the vendored QNode model still has the 1.x set_interpretation enum "
+    "(BATCH/ALL/MANY) and rejects COLLATE; remove once it is regenerated for 2.0",
+)
+def test_trapi2_collate_is_honoured_like_is_set():
+    """set_interpretation COLLATE on an unpinned qnode (2.0) is ARAX's
+    is_set=true: ARAXMessenger.from_dict marks it, so resultify collates it."""
+    query_graph, knowledge_graph = _set_qg_and_kg()
+    qg_dict = query_graph.to_dict()
+    qg_dict["nodes"]["n01"].pop("is_set")
+    qg_dict["nodes"]["n01"]["set_interpretation"] = "COLLATE"
+    message = ARAXMessenger().from_dict({"query_graph": qg_dict})
+    assert message.query_graph.nodes["n01"].is_set is True
+    assert message.query_graph.nodes["n00"].is_set is False
+    response, message = _run_resultify_directly(message.query_graph, knowledge_graph)
+    assert response.status == "OK"
+    assert len(message.results) == 2
+    assert any(
+        set(result.node_bindings["n01"].ids) == {"PR:1", "PR:2"}
+        for result in message.results
+    )
+    # without COLLATE (or is_set), each n01 node is its own result
+    qg_dict["nodes"]["n01"]["set_interpretation"] = "BATCH"
+    message = ARAXMessenger().from_dict({"query_graph": qg_dict})
+    assert message.query_graph.nodes["n01"].is_set is False
+    response, message = _run_resultify_directly(message.query_graph, knowledge_graph)
+    assert response.status == "OK"
+    assert len(message.results) == 3
+    assert all(len(result.node_bindings["n01"].ids) == 1 for result in message.results)
+
+
+def test_trapi2_option_group_bindings_are_never_empty():
+    shorthand_qnodes = {"n00": "", "n01": ""}
+    shorthand_qedges = {"e00": "n00--n01"}
+    query_graph = _convert_shorthand_to_qg(shorthand_qnodes, shorthand_qedges)
+    query_graph.nodes["n02"] = QNode(is_set=True, option_group_id="1")
+    query_graph.edges["e01"] = QEdge(subject="n01", object="n02", option_group_id="1")
+    shorthand_kg_nodes = {
+        "n00": ["DOID:1"],
+        "n01": ["PR:1", "PR:2"],
+        "n02": ["CHEBI:1"],
+    }
+    shorthand_kg_edges = {
+        "e00": ["DOID:1--PR:1", "DOID:1--PR:2"],
+        "e01": ["PR:1--CHEBI:1"],
+    }
+    knowledge_graph = _convert_shorthand_to_kg(shorthand_kg_nodes, shorthand_kg_edges)
+    response, message = _run_resultify_directly(query_graph, knowledge_graph)
+    assert response.status == "OK"
+    by_protein = {
+        result.node_bindings["n01"].ids[0]: result for result in message.results
+    }
+    assert set(by_protein) == {"PR:1", "PR:2"}
+    # the option group is fulfilled for PR:1 only; PR:2's result has no n02 / e01
+    # binding at all (a 2.0 binding cannot be empty)
+    assert by_protein["PR:1"].node_bindings["n02"].ids == ["CHEBI:1"]
+    assert "n02" not in by_protein["PR:2"].node_bindings
+    assert "e01" not in by_protein["PR:2"].analyses[0].edge_bindings
+
+
+def test_trapi2_edgeless_result_is_kept_by_reference_closure():
+    """A 2.0 result may have no analyses (edgeless QG): its nodes stay referenced."""
+    kg = KnowledgeGraph(
+        nodes={"A:1": Node(categories=["biolink:Gene"]), "A:2": Node()}, edges={}
+    )
+    message = Message(
+        query_graph=QueryGraph(nodes={"n0": QNode()}),
+        knowledge_graph=kg,
+        results=[Result(node_bindings={"n0": NodeBinding(ids=["A:1"])})],
+        auxiliary_graphs={},
+    )
+    nodes, edges, aux_graphs, results = (
+        ARAX_resultify.analyze_message_get_referenced_IDs(message, ARAXResponse())
+    )
+    assert (nodes, edges, aux_graphs, results) == ({"A:1"}, set(), set(), {0})
+
+
+def test_trapi2_pathfinder_qg_is_not_resultified():
+    response = ARAXResponse()
+    response.envelope = Response(
+        message=Message(
+            query_graph=QueryGraph(
+                nodes={"n0": QNode(ids=["A:1"]), "n1": QNode(ids=["A:2"])},
+                paths={"p0": QPath(subject="n0", object="n1")},
+            ),
+            knowledge_graph=KnowledgeGraph(nodes={}, edges={}),
+            results=[],
+        )
+    )
+    ARAXResultify().apply(response, {})
+    assert response.status == "OK"
+    assert any(
+        "Pathfinder" in m["message"] for m in response.messages_list(response.WARNING)
+    )

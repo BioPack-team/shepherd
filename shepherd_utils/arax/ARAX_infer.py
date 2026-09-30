@@ -6,6 +6,7 @@
 #     E-2, DEC-5); allowable_actions and describe_me list only
 #     drug_treatment_graph_expansion. The module docstring is upstream's, unchanged
 #   - main() is dropped
+#   - TRAPI 2.0: the unused QualifierConstraint import is dropped (the model no longer exists)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """
 ARAX Infer Module -- Inference engine for drug-disease treatment and chemical-gene regulation prediction.
@@ -29,7 +30,6 @@ from collections import Counter
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 
 from shepherd_utils.arax.openapi_server.models.qualifier import Qualifier
-from shepherd_utils.arax.openapi_server.models.qualifier_constraint import QualifierConstraint as QConstraint
 
 from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
 

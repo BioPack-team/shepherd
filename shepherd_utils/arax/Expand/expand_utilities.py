@@ -1,6 +1,10 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Expand/expand_utilities.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - TRAPI 2.0: get_knowledge_source_constraints reads the qedge's attribute constraints from
+#     qedge.constraints.attributes, and also maps the new qedge.constraints.sources (ALLOW -> allowlist,
+#     DENY -> denylist) onto the same allowlist/denylist (primary_only is left to Retriever);
+#     get_required_portion_of_qg reads a query graph without 'edges' (optional in 2.0) as having none
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This file contains utilities/helper functions for general use within the Expand module
 import copy
@@ -227,7 +231,7 @@ def get_qg_without_kryptonite_portion(qg: QueryGraph) -> QueryGraph:
 
 def get_required_portion_of_qg(query_graph: QueryGraph) -> QueryGraph:
     return QueryGraph(nodes={qnode_key: qnode for qnode_key, qnode in query_graph.nodes.items() if not qnode.option_group_id},
-                      edges={qedge_key: qedge for qedge_key, qedge in query_graph.edges.items() if not qedge.option_group_id})
+                      edges={qedge_key: qedge for qedge_key, qedge in (query_graph.edges or {}).items() if not qedge.option_group_id})
 
 
 def edges_are_parallel(edge_a: Union[QEdge, Edge], edge_b: Union[QEdge, Edge]) -> Union[QEdge, Edge]:
@@ -760,7 +764,8 @@ def merge_two_dicts(dict_a: dict, dict_b: dict) -> dict:
 def get_knowledge_source_constraints(edge):
     allowlist = None
     denylist = set()
-    for constraint in edge.attribute_constraints:
+    edge_constraints = edge.constraints
+    for constraint in (edge_constraints.attributes if edge_constraints else None) or []:
         if constraint.id == "knowledge_source" or constraint.id == "aggregator_knowledge_source":
             if constraint.operator != "==":
                 raise Exception("Given incompatible operator in edge knowledge_source constraint")
@@ -773,6 +778,15 @@ def get_knowledge_source_constraints(edge):
                 if allowlist is None:
                     allowlist = set()
                 allowlist |= knowledge_sources
+    # TRAPI 2.0's own knowledge-source constraint
+    sources_constraint = edge_constraints.sources if edge_constraints else None
+    if sources_constraint and sources_constraint.values:
+        if sources_constraint.behavior == "DENY":
+            denylist |= set(sources_constraint.values)
+        else:
+            if allowlist is None:
+                allowlist = set()
+            allowlist |= set(sources_constraint.values)
     return allowlist, denylist
 
 

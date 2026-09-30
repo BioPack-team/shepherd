@@ -4,6 +4,8 @@
 #   - remove the sort_results_edge_attribute and sort_results_node_attribute operations, which always crashed with a NameError (dead code, DEC-5 / E-4); they now get the NotImplementedError reply other unimplemented operations get
 #   - overlay_connect_knodes no longer emits overlay(action=predict_drug_treats_disease), a disabled action that made the whole plan fail (DEC-5 / E-4)
 #   - drop the broken CLI main() (DEC-5 / E-4)
+#   - TRAPI 2.0 has no nulls, so the query graph dict (QueryGraph.to_dict()) omits an unset
+#     qnode `categories`; overlay_connect_knodes reads it with .get()
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This will be a translation table between the Operations JSON spec (https://github.com/NCATSTranslator/OperationsAndWorkflows/) and ARAXi
 import json
@@ -75,7 +77,7 @@ class WorkflowToARAXi:
         ARAXi = []
         if len(query_graph['nodes']) >= 3:
             response.warning("This query graph has 3 or more nodes. This may take a while")
-        nodes_keys_with_categories = [key for key,node in query_graph['nodes'].items() if node['categories'] is not None]
+        nodes_keys_with_categories = [key for key,node in query_graph['nodes'].items() if node.get('categories') is not None]
         qnode_pairs = itertools.combinations(nodes_keys_with_categories,2)
         ARAXi.append(f"overlay(action=compute_ngd,default_value=inf,virtual_relation_label=connect_knodes_ngd)")
         ARAXi.append(f"overlay(action=overlay_clinical_info,COHD_method=paired_concept_frequency,virtual_relation_label=connect_knodes_paired_freq)")

@@ -1,7 +1,9 @@
 """Parity tests for the ARAX ranker port (workers/arax_rank).
 
 Expected values come from running the real ARAX ranker
-(RTXteam/RTX @ 9485431, ARAX_ranker.py) on the same inputs. See
+(RTXteam/RTX @ 9485431, ARAX_ranker.py) on the same inputs, in their TRAPI 1.6
+form; the envelopes here are the same data in TRAPI 2.0 shapes (bindings as
+``{"ids"}``, ``agent_type`` a top-level Edge property). See
 docs/ARAX_PORT_BASELINE.md (DEC-1, DEC-8, RNK-*): ARAX's quirks are
 reproduced on purpose.
 """
@@ -12,6 +14,7 @@ import os
 import sys
 
 import pytest
+from translator_tom import Response
 
 sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "..", "workers", "arax_rank")
@@ -35,11 +38,18 @@ CTD_CONF = kg_key("infores:retriever", "CHEBI:3", "MONDO:1", "infores:ctd")
 SEMMED_1 = kg_key("infores:retriever", "CHEBI:4", "MONDO:1", "infores:semmeddb")
 
 
+def _sources(resource_id):
+    return [{"resource_id": resource_id, "resource_role": "primary_knowledge_source"}]
+
+
 def ngd_edge(subject, value):
     return {
         "subject": subject,
         "object": "MONDO:1",
         "predicate": "biolink:occurs_together_in_literature_with",
+        "knowledge_level": "statistical_association",
+        "agent_type": "computational_model",
+        "sources": _sources("infores:arax"),
         "attributes": [
             {
                 "attribute_type_id": "EDAM-DATA:2526",
@@ -50,22 +60,25 @@ def ngd_edge(subject, value):
     }
 
 
-def treats_edge(subject, attributes):
-    return {
+def treats_edge(subject, attributes, agent_type="automated_agent"):
+    edge = {
         "subject": subject,
         "object": "MONDO:1",
         "predicate": "biolink:treats",
-        "attributes": attributes,
+        "knowledge_level": "knowledge_assertion",
+        "agent_type": agent_type,
+        "sources": _sources("infores:drugbank"),
     }
+    if attributes:
+        edge["attributes"] = attributes
+    return edge
 
 
 def golden_envelope():
     edges = {
         DRUGBANK: treats_edge("CHEBI:1", []),
-        DRUGBANK_MANUAL: treats_edge(
-            "CHEBI:1",
-            [{"attribute_type_id": "biolink:agent_type", "value": "manual_agent"}],
-        ),
+        # ARAX read a biolink:agent_type attribute; 2.0's top-level property
+        DRUGBANK_MANUAL: treats_edge("CHEBI:1", [], agent_type="manual_agent"),
         SEMMED_7: treats_edge(
             "CHEBI:2",
             [
@@ -98,15 +111,15 @@ def golden_envelope():
     def result(i, treats_keys):
         return {
             "node_bindings": {
-                "n0": [{"id": "MONDO:1", "attributes": []}],
-                "n1": [{"id": f"CHEBI:{i}", "attributes": []}],
+                "n0": {"ids": ["MONDO:1"]},
+                "n1": {"ids": [f"CHEBI:{i}"]},
             },
             "analyses": [
                 {
                     "resource_id": "infores:arax",
                     "edge_bindings": {
-                        "e0": [{"id": key, "attributes": []} for key in treats_keys],
-                        "N1": [{"id": f"N1_{i}", "attributes": []}],
+                        "e0": {"ids": list(treats_keys)},
+                        "N1": {"ids": [f"N1_{i}"]},
                     },
                 }
             ],
@@ -130,7 +143,13 @@ def golden_envelope():
                     "N1": {"subject": "n1", "object": "n0"},
                 },
             },
-            "knowledge_graph": {"nodes": {}, "edges": edges},
+            "knowledge_graph": {
+                "nodes": {
+                    curie: {"categories": ["biolink:NamedThing"]}
+                    for curie in ("MONDO:1", "CHEBI:1", "CHEBI:2", "CHEBI:3", "CHEBI:4")
+                },
+                "edges": edges,
+            },
             "results": [
                 result(4, [SEMMED_1]),
                 result(3, [CTD_CONF]),
@@ -225,7 +244,7 @@ def test_ties_are_broken_in_descending_steps():
     for edge in edges.values():
         edge["attributes"] = []
     for result in envelope["message"]["results"]:
-        result["analyses"][0]["edge_bindings"]["e0"] = [{"id": DRUGBANK}]
+        result["analyses"][0]["edge_bindings"]["e0"] = {"ids": [DRUGBANK]}
     envelope = arax_rank(envelope, logger)
     scores = [r["analyses"][0]["score"] for r in envelope["message"]["results"]]
     assert scores == [1.0, 0.999, 0.998, 0.997]
@@ -249,14 +268,15 @@ def test_empty_semmeddb_publications_raise_like_arax():
 
 def test_dangling_edge_binding_raises_like_arax():
     envelope = golden_envelope()
-    envelope["message"]["results"][0]["analyses"][0]["edge_bindings"]["e0"] = [
-        {"id": "not-in-kg"}
-    ]
+    envelope["message"]["results"][0]["analyses"][0]["edge_bindings"]["e0"] = {
+        "ids": ["not-in-kg"]
+    }
     with pytest.raises(KeyError):
         arax_rank(envelope, logger)
 
 
-def test_result_without_analysis_raises_like_arax():
+def test_result_with_an_empty_analyses_list_raises_like_arax():
+    """``"analyses": []`` is invalid 2.0 (minItems 1); ARAX raises on it."""
     envelope = golden_envelope()
     envelope["message"]["results"][0]["analyses"] = []
     with pytest.raises(IndexError):
@@ -277,3 +297,71 @@ def test_worker_ranks_and_stringifies_log_timestamps():
     ranked = rank_message(envelope, logger)
     assert ranked["logs"][0]["timestamp"] == "1234"
     assert ranked["message"]["results"][0]["essence"] == "drug 1"
+
+
+def test_ranked_golden_is_valid_trapi_2():
+    """row_data / table_column_names are ARAX extras 2.0 allows (Result and
+    Response take additional properties); nothing is added to the edges, which
+    2.0 closes (additionalProperties false)."""
+    envelope = arax_rank(golden_envelope(), logger)
+    Response.from_dict(envelope)
+
+
+def test_manual_agent_is_read_from_the_top_level_agent_type():
+    envelope = golden_envelope()
+    edges = envelope["message"]["knowledge_graph"]["edges"]
+    # A 1.x-style attribute is not read: 2.0's top-level property is the data
+    edges[DRUGBANK]["attributes"] = [
+        {"attribute_type_id": "biolink:agent_type", "value": "manual_agent"}
+    ]
+    ranker = ARAXRanker()
+    ranker.aggregate_scores_dmk(envelope, logger)
+    assert ranker.edge_confidences[DRUGBANK_MANUAL] == 0.9
+    assert ranker.edge_confidences[DRUGBANK] == 0.99
+    # ... and it applies to an edge without attributes, too
+    envelope = golden_envelope()
+    edges = envelope["message"]["knowledge_graph"]["edges"]
+    edges[SEMMED_1]["agent_type"] = "manual_agent"
+    del edges[SEMMED_1]["attributes"]
+    ranker = ARAXRanker()
+    ranker.aggregate_scores_dmk(envelope, logger)
+    assert ranker.edge_confidences[SEMMED_1] == 0.9
+
+
+def _without_edge_bindings(envelope, index, how):
+    result = envelope["message"]["results"][index]
+    if how == "1.x":  # ARAX's input: one analysis that binds no edges
+        result["analyses"][0]["edge_bindings"] = {}
+    else:  # its 2.0 form: the empty containers are omitted
+        del result["analyses"]
+    return envelope
+
+
+def test_result_without_analyses_is_ranked_like_arax_ranks_one_binding_no_edges():
+    """2.0 omits an empty edge_bindings, and so an analysis binding nothing
+    (prune_response). Such a result is scored exactly as ARAX scores the 1.x
+    form; with no Analysis to hold it, its score is in row_data only."""
+    arax = arax_rank(_without_edge_bindings(golden_envelope(), 1, "1.x"), logger)
+    port = arax_rank(_without_edge_bindings(golden_envelope(), 1, "2.0"), logger)
+    arax_results = arax["message"]["results"]
+    port_results = port["message"]["results"]
+    assert [r["essence"] for r in port_results] == [r["essence"] for r in arax_results]
+    assert [r["row_data"] for r in port_results] == [
+        r["row_data"] for r in arax_results
+    ]
+    for arax_result, port_result in zip(arax_results, port_results):
+        if "analyses" in port_result:
+            assert port_result["analyses"] == arax_result["analyses"]
+        else:
+            assert port_result["essence"] == "drug 3"
+    Response.from_dict(port)
+
+
+def test_analysis_without_edge_bindings_is_ranked_like_an_empty_map():
+    envelope = golden_envelope()
+    del envelope["message"]["results"][1]["analyses"][0]["edge_bindings"]
+    ranked = arax_rank(envelope, logger)
+    expected = arax_rank(_without_edge_bindings(golden_envelope(), 1, "1.x"), logger)
+    assert [r["row_data"] for r in ranked["message"]["results"]] == [
+        r["row_data"] for r in expected["message"]["results"]
+    ]

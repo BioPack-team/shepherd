@@ -1,6 +1,13 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_ranker.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - TRAPI 2.0 data moves (DEC-8 parity otherwise kept, quirks included):
+#     * an EdgeBinding lists all of a qedge's edge ids (`ids`); they are read in the
+#       order upstream read its list of single-id bindings
+#     * an edge's agent type is the top-level `Edge.agent_type`, no longer a
+#       `biolink:agent_type` attribute; a manual_agent edge still gets the 0.90
+#       confidence and overrides everything else, as upstream (now also when it has
+#       no attributes, which upstream could not see since the attribute was one)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import math
 import os
@@ -87,11 +94,11 @@ def _process_valid_edge_ids(valid_edge_id_info: dict[str, Dict], kg_edge_id_to_e
         results[qedge_key]['scores'] = []
 
         same_edge_ids: dict[str, list[float]] = {}
-        for edge_binding in edge_info['edge_binding_list']:
-            edge_id = edge_binding.id.split(':', 2)[-1]
+        for edge_binding_id in edge_info['edge_binding'].ids:
+            edge_id = edge_binding_id.split(':', 2)[-1]
             if edge_id not in same_edge_ids:
                 same_edge_ids[edge_id] = []
-            same_edge_ids[edge_id].append(kg_edge_id_to_edge[edge_binding.id].confidence)
+            same_edge_ids[edge_id].append(kg_edge_id_to_edge[edge_binding_id].confidence)
             
         # Take the average of the scores for each edge id
         for edge_id, scores in same_edge_ids.items():
@@ -111,12 +118,12 @@ def _get_weighted_graph_networkx_from_result_graph(kg_edge_id_to_edge: dict[str,
     # Get all valid edge ids from the edge binding list
     valid_edge_id_info = {}
     for analysis in result.analyses:  # For now we only ever have one Analysis per Result
-        for qedge_key, edge_binding_list in analysis.edge_bindings.items():
+        for qedge_key, edge_binding in analysis.edge_bindings.items():
             if 'creative_' not in qedge_key: # ignore all xDTD/xCRG supported edges
                 qedge_tuple = qg_edge_key_to_edge_tuple[qedge_key]
                 valid_edge_id_info[qedge_key] = {
                     'edge_tuple': qedge_tuple,
-                    'edge_binding_list': edge_binding_list
+                    'edge_binding': edge_binding
                 }
                 
     # Process all valid edge ids (possibly combine multiple duplicate edges into one)
@@ -714,14 +721,13 @@ and [frobenius norm](https://en.wikipedia.org/wiki/Matrix_norm#Frobenius_norm).
         for edge_key, edge in message.knowledge_graph.edges.items():
             if edge.attributes is not None:
                 edge_attributes = {x.original_attribute_name:x.value for x in edge.attributes}
-                for edge_attribute in edge.attributes:
-                    if edge_attribute.attribute_type_id == "biolink:agent_type" and edge_attribute.value == "manual_agent":
-                        edge_attributes['confidence'] = edge_confidence_manual_agent
-                        edge.confidence = edge_confidence_manual_agent
-                        edge_ids_manual_agent.add(edge_key)
-                        break
             else:
                 edge_attributes = {}
+            # TRAPI 2.0: agent_type is a top-level Edge property (was a biolink:agent_type attribute)
+            if edge.agent_type == "manual_agent":
+                edge_attributes['confidence'] = edge_confidence_manual_agent
+                edge.confidence = edge_confidence_manual_agent
+                edge_ids_manual_agent.add(edge_key)
 
             if edge_attributes.get("confidence", None):
                 edge.confidence = edge_attributes['confidence']

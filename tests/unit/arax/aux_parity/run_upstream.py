@@ -1,10 +1,15 @@
-"""Regenerate goldens.json.gz from upstream's knowledge_source_metadata,
+"""Record goldens_trapi16.json.gz from upstream's knowledge_source_metadata,
 meta_kg_background_refresh and autocomplete/rtxcomplete.
 
 Usage: RTX_CODE=/path/to/RTX/code python run_upstream.py
 PloverDB is replaced by the case's base meta-KG and the KP info cache is
 absent (so upstream's merge step leaves it unchanged), which is what the port's
 Retriever fetch returns (DEC-11).
+
+This records upstream's TRAPI 1.6 behaviour, the goldens_trapi16.json.gz kept
+as recorded. The parity test compares against goldens.json.gz, their TRAPI
+2.0 translation (unchanged for this suite, see H7 there): after recording,
+run ``python ../trapi2_goldens.py`` (in the Shepherd venv) to regenerate it.
 """
 
 import glob, gzip, json, os, sys, warnings
@@ -66,6 +71,6 @@ if os.path.exists(cache):
 import rtxcomplete  # noqa: E402
 
 out["autocomplete"] = run_autocomplete(rtxcomplete)
-with gzip.open(os.path.join(HERE, "goldens.json.gz"), "wt") as f:
+with gzip.open(os.path.join(HERE, "goldens_trapi16.json.gz"), "wt") as f:
     json.dump(out, f, sort_keys=True)
 print("wrote goldens")

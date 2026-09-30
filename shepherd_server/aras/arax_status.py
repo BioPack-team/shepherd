@@ -21,8 +21,10 @@ from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
+import shepherd_utils.db as db
 from shepherd_utils.config import settings
 from shepherd_utils.db import data_db_client, get_message, get_recent_queries
+from shepherd_utils.trapi import query_parameters
 
 LOGGER = logging.getLogger("shepherd.arax.status")
 TOKEN_TTL_SEC = 24 * 3600
@@ -142,6 +144,31 @@ async def recent_queries(last_n_hours=None, mode=None) -> dict:
 async def query_by_id(id_):
     """ARAXQueryTracker.get_query_by_id: the stored input query, or None."""
     return await get_message(str(id_), LOGGER)
+
+
+async def query_parameters_for_response(response_id: str) -> dict:
+    """The ``parameters`` of the query whose response is ``response_id``.
+
+    TRAPI 2.0 says a Response repeats its query's ``parameters``, and a stored
+    response carries none (``save_response``), so ``GET /response/{id}`` looks
+    the query up: ``shepherd_brain`` maps the response id to the query id, and
+    the query is in the data store. ``{}`` when either is gone (the query
+    expired, or the id was never a query's response).
+    """
+    try:
+        async with db.pool.connection(settings.postgres_pool_timeout) as conn:
+            cursor = await conn.execute(
+                "SELECT qid FROM shepherd_brain WHERE response_id = %s LIMIT 1",
+                (response_id,),
+            )
+            row = await cursor.fetchone()
+    except Exception as e:
+        LOGGER.warning(f"Could not look up the query of response {response_id}: {e}")
+        return {}
+    if row is None:
+        return {}
+    query = await get_message(row[0], LOGGER)
+    return dict(query_parameters(query if isinstance(query, dict) else None))
 
 
 def kp_cache_listing() -> dict:

@@ -1,10 +1,17 @@
-"""Regenerate goldens.json.gz from upstream ARAX's ResponseCache.get_response.
+"""Record goldens_trapi16.json.gz from upstream ARAX's ResponseCache.get_response.
 
 Usage: RTX_CODE=/path/to/RTX/code python run_upstream.py
 flask and boto3 are stubbed (not reached); MySQL is replaced by a fake session
 and a local response is served from data/responses_1_0/{id}.json, upstream's
 first place to look; requests.get answers from the case data (ARS messages at
 ars-prod, the first ARS host upstream tries).
+
+Upstream speaks TRAPI 1.6, so the cases it serves are the recorded 1.6
+documents (inputs_trapi16.json.gz).
+This records upstream's TRAPI 1.6 behaviour, the goldens_trapi16.json.gz kept
+as recorded. The parity test compares against goldens.json.gz, their TRAPI
+2.0 translation: after recording, run ``python ../trapi2_goldens.py`` (in the
+Shepherd venv) to regenerate it.
 """
 
 import gzip, json, os, sys, types, warnings
@@ -106,7 +113,10 @@ def lookup(response_id):
     )
 
 
-out = run_all(setup, lookup)
-with gzip.open(os.path.join(HERE, "goldens.json.gz"), "wt") as f:
+sys.path.insert(0, os.path.join(HERE, ".."))
+from trapi2_goldens import load_inputs16  # noqa: E402
+
+out = run_all(setup, lookup, cases=load_inputs16("response_parity")["CASES"])
+with gzip.open(os.path.join(HERE, "goldens_trapi16.json.gz"), "wt") as f:
     json.dump(out, f, sort_keys=True)
 print("wrote goldens for", len(out), "cases")

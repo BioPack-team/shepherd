@@ -2,6 +2,11 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only (including class-name strings)
 #   - drop the unused import of knowledge_graph_info (dead code, DEC-5)
+#   - TRAPI 2.0: one QueryGraph class (no PathfinderQueryGraph): add_qpath adds the path
+#     to the query graph's `paths` and drops its (empty) `edges`, which is what the 1.x
+#     conversion to a PathfinderQueryGraph did; from_dict reads a QG with paths as a QueryGraph
+#   - TRAPI 2.0 set_interpretation COLLATE (an unpinned qnode whose matches are collated into
+#     one result) is what ARAX's is_set=true means, so from_dict sets is_set on such qnodes
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, flush=True, **kwargs)
@@ -26,7 +31,6 @@ from shepherd_utils.arax.openapi_server.models.response import Response
 from shepherd_utils.arax.openapi_server.models.message import Message
 from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
 from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
-from shepherd_utils.arax.openapi_server.models.pathfinder_query_graph import PathfinderQueryGraph
 from shepherd_utils.arax.openapi_server.models.q_node import QNode
 from shepherd_utils.arax.openapi_server.models.q_edge import QEdge
 from shepherd_utils.arax.openapi_server.models.q_path import QPath
@@ -728,7 +732,7 @@ class ARAXMessenger:
             message.query_graph.paths = {}
 
         #### Extract the existing paths if any
-        if isinstance(message.query_graph, PathfinderQueryGraph):
+        if message.query_graph.paths is not None:
             query_graph_paths = message.query_graph.paths
         else:
             query_graph_paths = []
@@ -766,14 +770,14 @@ class ARAXMessenger:
             response.error(f"While trying to add QPath, object is a required parameter", error_code="MissingTargetKey")
             return response
 
-        #### If the query_graph is type PathfinderQueryGraph already, then just add the new qpath
-        if isinstance(message.query_graph, PathfinderQueryGraph):
+        #### If the query_graph has paths already, then just add the new qpath
+        if message.query_graph.paths is not None:
             message.query_graph.paths[key] = qpath
 
-        #### If the query_graph is type QueryGraph instead of PathfinderQueryGraph, then migrate to PathfinderQueryGraph
+        #### If the query_graph has no paths yet, then make it a pathfinder query graph (nodes and paths)
         elif isinstance(message.query_graph, QueryGraph):
             eprint(f"INFO: Converting a QueryGraph to a PathfinderQueryGraph")
-            new_query_graph = PathfinderQueryGraph(nodes = message.query_graph.nodes, paths = { key: qpath} )
+            new_query_graph = QueryGraph(nodes = message.query_graph.nodes, paths = { key: qpath} )
             message.query_graph = new_query_graph
 
         #### Else fail
@@ -789,10 +793,10 @@ class ARAXMessenger:
     #### Get the next free path key like pXX where XX is a zero-padded integer starting with 00
     def __get_next_free_path_key(self):
 
-        #### If the query_graph is absent of type legacy QueryGraph, then there are no paths yet
+        #### If the query_graph is absent or has no paths (a legacy QueryGraph), then there are no paths yet
         #### so just default to p00
         message = self.envelope.message
-        if message.query_graph is None or isinstance(message.query_graph, QueryGraph):
+        if message.query_graph is None or message.query_graph.paths is None:
             return 'p00'
 
         #### Otherwise find the first unused key
@@ -959,11 +963,12 @@ class ARAXMessenger:
         #### Deserialize
         message_obj = Message().from_dict(message)
 
-        #### Special handling for the QueryGraph because of its PathfinderQueryGraph duality
-        if 'query_graph' in message and message['query_graph'] is not None:
-            if 'paths' in message['query_graph']:
-                pathfinder_query_graph_obj = PathfinderQueryGraph().from_dict(message['query_graph'])
-                message_obj.query_graph = pathfinder_query_graph_obj
+        #### (TRAPI 2.0 has a single QueryGraph class for both edges and paths)
+        #### TRAPI 2.0 set_interpretation COLLATE on an unpinned qnode is ARAX's is_set=true
+        if message_obj.query_graph is not None and message_obj.query_graph.nodes is not None:
+            for qnode in message_obj.query_graph.nodes.values():
+                if qnode.set_interpretation == 'COLLATE':
+                    qnode.is_set = True
 
 
         #### Revert some things back temporarily
