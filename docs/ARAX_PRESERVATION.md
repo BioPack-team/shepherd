@@ -155,6 +155,10 @@ them (DEC-1):
   `qedge_keys`.
 - **D-24:** `filter_results_top_n` with a string `max_results` fails an
   assertion.
+- **D-28:** `overlay_fisher_exact_test` (and clinical info) after a `lookup`
+  binds its edges to the results one at a time, walking every result for
+  each edge. On a large answer this takes many minutes and the query times
+  out. Upstream already fixed the same pattern in NGD.
 - **D-26:** `overlay_connect_knodes` fails in Jaccard. The port's E-4 change
   removes the disabled overlay action that made it fail sooner upstream.
 

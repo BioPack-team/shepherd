@@ -99,7 +99,7 @@ What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
    link (`{baseAPI}/ui/`) has no Shepherd equivalent (Shepherd serves `/docs`).
 5. **`GET /status/logs`** (API-10) is not served. The UI does not call it.
 6. **The bug-fix pass (DEC-1)**, after validation: the Part D defects (all
-   reproduced today), C-1 and C-3 to C-7 in `arax.pathfinder`, and C-12. Found since, while checking what the ARAX team asked to keep: D-22 to D-27. D-22 (an empty response in the UI whenever the TRAPI validator raises) and D-23 (the `filter_kgraph_*` workflow operations crashing after a lookup) are the ones users would hit first.
+   reproduced today), C-1 and C-3 to C-7 in `arax.pathfinder`, and C-12. Found since, while checking what the ARAX team asked to keep: D-22 to D-28. D-22 (an empty response in the UI whenever the TRAPI validator raises) and D-23 (the `filter_kgraph_*` workflow operations crashing after a lookup) are the ones users would hit first.
 
 ## How to read this
 
@@ -720,6 +720,7 @@ are cached and aiohttp HTTP errors propagate, as upstream, but TLS is verified.
 | D-25 | A TRAPI qnode's `name` is accepted but not resolved ("QueryGraph has no nodes with ids"); query by name works through ARAXi's `add_qnode(name=...)`. A set qnode's `member_ids` (and its categories, with `set_interpretation: ALL`) are not forwarded to the KP. | `ARAX_query.py` (allowed qnode attributes), `trapi_querier.py` (`_strip_empty_properties`) |
 | D-26 | `overlay_connect_knodes` computes Jaccard over every node triple, which divides by zero when a pair shares no neighbors, failing the plan. The port's E-4 change removes the disabled overlay action that made the operation fail even earlier upstream. | `operation_to_ARAXi.py`, `Overlay/compute_jaccard.py` |
 | D-27 | `ResultTransformer.transform` reads `node_bindings[qnode_key]` for every qnode an original qedge touches, including an optional group's qnodes. A result without the optional part has no binding for them, so the query fails with `KeyError: '<qnode>'`. The exception escapes ARAX's plan, so the Shepherd task fails (HTTP 500, status `Error`). This hits any optional-group query where some result lacks the optional part. Seen live on `optional_group` (its optional hop was refused, so no result had it); reproduced offline with that hop answered 422. | `result_transformer.py` (the `for non_orphan_qnode_key in non_orphan_qnode_keys` loops) |
+| D-28 | `fisher_exact_test` and `overlay_clinical_info` bind each new virtual edge to the results with `update_results_with_overlay_edge`, one call per edge, and each call walks every result. Once results exist (a workflow's `lookup` resultifies before its overlays), the cost is edges × results: on a two-hop answer (about 22k results) `overlay_fisher_exact_test` runs for over 9 minutes, so `wf_overlays` times out. Upstream already batches this for `compute_ngd` (`update_results_with_overlay_edges`, one walk for all edges); the fix is to do the same in these two. A DSL query that runs FET before `resultify` is unaffected. | `Overlay/fisher_exact_test.py` (the virtual-edge loop), `Overlay/overlay_clinical_info.py`, `Overlay/overlay_utilities.py` |
 
 ---
 

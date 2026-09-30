@@ -978,6 +978,7 @@ case(
     ),
     min_results=1,
     checks=[edge_attribute("normalized_google_distance")],
+    known_defect="D-28",
     timeout=600,
 )
 case(
