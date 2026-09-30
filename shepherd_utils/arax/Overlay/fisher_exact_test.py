@@ -3,6 +3,7 @@
 #   - import paths / sys.path hacks only
 #   - the tier0 overlay sqlite path comes from RTXConfiguration.kg2c_sqlite_path (Shepherd's pathfinder download) instead of RTX/code/ARAX/KnowledgeSources/KG2c/
 #   - the rel_edge_key background-count query goes to infores:retriever instead of infores:gandalf (DEC-4: Retriever queries Gandalf)
+#   - the virtual edges are bound to the results in one pass after the loop, not one call per edge (D-28)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # ruff: noqa: E402
 # This class will perform fisher's exact test to evalutate the significance of connection between
@@ -386,6 +387,7 @@ class ComputeFTEST:
             # add the virtual edge with FET result to message KG
             self.response.debug("Adding virtual edge with FET result to message KG")
             count = 0
+            overlay_kedges = []  # bound to results in one pass once the loop finishes (D-28)
             for index, value in enumerate([(virtual_relation_label, output[adj], node, adj) for adj in object_node_dict if adj in output.keys() for node in object_node_dict[adj]], 1):
 
                 edge_attribute_list =  [
@@ -408,9 +410,11 @@ class ComputeFTEST:
                 kg.edges[edge_id] = edge
 
                 if self.message.results is not None and len(self.message.results) > 0:
-                    ou.update_results_with_overlay_edge(subject_knode_key=value[2], object_knode_key=value[3], kedge_key=edge_id, message=self.message, log=self.response)
+                    overlay_kedges.append(((value[2], value[3]), edge_id))
 
                 count = count + 1
+
+            ou.update_results_with_overlay_edge_list(overlay_kedges, self.message, self.response)
 
             self.response.debug(f"{count} new virtual edges were added to message KG")
 

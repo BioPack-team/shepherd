@@ -1,6 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Overlay/overlay_clinical_info.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - add_virtual_edge binds its virtual edges to the results in one pass after its loop, not one call per edge (D-28)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This class will overlay the clinical information we have on hand
 #!/bin/env python3
@@ -281,6 +282,7 @@ class OverlayClinicalInfo:
         curies_to_decorate.update(subject_curies_to_decorate)
         curies_to_decorate.update(object_curies_to_decorate)
         self.mapping_curie_to_omop_ids = self.cohdIndex.get_concept_ids(curies_to_decorate)
+        overlay_kedges = []  # bound to results in one pass once the loop finishes (D-28)
         for (subject_curie, object_curie) in itertools.product(subject_curies_to_decorate, object_curies_to_decorate):
             # create the edge attribute if it can be
             edge_attribute = self.make_edge_attribute_from_curies(subject_curie, object_curie,
@@ -341,7 +343,8 @@ class OverlayClinicalInfo:
                 edge.qedge_keys = qedge_keys
                 self.message.knowledge_graph.edges[id] = edge
                 if self.message.results is not None and len(self.message.results) > 0:
-                    ou.update_results_with_overlay_edge(subject_knode_key=subject_key, object_knode_key=object_key, kedge_key=id, message=self.message, log=self.response)
+                    overlay_kedges.append(((subject_key, object_key), id))
+        ou.update_results_with_overlay_edge_list(overlay_kedges, self.message, self.response)
 
         # Now add a q_edge the query_graph since I've added an extra edge to the KG
         if added_flag:

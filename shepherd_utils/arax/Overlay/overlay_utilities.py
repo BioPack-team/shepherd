@@ -1,6 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Overlay/overlay_utilities.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - new update_results_with_overlay_edge_list (one walk of the results for edges that may share a node pair), for callers that bound their overlay edges one at a time (D-28); update_results_with_overlay_edges's body moved to _bind_overlay_edges, unchanged
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This file contains utilities/helper functions for general use within the Overlay module
 import itertools
@@ -8,7 +9,7 @@ import os
 import sys
 import traceback
 from collections import defaultdict
-from typing import NamedTuple, Optional
+from typing import Iterable, NamedTuple, Optional
 
 from shepherd_utils.arax.openapi_server.models.response import Response
 from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
@@ -117,7 +118,22 @@ def update_results_with_overlay_edges(kedge_keys_by_node_pair: dict[tuple[str, s
     and call this once instead of calling update_results_with_overlay_edge() per edge, because
     the results are walked a single time here: the cost stops growing with the edge count.
     """
-    if not kedge_keys_by_node_pair or not message.results:
+    _bind_overlay_edges(kedge_keys_by_node_pair.items(), message, log, reasoner_id)
+
+
+def update_results_with_overlay_edge_list(kedges: list[tuple[tuple[str, str], str]], message: Message, log: ARAXResponse, reasoner_id: str="infores:arax"):
+    """
+    Bind overlay edges, given in creation order as ((subject curie, object curie), kedge key), to the results.
+
+    Binds exactly what calling update_results_with_overlay_edge() once per edge, in that order,
+    would, in one walk of the results (D-28). Unlike update_results_with_overlay_edges, several
+    edges may share a node pair.
+    """
+    _bind_overlay_edges(kedges, message, log, reasoner_id)
+
+
+def _bind_overlay_edges(kedges: Iterable[tuple[tuple[str, str], str]], message: Message, log: ARAXResponse, reasoner_id: str):
+    if not kedges or not message.results:
         return
     try:
         qedges = message.query_graph.edges
@@ -145,7 +161,7 @@ def update_results_with_overlay_edges(kedge_keys_by_node_pair: dict[tuple[str, s
 
         # A place only qualifies if it covers both endpoints of the edge, so scan whichever
         # endpoint is indexed in fewer places and confirm the other one by membership.
-        for (subject_knode_key, object_knode_key), kedge_key in kedge_keys_by_node_pair.items():
+        for (subject_knode_key, object_knode_key), kedge_key in kedges:
             subject_places = binding_places_by_curie.get(subject_knode_key)
             object_places = binding_places_by_curie.get(object_knode_key)
             if not subject_places or not object_places:
