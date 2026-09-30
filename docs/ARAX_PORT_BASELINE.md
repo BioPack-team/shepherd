@@ -89,6 +89,15 @@ What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
    (§22) are a ready starting point. `connect_nodes` (whose limits are
    Shepherd's, DEC-7) has only port-side tests; `add_node_pmids` and the xCRG
    MVP2 route are parity-tested with NCBI eUtils and the Retriever stubbed.
+   **Run so far:** `scripts/test_arax_queries.py` (84 cases: every query type
+   ARAX handles) against a local Shepherd, a local Retriever and the real
+   ARAX data files: 78 passed, 3 expected failures (D-23, D-26, D-27), and the
+   rest were the Retriever's `MANY` support (it has none; the case now expects
+   that) and cohd.io being unreachable (D-29). The local Retriever needs
+   `OPENAPI__X_TRAPI__BATCH_SIZE_LIMIT` raised above its default of 300 ids per
+   qnode, or every hop fed by a larger first hop is refused with a 422; the
+   shared Translator Retrievers run the default. The side-by-side comparison
+   with a live ARAX is still to do.
 3. **Build and deploy.** The `arax` worker and server images have not been built
    (the install steps were checked in fresh environments). The `arax` worker's
    resources were sized for the old proxy (1 CPU, 3 GB, so one query at a
