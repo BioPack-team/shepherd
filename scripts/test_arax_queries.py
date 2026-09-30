@@ -618,7 +618,8 @@ case(
         },
         {"e0": {"subject": "n0", "object": "n1"}},
     ),
-    min_results=1,
+    note="accepted and sent to the KP, as in ARAX; Retriever does not support MANY "
+    "(x-trapi multicuriesquery: false), so 0 results is its answer",
 )
 case(
     "all_set_interpretation_all",
