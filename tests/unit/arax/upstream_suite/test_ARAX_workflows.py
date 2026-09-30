@@ -530,8 +530,8 @@ def test_FET_ranking_2():
     for result in message.results:
         for key, edge_bindings in result.analyses[0].edge_bindings.items():
             if key.startswith('FET'):
-                for edge in edge_bindings:
-                    for attribute in message.knowledge_graph.edges[edge.id].attributes:
+                for edge_id in edge_bindings.ids:  # TRAPI 2.0: one binding with ids
+                    for attribute in message.knowledge_graph.edges[edge_id].attributes:
                         if attribute.original_attribute_name == "fisher_exact_test_p-value":
                             if str(result.score) in fet_ranking_value:
                                 fet_ranking_value[str(result.score)].append(float(attribute.value))

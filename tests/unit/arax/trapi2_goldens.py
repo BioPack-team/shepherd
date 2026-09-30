@@ -30,8 +30,8 @@ What TOM does, per recorded field:
     no edge bindings loses ``edge_bindings``;
   - ``biolink:knowledge_level`` / ``biolink:agent_type`` attributes become the
     required top-level Edge members, ``not_provided`` when the edge had none
-    (every Retriever edge of the mock universe, and the ARAX-made edges upstream
-    created without them: the port must set ``not_provided`` there);
+    (every Retriever edge of the mock universe, and ARAX's own subclass_of
+    edges; but see H9);
   - ``attribute_constraints`` / ``qualifier_constraints`` fold into the QEdge's
     ``constraints`` object (a qualifier set becomes a plain ``{type: value}``
     dict), ``intermediate_categories`` becomes ``required_intermediate_categories``;
@@ -50,7 +50,8 @@ Hand rules on top (what TOM does not own):
   - H2 an empty query graph is dropped: ARAX's template envelope (every error
     before a query graph exists) has ``query_graph: {nodes: {}, edges: {}}``;
     2.0 requires ``nodes`` to be non-empty, and ``query_graph`` is optional, so
-    the 2.0 envelope has no ``query_graph``.
+    the 2.0 envelope has no ``query_graph``. (Only for envelopes ARAX made: a
+    stored document /response serves back keeps what it has.)
   - H3 a recorded Query's own ``parameters`` are kept when TOM moves
     ``log_level`` / ``bypass_cache`` into them (TOM replaces the object).
   - H4 ARAX-internal records are not TRAPI and are kept verbatim: expand_parity
@@ -68,14 +69,20 @@ Hand rules on top (what TOM does not own):
     one (``trapi_querier._get_kg_to_qg_mappings_from_results``): a qnode with a
     single id implies that id -- the same parent upstream recorded, so every
     such case keeps its golden. Where a subclass child binds to a qnode with
-    several ids, 2.0 cannot say which parent it fulfils; those cases
-    (``QUERY_ID_LOST``) are TRAPI 2.0 differences, pinned in the parity tests.
+    several ids, 2.0 cannot say which parent it fulfils (the port takes it from
+    a subclass_of KG edge when Retriever sends one; the mock sends none, as
+    upstream's never did); those cases (``QUERY_ID_LOST``, pairs from
+    ``query_id_lost_pairs``) are TRAPI 2.0 differences, pinned in the parity
+    tests.
   - H6 response_parity: ARAX's ``validation_result.version`` (and the fake
     validator's ``info.checked.<trapi>.<biolink>`` key and dumped text) name
     the TRAPI version ARAX validates against: ``2.0.0`` (ARAX's only valid
     version under TRAPI 2.0; the ``local_trapi_1_5`` stored response still
     declares ``1.5.0``, which is no longer a valid version, so it is validated
     as the default ``2.0.0`` too, and keeps declaring ``1.5.0``).
+  - H7 aux_parity: the meta-KG (and its simple view) and autocomplete answers
+    are the same objects in 2.0 (a MetaKnowledgeGraph shape change would be
+    additions only); the goldens are carried over unchanged.
   - H8 response_parity: in ARAX's attribute-stripped (``X``) view, a KG edge
     keeps the stored edge's ``knowledge_level`` / ``agent_type`` (see
     ``_unstrip_levels``).
@@ -84,9 +91,28 @@ Hand rules on top (what TOM does not own):
     exact test ``statistical_association`` / ``automated_agent``, as NGD's
     own; COHD ``statistical_association`` / ``data_analysis_pipeline``)
     instead of TOM's ``not_provided``.
-  - H7 aux_parity: the meta-KG (and its simple view) and autocomplete answers
-    are the same objects in 2.0 (a MetaKnowledgeGraph shape change would be
-    additions only); the goldens are carried over unchanged.
+  - H11 an Analysis with neither ``edge_bindings`` nor ``path_bindings`` is
+    dropped, and a result's emptied ``analyses`` with it: TRAPI 2.0 requires
+    an Analysis to have one or both (a schema anyOf, which the ARS validator
+    and ``prune_response`` enforce; TOM's model does not). Upstream gives a
+    one-node query's result (tpl_one_node) such an analysis, carrying the
+    result's score (``{"resource_id": "infores:arax", "score": 1.0}``): that
+    score is lost with it in 2.0. The same holds for the mock Retriever's
+    one-node answers.
+  - H12 a qnode whose recorded ``is_set: true`` the 2.0 case expresses as
+    ``set_interpretation: COLLATE`` (``collated_qnodes``) echoes both in the
+    envelope's query graph: the vendored QNode reads COLLATE as ``is_set``
+    and keeps the client's own value.
+  - H10 nulls go wherever the port's ``to_dict`` omits them, which is in
+    every ARAX model object, including ARAX's own envelope ``operations``
+    (an Operations model TOM sees as an opaque extra); plain-dict members
+    (``query_options``, ``validation_result``) keep theirs, as the port does.
+
+The case inputs (``expand_case``, ``query_case``, ``response_case``) are the
+same translation, plus: an unpinned qnode's ``is_set: true`` becomes
+``set_interpretation: COLLATE``; a stored log entry's timestamp gains its
+``Z`` offset; a stored response kept as JSON text in an ARS child's logs is
+translated too.
 """
 
 import base64
@@ -303,6 +329,16 @@ def message(original: dict, new: dict, produced: bool = True) -> dict:
         _restore_element_attributes(
             result.get("analyses"), new_result.get("analyses"), False
         )
+    for new_result in new.get("results") or []:  # H11
+        analyses = [
+            a
+            for a in new_result.get("analyses") or []
+            if a.get("edge_bindings") or a.get("path_bindings")
+        ]
+        if analyses:
+            new_result["analyses"] = analyses
+        else:
+            new_result.pop("analyses", None)
     if isinstance(original.get("knowledge_graph"), dict) and isinstance(
         new.get("knowledge_graph"), dict
     ):
@@ -322,6 +358,10 @@ def response(original: Any, produced: bool = True) -> Any:
         return copy.deepcopy(original)
     new = _tom(original, "Response")
     message(original["message"], new["message"], produced)
+    if isinstance(new.get("operations"), dict):  # H10
+        new["operations"] = {
+            k: v for k, v in new["operations"].items() if v is not None
+        }
     return new
 
 
@@ -398,11 +438,29 @@ def expand_goldens(g16: dict) -> dict:
     return {case: expand_record(rec) for case, rec in g16.items()}
 
 
+def collated_qnodes(case: tuple) -> list:
+    """The qnode keys of a recorded query that query_case turned from an
+    unpinned ``is_set: true`` into ``set_interpretation: COLLATE``."""
+    qg = (case[1].get("message") or {}).get("query_graph") or {}
+    return sorted(
+        key
+        for key, qnode in (qg.get("nodes") or {}).items()
+        if qnode.get("is_set") is True and not qnode.get("ids")
+    )
+
+
 def query_goldens(g16: dict) -> dict:
+    collated = {
+        c[0]: collated_qnodes(c) for c in load_inputs16("query_parity")["CASES"]
+    }
     out = {}
     for case, rec in g16.items():
         new = copy.deepcopy(rec)
         new["envelope"] = response(rec["envelope"])
+        qg = new["envelope"]["message"].get("query_graph") or {}
+        for key in collated.get(case, []):  # H12
+            if key in (qg.get("nodes") or {}):
+                qg["nodes"][key]["set_interpretation"] = "COLLATE"
         qo = new["envelope"].get("query_options")
         if isinstance(qo, dict) and "query_plan" in qo:
             qo["query_plan"] = query_plan(qo["query_plan"])

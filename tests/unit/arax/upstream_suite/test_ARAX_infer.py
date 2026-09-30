@@ -129,13 +129,13 @@ def test_xdtd_issue2160():
             {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "on",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "sn"
                     }
                 },
@@ -363,16 +363,14 @@ def test_xcrg_with_qg1():
                     "subject": "chemical",
                     "predicates": ['biolink:regulates', 'biolink:affects'],
                     "knowledge_type": "inferred",
-                    "qualifier_constraints": [
-                        {
-                            "qualifier_set": [
-                                {
-                                    "qualifier_type_id": "biolink:object_direction_qualifier",
-                                    "qualifier_value": "increased"
-                                }
-                            ]
-                        }
-                    ]
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
+                            {
+                                "biolink:object_direction_qualifier": "increased"
+                            }
+                        ]
+                    }
                 }
             }
         }
@@ -413,16 +411,14 @@ def test_xcrg_with_qg2():
                     "subject": "chemical",
                     "predicates": ['biolink:affects'],
                     "knowledge_type": "inferred",
-                    "qualifier_constraints": [
-                        {
-                            "qualifier_set": [
-                                {
-                                    "qualifier_type_id": "biolink:object_direction_qualifier",
-                                    "qualifier_value": "decreased"
-                                }
-                            ]
-                        }
-                    ]
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
+                            {
+                                "biolink:object_direction_qualifier": "decreased"
+                            }
+                        ]
+                    }
                 }
             }
         }
@@ -454,20 +450,15 @@ def test_xcrg_with_only_qg():
                 "predicates": [
                     "biolink:affects"
                 ],
-                "qualifier_constraints": [
-                    {
-                    "qualifier_set": [
+                # TRAPI 2.0: was "qualifier_constraints": [...]
+                "constraints": {
+                    "qualifiers": [
                         {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity_or_abundance"
-                        },
-                        {
-                        "qualifier_type_id": "biolink:object_direction_qualifier",
-                        "qualifier_value": "increased"
+                            "biolink:object_aspect_qualifier": "activity_or_abundance",
+                            "biolink:object_direction_qualifier": "increased"
                         }
                     ]
-                    }
-                ],
+                },
                 "subject": "SN"
                 }
             },
@@ -531,13 +522,13 @@ def test_xdtd_publications_in_edge_attributes():
         "message": {"query_graph": {
             "edges": {
                 "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "on",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "sn"
                 }
             },
@@ -592,13 +583,13 @@ def test_xdtd_extra_edge_attributes_and_qualifiers():
         "message": {"query_graph": {
             "edges": {
                 "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "on",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "sn"
                 }
             },
@@ -700,13 +691,13 @@ def test_xdtd_source_record_urls_in_retrieval_sources():
         "message": {"query_graph": {
             "edges": {
                 "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "on",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "sn"
                 }
             },

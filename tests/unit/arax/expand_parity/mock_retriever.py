@@ -12,7 +12,8 @@ every recorded request):
   such member);
 - a 2.0 edge carries the required ``knowledge_level`` / ``agent_type``
   (``not_provided``: the universe's edges state neither);
-- an analysis without edge bindings has none (2.0 forbids an empty map), and
+- a one-node answer's results have no analyses (a 2.0 Analysis needs edge
+  or path bindings, and there are none), and
   2.0 aux graphs have no ``attributes``.
 """
 
@@ -95,6 +96,8 @@ def edge_bindings(bound, trapi):
 
 
 def analysis(bound, trapi):
+    if trapi != "1.6" and not bound:
+        return None  # 2.0: an Analysis needs edge (or path) bindings
     return [{"resource_id": "infores:retriever", **edge_bindings(bound, trapi)}]
 
 
@@ -126,12 +129,10 @@ def answer(body, trapi=None):
         for nid in sorted(qn.get("ids") or []):
             if nid in NODES:
                 kg_nodes[nid] = NODES[nid]
-                results.append(
-                    {
-                        "node_bindings": {qk: node_binding(nid, nid, trapi)},
-                        "analyses": analysis({}, trapi),
-                    }
-                )
+                result = {"node_bindings": {qk: node_binding(nid, nid, trapi)}}
+                if analysis({}, trapi):
+                    result["analyses"] = analysis({}, trapi)
+                results.append(result)
     elif len(qedges) > 1:
         return 200, {"message": answer_multi_hop(qg, trapi)}
     else:

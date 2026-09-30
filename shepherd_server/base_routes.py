@@ -27,6 +27,7 @@ from shepherd_utils.db import (
     get_message,
     get_query_log_level,
     get_query_state,
+    get_response_query_parameters,
     remove_callback_id,
     save_logs,
     save_message,
@@ -898,7 +899,8 @@ async def get_query_response(
     if response is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
     logs = await get_logs(query_id, logger)
-    # The stored response started as a copy of the query, so a
-    # ``parameters`` still on it is the one to repeat back.
-    finalize_response(response, logs=logs)
+    # A stored response carries no parameters (save_response); the ones to
+    # repeat are its query's.
+    parameters = await get_response_query_parameters(query_id, logger)
+    finalize_response(response, {"parameters": parameters}, logs)
     return ORJSONResponse(content=response)

@@ -168,3 +168,35 @@ def test_arax_made_edges_get_their_2_0_levels():
 def test_envelopes_declare_trapi_2():
     new = T.read_json_gz(T.golden_paths("query_parity")[1])
     assert {rec["envelope"]["schema_version"] for rec in new.values()} == {"2.0.0"}
+
+
+def test_analyses_have_bindings():
+    """H11: every 2.0 analysis has edge or path bindings; tpl_one_node's
+    binding-less (score-carrying) analyses are the ones dropped."""
+    old = T.read_json_gz(T.golden_paths("query_parity")[0])
+    new = T.read_json_gz(T.golden_paths("query_parity")[1])
+    dropped = set()
+    for case, rec in new.items():
+        for result in rec["envelope"]["message"].get("results") or []:
+            for analysis in result.get("analyses") or []:
+                assert analysis.get("edge_bindings") or analysis.get("path_bindings")
+        for result in old[case]["envelope"]["message"].get("results") or []:
+            for analysis in result.get("analyses") or []:
+                if not analysis.get("edge_bindings"):
+                    dropped.add(case)
+    assert dropped == {"tpl_one_node"}
+
+
+def test_collated_qnodes_echo_collate():
+    """H12: the qnode the 2.0 case sends as COLLATE echoes it with is_set."""
+    new = T.read_json_gz(T.golden_paths("query_parity")[1])
+    collated = {
+        c[0]: T.collated_qnodes(c)
+        for c in T.load_inputs16("query_parity")["CASES"]
+        if T.collated_qnodes(c)
+    }
+    assert collated == {"trapi_set_interpretation_many_and_is_set": ["n1"]}
+    qnode = new["trapi_set_interpretation_many_and_is_set"]["envelope"]["message"][
+        "query_graph"
+    ]["nodes"]["n1"]
+    assert qnode["is_set"] is True and qnode["set_interpretation"] == "COLLATE"

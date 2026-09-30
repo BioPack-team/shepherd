@@ -133,6 +133,11 @@ class QNode(Model):
         :return: The is_set of this QNode.
         :rtype: bool
         """
+        # TRAPI 2.0 (Shepherd change): set_interpretation COLLATE -- collate
+        # the matching nodes of an unpinned QNode into one Result -- is what
+        # ARAX's is_set means, so ARAX's is_set handling honours it.
+        if self._set_interpretation == "COLLATE":
+            return True
         return self._is_set
 
     @is_set.setter
@@ -190,7 +195,7 @@ class QNode(Model):
         :param set_interpretation: The set_interpretation of this QNode.
         :type set_interpretation: str
         """
-        allowed_values = [None,"BATCH", "ALL", "MANY"]  # noqa: E501
+        allowed_values = [None,"BATCH", "ALL", "MANY", "COLLATE"]  # noqa: E501
         if set_interpretation not in allowed_values:
             raise ValueError(
                 "Invalid value for `set_interpretation` ({0}), must be one of {1}"

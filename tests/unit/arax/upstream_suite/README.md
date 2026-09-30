@@ -1,19 +1,36 @@
 # Upstream ARAX's test suite, run against the port
 
 The `test_*.py` files here are upstream ARAX's own tests
-(`RTXteam/RTX @ 9485431`, `code/ARAX/test/`), copied unmodified (MIT, see
-`LICENSE.RTX`). `upstream_alias.py` resolves their imports (`ARAX_query`,
+(`RTXteam/RTX @ 9485431`, `code/ARAX/test/`, MIT, see `LICENSE.RTX`).
+`upstream_alias.py` resolves their imports (`ARAX_query`,
 `Expand.expand_utilities`, `openapi_server.models.*`, `node_synonymizer`, ...)
 to the port's modules under `shepherd_utils/arax/`, so the same tests exercise
 the port.
+
+**They are no longer verbatim.** Upstream ARAX speaks TRAPI 1.6 and the port
+speaks TRAPI 2.0, so where a test builds or checks a TRAPI 1.x shape it is
+adapted to the 2.0 one, and nothing else: one `NodeBinding(ids=[...])` /
+`EdgeBinding(ids=[...])` per qnode / qedge instead of lists of `id` bindings;
+a QEdge's `constraints` object instead of `attribute_constraints` /
+`qualifier_constraints` (a qualifier set is a `{type: value}` dict);
+`required_intermediate_categories`; `knowledge_level` / `agent_type` as edge
+members instead of attributes; no `attributes` on aux graphs; no
+`NodeBinding.query_id` (the checks on it are removed); `schema_version`
+`2.0.0`. Each change is local, keeps upstream's structure and style, and is
+marked with a `# TRAPI 2.0:` comment, so `diff` against upstream's files still
+shows exactly what changed. Code that was already broken upstream (the TRAPI
+1.3 `result.edge_bindings` in a few live-only tests) is left as it is.
 
 ## In CI (offline)
 
 `pytest tests/unit/arax/upstream_suite` runs the 81 tests in
 `offline_passing.txt`. These are every upstream test that passes on upstream
-ARAX itself with no network and no ARAX data files. The rest are skipped
-because they fail offline on upstream too. The two xfails are the port's
-recorded difference DEC-4 (xCRG uses Shepherd's Retriever).
+ARAX itself with no network and no ARAX data files (and all 81 pass on the
+port, adapted to TRAPI 2.0 as above). The rest are skipped because they fail
+offline on upstream too. The two xfails are the port's recorded difference
+DEC-4 (xCRG uses Shepherd's Retriever). With `--arax-live`,
+`test_gene_object_xcrg_full_trapi_integration` is a strict xfail: the
+catrax-xcrg package xCRG runs speaks TRAPI 1.x and has no 2.0 release.
 
 ## Against live services (`--arax-live`)
 

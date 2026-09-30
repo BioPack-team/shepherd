@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
-from .trapi import prepare_stored_response, query_log_level
+from .trapi import prepare_stored_response, query_log_level, query_parameters
 
 PG_RETRIES = 5
 # Retries for the handful of Redis writes that are correctness-critical
@@ -220,6 +220,13 @@ _SCHEMA_UPGRADES = (
     (
         "idx_callbacks_query_id",
         "CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id)",
+    ),
+    # GET /response/{id} maps a response back to its query (to repeat the
+    # query's TRAPI 2.0 parameters); see get_response_query_parameters.
+    (
+        "idx_shepherd_brain_response_id",
+        "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_response_id "
+        "ON shepherd_brain (response_id)",
     ),
 )
 
@@ -469,6 +476,36 @@ async def save_message(
             logger.error(f"Failed to save a message into redis: {e}")
             if raise_on_failure:
                 raise
+
+
+async def get_response_query_parameters(
+    response_id: str, logger: logging.Logger
+) -> dict:
+    """The TRAPI ``parameters`` of the query whose response is ``response_id``.
+
+    TRAPI 2.0 says a Response repeats its query's ``parameters``, and a stored
+    response carries none (``save_response``), so a route serving a stored
+    response by its id looks the query up: ``shepherd_brain`` maps the response
+    id to the query id, and the query is in the data store. ``{}`` when either
+    is gone (the query expired, or the id was never a query's response).
+    """
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cursor = await conn.execute(
+                "SELECT qid FROM shepherd_brain WHERE response_id = %s LIMIT 1",
+                (response_id,),
+            )
+            row = await cursor.fetchone()
+    except Exception as e:
+        logger.warning(f"Could not look up the query of response {response_id}: {e}")
+        return {}
+    if row is None:
+        return {}
+    try:
+        query = await get_message(row[0], logger)
+    except KeyError:
+        return {}
+    return dict(query_parameters(query if isinstance(query, dict) else None))
 
 
 async def save_response(

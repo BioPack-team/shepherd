@@ -106,9 +106,9 @@ def test_prune():
     result_nodes = set()
     result_edges = set()
     for result in message.results:
-        for node_binding_list in result.node_bindings.values():
-            for node_binding in node_binding_list:
-                result_nodes.add(node_binding.id)
+        for node_binding in result.node_bindings.values():
+            for node_id in node_binding.ids:  # TRAPI 2.0: one binding with ids
+                result_nodes.add(node_id)
         for edge_binding_list in result.edge_bindings.values():
             for edge_binding in edge_binding_list:
                 result_edges.add(edge_binding.id)

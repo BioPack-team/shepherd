@@ -82,6 +82,20 @@ for _case in QUERY_ID_LOST["query_parity"]:
     EXPECTED_DIFFERENCES.setdefault(_case, set()).update(
         {"message", "envelope", "logs"}
     )
+# TRAPI 2.0: upstream told a one-node query ("edges": {}, tpl_one_node) from
+# a query graph with no edges or paths (no "edges" key, an error) by the empty
+# map; 2.0 forbids an empty "edges", so both are the same one-node query graph
+# and this case now runs as a one-node query; see
+# test_query_graph_without_edges_is_a_one_node_query
+EXPECTED_DIFFERENCES["val_no_edges_or_paths"] = {
+    "status",
+    "error_code",
+    "http_status",
+    "message",
+    "envelope",
+    "logs",
+    "requests",
+}
 # Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
 XFAIL = {
     # connect(action=xcrg) runs the catrax-xcrg package, which speaks TRAPI
@@ -150,7 +164,7 @@ def test_removed_filter_command_is_unrecognized(outputs):
 def test_stored_response_url_is_shepherds(outputs):
     """DEC-3: envelope.id is where Shepherd serves the stored response."""
     upstream, port = outputs
-    stored = [n for n, rec in upstream.items() if rec["envelope_id"]]
+    stored = [n for n, rec in upstream.items() if rec["envelope_id"] and n not in XFAIL]
     assert stored
     for name in stored:
         assert port[name]["envelope_id"] == "http://shepherd.test/arax/response/R1"
@@ -208,3 +222,18 @@ def test_connect_knodes_translation_is_upstreams_minus_the_disabled_action(outpu
     ]
     assert len(want) == len(actions(upstream[case])) - 1
     assert actions(port[case]) == want
+
+
+def test_query_graph_without_edges_is_a_one_node_query(outputs):
+    """TRAPI 2.0 has no empty "edges" map: a query graph with nodes only is a
+    one-node query, answered as tpl_one_node's is."""
+    upstream, port = outputs
+    assert upstream["val_no_edges_or_paths"]["status"] == "ERROR"
+    rec, one_node = port["val_no_edges_or_paths"], port["tpl_one_node"]
+    for field in ("exception", "status", "error_code", "http_status"):
+        assert rec[field] == one_node[field], field
+    (request,) = rec["requests"]
+    qg = request["body"]["message"]["query_graph"]
+    assert "edges" not in qg
+    assert qg["nodes"]["n0"]["ids"] == ["CHEBI:1"]
+    assert rec["message"] == "Normal completion with 1 results."

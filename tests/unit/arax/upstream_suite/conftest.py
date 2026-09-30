@@ -1,7 +1,9 @@
 """Upstream ARAX's own test suite (RTXteam/RTX @ 9485431, code/ARAX/test/),
 run against the Shepherd port.
 
-The test_*.py files here are upstream's, unmodified (MIT, see LICENSE.RTX).
+The test_*.py files here are upstream's (MIT, see LICENSE.RTX), adapted to
+TRAPI 2.0 where they build or check TRAPI 1.x shapes; each change is marked
+``# TRAPI 2.0:`` (see README.md).
 ``upstream_alias`` makes their imports (``from ARAX_query import ARAXQuery``,
 ``import Expand.expand_utilities``, ``from openapi_server.models...``) resolve to
 the port's modules, so they exercise the port's code.
@@ -49,6 +51,14 @@ EXPECTED_DEVIATIONS = {
     "test_ARAX_xcrg_connect.py::test_connect_xcrg_calls_package_and_updates_response": (
         "DEC-4: the xCRG config's retriever_url is Shepherd's Retriever, not "
         "retriever.<maturity>.transltr.io; everything else it checks is upstream's"
+    ),
+}
+# Live tests that cannot pass on TRAPI 2.0 yet (strict xfails with --arax-live)
+EXPECTED_LIVE_FAILURES = {
+    "test_ARAX_xcrg_connect.py::test_gene_object_xcrg_full_trapi_integration": (
+        "TRAPI 2.0: connect(action=xcrg) runs the catrax-xcrg package, which "
+        "speaks TRAPI 1.x and has no 2.0 release (Shepherd does no 1.x<->2.0 "
+        "conversion)"
     ),
 }
 
@@ -134,6 +144,12 @@ def pytest_collection_modifyitems(config, items):
             if upstream_id not in OFFLINE_PASSING:
                 item.add_marker(skip_offline)
             continue
+        if upstream_id in EXPECTED_LIVE_FAILURES:
+            item.add_marker(
+                pytest.mark.xfail(
+                    reason=EXPECTED_LIVE_FAILURES[upstream_id], strict=True
+                )
+            )
         # --arax-live: upstream's own selection
         if "slow" in item.keywords:
             if not config.getoption("--runslow") and not config.getoption(
