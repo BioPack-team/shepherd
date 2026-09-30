@@ -439,8 +439,10 @@ class _FakePool:
 async def test_query_parameters_for_response_reads_the_query(mocker):
     pool = _FakePool(("q1",))
     mocker.patch.object(api.arax_status.db, "pool", pool)
+    # The lookup lives in shepherd_utils.db (get_response_query_parameters),
+    # which the base GET /response/{id} uses too.
     get = mocker.patch.object(
-        api.arax_status,
+        api.arax_status.db,
         "get_message",
         new_callable=mocker.AsyncMock,
         return_value={"message": {}, "parameters": {"timeout": 5}},

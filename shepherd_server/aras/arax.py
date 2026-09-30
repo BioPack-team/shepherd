@@ -383,19 +383,14 @@ def finish_stored_response(response_id: str, parameters: dict, logs: list):
     return response_lookup.finish_local_response(envelope)
 
 
-async def _run_response_step(fn, *args):
-    """``get_response``'s ``run``: its local-response step reads Shepherd's
-    stored form, so it becomes ``finish_stored_response``, with the query's
-    parameters and logs read here (async). The other steps run as given."""
-    from shepherd_utils.arax.ResponseCache import response_lookup
-
-    if fn is response_lookup.load_and_finish_local_response:
-        (response_id,) = args
-        logger = logging.getLogger("shepherd.arax.response")
-        parameters = await arax_status.query_parameters_for_response(response_id)
-        logs = await get_logs(response_id, logger)
-        return await _run_in_pool(finish_stored_response, response_id, parameters, logs)
-    return await _run_in_pool(fn, *args)
+async def _load_stored_response(response_id: str):
+    """``get_response``'s ``load_local``: a Shepherd response is kept in its
+    stored form, so it is finished by ``finish_stored_response``, with the
+    query's parameters and logs read here (async)."""
+    logger = logging.getLogger("shepherd.arax.response")
+    parameters = await arax_status.query_parameters_for_response(response_id)
+    logs = await get_logs(response_id, logger)
+    return await _run_in_pool(finish_stored_response, response_id, parameters, logs)
 
 
 @ARAX.get("/response/{response_id}")
@@ -408,7 +403,8 @@ async def get_response(response_id: str) -> Response:
         fetch_url=_fetch_url,
         fetch_ars=_fetch_ars,
         ars_host=ars_host(),
-        run=_run_response_step,
+        run=_run_in_pool,
+        load_local=_load_stored_response,
     )
     return _arax_json(result)
 

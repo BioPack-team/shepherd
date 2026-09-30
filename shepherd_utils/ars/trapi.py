@@ -21,12 +21,12 @@ What the verdict enforces (TOM's pydantic models, i.e. TRAPI 2.0 structure):
     extras, which is what lets the ARS hang ``normalized_score`` and
     ``ordering_components`` on a Result.
   - ``RetrievalSource.resource_role`` and ``LogEntry.level`` enums.
-  - the two ``anyOf`` rules the pydantic models cannot express (TOM checks
-    them only in its much heavier semantic validation, which also checks
+  - the schema's one ``anyOf`` rule the pydantic models cannot express (TOM
+    checks it only in its much heavier semantic validation, which also checks
     referential integrity -- more than upstream's verdict ever did): an
-    Analysis binds ``edge_bindings`` and/or ``path_bindings``, and a query
-    graph has ``edges`` and/or ``paths``. These replace 1.5's separate
-    Analysis / PathfinderAnalysis and QueryGraph / PathfinderQueryGraph.
+    Analysis binds ``edge_bindings`` and/or ``path_bindings``. It replaces
+    1.5's separate Analysis / PathfinderAnalysis. (A QueryGraph needs only
+    ``nodes``; ``edges`` and ``paths`` are each optional.)
 
 Explicit nulls: TRAPI 2.0 has no ``nullable`` anywhere, but TOM's models
 type optional members as ``X | None`` and so accept an explicit ``null``.
@@ -89,11 +89,6 @@ class _AnyOfError(ValueError):
 
 def _check_any_of(message: dict) -> None:
     """The schema's anyOf rules, on a dict the models already accepted."""
-    query_graph = message.get("query_graph")
-    if query_graph is not None and not (
-        query_graph.get("edges") or query_graph.get("paths")
-    ):
-        raise _AnyOfError("query_graph has neither edges nor paths")
     for i, result in enumerate(message.get("results") or []):
         for j, analysis in enumerate(result.get("analyses") or []):
             if not (analysis.get("edge_bindings") or analysis.get("path_bindings")):

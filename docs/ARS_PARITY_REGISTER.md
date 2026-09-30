@@ -202,9 +202,9 @@ Behavioral deviations:
    reasoner-pydantic 5.1.1's field requirements in hand-written pydantic-v2
    models (upstream's package is pydantic-1 only), with verdict parity
    golden-tested; with the move to TRAPI 2.0 (deviation 18) the verdict is
-   TOM's `Response` model plus the two schema `anyOf` rules the models do
+   TOM's `Response` model plus the schema's `anyOf` rule the models do
    not express (an Analysis has `edge_bindings` and/or `path_bindings`; a
-   query graph has `edges` and/or `paths`). Verdicts are golden-tested over
+   2.0 query graph needs only `nodes`). Verdicts are golden-tested over
    the same valid + broken corpora, in 2.0 form.
 2. **Annotator**: the in-process `biothings_annotator` package, as
    upstream, with two deltas. (a) *Version pinning*: Relay installs the
