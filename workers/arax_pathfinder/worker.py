@@ -233,6 +233,60 @@ def execute_pathfinding(
     return result, aux_graphs, knowledge_graph
 
 
+def pathfinder_results(result, aux_graphs) -> tuple[list, dict]:
+    """TRAPI 2.0 results and auxiliary graphs from what ``get_paths`` returns.
+
+    catrax-pathfinder builds its result in its own (TRAPI 1.x-like) shape:
+    node bindings as ``[{"id", "attributes"}]`` per qnode, an analysis's path
+    bindings as ``[{"id"}]`` per qpath, aux graphs as ``{"edges",
+    "attributes"}``. They are built here as 2.0 objects from those fields, as
+    ``ARAX_connect.convert_to_trapi`` does for ARAX's ``connect``:
+
+    - a NodeBinding / PathBinding is one ``{"ids": [...]}`` per qnode / qpath;
+    - an AuxiliaryGraph is ``{"edges"}`` only, and one without edges is left
+      out (2.0 requires edges), with the path bindings to it; an analysis left
+      without path bindings is dropped, and a result left without analyses;
+    - ARAX's ``id`` and ``essence`` stay on the Result (additional properties
+      are allowed there, and ARAX's UI reads them).
+    """
+    aux_graphs = aux_graphs or {}
+    kept_aux_graphs = {
+        key: {"edges": list(aux_graph["edges"])}
+        for key, aux_graph in aux_graphs.items()
+        if (aux_graph or {}).get("edges")
+    }
+    if result is None:
+        return [], kept_aux_graphs
+    analyses = []
+    for analysis in result.get("analyses") or []:
+        path_bindings = {}
+        for qpath_key, bindings in (analysis.get("path_bindings") or {}).items():
+            ids = [b["id"] for b in bindings or [] if b["id"] in kept_aux_graphs]
+            if ids:
+                path_bindings[qpath_key] = {"ids": list(dict.fromkeys(ids))}
+        if not path_bindings:
+            continue
+        trapi_analysis = {
+            "resource_id": analysis["resource_id"],
+            "path_bindings": path_bindings,
+        }
+        if analysis.get("score") is not None:
+            trapi_analysis["score"] = analysis["score"]
+        analyses.append(trapi_analysis)
+    if not analyses:
+        return [], kept_aux_graphs
+    node_bindings = {
+        qnode_key: {"ids": list(dict.fromkeys(b["id"] for b in bindings))}
+        for qnode_key, bindings in (result.get("node_bindings") or {}).items()
+        if bindings
+    }
+    trapi_result = {"node_bindings": node_bindings, "analyses": analyses}
+    if result.get("id") is not None:
+        trapi_result = {"id": result["id"], **trapi_result}
+    trapi_result["essence"] = "result"
+    return [trapi_result], kept_aux_graphs
+
+
 def arax_pathfinder_task(
     query_id: str, response_id: str, otel_carrier: dict, logger: logging.Logger
 ) -> None:
@@ -295,18 +349,11 @@ def _arax_pathfinder_task(
         raise
 
     with tracer.start_as_current_span("arax_pathfinder.save_response"):
-        if result is not None:
-            # Result allows additional properties in 2.0, so ARAX's "id" and
-            # "essence" (used by the ARAX UI) are kept.
-            result = {
-                "id": result["id"],
-                "analyses": result["analyses"],
-                "node_bindings": result["node_bindings"],
-                "essence": "result",
-            }
-        res = [result] if result is not None else []
-        if knowledge_graph is None:
-            knowledge_graph = {"nodes": {}, "edges": {}}
+        res, aux_graphs = pathfinder_results(result, aux_graphs)
+        if not isinstance(knowledge_graph, dict):
+            knowledge_graph = {}
+        knowledge_graph.setdefault("nodes", {})
+        knowledge_graph.setdefault("edges", {})
         message["message"]["knowledge_graph"] = knowledge_graph
         if aux_graphs:
             message["message"]["auxiliary_graphs"] = aux_graphs

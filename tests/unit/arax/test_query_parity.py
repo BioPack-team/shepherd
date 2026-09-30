@@ -1,12 +1,15 @@
 """End-to-end ARAXQuery parity: the Shepherd port vs. goldens from upstream ARAX.
 
-``query_parity/run_upstream.py`` ran each case in ``query_parity/query_cases.py``
-through ARAX's own ARAXQuery.query() (RTXteam/RTX @ 9485431) against the Expand
-parity mock Retriever, with small synthetic data files (tier0 overlay,
+``query_parity/run_upstream.py`` ran each case through ARAX's own
+ARAXQuery.query() (RTXteam/RTX @ 9485431, TRAPI 1.6) against the Expand parity
+mock Retriever, with small synthetic data files (tier0 overlay,
 curie_to_pmids, COHD, ExplainableDTD, FDA drugs) and recorded the status, the
 final envelope (minus its id, datetime and logs), the INFO+ log and every
-request sent to the KP. This test runs the same cases through the port and
-requires identical results, apart from the intended differences below.
+request sent to the KP (``goldens_trapi16.json.gz``). The port speaks TRAPI
+2.0: it runs the 2.0 cases in ``query_parity/query_cases.py`` against the mock
+Retriever's 2.0 mode and must produce ``goldens.json.gz``, the TRAPI 2.0
+translation of that record (``trapi2_goldens.py``, which lists its rules),
+apart from the intended differences below.
 
 Like the Expand parity test it runs the port in a subprocess with
 PYTHONHASHSEED=0.
@@ -26,6 +29,7 @@ sys.path.insert(0, QP)
 sys.path.insert(0, HERE)
 from query_cases import CASES  # noqa: E402
 from test_expand_parity import _first_diff, _sort_ids  # noqa: E402
+from trapi2_goldens import QUERY_ID_LOST  # noqa: E402
 
 FIELDS = [
     "exception",
@@ -69,6 +73,22 @@ EXPECTED_DIFFERENCES = {
     # request itself is identical
     "trapi_set_interpretation_all": {"logs"},
 }
+# TRAPI 2.0 (H5 in trapi2_goldens.py): a subclass child bound to a qnode with
+# several ids has no NodeBinding.query_id in 2.0, so ARAX records no parent
+# for it and adds no subclass_of edge; the results built on that differ. The
+# KP request (the case sends one, before any answer) and the outcome are
+# compared; test_expand_parity pins the lost parent itself.
+for _case in QUERY_ID_LOST["query_parity"]:
+    EXPECTED_DIFFERENCES.setdefault(_case, set()).update(
+        {"message", "envelope", "logs"}
+    )
+# Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
+XFAIL = {
+    # connect(action=xcrg) runs the catrax-xcrg package, which speaks TRAPI
+    # 1.x internally and has no 2.0 release; converting at its boundary would
+    # be a runtime 1.x<->2.0 conversion, which Shepherd does not do
+    "mvp2_xcrg_route": "catrax-xcrg has no TRAPI 2.0 release",
+}
 
 
 def _upstream_view(field, value):
@@ -95,7 +115,17 @@ def outputs(tmp_path_factory):
     return upstream, port
 
 
-@pytest.mark.parametrize("case", [c[0] for c in CASES])
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            pytest.param(c[0], marks=pytest.mark.xfail(strict=True, reason=XFAIL[c[0]]))
+            if c[0] in XFAIL
+            else c[0]
+        )
+        for c in CASES
+    ],
+)
 def test_query_matches_upstream(outputs, case):
     upstream, port = outputs
     exempt = EXPECTED_DIFFERENCES.get(case, set())

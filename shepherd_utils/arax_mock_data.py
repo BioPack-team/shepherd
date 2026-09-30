@@ -16,8 +16,10 @@ every reader in the port accepts:
   kg2webhost.rtx.ai
 
 The content is built from a small seed of real, well-known curies, plus the
-nodes and edges of any saved TRAPI responses given with ``--from-trapi`` (a
-response from Retriever or from Shepherd's ``/arax/query``), so local queries
+nodes and edges of any saved TRAPI 2.0 responses given with ``--from-trapi``
+(a response from Retriever or from Shepherd's ``/arax/query``; only the
+knowledge graph's node names and categories, and its edges' ends, predicates,
+sources and ``biolink:publications``, are read), so local queries
 over those nodes get overlay values, xDTD predictions and autocomplete terms.
 The values are made up (deterministically: the same inputs give the same
 files) but consistent with each other: NGD values are computed from the PMID

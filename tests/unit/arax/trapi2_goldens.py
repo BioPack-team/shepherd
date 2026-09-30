@@ -76,6 +76,11 @@ Hand rules on top (what TOM does not own):
   - H8 response_parity: in ARAX's attribute-stripped (``X``) view, a KG edge
     keeps the stored edge's ``knowledge_level`` / ``agent_type`` (see
     ``_unstrip_levels``).
+  - H9 the edges ARAX's overlays make without KL/AT attributes upstream get
+    the values the 2.0 port gives them (ARAX_EDGE_LEVELS: Jaccard and Fisher's
+    exact test ``statistical_association`` / ``automated_agent``, as NGD's
+    own; COHD ``statistical_association`` / ``data_analysis_pipeline``)
+    instead of TOM's ``not_provided``.
   - H7 aux_parity: the meta-KG (and its simple view) and autocomplete answers
     are the same objects in 2.0 (a MetaKnowledgeGraph shape change would be
     additions only); the goldens are carried over unchanged.
@@ -236,7 +241,52 @@ def knowledge_graph(original: dict, new: dict = None) -> dict:
         new["edges"] = {}
     _restore_element_attributes(original.get("nodes"), new.get("nodes"), False)
     _restore_element_attributes(original.get("edges"), new.get("edges"), True)
+    for key, edge in (new.get("edges") or {}).items():
+        levels = arax_edge_levels(original["edges"][key])
+        if levels:
+            edge["knowledge_level"], edge["agent_type"] = levels
     return new
+
+
+# H9: (predicate, primary knowledge source) of the edges ARAX makes itself
+# without KL/AT attributes upstream, and the KL/AT the 2.0 port gives them
+# (2.0 requires both on every edge). NGD, xDTD and the others upstream already
+# stamped; TOM lifts theirs.
+ARAX_EDGE_LEVELS = {
+    ("biolink:has_jaccard_index_with", "infores:arax"): (
+        "statistical_association",
+        "automated_agent",
+    ),
+    ("biolink:has_fisher_exact_test_p_value_with", "infores:arax"): (
+        "statistical_association",
+        "automated_agent",
+    ),
+    ("biolink:associated_with", "infores:cohd"): (
+        "statistical_association",
+        "data_analysis_pipeline",
+    ),
+}
+
+
+def arax_edge_levels(edge: dict):
+    """H9: the 2.0 (knowledge_level, agent_type) of an ARAX-made 1.6 edge
+    that had no KL/AT attributes, else None (TOM's lift / default stands)."""
+    if any(
+        a.get("attribute_type_id") in (KL, AT)
+        for a in edge.get("attributes") or []
+        if isinstance(a, dict)
+    ):
+        return None
+    primary = [
+        s.get("resource_id")
+        for s in edge.get("sources") or []
+        if s.get("resource_role") == "primary_knowledge_source"
+    ]
+    for source in primary:
+        levels = ARAX_EDGE_LEVELS.get((edge.get("predicate"), source))
+        if levels:
+            return levels
+    return None
 
 
 def message(original: dict, new: dict, produced: bool = True) -> dict:

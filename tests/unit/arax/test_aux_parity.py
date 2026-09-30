@@ -8,6 +8,10 @@ lookup over a small terms database; the port, given the same meta-KG as
 Retriever's, must produce the same full and simple meta-KGs, backups
 fallback included, and the same autocomplete answers in the same order (the
 fragment cache carries over between lookups).
+
+``goldens.json.gz`` is the TRAPI 2.0 translation of the recorded
+``goldens_trapi16.json.gz`` (``trapi2_goldens.py``): the same objects, as the
+meta-KG's shape did not change for what ARAX builds.
 """
 
 import gzip

@@ -3,8 +3,9 @@
 #   - import paths / sys.path hacks only
 #   - new forwarded_kps argument: a user-specified kp list is sent to Retriever as parameters.kp, exactly as given (DEC-10)
 #   - TRAPI 2.0: node/edge bindings are one {"ids": [...]} object per qnode/qedge; there is no
-#     NodeBinding.query_id, so the parent query curie of an answer node is always the implied one
-#     (upstream's handling of a KP that returns no query_id); ARAX-made edges set knowledge_level /
+#     NodeBinding.query_id, so the parent query curie of an answer node is the implied one (upstream's
+#     handling of a KP that returns no query_id), or, for a qnode with several ids, the queried curie a
+#     biolink:subclass_of edge in the KP's knowledge graph links it to; ARAX-made edges set knowledge_level /
 #     agent_type as top-level Edge properties (not attributes); AuxiliaryGraph has no attributes; a
 #     TRAPI parameters.bypass_cache=true is forwarded to Retriever in parameters (2.0 requires it);
 #     a KP knowledge graph without edges (optional in 2.0) is an empty one, not a malformed one;
@@ -316,7 +317,8 @@ class TRAPIQuerier:
     def _get_kg_to_qg_mappings_from_results(
             self,
             results: list[Result],
-            qg: QueryGraph
+            qg: QueryGraph,
+            kg_edges: Optional[dict[str, Edge]] = None
     ) -> tuple[dict[str, dict[str, set[str]]], dict[str, set[str]]]:
         """
         This function returns a dictionary in which one can lookup which qnode_keys/qedge_keys a given node/edge
@@ -328,6 +330,12 @@ class TRAPIQuerier:
         kg_id_to_parent_query_id_map = defaultdict(set)
         qedge_key_mappings = defaultdict(set)
         unattributed_kg_ids = defaultdict(set)
+        # TRAPI 2.0 has no NodeBinding.query_id; the only 2.0 carrier of "this answer is a subclass of that
+        # queried curie" is a biolink:subclass_of edge in the KP's knowledge graph
+        kp_subclass_parents = defaultdict(set)
+        for kg_edge in (kg_edges or {}).values():
+            if kg_edge.predicate == "biolink:subclass_of" and kg_edge.subject and kg_edge.object:
+                kp_subclass_parents[kg_edge.subject].add(kg_edge.object)
         for result in results:
             # Record mappings from the returned node to the parent curie listed in the QG that it is fulfilling
             for qnode_key, node_binding in result.node_bindings.items():
@@ -343,6 +351,8 @@ class TRAPIQuerier:
                         if kg_id in query_node_ids:
                             implied_parent_id = kg_id
                             kg_id_to_parent_query_id_map[kg_id].add(implied_parent_id)
+                        elif kp_subclass_parents[kg_id] & query_node_ids:
+                            kg_id_to_parent_query_id_map[kg_id].update(kp_subclass_parents[kg_id] & query_node_ids)
                         else:
                             unattributed_kg_ids[qnode_key].add(kg_id)
 
@@ -355,9 +365,9 @@ class TRAPIQuerier:
         for qnode_key, kg_ids in unattributed_kg_ids.items():
             self.log.warning(f"{self.kp_infores_curie} returned {len(kg_ids)} node(s) for {qnode_key} that are not "
                              f"among {qnode_key}'s multiple ids in the query sent to {self.kp_infores_curie}: "
-                             f"{util.summarize_set_elements(kg_ids)}. TRAPI 2.0 node bindings carry no query_id, "
-                             f"so which queried curie they answer is unknown and no subclass_of edges are added "
-                             f"for them.")
+                             f"{util.summarize_set_elements(kg_ids)}. TRAPI 2.0 node bindings carry no query_id "
+                             f"and the KP returned no subclass_of edge for them, so which queried curie they "
+                             f"answer is unknown and no subclass_of edges are added for them.")
 
         return {"nodes": qnode_key_mappings, "edges": qedge_key_mappings}, kg_id_to_parent_query_id_map
 
@@ -598,7 +608,7 @@ class TRAPIQuerier:
 
         # Build a map that indicates which qnodes/qedges a given node/edge fulfills
         kg_to_qg_mappings, query_curie_mappings = \
-            self._get_kg_to_qg_mappings_from_results(results, qg)
+            self._get_kg_to_qg_mappings_from_results(results, qg, kg.edges)
 
         # Populate our final KG with the returned edges
         unbound_edges = {}

@@ -4,7 +4,8 @@
 #   - TRAPI 2.0 bindings: one NodeBinding / EdgeBinding per qnode / qedge, read and
 #     rebuilt through their `ids` (a binding pruned to no ids stays in memory as an
 #     empty one, like upstream's empty list; ARAX_query drops it from the Response);
-#     AuxiliaryGraph has no `attributes` in 2.0
+#     AuxiliaryGraph has no `attributes` in 2.0; an Analysis left with no support graphs
+#     has none (2.0 forbids an empty support_graphs list)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import os
 import sys
@@ -195,6 +196,10 @@ class ResultTransformer:
                 else:
                     # Tack the support graph onto the result
                     first_analysis.support_graphs.append(aux_graph_key)
+
+            # TRAPI 2.0: no empty support_graphs (e.g. when every group went onto an inferred edge)
+            if not first_analysis.support_graphs:
+                first_analysis.support_graphs = None
 
             # Delete virtual edges (since we moved them to supporting_graphs)
             for virtual_qedge_key in virtual_qedge_keys:

@@ -86,14 +86,18 @@ def _drop_empty_bindings(bindings):
 
 def _finalizing_trapi2_envelope(query_method):
     """ARAXQuery.query, then TRAPI 2.0's envelope rules (Shepherd addition): repeat
-    the query's parameters, and no nulls / forbidden empties."""
+    the query's parameters, and no nulls / forbidden empties. Also when query()
+    raises (the exception propagates as upstream's does), since the envelope
+    built so far is still what is returned."""
     @functools.wraps(query_method)
     def query(self, query, *args, **kwargs):
-        response = query_method(self, query, *args, **kwargs)
-        if response is not None and response.envelope is not None:
-            parameters = query.get('parameters') if isinstance(query, dict) else None
-            finalize_trapi2_envelope(response.envelope, parameters)
-        return response
+        try:
+            return query_method(self, query, *args, **kwargs)
+        finally:
+            response = self.response
+            if response is not None and response.envelope is not None:
+                parameters = query.get('parameters') if isinstance(query, dict) else None
+                finalize_trapi2_envelope(response.envelope, parameters)
     return query
 
 
