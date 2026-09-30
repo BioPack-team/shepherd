@@ -82,7 +82,8 @@ def test_option_group_id():
             "expand(edge_key=[e00,e01], kp=infores:retriever)",
         ]}}
     [response, message] = _do_arax_query(query)
-    for key, edge in message.query_graph.edges.items():
+    # TRAPI 2.0: an empty query graph is not valid 2.0, so a message has none until it has a qnode
+    for key, edge in (message.query_graph.edges if message.query_graph else {}).items():
         if key == 'e01':
             assert edge.option_group_id == '1'
         elif key == 'e00':

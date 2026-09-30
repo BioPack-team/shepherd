@@ -7,6 +7,7 @@
 #     conversion to a PathfinderQueryGraph did; from_dict reads a QG with paths as a QueryGraph
 #   - TRAPI 2.0 set_interpretation COLLATE (an unpinned qnode whose matches are collated into
 #     one result) is what ARAX's is_set=true means, so from_dict sets is_set on such qnodes
+#   - create_envelope keeps the query's TRAPI 2.0 `parameters` from a previous envelope
 #   - TRAPI 2.0 forbids an empty QNode.constraints: add_qnode / from_dict leave it unset
 #     rather than the model's [] default
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
@@ -93,7 +94,11 @@ class ARAXMessenger:
     
         #### Create the top-level Response object called an envelope
         response.info("Creating an empty template TRAPI Response")
+        previous_envelope = response.envelope
         envelope = Response()
+        #### TRAPI 2.0: keep the query's parameters (query-level, not message-level) on a new envelope
+        if previous_envelope is not None:
+            envelope.parameters = previous_envelope.parameters
         response.envelope = envelope
         self.envelope = envelope
 

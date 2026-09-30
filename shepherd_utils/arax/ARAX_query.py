@@ -10,8 +10,8 @@
 #     the response=false return
 #   - ARAXResponse.output is not switched to STDERR at import (Shepherd has its own
 #     logging; the response log is unchanged)
-#   - TRAPI 2.0: the Response repeats the query's `parameters` (log_level / bypass_cache
-#     now live there and stay ignored, ORC-05); the envelope ARAX answers with is made
+#   - TRAPI 2.0: the envelope carries the query's `parameters` from the start (the Response
+#     repeats them; Expand reads bypass_cache there; log_level stays ignored, ORC-05); the envelope ARAX answers with is made
 #     2.0-valid when query() returns (no nulls, and none of the empty containers 2.0
 #     forbids, e.g. the in-memory Analysis of an edgeless result, which has no bindings);
 #     the incoming QG's qedges may carry 2.0 `constraints` (not 1.x attribute_constraints /
@@ -423,6 +423,10 @@ class ARAXQuery:
             response.envelope.query_options = query['query_options']
         else:
             response.envelope.query_options = {}
+
+        #### TRAPI 2.0: the query's parameters (the Response repeats them; Expand reads bypass_cache there)
+        if 'parameters' in query and query['parameters'] is not None:
+            response.envelope.parameters = query['parameters']
 
         #### Need to put certain input Query parameters into query_options to later use by Expand et al.
         if 'return_minimal_metadata' in query:

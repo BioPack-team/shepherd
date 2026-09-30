@@ -29,7 +29,12 @@ sys.path.insert(0, HERE)
 from cases import CASES  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(HERE))
-from trapi2_goldens import QUERY_ID_LOST  # noqa: E402
+from trapi2_goldens import (  # noqa: E402
+    QUERY_ID_LOST,
+    golden_paths,
+    query_id_lost_pairs,
+    read_json_gz,
+)
 
 FIELDS = [
     "exception",
@@ -199,26 +204,20 @@ def test_kp_list_leaves_every_other_kp_skipped(outputs):
 
 @pytest.mark.parametrize("case", QUERY_ID_LOST["expand_parity"])
 def test_subclass_parent_is_not_expressible_in_trapi2(outputs, case):
-    """TRAPI 2.0 has no NodeBinding.query_id: a subclass child bound to a qnode
-    with several ids has no recorded parent in the port, where upstream had
-    the parent Retriever named; every other child keeps upstream's."""
+    """TRAPI 2.0 has no NodeBinding.query_id: a subclass child that Retriever
+    bound to a qnode with several ids (in any of the case's queries) has no
+    recorded parent in the port, where upstream had the one Retriever named;
+    every other KG node keeps upstream's query_ids."""
     upstream, port = outputs
-    want, got = upstream[case]["node_query_ids"], port[case]["node_query_ids"]
-    qg = upstream[case]["qg"]
-    multi_id = {
-        curie
-        for qnode in qg["nodes"].values()
-        if len(qnode.get("ids") or []) > 1
-        for curie in qnode["ids"]
-    }
-    lost = {
-        node: parents
-        for node, parents in want.items()
-        if node not in multi_id and set(parents) & multi_id
-    }
+    lost = query_id_lost_pairs(
+        read_json_gz(golden_paths("expand_parity")[0])[case]["requests"]
+    )
     assert lost, "the case no longer exercises a lost query_id"
+    want, got = upstream[case]["node_query_ids"], port[case]["node_query_ids"]
+    for node, parents in lost.items():
+        if node in want:  # (a node may be pruned later)
+            assert set(parents) <= set(want[node]), node
+        assert not set(got.get(node) or []) & set(parents), node
     for node, parents in want.items():
         if node in got and node not in lost:
             assert got[node] == parents, node
-    for node in lost:
-        assert not set(got.get(node) or []) & set(lost[node]), node

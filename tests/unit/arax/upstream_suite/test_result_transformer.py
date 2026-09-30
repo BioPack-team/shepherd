@@ -79,6 +79,8 @@ def test_creative_noninf_ngd_only_support_graph_filters_result():
                 attribute_source="infores:arax",
             ),
         ],
+        knowledge_level="prediction",  # TRAPI 2.0: required edge members
+        agent_type="computational_model",
     )
     ngd_edge = Edge(
         predicate="biolink:occurs_together_in_literature_with",
@@ -92,6 +94,8 @@ def test_creative_noninf_ngd_only_support_graph_filters_result():
                 attribute_source="infores:arax",
             ),
         ],
+        knowledge_level="statistical_association",  # TRAPI 2.0: required edge members
+        agent_type="automated_agent",
     )
     kg = KnowledgeGraph(nodes=kg_nodes,
                         edges={inferred_edge_id: inferred_edge,
@@ -99,16 +103,16 @@ def test_creative_noninf_ngd_only_support_graph_filters_result():
 
     # The lone aux graph contains only the inf-NGD edge: removing it leaves
     # no path from drug to disease, so the support graph "breaks".
-    aux_graphs = {aux_graph_id: AuxiliaryGraph(edges=[ngd_edge_id], attributes=[])}
+    aux_graphs = {aux_graph_id: AuxiliaryGraph(edges=[ngd_edge_id])}  # TRAPI 2.0: no attributes
 
     # Single result binding the inferred edge to the original qedge.
     analysis = Analysis(
         resource_id="infores:arax",
-        edge_bindings={qedge_treats: [EdgeBinding(id=inferred_edge_id)]},
+        edge_bindings={qedge_treats: EdgeBinding(ids=[inferred_edge_id])},  # TRAPI 2.0: one binding with ids
     )
     result = Result(
-        node_bindings={qnode_drug: [NodeBinding(id=drug_id)],
-                       qnode_disease: [NodeBinding(id=disease_id)]},
+        node_bindings={qnode_drug: NodeBinding(ids=[drug_id]),  # TRAPI 2.0: one binding with ids
+                       qnode_disease: NodeBinding(ids=[disease_id])},
         analyses=[analysis],
         essence="metformin",
     )
@@ -188,6 +192,8 @@ def test_creative_inf_ngd_only_support_graph_filters_result():
                 attribute_source="infores:arax",
             ),
         ],
+        knowledge_level="prediction",  # TRAPI 2.0: required edge members
+        agent_type="computational_model",
     )
     ngd_edge = Edge(
         predicate="biolink:occurs_together_in_literature_with",
@@ -201,6 +207,8 @@ def test_creative_inf_ngd_only_support_graph_filters_result():
                 attribute_source="infores:arax",
             ),
         ],
+        knowledge_level="statistical_association",  # TRAPI 2.0: required edge members
+        agent_type="automated_agent",
     )
     kg = KnowledgeGraph(nodes=kg_nodes,
                         edges={inferred_edge_id: inferred_edge,
@@ -208,16 +216,16 @@ def test_creative_inf_ngd_only_support_graph_filters_result():
 
     # The lone aux graph contains only the inf-NGD edge: removing it leaves
     # no path from drug to disease, so the support graph "breaks".
-    aux_graphs = {aux_graph_id: AuxiliaryGraph(edges=[ngd_edge_id], attributes=[])}
+    aux_graphs = {aux_graph_id: AuxiliaryGraph(edges=[ngd_edge_id])}  # TRAPI 2.0: no attributes
 
     # Single result binding the inferred edge to the original qedge.
     analysis = Analysis(
         resource_id="infores:arax",
-        edge_bindings={qedge_treats: [EdgeBinding(id=inferred_edge_id)]},
+        edge_bindings={qedge_treats: EdgeBinding(ids=[inferred_edge_id])},  # TRAPI 2.0: one binding with ids
     )
     result = Result(
-        node_bindings={qnode_drug: [NodeBinding(id=drug_id)],
-                       qnode_disease: [NodeBinding(id=disease_id)]},
+        node_bindings={qnode_drug: NodeBinding(ids=[drug_id]),  # TRAPI 2.0: one binding with ids
+                       qnode_disease: NodeBinding(ids=[disease_id])},
         analyses=[analysis],
         essence="metformin",
     )
@@ -290,12 +298,15 @@ def test_creative_inferred_edge_without_support_graph_filters_result():
         subject=drug_id,
         object=disease_id,
         attributes=[
+            # TRAPI 2.0: agent_type is an edge member now; was a biolink:agent_type attribute
             Attribute(
-                attribute_type_id="biolink:agent_type",
+                attribute_type_id="biolink:description",
                 value="computational_model",
                 attribute_source="infores:arax",
             ),
         ],
+        knowledge_level="prediction",
+        agent_type="computational_model",
     )
     kg = KnowledgeGraph(nodes=kg_nodes, edges={inferred_edge_id: inferred_edge})
 
@@ -304,11 +315,11 @@ def test_creative_inferred_edge_without_support_graph_filters_result():
 
     analysis = Analysis(
         resource_id="infores:arax",
-        edge_bindings={qedge_treats: [EdgeBinding(id=inferred_edge_id)]},
+        edge_bindings={qedge_treats: EdgeBinding(ids=[inferred_edge_id])},  # TRAPI 2.0: one binding with ids
     )
     result = Result(
-        node_bindings={qnode_drug: [NodeBinding(id=drug_id)],
-                       qnode_disease: [NodeBinding(id=disease_id)]},
+        node_bindings={qnode_drug: NodeBinding(ids=[drug_id]),  # TRAPI 2.0: one binding with ids
+                       qnode_disease: NodeBinding(ids=[disease_id])},
         analyses=[analysis],
         essence="metformin",
     )

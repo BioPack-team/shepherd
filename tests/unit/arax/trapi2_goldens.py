@@ -55,9 +55,12 @@ Hand rules on top (what TOM does not own):
     ``log_level`` / ``bypass_cache`` into them (TOM replaces the object).
   - H4 ARAX-internal records are not TRAPI and are kept verbatim: expand_parity
     ``node_qnode_keys``, ``edge_qedge_keys``, ``qg_filled``, ``kryptonite`` and
-    ``node_query_ids`` (see below); the log lines and messages (ARAX's own
+    ``node_query_ids`` (see below); the log lines (but H4b) and messages (ARAX's own
     text: none quotes a TRAPI 1.x member of the exchanged objects; the ARAXi
     parameter names they echo, like ``is_set``, are still ARAXi's).
+  - H4b the one log line that pretty-prints a TRAPI model's ``to_dict()``
+    (Expand's unsupported-constraint error) loses its ``'x': None`` members,
+    as the port's ``to_dict`` omits None (``log_text``).
   - H5 ``node_query_ids`` (ARAX's in-memory ``Node.query_ids``: which query
     curie a KG node fulfils) is kept as recorded. 2.0 has no
     ``NodeBinding.query_id``, so the mock Retriever's 2.0 answers carry none
@@ -91,6 +94,7 @@ import copy
 import gzip
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -377,7 +381,17 @@ def expand_record(rec: dict) -> dict:
     out["aux"] = auxiliary_graphs(rec["aux"])
     out["plan"] = query_plan(rec["plan"])
     out["requests"] = requests(rec["requests"])
+    out["logs"] = [(level, log_text(text)) for level, text in rec["logs"]]
     return out
+
+
+def log_text(text: str) -> str:
+    """H4b: a log line that pretty-prints a model's to_dict() (Expand's
+    unsupported-constraint error quotes the AttributeConstraint) loses the
+    None members, which the port's to_dict omits under 2.0."""
+    if text.startswith("Unsupported constraint(s) detected"):
+        text = re.sub(r"\n '[A-Za-z_]+': None,", "", text)
+    return text
 
 
 def expand_goldens(g16: dict) -> dict:
@@ -565,29 +579,44 @@ def response_case(case: tuple) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def query_id_lost_cases(suite: str) -> list:
-    """Cases whose recorded exchange bound a subclass child (a NodeBinding
-    with a query_id) to a qnode with several ids: replays each recorded
-    request through the mock Retriever's 1.6 mode."""
+def query_id_lost_pairs(requests: list) -> dict:
+    """{KG node: parents} that a case's recorded exchange named only through a
+    NodeBinding.query_id on a qnode with several ids -- what TRAPI 2.0 cannot
+    carry. Replays each recorded request through the mock Retriever's 1.6
+    mode; a parent the same node also got from a single-id qnode (implied in
+    2.0 as well) is not lost."""
     sys.path.insert(0, os.path.join(HERE, "expand_parity"))
     import mock_retriever
 
-    out = []
-    for case, rec in read_json_gz(golden_paths(suite)[0]).items():
-        for r in rec.get("requests") or []:
-            code, answer = mock_retriever.answer(r["body"], trapi="1.6")
-            if code != 200:
-                continue
-            qnodes = r["body"]["message"]["query_graph"]["nodes"]
-            if any(
-                "query_id" in b and len(qnodes[qk].get("ids") or []) > 1
-                for result in answer["message"]["results"]
-                for qk, bindings in result["node_bindings"].items()
-                for b in bindings
-            ):
-                out.append(case)
-                break
-    return sorted(out)
+    lost, kept = {}, {}
+    for r in requests:
+        code, answer = mock_retriever.answer(r["body"], trapi="1.6")
+        if code != 200:
+            continue
+        qnodes = r["body"]["message"]["query_graph"]["nodes"]
+        for result in answer["message"]["results"]:
+            for qk, bindings in result["node_bindings"].items():
+                ids = qnodes[qk].get("ids") or []
+                for b in bindings:
+                    if "query_id" in b and len(ids) > 1:
+                        lost.setdefault(b["id"], set()).add(b["query_id"])
+                    elif len(ids) == 1:
+                        kept.setdefault(b["id"], set()).add(ids[0])
+    out = {}
+    for node, parents in lost.items():
+        parents = parents - kept.get(node, set())
+        if parents:
+            out[node] = sorted(parents)
+    return out
+
+
+def query_id_lost_cases(suite: str) -> list:
+    """The cases with query_id_lost_pairs (QUERY_ID_LOST)."""
+    return sorted(
+        case
+        for case, rec in read_json_gz(golden_paths(suite)[0]).items()
+        if query_id_lost_pairs(rec.get("requests") or [])
+    )
 
 
 def main(argv: list) -> int:

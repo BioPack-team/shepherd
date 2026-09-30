@@ -87,13 +87,13 @@ def _print_results_for_debug(message: Message):
         for qnode_key, node_bindings_list in result.node_bindings.items():
             qnode = qg.nodes[qnode_key]
             print(f"  qnode {qnode_key}{f' (option group {qnode.option_group_id})' if qnode.option_group_id else ''}:")
-            for node_binding in node_bindings_list:
-                print(f"    {node_binding.id} {kg.nodes[node_binding.id].name}")
+            for node_id in node_bindings_list.ids:  # TRAPI 2.0: one binding with ids
+                print(f"    {node_id} {kg.nodes[node_id].name}")
         for qedge_key, edge_bindings_list in result.analyses[0].edge_bindings.items():
             qedge = qg.edges[qedge_key]
             print(f"  qedge {qedge_key}{f' (option group {qedge.option_group_id})' if qedge.option_group_id else ''}:")
-            for edge_binding in edge_bindings_list:
-                print(f"    {edge_binding.id}")
+            for edge_id in edge_bindings_list.ids:  # TRAPI 2.0: one binding with ids
+                print(f"    {edge_id}")
     # Display the query graph
     import graphviz
     dot = graphviz.Digraph(comment='QG')
@@ -114,11 +114,11 @@ def _print_results_for_debug(message: Message):
 
 
 def _get_result_node_keys_by_qg_key(result: Result) -> Dict[str, Set[str]]:
-    return {qnode_key: {node_binding.id for node_binding in result.node_bindings[qnode_key]} for qnode_key in result.node_bindings}
+    return {qnode_key: set(result.node_bindings[qnode_key].ids) for qnode_key in result.node_bindings}  # TRAPI 2.0: one binding with ids
 
 
 def _get_result_edge_keys_by_qg_key(result: Result) -> Dict[str, Set[str]]:
-    return {qedge_key: {edge_binding.id for edge_binding in result.analyses[0].edge_bindings[qedge_key]} for qedge_key in result.analyses[0].edge_bindings}
+    return {qedge_key: set(result.analyses[0].edge_bindings[qedge_key].ids) for qedge_key in result.analyses[0].edge_bindings}  # TRAPI 2.0: one binding with ids
 
 
 def _do_arax_query(actions_list: List[str], debug=False, enforce_connected=True) -> Tuple[ARAXResponse, Message]:
@@ -136,9 +136,9 @@ def _do_arax_query(actions_list: List[str], debug=False, enforce_connected=True)
     if enforce_connected:
         for result in message.results:
             # First grab all edge keys used in this result
-            all_edge_keys_in_result = {edge_binding.id
-                                       for qedge_key, edge_bindings in result.analyses[0].edge_bindings.items()
-                                       for edge_binding in edge_bindings}
+            all_edge_keys_in_result = {edge_id  # TRAPI 2.0: one binding with ids
+                                       for qedge_key, edge_binding in (result.analyses[0].edge_bindings or {}).items()
+                                       for edge_id in edge_binding.ids}
             if all_edge_keys_in_result:  # Skip checking for single-node queries
                 # Then figure out all nodes that those edges link to
                 all_subjects = {message.knowledge_graph.edges[edge_key].object for edge_key in all_edge_keys_in_result}
@@ -147,9 +147,9 @@ def _do_arax_query(actions_list: List[str], debug=False, enforce_connected=True)
                 # Then ensure that every node in the result is used by an edge (catches subclass nodes that only point
                 #  to parent since there is no subclass qedge in the final results) and every node used by an edge has
                 #  a node binding
-                all_node_keys_in_result = {node_binding.id
-                                           for qnode_key, node_bindings in result.node_bindings.items()
-                                           for node_binding in node_bindings}
+                all_node_keys_in_result = {node_id  # TRAPI 2.0: one binding with ids
+                                           for qnode_key, node_binding in result.node_bindings.items()
+                                           for node_id in node_binding.ids}
                 assert all_node_keys_in_result == all_nodes_used_by_edges
 
     return response, message
@@ -1074,7 +1074,7 @@ def test_issue720_1():
     n02_nodes_in_kg = [node for node in message.knowledge_graph.nodes.values() if "n02" in node.qnode_keys]
     assert message.results and len(message.results) >= len(n02_nodes_in_kg)
     for result in message.results:
-        n02s = {node_binding.id for node_binding in result.node_bindings["n02"]}
+        n02s = set(result.node_bindings["n02"].ids)  # TRAPI 2.0: one binding with ids
         assert "DOID:14330" not in n02s
     assert response.status == 'OK'
 
@@ -1119,9 +1119,10 @@ def test_issue833_extraneous_intermediate_nodes():
     response, message = _run_resultify_directly(query_graph, knowledge_graph)
     assert response.status == 'OK'
     for result in message.results:
-        result_n01_nodes = {node_binding.id for node_binding in result.node_bindings["n01"]}
-        result_e01_edges = {edge_binding.id for edge_binding in result.analyses[0].edge_bindings["e01"]}
-        result_e00_edges = {edge_binding.id for edge_binding in result.analyses[0].edge_bindings["e00"]}
+        # TRAPI 2.0: one binding with ids
+        result_n01_nodes = set(result.node_bindings["n01"].ids)
+        result_e01_edges = set(result.analyses[0].edge_bindings["e01"].ids)
+        result_e00_edges = set(result.analyses[0].edge_bindings["e00"].ids)
         for n01_node_key in result_n01_nodes:
             kg_edges_using_this_node = _get_kg_edge_keys_using_node(n01_node_key, message.knowledge_graph)
             assert result_e01_edges.intersection(kg_edges_using_this_node)
@@ -1339,9 +1340,10 @@ def test_issue1146_a():
     assert len(message.results) == 4
     # Make sure every n1 node is connected to an e1 and e0 edge
     for result in message.results:
-        result_n1_nodes = {node_binding.id for node_binding in result.node_bindings["n1"]}
-        result_e1_edges = {edge_binding.id for edge_binding in result.analyses[0].edge_bindings["e1"]}
-        result_e0_edges = {edge_binding.id for edge_binding in result.analyses[0].edge_bindings["e0"]}
+        # TRAPI 2.0: one binding with ids
+        result_n1_nodes = set(result.node_bindings["n1"].ids)
+        result_e1_edges = set(result.analyses[0].edge_bindings["e1"].ids)
+        result_e0_edges = set(result.analyses[0].edge_bindings["e0"].ids)
         for n1_node in result_n1_nodes:
             kg_edges_using_this_node = _get_kg_edge_keys_using_node(n1_node, message.knowledge_graph)
             assert result_e1_edges.intersection(kg_edges_using_this_node)
@@ -1469,19 +1471,12 @@ def test_node_binding_query_id_one_hop_single_input_curie():
     # Make sure the input curie and one of its children appear somewhere in the results
     assert DIABETES_CURIE in kg.nodes
     assert TYPE_1_DIABETES_CURIE in kg.nodes
-    # Make sure node bindings do/don't have 'query_id' filled out as appropriate
-    for result in message.results:
-        for node_binding in result.node_bindings["n00"]:
-            if node_binding.id == DIABETES_CURIE:
-                assert node_binding.query_id is None
-            else:
-                assert node_binding.query_id == DIABETES_CURIE
-        for node_binding in result.node_bindings["n01"]:
-            assert node_binding.query_id is None
+    # TRAPI 2.0: NodeBinding has no query_id, so which parent a subclass node
+    # fulfils is not in the results (upstream checked the query_ids here)
     # Make sure we have some subclass edges
     assert any(edge.predicate == "biolink:subclass_of" for edge in message.knowledge_graph.edges.values())
-    insulin_results = [result for result in message.results if any([node_binding.id == INSULIN_CURIE
-                                                                    for node_binding in result.node_bindings["n01"]])]
+    insulin_results = [result for result in message.results if any([node_id == INSULIN_CURIE  # TRAPI 2.0: ids
+                                                                    for node_id in result.node_bindings["n01"].ids])]
     
     assert len(insulin_results) == 1
 
@@ -1505,19 +1500,11 @@ def test_node_binding_query_id_one_hop_multiple_input_curies():
     # TODO: Do the below check after we've figured out the multiple query IDs problem (nodes could fulfill either
     #  diabetes or type 1 diabetes), but can only have 1 n00 parent specified
     # assert type_1_diabetes_curie in kg.nodes
-    # Make sure node bindings do/don't have 'query_id' filled out as appropriate
-    for result in message.results:
-        for node_binding in result.node_bindings["n00"]:
-            if node_binding.id in parent_query_ids:
-                assert node_binding.query_id is None
-            else:
-                assert node_binding.query_id in parent_query_ids
-        for node_binding in result.node_bindings["n01"]:
-            assert node_binding.query_id is None
+    # TRAPI 2.0: NodeBinding has no query_id (upstream checked the query_ids here)
     # Make sure we have some results with subclass self-edges (Expand assigns such qedges keys like 'subclass:n00-n00')
     assert any(edge.predicate == "biolink:subclass_of" for edge in message.knowledge_graph.edges.values())
-    insulin_results = [result for result in message.results if any([node_binding.id == INSULIN_CURIE
-                                                                    for node_binding in result.node_bindings["n01"]])]
+    insulin_results = [result for result in message.results if any([node_id == INSULIN_CURIE  # TRAPI 2.0: ids
+                                                                    for node_id in result.node_bindings["n01"].ids])]
     assert len(insulin_results) in range(1, 3)
 
 
@@ -1540,20 +1527,7 @@ def test_node_binding_query_id_two_hop_double_pinned():
     # Make the input curie and one of its children appear somewhere in the results
     assert DIABETES_CURIE in kg.nodes
     assert HEART_DISEASE_CURIE in kg.nodes
-    # Make sure node bindings do/don't have 'query_id' filled out as appropriate
-    for result in message.results:
-        for node_binding in result.node_bindings["n00"]:
-            if node_binding.id == DIABETES_CURIE:
-                assert node_binding.query_id is None
-            else:
-                assert node_binding.query_id == DIABETES_CURIE
-        for node_binding in result.node_bindings["n01"]:
-            if node_binding.id == HEART_DISEASE_CURIE:
-                assert node_binding.query_id is None
-            else:
-                assert node_binding.query_id == HEART_DISEASE_CURIE
-        for node_binding in result.node_bindings["n02"]:
-            assert node_binding.query_id is None
+    # TRAPI 2.0: NodeBinding has no query_id (upstream checked the query_ids here)
     # Make sure there's one result for Dabigatran and its structure is as expected
     dabigatran_results = [result for result in message.results if result.essence.upper() == "DABIGATRAN"]
     assert len(dabigatran_results) == 1
@@ -1561,7 +1535,7 @@ def test_node_binding_query_id_two_hop_double_pinned():
     edge_keys_that_should_be_filled = {"e00", "e01"}
     assert set(dabigatran_result.analyses[0].edge_bindings) == edge_keys_that_should_be_filled
     for edge_key in edge_keys_that_should_be_filled:
-        assert len(dabigatran_result.analyses[0].edge_bindings[edge_key])
+        assert len(dabigatran_result.analyses[0].edge_bindings[edge_key].ids)  # TRAPI 2.0: ids
 
 
 @pytest.mark.external
