@@ -48,6 +48,11 @@ def rank_message(in_message: dict, logger: logging.Logger) -> dict:
 
     Returns:
         Ranked message
+
+    Errors are not caught: where ARAX's ranker raises, ARAX fails the query
+    (``UncaughtARAXiError``), so here the exception reaches
+    ``run_task_lifecycle``, which records it and routes the query to
+    ``finish_query`` with an ERROR status (DEC-8).
     """
     # save the logs for the response (if any)
     if "logs" not in in_message or in_message["logs"] is None:
@@ -58,27 +63,7 @@ def rank_message(in_message: dict, logger: logging.Logger) -> dict:
             if "timestamp" in log:
                 log["timestamp"] = str(log["timestamp"])
 
-    # Check if message has results to rank
-    if not in_message.get("message"):
-        logger.warning("No message found in input")
-        return in_message
-
-    msg = in_message["message"]
-
-    if not msg.get("results"):
-        logger.info("No results to rank")
-        return in_message
-
-    try:
-        # Run ARAX ranking
-        ranked_message = arax_rank(in_message, logger)
-        logger.info(f"Successfully ranked {len(msg.get('results', []))} results")
-        return ranked_message
-
-    except Exception as e:
-        logger.exception(f"ARAX ranking failed: {e}")
-        # Return original message on failure
-        return in_message
+    return arax_rank(in_message, logger)
 
 
 def arax_rank_task(response_id: str, logger: logging.Logger) -> None:

@@ -106,8 +106,27 @@ class Settings(BaseSettings):
     default_data_tier: int = 0
 
     # ARAX configs
+    # The server's ARAX API: fetch the autocomplete database at startup and
+    # refresh the meta-KG hourly (off in tests)
+    arax_background_tasks: bool = True
+    # No longer used: the arax worker runs ARAX in-process (DEC-14). Kept so an
+    # existing .env that still sets ARAX_URL keeps validating.
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
     arax_biolink_version: str = "v4.2.5"
+    # Where the ARAX port's BiolinkHelper caches the Biolink model and its
+    # lookup map (must be writable; upstream writes next to its own source
+    # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so
+    # the cache survives restarts; see arax_biolink_cache_path().
+    arax_biolink_cache_dir: str = ""
+    # ARAX's KP response cache (DEC-18): Expand's KP queries and Connect's results,
+    # kept in the data store and shared by every arax worker and the server. An
+    # entry lives this long after its last request; the arax worker re-queries
+    # entries older than 6 h in the background, as ARAX does.
+    arax_kp_cache_enabled: bool = True
+    arax_kp_cache_ttl_sec: int = 259200  # 3 days
+    # Seconds between KP-cache refresh passes (ARAX's background tasker runs one a
+    # minute, each capped at 60 s); 0 turns the refresh off
+    arax_kp_cache_refresh_interval_sec: int = 60
     arax_blocked_list_url: str = (
         "https://raw.githubusercontent.com/RTXteam/RTX/master/"
         "code/ARAX/KnowledgeSources/general_concepts.json"
@@ -120,6 +139,33 @@ class Settings(BaseSettings):
         "tier0-info-for-overlay_v1.0_{version}.sqlite"
     )
     arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+
+    # Data files for the ARAX port's other workers (Overlay, Infer, Expand, the
+    # UI-facing API), set up the same way as the pathfinder DBs above: one
+    # volume-mounted directory, downloaded on first startup by
+    # shepherd_utils.data_download.ensure_arax_dbs. The two files pathfinder
+    # already downloads (curie_ngd, tier0-info-for-overlay) are not repeated
+    # here -- use arax_pathfinder_sqlite_paths() for those.
+    # {version} in a filename template is filled from arax_tier_version.
+    # Each *_url, when set, replaces the default {arax_dbs_base_url}/{filename}
+    # for that one file (the defaults are placeholders until the real files are
+    # published).
+    arax_dbs_dir: str = "arax_dbs"
+    arax_tier_version: str = "tier0-20260621"
+    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
+    arax_curie_to_pmids_url: str = ""
+    arax_explainable_dtd_db_filename: str = (
+        "ExplainableDTD_v1.0_{version}-all_with_paths.db"
+    )
+    arax_explainable_dtd_url: str = ""
+    arax_autocomplete_sqlite_filename: str = "autocomplete_v1.0_{version}.sqlite"
+    arax_autocomplete_url: str = ""
+    arax_fda_approved_drugs_filename: str = "fda_approved_drugs_v1.0.pickle"
+    arax_fda_approved_drugs_url: str = ""
+    # COHD stays on its KG2.8.0 build, as in ARAX (DEC-6).
+    arax_cohd_db_filename: str = "COHDdatabase_v1.0_KG2.8.0.db"
+    arax_cohd_url: str = ""
     # End of ARAX configs
 
     pathfinder_redis_host: str = "host.docker.internal"

@@ -22,6 +22,7 @@ commit to git (they're gitignored and volume-mounted from the host):
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
 - **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`, `general_concepts.json`)
+- **arax** (the in-process ARAX port) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0_<tier-version>-all_with_paths.db`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`), plus the arax_pathfinder sqlite dbs in `./arax_pathfinder_dbs/`. The server's ARAX API fetches `autocomplete_v1.0_<tier-version>.sqlite` into the same `./arax_dbs/` (and keeps its meta-KG backups there). The arax worker also caches the Biolink model and ARAX's Biolink lookup map in `./arax_dbs/biolink/`, built at startup so it survives restarts (`ARAX_BIOLINK_CACHE_DIR` moves it).
 
 So a new developer doesn't have to source these by hand, each worker can fetch its dataset on first
 startup. Two download mechanisms are supported, depending on where the dataset lives:
@@ -50,6 +51,25 @@ directory, so it is downloaded once and then persists with the databases rather 
 by every new container. It is only fetched when absent — delete it from the volume to pick up an
 updated upstream list.
 
+**The ARAX port's data files** work the same way as the pathfinder databases: plain files over HTTPS,
+one volume-mounted directory (`ARAX_DBS_DIR`, default `arax_dbs`), fetched on first startup. Each
+worker requests only the files it opens (`ensure_arax_dbs([...])` in `shepherd_utils/data_download.py`),
+and `arax_db_path(name)` is the single place their on-disk paths come from. The tier-versioned
+filenames are filled from one variable, separate from pathfinder's:
+
+```dotenv
+ARAX_TIER_VERSION=tier0-20260621
+```
+
+By default each file is fetched from `ARAX_DBS_BASE_URL/<filename>`. These URLs are placeholders until
+the real files are published; a single file can be pointed elsewhere with its own override
+(`ARAX_CURIE_TO_PMIDS_URL`, `ARAX_EXPLAINABLE_DTD_URL`, `ARAX_AUTOCOMPLETE_URL`,
+`ARAX_FDA_APPROVED_DRUGS_URL`, `ARAX_COHD_URL`), and each filename can be changed with its
+`ARAX_*_FILENAME` setting. COHD stays on its KG2.8.0 build and the FDA pickle has no tier version, so
+`ARAX_TIER_VERSION` does not affect those two. The two databases the pathfinder already downloads
+(`curie_ngd`, `tier0-info-for-overlay`) are not duplicated here; ARAX workers that need them use
+`arax_pathfinder_sqlite_paths()`. The deployment notes below apply to `ARAX_DBS_DIR` in the same way.
+
 On startup, each worker checks whether its files already exist in the volume-mounted directory. If
 they're missing and a URL is configured, it fetches them into that directory — which lives on the
 host, so the data persists across restarts and is only downloaded once. If the files are already
@@ -59,6 +79,56 @@ band, so it's unaffected).
 Downloads are bounded by `DATASET_DOWNLOAD_TIMEOUT_SEC` (default 60), which applies per socket
 operation rather than to the whole transfer — a large file downloads for as long as it needs, but a
 connection that opens and then stalls fails loudly instead of hanging worker startup.
+
+#### ARAX's KP response cache
+
+The arax worker caches every Retriever (KP) response ARAX's Expand gets, and Connect's PathFinder
+and xCRG results, as ARAX does (DEC-18 in `docs/ARAX_PORT_BASELINE.md`). The cache lives in
+Shepherd's Redis data store, so it is shared by every arax worker replica and survives restarts; the
+server lists it at `/arax/status?mode=kp_cache` (the UI's KP-cache view). A query with
+`"query_options": {"bypass_cache": true}` skips it. Each worker re-queries entries older than 6 h in
+the background, one replica at a time, and an entry is dropped 3 days after it was last requested.
+
+```dotenv
+ARAX_KP_CACHE_ENABLED=true               # false: never read or write the cache
+ARAX_KP_CACHE_TTL_SEC=259200             # an entry's lifetime after its last request
+ARAX_KP_CACHE_REFRESH_INTERVAL_SEC=60    # seconds between refresh passes; 0 turns the refresh off
+```
+
+To inspect or clear it, run ARAX's cacher CLI in the arax container, e.g.
+`python -m shepherd_utils.arax.Expand.trapi_query_cacher --summarize` (also `--list`,
+`--dump_response ID`, `--delete_query ID`, `--delete_query_url_match URL`, `--refresh`,
+`--initialize_cache`).
+
+#### Mock ARAX data for local testing
+
+Until the real files are published, `shepherd_utils/arax_mock_data.py` writes small mock versions in
+exactly their shape (same filenames, tables, columns and value formats), so the whole ARAX stack runs
+locally. Generate them into the volume-mounted directories before `docker compose up`; the startup
+check then finds them and skips the download:
+
+```bash
+python -m shepherd_utils.arax_mock_data --pathfinder
+# writes ./arax_dbs/ (curie_to_pmids, ExplainableDTD, COHD, FDA drugs, autocomplete)
+# and, with --pathfinder, ./arax_pathfinder_dbs/ (curie_ngd, tier0 overlay)
+```
+
+The content comes from a seed of about 30 real curies (e.g. `MONDO:0005148` type 2 diabetes,
+`CHEBI:6801` metformin, `NCBIGene:5468` PPARG) and their edges. The values are made up
+(deterministically) but consistent: NGD comes from the PMID sets, and every xDTD prediction has
+explanation paths built from edges in its own edge mapping. To cover more nodes, add the knowledge
+graph of saved TRAPI responses, e.g. a Retriever response or one from `/arax/query`:
+
+```bash
+python -m shepherd_utils.arax_mock_data --pathfinder --force --from-trapi response1.json response2.json
+```
+
+The clinical-info overlay maps curies to OMOP ids through the live cohd.io API at query time, so the
+generator asks cohd.io for the same ids; with `--no-network` it makes ids up instead, and COHD then
+finds nothing at query time. Existing files are never replaced without `--force`. Use `--out` and
+`--pathfinder-out` to write somewhere other than `ARAX_DBS_DIR` and `ARAX_PATHFINDER_DBS_DIR`.
+Delete the mock files (or run with the real URLs into an empty directory) when switching to the
+real data, because a file that is already present is never downloaded.
 
 #### Deploying these workers
 

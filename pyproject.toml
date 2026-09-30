@@ -24,8 +24,23 @@ dependencies = [
   "pyyaml~=6.0",
   "redis~=5.2",
   "scipy",
+  "six~=1.16",
   "uvicorn[standard]~=0.29",
   "zstandard~=0.23"
+]
+
+[project.optional-dependencies]
+# What the server's ARAX API (shepherd_server/aras/arax.py) needs on top of the
+# base install: /arax/response/{id} validates with ARAX's pinned validator,
+# and /status, /entity and the recent-PK view use ARAX's SmartAPI client and
+# NodeSynonymizer (ARAX's pins where it has them).
+arax-api = [
+  "aiohttp",
+  "bmt==1.4.8",
+  "pandas",
+  "reasoner-validator==6.0.2",
+  "requests",
+  "requests-cache==1.2.1",
 ]
 
 [build-system]
@@ -47,3 +62,14 @@ shepherd_utils = ["*.yml"]
 # The ARS port bundles its upstream blocklist and the schema DDL applied by
 # startup upgrades on pre-existing volumes.
 "shepherd_utils.ars" = ["blocklist.json", "*.sql"]
+# The ARAX port bundles data files vendored from RTX at its pinned commit
+# (general_concepts.json, the QG interpreter templates, ...).
+"shepherd_utils.arax" = ["KnowledgeSources/*.json", "*.yaml"]
+
+[tool.black]
+# The ARAX port mirrors upstream RTX module-for-module (and vendors ARAX's
+# generated TRAPI models); it is kept unformatted so it stays diffable against
+# upstream. Shepherd-specific glue lives outside it. See shepherd_utils/arax/README.md.
+# Upstream ARAX's own test files (tests/unit/arax/upstream_suite/test_*.py) are
+# vendored verbatim for the same reason.
+extend-exclude = "(shepherd_utils/arax/|tests/unit/arax/upstream_suite/test_)"
