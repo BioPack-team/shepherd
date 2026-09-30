@@ -1453,6 +1453,11 @@ class Runner:
             c.checks = [results_at_most(2)]
         if c.stream:
             body = dict(body, stream_progress=True)
+        # How long Shepherd waits for the answer (its default is 360 s); the
+        # client waits a minute longer
+        parameters = dict(body.get("parameters") or {})
+        parameters.setdefault("timeout", c.timeout)
+        body = dict(body, parameters=parameters)
         start = time.perf_counter()
         problems = []
         try:
