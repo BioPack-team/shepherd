@@ -6,6 +6,7 @@
     python test_arax_queries.py --group workflows    # one group
     python test_arax_queries.py --base http://localhost:5439/arax --workers 4
     python test_arax_queries.py --from-saved --only lookup_two_hop   # re-read saved responses' logs
+    python test_arax_queries.py --trace --only wf_overlays           # print each step as it runs
 
 Groups: lookup (TRAPI one-hop to three-hop), creative (MVP1 xDTD, MVP2 xCRG,
 pathfinder), flexible (not / any / all / optional groups / constraints),
@@ -1363,16 +1364,37 @@ def check_query_response(c: Case, http_status: int, body: dict) -> list:
     return problems
 
 
-def read_stream(resp) -> tuple[dict, list]:
-    """The final envelope of ARAX's NDJSON stream, and the problems with the stream."""
-    lines = [line for line in resp.iter_lines() if line.strip()]
+def trace_line(name: str, start: float, entry: dict):
+    """Print a streamed log line that marks a step, or says something went wrong."""
+    message = " ".join(str(entry.get("message") or "").split())
+    level = entry.get("level")
+    if level in ("WARNING", "ERROR") or message.startswith(
+        ("Processing", "Expanding qedge", "Computing", "Running", "Performing")
+    ):
+        print(
+            f"  [{name}] +{time.perf_counter() - start:6.1f}s {level}: {message[:160]}",
+            flush=True,
+        )
+
+
+def read_stream(resp, trace: Optional[str] = None) -> tuple[dict, list]:
+    """The final envelope of ARAX's NDJSON stream, and the problems with the stream.
+
+    With ``trace`` (the case name), prints each step's log line as it arrives.
+    """
+    start = time.perf_counter()
     problems = []
     parsed = []
-    for line in lines:
+    for line in resp.iter_lines():
+        if not line.strip():
+            continue
         try:
             parsed.append(json.loads(line))
         except ValueError:
             problems.append(f"stream line is not JSON: {line[:80]}")
+            continue
+        if trace and isinstance(parsed[-1], dict) and parsed[-1].get("level"):
+            trace_line(trace, start, parsed[-1])
     if not parsed:
         return {}, ["the stream was empty"]
     final = parsed[-1]
@@ -1423,9 +1445,10 @@ def print_saved_logs(out_dir: Path, cases: list) -> int:
 
 
 class Runner:
-    def __init__(self, base, out_dir):
+    def __init__(self, base, out_dir, trace=False):
         self.base = base.rstrip("/")
         self.out_dir = out_dir
+        self.trace = trace  # stream every query, printing its steps as they run
         self.bodies = {}  # case name -> response body
 
     def save(self, name, content):
@@ -1451,7 +1474,8 @@ class Runner:
             body["operations"]["message_uris"] = [stored["id"]]
             body.pop("message")
             c.checks = [results_at_most(2)]
-        if c.stream:
+        stream = c.stream or self.trace
+        if stream:
             body = dict(body, stream_progress=True)
         # How long Shepherd waits for the answer (its default is 360 s); the
         # client waits a minute longer
@@ -1462,11 +1486,14 @@ class Runner:
         problems = []
         try:
             with httpx.Client(timeout=httpx.Timeout(c.timeout + 60)) as client:
-                if c.stream:
+                if stream:
                     with client.stream("POST", f"{self.base}/query", json=body) as resp:
                         http_status = resp.status_code
-                        result, stream_problems = read_stream(resp)
-                        problems += stream_problems
+                        result, stream_problems = read_stream(
+                            resp, trace=c.name if self.trace else None
+                        )
+                        if c.stream:  # the stream itself is what's being checked
+                            problems += stream_problems
                 else:
                     resp = client.post(f"{self.base}/query", json=body)
                     http_status = resp.status_code
@@ -1568,6 +1595,11 @@ def main():
         "--out", default="responses/arax-validation", help="where responses are saved"
     )
     parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="stream each query and print its steps (actions, KP calls, warnings) as they run",
+    )
+    parser.add_argument(
         "--from-saved",
         action="store_true",
         help="print the WARNING/ERROR log lines of responses saved in --out, without querying",
@@ -1593,7 +1625,7 @@ def main():
     if args.from_saved:
         return print_saved_logs(out_dir, selected)
     out_dir.mkdir(parents=True, exist_ok=True)
-    runner = Runner(args.base, out_dir)
+    runner = Runner(args.base, out_dir, trace=args.trace)
     first = [c for c in selected if not c.after]
     later = [c for c in selected if c.after]
     print(
