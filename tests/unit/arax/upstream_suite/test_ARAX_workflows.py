@@ -82,8 +82,9 @@ def test_option_group_id():
             "expand(edge_key=[e00,e01], kp=infores:retriever)",
         ]}}
     [response, message] = _do_arax_query(query)
-    # TRAPI 2.0: an empty query graph is not valid 2.0, so a message has none until it has a qnode
-    for key, edge in (message.query_graph.edges if message.query_graph else {}).items():
+    # TRAPI 2.0: an empty query graph is not valid 2.0, so a message has none until it has a qnode,
+    # and a node-only query graph has no edges (upstream's 1.6 message always had edges: {})
+    for key, edge in ((message.query_graph.edges if message.query_graph else None) or {}).items():
         if key == 'e01':
             assert edge.option_group_id == '1'
         elif key == 'e00':
@@ -100,7 +101,8 @@ def test_exclude():
         ]}}
     [response, message] = _do_arax_query(query)
     assert response.status == 'OK'
-    for key, edge in message.query_graph.edges.items():
+    # TRAPI 2.0: a node-only query graph has no edges (upstream's 1.6 message always had edges: {})
+    for key, edge in ((message.query_graph.edges if message.query_graph else None) or {}).items():
         if key == 'e01':
             assert edge.exclude
         if key == 'e00':
