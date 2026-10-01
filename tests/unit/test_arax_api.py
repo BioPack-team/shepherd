@@ -211,7 +211,9 @@ async def test_stream_times_out(mocker):
     FakeShepherd(mocker, {})
     lines = await _collect(
         await api.arax_stream_query(
-            {"stream_progress": True, "parameters": {"timeout": -1}}
+            # TRAPI 2.0: a timeout of 0 means "don't wait" (a negative one
+            # asks for the server's default; see base_routes.sync_timeout)
+            {"stream_progress": True, "parameters": {"timeout": 0}}
         )
     )
     assert json.loads(lines[-1]) == {
