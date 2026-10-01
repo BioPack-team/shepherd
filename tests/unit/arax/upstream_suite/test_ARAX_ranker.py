@@ -98,13 +98,13 @@ def test_ARAXRanker_test1_asset12():
     query = { "message": { "query_graph": {
                 "edges": {
                     "e01": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "SN"
                     }
                 },
@@ -158,13 +158,13 @@ def test_ARAXRanker_test5_asset70():
     query = { "message": { "query_graph": {
                 "edges": {
                     "e01": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "SN"
                     }
                 },
@@ -218,13 +218,13 @@ def test_ARAXRanker_test6_asset72():
     query = { "message": { "query_graph": {
                 "edges": {
                     "e01": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "SN"
                     }
                 },
@@ -278,13 +278,13 @@ def test_ARAXRanker_test9_asset614():
     query = { "message": { "query_graph": {
                 "edges": {
                     "e01": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "SN"
                     }
                 },
@@ -338,13 +338,13 @@ def test_ARAXRanker_test9_asset619():
     query = { "message": { "query_graph": {
                 "edges": {
                     "e01": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "SN"
                     }
                 },
@@ -398,13 +398,13 @@ def test_ARAXRanker_test9_asset623():
     query = { "message": { "query_graph": {
                 "edges": {
                     "e01": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:treats"
                     ],
-                    "qualifier_constraints": [],
+                    # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
                     "subject": "SN"
                     }
                 },
@@ -458,26 +458,21 @@ def test_ARAXRanker_test13_asset311():
     query = { "message": { "query_graph": {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:affects"
                     ],
-                    "qualifier_constraints": [
-                        {
-                        "qualifier_set": [
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
                             {
-                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                            "qualifier_value": "activity_or_abundance"
-                            },
-                            {
-                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                            "qualifier_value": "decreased"
+                                "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                "biolink:object_direction_qualifier": "decreased"
                             }
                         ]
-                        }
-                    ],
+                    },
                     "subject": "SN"
                     }
                 },
@@ -531,26 +526,21 @@ def test_ARAXRanker_test13_asset355():
     query = { "message": { "query_graph": {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:affects"
                     ],
-                    "qualifier_constraints": [
-                        {
-                        "qualifier_set": [
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
                             {
-                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                            "qualifier_value": "activity_or_abundance"
-                            },
-                            {
-                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                            "qualifier_value": "decreased"
+                                "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                "biolink:object_direction_qualifier": "decreased"
                             }
                         ]
-                        }
-                    ],
+                    },
                     "subject": "SN"
                     }
                 },
@@ -604,26 +594,21 @@ def test_ARAXRanker_test13_asset360():
     query = { "message": { "query_graph": {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:affects"
                     ],
-                    "qualifier_constraints": [
-                        {
-                        "qualifier_set": [
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
                             {
-                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                            "qualifier_value": "activity_or_abundance"
-                            },
-                            {
-                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                            "qualifier_value": "decreased"
+                                "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                "biolink:object_direction_qualifier": "decreased"
                             }
                         ]
-                        }
-                    ],
+                    },
                     "subject": "SN"
                     }
                 },
@@ -677,26 +662,21 @@ def test_ARAXRanker_test13_asset361():
     query = { "message": { "query_graph": {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:affects"
                     ],
-                    "qualifier_constraints": [
-                        {
-                        "qualifier_set": [
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
                             {
-                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                            "qualifier_value": "activity_or_abundance"
-                            },
-                            {
-                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                            "qualifier_value": "decreased"
+                                "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                "biolink:object_direction_qualifier": "decreased"
                             }
                         ]
-                        }
-                    ],
+                    },
                     "subject": "SN"
                     }
                 },
@@ -750,26 +730,21 @@ def test_ARAXRanker_test21_asset338():
     query = { "message": { "query_graph": {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:affects"
                     ],
-                    "qualifier_constraints": [
-                        {
-                        "qualifier_set": [
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
                             {
-                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                            "qualifier_value": "activity_or_abundance"
-                            },
-                            {
-                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                            "qualifier_value": "decreased"
+                                "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                "biolink:object_direction_qualifier": "decreased"
                             }
                         ]
-                        }
-                    ],
+                    },
                     "subject": "SN"
                     }
                 },
@@ -823,26 +798,21 @@ def test_ARAXRanker_test23_asset381():
     query = { "message": { "query_graph": {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:affects"
                     ],
-                    "qualifier_constraints": [
-                        {
-                        "qualifier_set": [
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
                             {
-                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                            "qualifier_value": "activity_or_abundance"
-                            },
-                            {
-                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                            "qualifier_value": "decreased"
+                                "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                "biolink:object_direction_qualifier": "decreased"
                             }
                         ]
-                        }
-                    ],
+                    },
                     "subject": "SN"
                     }
                 },
@@ -897,26 +867,21 @@ def test_ARAXRanker_test23_asset378():
     query = { "message": { "query_graph": {
                 "edges": {
                     "t_edge": {
-                    "attribute_constraints": [],
+                    # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
                     "knowledge_type": "inferred",
                     "object": "ON",
                     "predicates": [
                         "biolink:affects"
                     ],
-                    "qualifier_constraints": [
-                        {
-                        "qualifier_set": [
+                    # TRAPI 2.0: was "qualifier_constraints": [...]
+                    "constraints": {
+                        "qualifiers": [
                             {
-                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                            "qualifier_value": "activity_or_abundance"
-                            },
-                            {
-                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                            "qualifier_value": "decreased"
+                                "biolink:object_aspect_qualifier": "activity_or_abundance",
+                                "biolink:object_direction_qualifier": "decreased"
                             }
                         ]
-                        }
-                    ],
+                    },
                     "subject": "SN"
                     }
                 },

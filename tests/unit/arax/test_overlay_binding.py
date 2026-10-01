@@ -5,8 +5,12 @@ fisher_exact_test and overlay_clinical_info used to call
 update_results_with_overlay_edge once per new virtual edge, each call walking
 every result. They now collect their edges and call
 update_results_with_overlay_edge_list once. These tests compare the two on the
-same messages, down to the order of each edge binding list, including edges
+same messages, down to the order of each edge binding's ids, including edges
 that share a node pair.
+
+TRAPI 2.0: an analysis has one EdgeBinding per qedge, so an overlay edge's key
+is unioned into that binding's ids (1.x appended an EdgeBinding to the qedge's
+list); the tests at the end pin that.
 """
 
 import copy
@@ -24,6 +28,7 @@ from shepherd_utils.arax.openapi_server.models.q_edge import QEdge
 from shepherd_utils.arax.openapi_server.models.q_node import QNode
 from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
 from shepherd_utils.arax.openapi_server.models.result import Result
+from translator_tom import Result as Result_2_0
 
 
 class Log:
@@ -60,8 +65,8 @@ def make_message(rng, n_results, n_genes, n_diseases):
             Analysis(
                 resource_id=resource_id,
                 edge_bindings={
-                    "e0": [EdgeBinding(id=f"a{i}", attributes=[])],
-                    "e1": [EdgeBinding(id=f"b{i}", attributes=[])],
+                    "e0": EdgeBinding(ids=[f"a{i}"]),
+                    "e1": EdgeBinding(ids=[f"b{i}"]),
                 },
             )
             for resource_id in ("infores:arax", "infores:other")
@@ -69,9 +74,9 @@ def make_message(rng, n_results, n_genes, n_diseases):
         results.append(
             Result(
                 node_bindings={
-                    "n0": [NodeBinding(id="C:1", attributes=[])],
-                    "n1": [NodeBinding(id=f"G:{g}", attributes=[]) for g in genes],
-                    "n2": [NodeBinding(id=f"D:{d}", attributes=[]) for d in diseases],
+                    "n0": NodeBinding(ids=["C:1"]),
+                    "n1": NodeBinding(ids=[f"G:{g}" for g in genes]),
+                    "n2": NodeBinding(ids=[f"D:{d}" for d in diseases]),
                 },
                 analyses=analyses,
             )
@@ -82,9 +87,9 @@ def make_message(rng, n_results, n_genes, n_diseases):
 def bindings(message):
     return [
         [
-            (analysis.resource_id, qedge_key, [b.id for b in edge_bindings])
+            (analysis.resource_id, qedge_key, list(edge_binding.ids))
             for analysis in result.analyses
-            for qedge_key, edge_bindings in analysis.edge_bindings.items()
+            for qedge_key, edge_binding in analysis.edge_bindings.items()
         ]
         for result in message.results
     ]
@@ -152,3 +157,72 @@ def test_one_pass_is_fast_on_a_large_answer():
     ou.update_results_with_overlay_edge_list(kedges, message, Log())
     # one call per edge took about 46 minutes here
     assert time.perf_counter() - start < 10
+
+
+def _one_result_message():
+    qg = QueryGraph(
+        nodes={key: QNode() for key in ("n0", "n1", "n2")},
+        edges={
+            "e0": QEdge(subject="n0", object="n1"),
+            "e1": QEdge(subject="n1", object="n2"),
+        },
+    )
+    result = Result(
+        node_bindings={
+            "n0": NodeBinding(ids=["C:1"]),
+            "n1": NodeBinding(ids=["G:1", "G:2"]),
+            "n2": NodeBinding(ids=["D:1"]),
+        },
+        analyses=[
+            Analysis(
+                resource_id="infores:arax",
+                edge_bindings={
+                    "e0": EdgeBinding(ids=["a0"]),
+                    "e1": EdgeBinding(ids=["b0"]),
+                },
+            ),
+            Analysis(
+                resource_id="infores:other",
+                edge_bindings={"e1": EdgeBinding(ids=["x0"])},
+            ),
+        ],
+    )
+    return Message(query_graph=qg, results=[result])
+
+
+def test_overlay_edges_are_unioned_into_the_one_edge_binding_per_qedge():
+    message = _one_result_message()
+    arax, other = message.results[0].analyses
+    e1_binding = arax.edge_bindings["e1"]
+    ou.update_results_with_overlay_edge_list(
+        [
+            (("G:1", "D:1"), "N1_0"),
+            (("D:1", "G:2"), "N1_1"),  # the other way round binds too
+            (("G:1", "D:1"), "N1_0"),  # already bound: not repeated
+            (("G:3", "D:1"), "N1_2"),  # no result binds G:3
+            (("C:1", "G:2"), "N1_3"),  # covers e0 only
+        ],
+        message,
+        Log(),
+    )
+    # still one EdgeBinding object per qedge, its ids grown in creation order
+    assert arax.edge_bindings["e1"] is e1_binding
+    assert arax.edge_bindings["e1"].ids == ["b0", "N1_0", "N1_1"]
+    assert arax.edge_bindings["e0"].ids == ["a0", "N1_3"]
+    # analyses of other reasoners are left alone
+    assert other.edge_bindings["e1"].ids == ["x0"]
+    # and the result is valid TRAPI 2.0
+    assert Result_2_0.from_dict(message.results[0].to_dict())
+
+
+def test_results_without_analyses_or_edge_bindings_are_skipped():
+    message = _one_result_message()
+    message.results[0].analyses[1].edge_bindings = None  # a path-only analysis
+    message.results.append(
+        Result(node_bindings={"n1": NodeBinding(ids=["G:1"])})  # no analyses
+    )
+    log = Log()
+    ou.update_results_with_overlay_edge_list([(("G:1", "D:1"), "N1_0")], message, log)
+    assert message.results[0].analyses[0].edge_bindings["e1"].ids == ["b0", "N1_0"]
+    assert message.results[1].analyses is None
+    assert log.lines == []

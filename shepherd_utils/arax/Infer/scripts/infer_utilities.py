@@ -5,6 +5,10 @@
 #     RTXConfig.explainable_dtd_db_path (Shepherd's ARAX data dir, DEC-6) instead of
 #     code/ARAX/KnowledgeSources/Prediction
 #   - genrete_regulate_subgraphs (legacy xCRG) is removed (dead code, E-2, DEC-5)
+#   - TRAPI 2.0: the biolink:knowledge_level / biolink:agent_type attributes are the Edge's top-level
+#     knowledge_level / agent_type (predicted treats edges: prediction / computational_model; explanation-path
+#     edges: the mapping DB's knowledge_level / agent_type, not_provided when the DB has none); a path edge
+#     without qualifiers gets none instead of an empty list; the deleted QualifierConstraint import is dropped
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """
 InferUtilities: Builds TRAPI-compliant knowledge graph subgraphs from xDTD/xCRG prediction results.
@@ -46,7 +50,6 @@ from shepherd_utils.arax.openapi_server.models.node import Node
 from shepherd_utils.arax.openapi_server.models.attribute import Attribute
 from shepherd_utils.arax.openapi_server.models.qualifier import Qualifier
 from shepherd_utils.arax.openapi_server.models.retrieval_source import RetrievalSource
-from shepherd_utils.arax.openapi_server.models.qualifier_constraint import QualifierConstraint as QConstraint
 from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
 
 from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
@@ -413,8 +416,6 @@ class InferUtilities:
                     edge_attribute_list = [
                         Attribute(original_attribute_name="created_datetime", value="2026-06-28", attribute_type_id="metatype:Datetime"),
                         Attribute(attribute_type_id="EDAM-DATA:0951", original_attribute_name="probability_treats", value=str(treat_score)),
-                        Attribute(attribute_source=self.kp, attribute_type_id="biolink:agent_type", value="computational_model"),
-                        Attribute(attribute_source=self.kp, attribute_type_id="biolink:knowledge_level", value="prediction"),
                     ]
                     retrieval_source = [
                         RetrievalSource(resource_id=self.kp, resource_role="primary_knowledge_source")
@@ -422,7 +423,8 @@ class InferUtilities:
                     # Use the functions to determine subject and object based on current canonical_id
                     edge_subject = edge_subject_func(canonical_id)
                     edge_object = edge_object_func(canonical_id)
-                    new_edge = Edge(subject=edge_subject, object=edge_object, predicate='biolink:treats', attributes=edge_attribute_list, sources=retrieval_source)
+                    new_edge = Edge(subject=edge_subject, object=edge_object, predicate='biolink:treats', attributes=edge_attribute_list, sources=retrieval_source,
+                                    knowledge_level="prediction", agent_type="computational_model")
                     new_edge_key = f"creative_DTD_prediction_{self.kedge_global_iter}"
                     message.knowledge_graph.edges[new_edge_key] = new_edge
                     message.knowledge_graph.edges[new_edge_key].filled = True
@@ -552,11 +554,11 @@ class InferUtilities:
 
                     for edge_info in edges_info[i]:
                         primary_knowledge_source = self._get_primary_knowledge_source(edge_info)
-                        new_edge = Edge(subject=subject_curie, object=object_curie, predicate=predicate, attributes=[], qualifiers=[], sources=[])
+                        new_edge = Edge(subject=subject_curie, object=object_curie, predicate=predicate, attributes=[], sources=[],
+                                        knowledge_level=edge_info.knowledge_level or "not_provided",
+                                        agent_type=edge_info.agent_type or "not_provided")
                         edge_attribute_list = [
                             Attribute(original_attribute_name="created_datetime", value="2026-06-28", attribute_type_id="metatype:Datetime"),
-                            Attribute(attribute_source=primary_knowledge_source, attribute_type_id="biolink:agent_type", value=edge_info.agent_type),
-                            Attribute(attribute_source=primary_knowledge_source, attribute_type_id="biolink:knowledge_level", value=edge_info.knowledge_level),
                         ]
                         edge_qualifier_list = []
                         if edge_info.publications:
@@ -614,7 +616,7 @@ class InferUtilities:
                         retrieval_source = self._build_retrieval_sources(edge_info, kp=self.kp)
                         new_edge.attributes += edge_attribute_list
                         if edge_qualifier_list:
-                            new_edge.qualifiers += edge_qualifier_list
+                            new_edge.qualifiers = edge_qualifier_list
                         new_edge.sources += retrieval_source
                         new_edge_key = edge_info.id if edge_info.id else f"urn:uuid:{uuid.uuid4()}"
                         message.knowledge_graph.edges[new_edge_key] = new_edge
@@ -646,8 +648,6 @@ class InferUtilities:
                 edge_attribute_list = [
                     Attribute(original_attribute_name="created_datetime", value="2026-06-28", attribute_type_id="metatype:Datetime"),
                     Attribute(attribute_type_id="EDAM-DATA:0951", original_attribute_name="probability_treats", value=str(treat_score)),
-                    Attribute(attribute_source=self.kp, attribute_type_id="biolink:agent_type", value="computational_model"),
-                    Attribute(attribute_source=self.kp, attribute_type_id="biolink:knowledge_level", value="prediction"),
                 ]
                 retrieval_source = [
                         RetrievalSource(resource_id=self.kp, resource_role="primary_knowledge_source")
@@ -659,7 +659,8 @@ class InferUtilities:
                 #     edge_predicate = message.query_graph.edges[qedge_id].predicates[0]  # FIXME: better way to handle multiple predicates?
                 
                 fixed_edge = Edge(predicate=edge_predicate, subject=path_drug_node_info.id, object=path_disease_node_info.id,
-                                attributes=edge_attribute_list, sources=retrieval_source)
+                                attributes=edge_attribute_list, sources=retrieval_source,
+                                knowledge_level="prediction", agent_type="computational_model")
                 #fixed_edge.qedge_keys = ["treats"]
                 fixed_edge.qedge_keys = [qedge_id]
                 message.knowledge_graph.edges[f"creative_DTD_prediction_{self.kedge_global_iter}"] = fixed_edge

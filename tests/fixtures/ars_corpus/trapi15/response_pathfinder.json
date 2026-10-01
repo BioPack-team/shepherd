@@ -1,0 +1,119 @@
+{
+  "message": {
+    "query_graph": {
+      "nodes": {
+        "n0": {
+          "ids": [
+            "CHEBI:45783"
+          ]
+        },
+        "n1": {
+          "ids": [
+            "MONDO:0004979"
+          ]
+        }
+      },
+      "paths": {
+        "p0": {
+          "subject": "n0",
+          "object": "n1",
+          "predicates": [
+            "biolink:related_to"
+          ]
+        }
+      }
+    },
+    "knowledge_graph": {
+      "nodes": {
+        "CHEBI:45783": {
+          "name": "imatinib",
+          "categories": [
+            "biolink:SmallMolecule"
+          ],
+          "attributes": []
+        },
+        "MONDO:0004979": {
+          "name": "asthma",
+          "categories": [
+            "biolink:Disease"
+          ],
+          "attributes": []
+        },
+        "NCBIGene:3815": {
+          "name": "KIT",
+          "categories": [
+            "biolink:Gene"
+          ],
+          "attributes": []
+        }
+      },
+      "edges": {
+        "e0": {
+          "subject": "CHEBI:45783",
+          "object": "NCBIGene:3815",
+          "predicate": "biolink:affects",
+          "sources": [
+            {
+              "resource_id": "infores:arax",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": []
+        },
+        "e1": {
+          "subject": "NCBIGene:3815",
+          "object": "MONDO:0004979",
+          "predicate": "biolink:gene_associated_with_condition",
+          "sources": [
+            {
+              "resource_id": "infores:arax",
+              "resource_role": "primary_knowledge_source"
+            }
+          ],
+          "attributes": []
+        }
+      }
+    },
+    "auxiliary_graphs": {
+      "ag0": {
+        "edges": [
+          "e0",
+          "e1"
+        ],
+        "attributes": []
+      }
+    },
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "CHEBI:45783",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "MONDO:0004979",
+              "attributes": []
+            }
+          ]
+        },
+        "analyses": [
+          {
+            "resource_id": "infores:arax",
+            "path_bindings": {
+              "p0": [
+                {
+                  "id": "ag0"
+                }
+              ]
+            },
+            "score": 0.7
+          }
+        ]
+      }
+    ]
+  },
+  "logs": []
+}

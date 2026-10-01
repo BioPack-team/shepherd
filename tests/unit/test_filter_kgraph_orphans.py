@@ -29,19 +29,13 @@ async def test_filter_kgraph_orphans(redis_mock, mocker):
             "results": [
                 {
                     "node_bindings": {
-                        "sn": [
-                            {"id": "MONDO:0001"},
-                        ],
-                        "on": [
-                            {"id": "MONDO:0002"},
-                        ],
+                        "sn": {"ids": ["MONDO:0001"]},
+                        "on": {"ids": ["MONDO:0002"]},
                     },
                     "analyses": [
                         {
                             "edge_bindings": {
-                                "e0": [
-                                    {"id": "1234"},
-                                ],
+                                "e0": {"ids": ["1234"]},
                             },
                             "score": 0.1,
                         },
@@ -79,3 +73,5 @@ async def test_filter_kgraph_orphans(redis_mock, mocker):
 
     assert len(message["message"]["knowledge_graph"]["nodes"]) == 2
     assert len(message["message"]["knowledge_graph"]["edges"]) == 1
+    # TRAPI 2.0: no empty auxiliary_graphs is left behind.
+    assert "auxiliary_graphs" not in message["message"]

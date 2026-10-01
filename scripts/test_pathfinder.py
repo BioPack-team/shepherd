@@ -24,6 +24,7 @@ RESPONSES_DIR = "responses"
 def generate_query(curie1: str, curie2: str) -> dict:
     """Given a curie, return a TRAPI message."""
     parameters = {
+        "log_level": "DEBUG",
         # "timeout": 300,
         # "tiers": [0],
     }
@@ -32,13 +33,11 @@ def generate_query(curie1: str, curie2: str) -> dict:
           "query_graph": {
               "nodes": {
                   "on": {
-                      "constraints": [],
                       "ids": [
                           curie1
                       ],
                   },
                   "sn": {
-                      "constraints": [],
                       "ids": [
                           curie2
                       ],
@@ -56,7 +55,6 @@ def generate_query(curie1: str, curie2: str) -> dict:
           }
       },
       "parameters": parameters,
-      "log_level": "DEBUG",
   }
 
 
@@ -75,7 +73,7 @@ async def single_lookup(curies: tuple[str, str], target: str):
             results = (response_json.get("message") or {}).get("results") or []
             num_results = len(results)
             assert num_results == 1
-            num_analyses = len(results[0]["analyses"])
+            num_analyses = len(results[0].get("analyses") or [])
     except Exception as e:
         num_results = 0
         num_analyses = 0

@@ -8,7 +8,9 @@
           "edges": {
             "e1": {
               "subject": "a",
-              "object": "b"
+              "object": "b",
+              "knowledge_level": "not_provided",
+              "agent_type": "not_provided"
             }
           }
         }
@@ -25,7 +27,9 @@
             "e1": {
               "subject": "a",
               "object": "b",
-              "sources": []
+              "sources": [],
+              "knowledge_level": "not_provided",
+              "agent_type": "not_provided"
             }
           }
         }
@@ -47,7 +51,9 @@
                   "resource_id": "infores:ctd",
                   "resource_role": "primary_knowledge_source"
                 }
-              ]
+              ],
+              "knowledge_level": "not_provided",
+              "agent_type": "not_provided"
             }
           }
         }
@@ -69,7 +75,9 @@
                   "resource_id": "infores:aragorn",
                   "resource_role": "primary_knowledge_source"
                 }
-              ]
+              ],
+              "knowledge_level": "not_provided",
+              "agent_type": "not_provided"
             }
           }
         }
@@ -86,7 +94,9 @@
             "e1": {
               "subject": "a",
               "object": "b",
-              "sources": []
+              "sources": [],
+              "knowledge_level": "not_provided",
+              "agent_type": "not_provided"
             }
           }
         }
@@ -108,7 +118,9 @@
                   "resource_id": "infores:x",
                   "resource_role": "aggregator_knowledge_source"
                 }
-              ]
+              ],
+              "knowledge_level": "not_provided",
+              "agent_type": "not_provided"
             }
           }
         }

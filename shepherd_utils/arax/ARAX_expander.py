@@ -10,6 +10,12 @@
 #     chemical_gene_regulation_graph_expansion, which the port removes as dead code (E-2,
 #     DEC-5), so they now end in ARAXInfer's UnknownAction error instead of upstream's
 #     failure on the missing xCRG models
+#   - TRAPI 2.0: qedge attribute constraints and qualifier sets are read from qedge.constraints
+#     (attributes / qualifiers, a qualifier set being a {qualifier_type_id: value} dict); a result's
+#     node binding is one {"ids": [...]} object; the lumped creative-treats edge sets
+#     knowledge_level / agent_type as top-level Edge properties, and the text-mining elevation check
+#     reads the top-level agent_type; a TRAPI parameters.bypass_cache=true also bypasses the KP cache;
+#     a query graph without 'edges' (optional in 2.0, e.g. single-node) is read as having none
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import asyncio
 import copy
@@ -180,11 +186,13 @@ class ARAXExpander:
         if not hasattr(response, "original_query_graph"):
             response.original_query_graph = copy.deepcopy(message.query_graph)
             response.debug(f"Saving original query graph (has qnodes {set(response.original_query_graph.nodes)} "
-                           f"and qedges {set(response.original_query_graph.edges)})..")
+                           f"and qedges {set(response.original_query_graph.edges or {})})..")
 
 
         # We'll use a copy of the QG because we modify it for internal use within Expand
         query_graph = copy.deepcopy(message.query_graph)
+        if query_graph.edges is None:
+            query_graph.edges = {}  # TRAPI 2.0: QueryGraph.edges is optional (e.g., a single-node query)
 
         # Check for any self-qedges; we will ignore those that are 'subclass_of'
         for qedge_key in set(query_graph.edges):
@@ -220,12 +228,12 @@ class ARAXExpander:
 
         # Default to expanding the entire QG (except subclass self-qedges) if the user didn't specify what to expand
         if not parameters['edge_key'] and not parameters['node_key']:
-            subclass_qedge_keys = {qedge_key for qedge_key in message.query_graph.edges
+            subclass_qedge_keys = {qedge_key for qedge_key in message.query_graph.edges or {}
                                    if eu.is_expand_created_subclass_qedge_key(qedge_key, message.query_graph)}
             if subclass_qedge_keys:
                 log.warning(f"Expand will ignore subclass self-qedges in your QG ({', '.join(subclass_qedge_keys)}) "
                             f"because KPs take care of subclass reasoning by default")
-            parameters['edge_key'] = list(set(message.query_graph.edges).difference(subclass_qedge_keys))
+            parameters['edge_key'] = list(set(message.query_graph.edges or {}).difference(subclass_qedge_keys))
             parameters['node_key'] = self._get_orphan_qnode_keys(message.query_graph)
 
         # set timeout based on input parameters, it'll be used later
@@ -243,6 +251,10 @@ class ARAXExpander:
             log.debug(f"Found bypass_cache parameter {bypass_cache}")
         else:
             bypass_cache = False
+        # TRAPI 2.0 carries bypass_cache in the query's parameters
+        trapi_parameters = getattr(response.envelope, "parameters", None)
+        if isinstance(trapi_parameters, dict) and trapi_parameters.get("bypass_cache") is True:
+            bypass_cache = True
 
         # Verify we understand all constraints
         for qnode_key, qnode in query_graph.nodes.items():
@@ -253,8 +265,8 @@ class ARAXExpander:
                                   f"Don't know how to handle! Supported qnode constraints are: "
                                   f"{self.supported_qnode_attribute_constraints}", error_code="UnsupportedConstraint")
         for qedge_key, qedge in query_graph.edges.items():
-            if qedge.attribute_constraints:
-                for constraint in qedge.attribute_constraints:
+            if qedge.constraints and qedge.constraints.attributes:
+                for constraint in qedge.constraints.attributes:
                     if not self.is_supported_constraint(constraint, self.supported_qedge_attribute_constraints):
                         log.error(f"Unsupported constraint(s) detected on qedge {qedge_key}: \n{constraint}\n"
                                   f"Don't know how to handle! Supported qedge constraints are: "
@@ -624,7 +636,7 @@ class ARAXExpander:
                     return response
 
         # Get rid of any lingering expand-added subclass self-qedges that are no longer relevant (edges pruned)
-        all_qedge_keys = set(message.query_graph.edges)
+        all_qedge_keys = set(message.query_graph.edges or {})
         for qedge_key in all_qedge_keys:
             if not overarching_kg.edges_by_qg_id.get(qedge_key) and \
                eu.is_expand_created_subclass_qedge_key(qedge_key, message.query_graph):
@@ -813,22 +825,22 @@ class ARAXExpander:
                 # issue2634 - curated CTKP edges implement elevation to treats prediction if and only if elevate_to_prediction = True is returned by KTKP.
                 if (edge_temp.predicate == "biolink:in_clinical_trials_for" and
                     any(source.resource_id == "infores:multiomics-clinicaltrials" for source in edge_temp.sources) and
-                    len([x.value for x in edge_temp.attributes if x.attribute_type_id == "elevate_to_prediction"]) > 0):
+                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "elevate_to_prediction"]) > 0):
                     if [x.value for x in edge_temp.attributes if x.attribute_type_id == "elevate_to_prediction"][0]:
                         higher_level_treats_edges_temp[edge_key_temp] = edge_temp
 
                 # issue2634 - curated DAKP/FAERS edges implement elevation to treats prediction if and only if the applied_to_treat predicate has evidence count (N_cases) >10
                 elif (edge_temp.predicate == "biolink:applied_to_treat" and
                     (any(source.resource_id == "infores:multiomics-drugapprovals" for source in edge_temp.sources) or any(source.resource_id == "infores:faers" for source in edge_temp.sources)) and
-                    len([x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:number_of_cases"]) > 0):
+                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "biolink:number_of_cases"]) > 0):
                     if [x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:number_of_cases"][0] > 24:
                         higher_level_treats_edges_temp[edge_key_temp] = edge_temp
 
                 # issue2634 - curated TMKP edges implement elevation to treats prediction if and only if the treats_or_applied_or_studied_to_treat predicate has evidence count (biolink:evidence_count) > 5
                 elif (edge_temp.predicate == "biolink:treats_or_applied_or_studied_to_treat" and
                       any(source.resource_id == "infores:text-mining-provider-cooccurrence" for source in edge_temp.sources) and
-                    len([x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:agent_type" and x.value == "text_mining_agent"]) > 0 and
-                    len([x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:evidence_count"]) > 0):
+                    edge_temp.agent_type == "text_mining_agent" and
+                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "biolink:evidence_count"]) > 0):
                     if [x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:evidence_count"][0] > 5:
                         higher_level_treats_edges_temp[edge_key_temp] = edge_temp
 
@@ -838,7 +850,7 @@ class ARAXExpander:
 
                 # issue2634 - SemMedDB treats_or_applied-type edges with >= 10 associated publications are elevated to treats prediction
                 elif (any(source.resource_id == "infores:semmeddb" for source in edge_temp.sources) and
-                    len([x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:publications"]) > 0 and
+                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "biolink:publications"]) > 0 and
                     [len(x.value) for x in edge_temp.attributes if x.attribute_type_id == "biolink:publications"][0] >= 10):
                         higher_level_treats_edges_temp[edge_key_temp] = edge_temp
 
@@ -867,12 +879,8 @@ class ARAXExpander:
                 lumped_edge = Edge(subject=subj_key, object=obj_key, predicate="biolink:treats",
                                    sources=[RetrievalSource(resource_id="infores:arax",
                                                             resource_role="primary_knowledge_source")],
-                                   attributes=[Attribute(attribute_type_id="biolink:agent_type",
-                                                         value="computational_model",
-                                                         attribute_source="infores:arax"),
-                                               Attribute(attribute_type_id="biolink:knowledge_level",
-                                                         value="prediction",
-                                                         attribute_source="infores:arax")])
+                                   knowledge_level="prediction",
+                                   agent_type="computational_model")
                 lumped_edge_key = f"creative_expand_treats_edge:{subj_key}--treats--{obj_key}--infores:arax"
                 overarching_kg.edges_by_qg_id[qedge_key][lumped_edge_key] = lumped_edge
 
@@ -1004,9 +1012,9 @@ class ARAXExpander:
                     subject_qnode = query_graph.nodes[qedge.subject]  # chemical
                     object_qnode = query_graph.nodes[qedge.object]  # gene
                     qualifier_direction = \
-                        [qualifier.qualifier_value for qualifier_constraint in qedge.qualifier_constraints for
-                         qualifier in qualifier_constraint.qualifier_set if
-                         qualifier.qualifier_type_id == 'biolink:object_direction_qualifier'][0]
+                        [qualifier_value for qualifier_set in ((qedge.constraints.qualifiers if qedge.constraints else None) or []) for
+                         qualifier_type_id, qualifier_value in qualifier_set.items() if
+                         qualifier_type_id == 'biolink:object_direction_qualifier'][0]
                     if qualifier_direction == 'increased':
                         regulation_type = 'increase'
                     elif qualifier_direction == 'decreased':
@@ -1464,7 +1472,7 @@ class ARAXExpander:
             while len(kept_nodes) < prune_threshold and counter < len(results):
                 current_result = intermediate_results_response.envelope.message.results[counter]
                 scores.append(current_result.analyses[0].score)
-                kept_nodes.update({binding.id for binding in current_result.node_bindings[qnode_key_to_prune]})
+                kept_nodes.update(set(current_result.node_bindings[qnode_key_to_prune].ids))
                 counter += 1
             if kept_nodes:
                 log.info(f"Kept top {len(kept_nodes)} answers for {qnode_key_to_prune}. "
@@ -1759,7 +1767,7 @@ class ARAXExpander:
 
     @staticmethod
     def _get_orphan_qnode_keys(query_graph: QueryGraph):
-        qnode_keys_used_by_qedges = {qnode_key for qedge in query_graph.edges.values() for qnode_key in {qedge.subject, qedge.object}}
+        qnode_keys_used_by_qedges = {qnode_key for qedge in (query_graph.edges or {}).values() for qnode_key in {qedge.subject, qedge.object}}
         all_qnode_keys = set(query_graph.nodes)
         return list(all_qnode_keys.difference(qnode_keys_used_by_qedges))
 

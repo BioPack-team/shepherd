@@ -199,3 +199,52 @@ async def test_mockworld_notification_sink_journals(world):
     assert notes[0]["client_id"] == "ui"
     assert notes[0]["signature"] == "sig"
     assert notes[0]["payload"] == {"pk": "x", "code": 200}
+
+
+# ---------------------------------------------------------------------------
+# TRAPI 2.0
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"message": {"query_graph": {"nodes": {"n0": {}}, "edges": {}}}},
+        {
+            "message": {
+                "query_graph": {
+                    "nodes": {"n0": {"ids": ["X:1"]}},
+                    "edges": {"e": {"subject": "n0", "object": "n0"}},
+                }
+            },
+            "parameters": {"log_level": "DEBUG"},
+        },
+        {},
+    ],
+)
+def test_mockworld_empty_response_is_valid_trapi2(query):
+    from translator_tom import Response
+
+    out = mockworld._empty_response(query)
+    assert out["message"]["results"] == []
+    assert "auxiliary_graphs" not in out["message"]
+    assert out.get("parameters") == (query.get("parameters") or None)
+    if query.get("message", {}).get("query_graph", {}).get("edges"):
+        Response.from_dict(out)
+
+
+def test_strip_envelope_drops_only_the_envelope():
+    """The harness drops Shepherd's 2.0 envelope members before diffing and
+    converts nothing, so a 1.5 answer and a 2.0 one still differ in shape."""
+    from normalize import strip_envelope
+
+    relay = {"message": {"results": [{"node_bindings": {"n0": [{"id": "X:1"}]}}]}}
+    shepherd = {
+        "message": {"results": [{"node_bindings": {"n0": {"ids": ["X:1"]}}}]},
+        "schema_version": "2.0.0",
+        "biolink_version": "4.4.4",
+        "parameters": {"log_level": "DEBUG"},
+    }
+    assert strip_envelope(shepherd) == {"message": shepherd["message"]}
+    assert strip_envelope(relay) == relay
+    assert diff(strip_envelope(relay), strip_envelope(shepherd)) != []

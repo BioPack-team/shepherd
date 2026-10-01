@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS callbacks (
 -- whose data volume predates this file change.
 CREATE INDEX IF NOT EXISTS idx_callbacks_callback_id ON callbacks (callback_id);
 CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id);
+CREATE INDEX IF NOT EXISTS idx_shepherd_brain_response_id ON shepherd_brain (response_id);
 
 -- ---------------------------------------------------------------------------
 -- Translator ARS tables. These mirror the Django models of the upstream ARS

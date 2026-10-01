@@ -1,5 +1,8 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_response.py.
-# Changes from upstream: the unittest/CLI block after the class is dropped.
+# Changes from upstream:
+#   - the unittest/CLI block after the class is dropped
+#   - log timestamps carry the local UTC offset (TRAPI 2.0 LogEntry.timestamp is an RFC 3339
+#     date-time; upstream's naive isoformat() has no offset)
 # See docs/ARAX_PORT_BASELINE.md (DEC-1, DEC-14) and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -134,7 +137,7 @@ class ARAXResponse:
         :type code: str
         """
 
-        timestamp = str(datetime.datetime.now().isoformat())
+        timestamp = str(datetime.datetime.now().astimezone().isoformat())
         pid = os.getpid()
         self.messages.append( { 'timestamp': timestamp, 'level': self.level_names[level], 'code': code, 'message': message } )
         self.n_messages += 1

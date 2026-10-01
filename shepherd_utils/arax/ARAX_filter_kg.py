@@ -1,6 +1,8 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_filter_kg.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - TRAPI 2.0: to_dict() omits unset members, so the discrete-attribute/property value lookups use .get() (upstream got None)
+#   - TRAPI 2.0: remove_edges_by_discrete_attribute accepts biolink:knowledge_level / biolink:agent_type (1.x attributes) and reads the top-level Edge properties
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 import traceback
@@ -661,7 +663,7 @@ This can be applied to an arbitrary knowledge graph as possible node categories 
             if 'edge_attribute' in parameters:
                 for edge in message.knowledge_graph.edges.values():
                     if hasattr(edge, parameters['edge_attribute']):
-                        value = edge.to_dict()[parameters['edge_attribute']]
+                        value = edge.to_dict().get(parameters['edge_attribute'])
                         if type(value) is str:
                             known_values.add(value)
                         elif type(value) is list:
@@ -695,6 +697,11 @@ This can be applied to an arbitrary knowledge graph as possible node categories 
                                     known_values.add(val)
                         if len(known_attributes.intersection(provided_by_attributes)) > 0:
                             known_attributes = known_attributes.union(provided_by_attributes)
+                # TRAPI 2.0: knowledge_level / agent_type are top-level Edge properties, no longer biolink: attributes
+                for property_name in ('knowledge_level', 'agent_type'):
+                    if getattr(edge, property_name, None) is not None:
+                        known_attributes.add(f"biolink:{property_name}")
+                        known_values.add(getattr(edge, property_name))
 
             allowable_parameters = {'action': {'remove_edges_by_discrete_attribute'},
                                     'edge_attribute': set([key for x in self.message.knowledge_graph.edges.values() for key, val in x.to_dict().items() if type(val) is str or type(val) is list]).union(known_attributes),
@@ -1388,7 +1395,7 @@ This can be applied to an arbitrary knowledge graph as possible node categories 
             if 'node_property' in parameters:
                 for node in message.knowledge_graph.nodes.values():
                     if hasattr(node, parameters['node_property']):
-                        value = node.to_dict()[parameters['node_property']]
+                        value = node.to_dict().get(parameters['node_property'])
                         if type(value) is str:
                             known_values.add(value)
             allowable_parameters = {'action': {'remove_nodes_by_property'},

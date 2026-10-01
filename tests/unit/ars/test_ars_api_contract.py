@@ -5,6 +5,7 @@ tr_sys/tr_ars/api.py behavior: exact paths, methods, status codes, error
 bodies, and response envelope shapes.
 """
 
+import copy
 import datetime
 import json
 import uuid
@@ -221,7 +222,14 @@ async def test_submit_returns_201_envelope_and_enqueues_fanout(client, db, redis
 
 
 async def test_submit_pathfinder_query_type(client, db, redis_mock):
-    q = {"message": {"query_graph": {"nodes": {}, "edges": {}, "paths": {}}}}
+    q = {
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["X:1"]}, "n1": {"ids": ["X:2"]}},
+                "paths": {"p0": {"subject": "n0", "object": "n1"}},
+            }
+        }
+    }
     resp = await client.post("/api/submit", json=q)
     assert resp.status_code == 201
     assert db["create_message"].await_args.kwargs["params"] == {
@@ -266,6 +274,86 @@ async def test_submit_no_query_graph_is_400(client, db, redis_mock):
     resp = await client.post("/api/submit", json={"nope": 1})
     assert resp.status_code == 400
     assert resp.text.startswith("failing due to")
+
+
+@pytest.mark.parametrize(
+    "mutate, needle",
+    [
+        # TRAPI 1.x spellings 2.0 retired: the schema would let them through
+        # (additionalProperties) and silently ignore them
+        (lambda q: q.update(log_level="DEBUG"), "parameters.log_level"),
+        (lambda q: q.update(bypass_cache=True), "parameters.bypass_cache"),
+        (
+            lambda q: q["message"]["query_graph"]["edges"]["e"].update(
+                qualifier_constraints=[
+                    {
+                        "qualifier_set": [
+                            {
+                                "qualifier_type_id": "biolink:object_direction_qualifier",
+                                "qualifier_value": "increased",
+                            }
+                        ]
+                    }
+                ]
+            ),
+            "constraints.qualifiers",
+        ),
+        (
+            lambda q: q["message"]["query_graph"].update(
+                edges=None,
+                paths={
+                    "p0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
+                    }
+                },
+            ),
+            "required_intermediate_categories",
+        ),
+        # plain schema violations
+        (
+            lambda q: q["message"]["query_graph"]["edges"]["e"].pop("subject"),
+            "Invalid TRAPI 2.0 query",
+        ),
+        (lambda q: q.update(parameters="DEBUG"), "Invalid TRAPI 2.0 query"),
+    ],
+    ids=[
+        "top_level_log_level",
+        "top_level_bypass_cache",
+        "qualifier_constraints",
+        "intermediate_categories",
+        "qedge_missing_subject",
+        "parameters_not_an_object",
+    ],
+)
+async def test_submit_rejects_a_non_trapi2_query_with_400(
+    client, db, redis_mock, mutate, needle
+):
+    """Every hosted ARA speaks TRAPI 2.0, so /submit validates the body as a
+    2.0 query (shepherd_utils.trapi.validate_query) and answers a bad one
+    with upstream's submit error shape -- before any row or task exists."""
+    q = copy.deepcopy(QUERY)
+    mutate(q)
+    resp = await client.post("/api/submit", json=q)
+    assert resp.status_code == 400
+    assert resp.text.startswith("failing due to")
+    assert needle in resp.text
+    db["create_message"].assert_not_awaited()
+    assert not await _fanout_enqueued()
+
+
+async def test_submit_fanout_task_uses_parameters_log_level(client, db, redis_mock):
+    """TRAPI 2.0: the client's log level is parameters.log_level."""
+    import logging
+
+    from shepherd_utils.broker import get_task
+
+    q = dict(QUERY, parameters={"log_level": "DEBUG"})
+    resp = await client.post("/api/submit", json=q)
+    assert resp.status_code == 201
+    task = await get_task("ars.fanout", "consumer", "t", logging.getLogger())
+    assert int(task[1]["log_level"]) == logging.DEBUG
 
 
 async def test_submit_name_from_body(client, db, redis_mock):
@@ -877,7 +965,9 @@ async def test_submit_lost_race_discards_own_row_and_serves_winner(
 
 
 async def test_submit_bypass_cache_skips_lookup(client, db, redis_mock):
-    resp = await client.post("/api/submit", json=dict(QUERY, bypass_cache=True))
+    """TRAPI 2.0: bypass_cache lives in parameters."""
+    q = dict(QUERY, parameters={"bypass_cache": True})
+    resp = await client.post("/api/submit", json=q)
     assert resp.status_code == 201
     assert resp.json()["fields"]["params"]["cache"]["role"] == "bypass"
     db["get_current_cache_entry"].assert_not_awaited()

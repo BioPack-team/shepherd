@@ -2,6 +2,10 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - drop the unused import of knowledge_graph_info (dead code, DEC-5)
+#   - TRAPI 2.0: the xCRG MVP2 check is is_xcrg_mvp2_query's (catrax-xcrg) shape check made on the
+#     2.0 query graph, where the qualifier sets are read from constraints.qualifiers
+#     ({qualifier_type_id: value} dicts) instead of qualifier_constraints; the package's reader
+#     only knows the 1.x member and would never match a 2.0 query
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -16,7 +20,7 @@ from datetime import datetime
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.query_graph_info import QueryGraphInfo
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
-from xcrg import is_xcrg_mvp2_query
+from xcrg.runner import get_single_query_edge, get_endpoint_type, get_valid_aspect_qualifiers
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 
@@ -25,6 +29,35 @@ from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeG
 from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
 from shepherd_utils.arax.openapi_server.models.q_node import QNode
 from shepherd_utils.arax.openapi_server.models.q_edge import QEdge
+
+
+def is_xcrg_mvp2_query(message: dict) -> bool:
+    """xcrg.is_xcrg_mvp2_query (validate_inferred_query) on a TRAPI 2.0 query: the first qualifier set
+    is constraints.qualifiers[0], a {qualifier_type_id: qualifier_value} dict."""
+    try:
+        qnodes = message.get("message", {}).get("query_graph", {}).get("nodes", {})
+        _, edge = get_single_query_edge(message)
+        if edge.get("knowledge_type") != "inferred":
+            return False
+        if "biolink:affects" not in (edge.get("predicates") or []):
+            return False
+        source_qnode = edge.get("subject")
+        target_qnode = edge.get("object")
+        if source_qnode not in qnodes or target_qnode not in qnodes:
+            return False
+        endpoint_nodes = [qnodes[source_qnode], qnodes[target_qnode]]
+        if sum(1 for node in endpoint_nodes if node.get("ids")) != 1:
+            return False
+        endpoint_types = {get_endpoint_type(node.get("categories") or []) for node in endpoint_nodes}
+        if endpoint_types != {"chemical", "gene"}:
+            return False
+        qualifier_sets = (edge.get("constraints") or {}).get("qualifiers") or []
+        qualifier_set = qualifier_sets[0] if qualifier_sets else {}
+        if qualifier_set.get("biolink:object_direction_qualifier") not in {"increased", "decreased"}:
+            return False
+        return qualifier_set.get("biolink:object_aspect_qualifier") in get_valid_aspect_qualifiers()
+    except Exception:
+        return False
 
 
 class ARAXQueryGraphInterpreter:

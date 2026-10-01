@@ -2,6 +2,7 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - add_virtual_edge binds its virtual edges to the results in one pass after its loop, not one call per edge (D-28)
+#   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type; upstream sets none, so they take what their primary source (infores:cohd, EHR co-occurrence statistics) asserts for its own edges: statistical_association / data_analysis_pipeline
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This class will overlay the clinical information we have on hand
 #!/bin/env python3
@@ -339,7 +340,8 @@ class OverlayClinicalInfo:
                                                         upstream_resource_ids=["infores:cohd"])
                     ]
                 edge = Edge(predicate=edge_type, subject=subject_key, object=object_key,
-                                attributes=edge_attribute_list, sources=retrieval_source)
+                                attributes=edge_attribute_list, sources=retrieval_source,
+                                knowledge_level="statistical_association", agent_type="data_analysis_pipeline")
                 edge.qedge_keys = qedge_keys
                 self.message.knowledge_graph.edges[id] = edge
                 if self.message.results is not None and len(self.message.results) > 0:

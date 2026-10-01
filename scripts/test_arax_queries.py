@@ -12,9 +12,17 @@ Groups: lookup (TRAPI one-hop to three-hop), creative (MVP1 xDTD, MVP2 xCRG,
 pathfinder), flexible (not / any / all / optional groups / constraints),
 araxi (the DSL: every command and the overlay, filter_kg and filter_results
 actions), workflows (TRAPI workflow operations, as the CQS sends them),
-validation (the errors ARAX answers), delivery (streaming, the KP cache,
+validation (the errors ARAX answers, and Shepherd's 400 for a body that is not
+TRAPI 2.0 -- a 1.x spelling such as a top-level log_level or
+qualifier_constraints), delivery (streaming, the KP cache,
 message_uris), endpoints (/response, /status, /entity, /meta_knowledge_graph,
 autocomplete).
+
+Queries are TRAPI 2.0 (parameters.log_level / timeout / bypass_cache, a QEdge's
+constraints.qualifiers, a QPath's required_intermediate_categories), and every
+response is checked to be a TRAPI 2.0 Response to its query (schema_version
+2.0.0, the query's parameters repeated, no empty logs; TOM's model too when
+translator_tom is installed).
 
 Each case checks the HTTP status, ARAX's response status ("Success", or the
 error code ARAX answers with, e.g. "QueryGraphNoIds"), a minimum number of
@@ -156,6 +164,38 @@ def log_contains(text):
     return check
 
 
+def _only_levels(r, levels):
+    """ARAX's log honours parameters.log_level (Shepherd's own entries do too)."""
+    extra = {e.get("level") for e in r.get("logs") or []} - levels
+    if extra:
+        return f"log entries at {sorted(extra)} despite parameters.log_level"
+
+
+def trapi_2_problems(body: dict, sent: dict) -> list:
+    """What makes ``body`` not a TRAPI 2.0 Response to the query ``sent``.
+
+    With translator_tom installed, TOM's model validates it as well.
+    """
+    problems = []
+    if body.get("schema_version") != "2.0.0":
+        problems.append(f"schema_version {body.get('schema_version')!r}, not 2.0.0")
+    if not body.get("biolink_version"):
+        problems.append("no biolink_version")
+    if (body.get("parameters") or {}) != (sent.get("parameters") or {}):
+        problems.append("parameters are not the query's")
+    if "logs" in body and not body["logs"]:
+        problems.append("empty logs (TRAPI 2.0: omit them)")
+    try:
+        from translator_tom import Response
+    except ImportError:
+        return problems
+    try:
+        Response.from_dict(body)
+    except Exception as e:
+        problems.append(f"not a valid TOM 2.0 Response: {str(e)[:300]}")
+    return problems
+
+
 def xdtd_predictions(r):
     """MVP1: xDTD's inferred treats edges, with their support graphs."""
     inferred = [e for e in _edges(r) if "probability_treats" in set(_attr_names([e]))]
@@ -194,9 +234,10 @@ def results_at_most(n):
 def not_bound(qnode_key, curie):
     def check(r):
         for result in _msg(r).get("results") or []:
-            for b in (result.get("node_bindings") or {}).get(qnode_key) or []:
-                if b.get("id") == curie:
-                    return f"{curie} is bound to {qnode_key} although excluded"
+            # TRAPI 2.0: one NodeBinding {"ids": [...]} per qnode
+            binding = (result.get("node_bindings") or {}).get(qnode_key) or {}
+            if curie in (binding.get("ids") or []):
+                return f"{curie} is bound to {qnode_key} although excluded"
 
     check.__name__ = f"{curie} not bound to {qnode_key}"
     return check
@@ -290,20 +331,14 @@ case(
                 "subject": "n0",
                 "object": "n1",
                 "predicates": ["biolink:affects"],
-                "qualifier_constraints": [
-                    {
-                        "qualifier_set": [
-                            {
-                                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                "qualifier_value": "activity_or_abundance",
-                            },
-                            {
-                                "qualifier_type_id": "biolink:object_direction_qualifier",
-                                "qualifier_value": "decreased",
-                            },
-                        ]
-                    }
-                ],
+                "constraints": {
+                    "qualifiers": [
+                        {
+                            "biolink:object_aspect_qualifier": "activity_or_abundance",
+                            "biolink:object_direction_qualifier": "decreased",
+                        }
+                    ]
+                },
             }
         },
     ),
@@ -468,20 +503,14 @@ case(
                 "object": "gene",
                 "predicates": ["biolink:affects"],
                 "knowledge_type": "inferred",
-                "qualifier_constraints": [
-                    {
-                        "qualifier_set": [
-                            {
-                                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                "qualifier_value": "activity_or_abundance",
-                            },
-                            {
-                                "qualifier_type_id": "biolink:object_direction_qualifier",
-                                "qualifier_value": "decreased",
-                            },
-                        ]
-                    }
-                ],
+                "constraints": {
+                    "qualifiers": [
+                        {
+                            "biolink:object_aspect_qualifier": "activity_or_abundance",
+                            "biolink:object_direction_qualifier": "decreased",
+                        }
+                    ]
+                },
             }
         },
     ),
@@ -499,20 +528,14 @@ case(
                 "object": "gene",
                 "predicates": ["biolink:affects"],
                 "knowledge_type": "inferred",
-                "qualifier_constraints": [
-                    {
-                        "qualifier_set": [
-                            {
-                                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                "qualifier_value": "activity_or_abundance",
-                            },
-                            {
-                                "qualifier_type_id": "biolink:object_direction_qualifier",
-                                "qualifier_value": "increased",
-                            },
-                        ]
-                    }
-                ],
+                "constraints": {
+                    "qualifiers": [
+                        {
+                            "biolink:object_aspect_qualifier": "activity_or_abundance",
+                            "biolink:object_direction_qualifier": "increased",
+                        }
+                    ]
+                },
             }
         },
     ),
@@ -607,6 +630,18 @@ case(
         {"e0": {"subject": "n0", "object": "n1"}},
     ),
     min_results=1,
+)
+case(
+    "any_set_interpretation_collate",
+    "flexible",
+    trapi(
+        {
+            "n0": {"categories": [C], "set_interpretation": "COLLATE"},
+            "n1": {"ids": [T2D]},
+        },
+        {"e0": {"subject": "n0", "object": "n1", "predicates": [TREATS]}},
+    ),
+    note="TRAPI 2.0's COLLATE: what ARAX's is_set means for an unpinned node",
 )
 case(
     "any_set_interpretation_many",
@@ -1092,8 +1127,58 @@ case(
     "validation",
     trapi({"n0": {"ids": [METFORMIN]}}),
     http=400,
-    status="MissingQEdgeAndQPath",
-    note="edges: {} would be a single-node lookup",
+    status="ERROR",
+    note="TRAPI 2.0 requires edges or paths: Shepherd's 400, before ARAX's "
+    "MissingQEdgeAndQPath",
+)
+# TRAPI 1.x spellings are rejected by Shepherd with a 400 naming the 2.0 one
+case(
+    "val_trapi1_log_level",
+    "validation",
+    trapi(ONE_HOP_NODES, ONE_HOP_EDGES, log_level="DEBUG"),
+    http=400,
+    status="ERROR",
+)
+case(
+    "val_trapi1_log_level_dsl",
+    "validation",
+    dsl(BASE_ONE_HOP, log_level="DEBUG"),
+    http=400,
+    status="ERROR",
+)
+case(
+    "val_trapi1_qualifier_constraints",
+    "validation",
+    trapi(
+        {"n0": {"ids": [METFORMIN]}, "n1": {"categories": [G]}},
+        {"e0": {"subject": "n0", "object": "n1", "qualifier_constraints": []}},
+    ),
+    http=400,
+    status="ERROR",
+)
+case(
+    "val_trapi1_intermediate_categories",
+    "validation",
+    trapi(
+        {"n0": {"ids": [METFORMIN]}, "n1": {"ids": [T2D]}},
+        paths={
+            "p0": {
+                "subject": "n0",
+                "object": "n1",
+                "constraints": [{"intermediate_categories": [G]}],
+            }
+        },
+    ),
+    http=400,
+    status="ERROR",
+)
+case(
+    "val_parameters_log_level",
+    "validation",
+    trapi(ONE_HOP_NODES, ONE_HOP_EDGES, parameters={"log_level": "WARNING"}),
+    min_results=1,
+    checks=[lambda r: _only_levels(r, {"WARNING", "ERROR"})],
+    note="TRAPI 2.0's parameters.log_level",
 )
 case(
     "val_no_pinned_node",
@@ -1165,6 +1250,17 @@ case(
     after=True,
 )
 case(
+    "bypass_cache_parameters",
+    "delivery",
+    trapi(
+        {"n0": {"ids": [ASTHMA]}, "n1": {"categories": [C]}},
+        {"e0": {"subject": "n1", "object": "n0", "predicates": [TREATS]}},
+        parameters={"bypass_cache": True},
+    ),
+    after=True,
+    note="TRAPI 2.0's parameters.bypass_cache",
+)
+case(
     "message_uris_reuse_a_response",
     "delivery",
     None,
@@ -1203,8 +1299,10 @@ case(
     path="/response/{rid}",
     after=True,
     endpoint_check=json_ok(
-        lambda b: (b.get("message") or {}).get("results"),
-        "a stored response with results",
+        lambda b: (b.get("message") or {}).get("results")
+        and b.get("schema_version") == "2.0.0"
+        and b.get("logs"),
+        "a stored response with results, as a TRAPI 2.0 Response with its logs",
     ),
 )
 case(
@@ -1346,8 +1444,13 @@ class Outcome:
     log_lines: list = field(default_factory=list)
 
 
-def check_query_response(c: Case, http_status: int, body: dict) -> list:
+def check_query_response(
+    c: Case, http_status: int, body: dict, sent: Optional[dict] = None
+) -> list:
     problems = []
+    if sent is not None and "message" in body:
+        # every response ARAX (or Shepherd) finished is a TRAPI 2.0 Response
+        problems += trapi_2_problems(body, sent)
     if http_status != c.http:
         problems.append(f"HTTP {http_status}, expected {c.http}")
     status = body.get("status")
@@ -1509,7 +1612,7 @@ class Runner:
         seconds = time.perf_counter() - start
         self.bodies[c.name] = result
         self.save(c.name, result)
-        problems += check_query_response(c, http_status, result)
+        problems += check_query_response(c, http_status, result, body)
         out = self._outcome(c, problems, seconds)
         out.n_results = len(_msg(result).get("results") or [])
         out.status, out.http = result.get("status"), http_status

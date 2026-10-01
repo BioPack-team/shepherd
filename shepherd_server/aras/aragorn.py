@@ -23,7 +23,7 @@ async def sync_query(request: Request) -> Response:
     return response
 
 
-@ARAGORN.post("/asyncquery", openapi_extra=query_openapi_extra())
+@ARAGORN.post("/asyncquery", openapi_extra=query_openapi_extra("AsyncQuery"))
 async def async_query(request: Request) -> Response:
     response = await run_async_query(ARATargetEnum.ARAGORN, request)
     return response

@@ -82,7 +82,9 @@ def test_option_group_id():
             "expand(edge_key=[e00,e01], kp=infores:retriever)",
         ]}}
     [response, message] = _do_arax_query(query)
-    for key, edge in message.query_graph.edges.items():
+    # TRAPI 2.0: an empty query graph is not valid 2.0, so a message has none until it has a qnode,
+    # and a node-only query graph has no edges (upstream's 1.6 message always had edges: {})
+    for key, edge in ((message.query_graph.edges if message.query_graph else None) or {}).items():
         if key == 'e01':
             assert edge.option_group_id == '1'
         elif key == 'e00':
@@ -99,7 +101,8 @@ def test_exclude():
         ]}}
     [response, message] = _do_arax_query(query)
     assert response.status == 'OK'
-    for key, edge in message.query_graph.edges.items():
+    # TRAPI 2.0: a node-only query graph has no edges (upstream's 1.6 message always had edges: {})
+    for key, edge in ((message.query_graph.edges if message.query_graph else None) or {}).items():
         if key == 'e01':
             assert edge.exclude
         if key == 'e00':
@@ -529,8 +532,8 @@ def test_FET_ranking_2():
     for result in message.results:
         for key, edge_bindings in result.analyses[0].edge_bindings.items():
             if key.startswith('FET'):
-                for edge in edge_bindings:
-                    for attribute in message.knowledge_graph.edges[edge.id].attributes:
+                for edge_id in edge_bindings.ids:  # TRAPI 2.0: one binding with ids
+                    for attribute in message.knowledge_graph.edges[edge_id].attributes:
                         if attribute.original_attribute_name == "fisher_exact_test_p-value":
                             if str(result.score) in fet_ranking_value:
                                 fet_ranking_value[str(result.score)].append(float(attribute.value))

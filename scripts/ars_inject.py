@@ -30,6 +30,11 @@ package version skew between the two builds (stable across reruns) or
 BioThings backend data movement between the capture and the injection
 (unstable) -- rerun to classify before treating one as a pipeline bug.
 
+TRAPI 2.0: the local ARS speaks only 2.0, and captured payloads are
+delivered as they are (there is no 1.x -> 2.0 conversion), so the source ARS
+must be a 2.0 stack too. The query templates (scripts/test_ars.py) are 2.0
+queries.
+
 Local stack prerequisites:
   - the ARA URL overrides point every actor at this script's sink,
     e.g. http://host.docker.internal:8210/<agent> (any path; it 200s all)

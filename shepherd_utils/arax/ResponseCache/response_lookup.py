@@ -21,6 +21,14 @@
 #     ARAs' child messages (ara-shepherd-aragorn / -arax / -bte)
 #   - store_callback keeps the posted body in Shepherd's data store (capped at
 #     5000 entries, as upstream caps its files) instead of data/callbacks/
+#   - TRAPI 2.0 (Shepherd serves and stores 2.0 only): responses are validated as
+#     TRAPI 2.0.0 with translator_tom (schema + TOM's semantic checks), through a
+#     stand-in with reasoner-validator's interface, since reasoner-validator (pinned
+#     6.0.2) only knows TRAPI <= 1.6; the ValidatorFailed log entries it adds carry
+#     an RFC 3339 timestamp with offset, as 2.0 LogEntry requires; the X view's
+#     stripped node/edge `attributes` and edge `sources` are omitted, not null
+#   - get_response takes an optional load_local (an async loader for a Shepherd
+#     response id), so the server can finish its stored form; default: upstream's
 # Everything else -- the branch order, the validator calls and result shapes,
 # the error tuples, the actor lookups, the attribute stripping, the size
 # strings -- is upstream's, including its quirks (DEC-1): the URL branch refers
@@ -43,11 +51,11 @@ def eprint(*args, **kwargs):
 
 
 # only certain versions of TRAPI can be validated; place default in position [0]
-valid_trapi_versions = ['1.6.0', '1.5.0']
+valid_trapi_versions = ['2.0.0']
 biolink_version = '4.4.2'
 
 try:
-    validator_version = f"{metadata.version('reasoner-validator')}"
+    validator_version = f"translator_tom {metadata.version('translator_tom')}"
 except metadata.PackageNotFoundError:
     validator_version = ""
 
@@ -72,9 +80,49 @@ def component_cache_get(component_id: str):
     return None if blob is None else decode_message(blob)
 
 
+class _TOMResponseValidator:
+    """TRAPI 2.0 response validation with translator_tom, behind the part of
+    reasoner-validator's TRAPIResponseValidator interface ARAX uses. A response
+    that is not a TRAPI 2.0 Response (the schema) is a critical message; TOM's
+    semantic errors are errors and its warnings are warnings."""
+
+    def __init__(self, trapi_version=None, biolink_version=None):
+        self.trapi_version = trapi_version
+        self.biolink_version = biolink_version
+        self.messages = {"info": {}, "skipped": {}, "warning": {}, "error": {}, "critical": {}}
+
+    @staticmethod
+    def _add(level_messages, code, location, text):
+        level_messages.setdefault(code, {}).setdefault(location or "global", []).append({"reason": text})
+
+    def check_compliance_of_trapi_response(self, envelope):
+        from pydantic import ValidationError
+        from translator_tom.v2_0 import Response as TOMResponse
+        from translator_tom.v2_0.validation import semantic_validate
+        try:
+            response = TOMResponse.from_dict(envelope)
+        except ValidationError as e:
+            for error in e.errors():
+                location = ".".join(str(part) for part in error["loc"])
+                self._add(self.messages["critical"], "critical.trapi.validation", location, error["msg"])
+            return
+        warnings, errors = semantic_validate(response)
+        for error in errors:
+            location = ".".join(str(part) for part in (getattr(error, "location", None) or ()))
+            self._add(self.messages["error"], "error.trapi.semantic", location, str(error))
+        for warning in warnings:
+            location = ".".join(str(part) for part in (getattr(warning, "location", None) or ()))
+            self._add(self.messages["warning"], "warning.trapi.semantic", location, str(warning))
+
+    def get_all_messages(self):
+        return {"Validate TRAPI Response": {"Standards Test": self.messages}}
+
+    def dumps(self):
+        return json.dumps(self.messages, sort_keys=True)
+
+
 def _TRAPIResponseValidator(**kwargs):
-    from reasoner_validator.validator import TRAPIResponseValidator
-    return TRAPIResponseValidator(**kwargs)
+    return _TOMResponseValidator(**kwargs)
 
 
 def _size_string(content_size):
@@ -135,7 +183,7 @@ def finish_local_response(envelope):
 
         #else:
         except Exception as error:
-            timestamp = str(datetime.now().isoformat())
+            timestamp = str(datetime.now().astimezone().isoformat())
             if 'logs' not in envelope or envelope['logs'] is None:
                 envelope['logs'] = []
             envelope['logs'].append( { "code": 'ValidatorFailed', "level": "ERROR", "message": "TRAPI validator crashed with error: " + str(error),
@@ -216,7 +264,7 @@ def finish_url_response(response_id, url, status_code, content, debug=True):
         else:
             envelope['validation_result'] = { 'status': 'PASS', 'version': schema_version, 'message': 'Validation disabled. too many dependency failures', 'validation_messages': { "errors": [], "warnings": [], "information": [ 'Validation has been temporarily disabled due to problems with dependencies. Will return again soon.' ] } }
     except Exception as error:
-        timestamp = str(datetime.now().isoformat())
+        timestamp = str(datetime.now().astimezone().isoformat())
         if 'logs' not in envelope or envelope['logs'] is None:
             envelope['logs'] = []
         envelope['logs'].append( { "code": 'ValidatorFailed', "level": "ERROR", "message": "TRAPI validator crashed with error: " + str(error),
@@ -358,7 +406,7 @@ def finish_ars_child_response(response_id, original_response_id, attribute_cachi
             envelope['validation_result'] = { 'status': 'DISABLED', 'version': schema_version, 'message': 'Validation disabled.', 'validation_messages': { "critical": {}, "error": {}, "warning": {}, "info": { "message": 'Validation has been temporarily disabled due to various problems running it. It may return if the problems can be resolved.' } } }
 
     except Exception as error:
-        timestamp = str(datetime.now().isoformat())
+        timestamp = str(datetime.now().astimezone().isoformat())
         if 'logs' not in envelope or envelope['logs'] is None:
             envelope['logs'] = []
         envelope['logs'].append( { "code": 'ValidatorFailed', "level": "ERROR", "message": "TRAPI validator crashed with error: " + str(error),
@@ -407,7 +455,7 @@ def finish_ars_child_response(response_id, original_response_id, attribute_cachi
             for node_key, node in envelope['message']['knowledge_graph']['nodes'].items():
                 component_uuid = 'Z' + str(uuid.uuid4())
                 component_cache_put(component_uuid, node)
-                node['attributes'] = None
+                node.pop('attributes', None)  # upstream: set to None (TRAPI 2.0 has no nulls)
                 node['detail_lookup'] = component_uuid
         eprint(f"attribute_caching={attribute_caching}")
         if attribute_caching is True and 'edges' in envelope['message']['knowledge_graph'] and envelope['message']['knowledge_graph']['edges'] is not None:
@@ -419,8 +467,8 @@ def finish_ars_child_response(response_id, original_response_id, attribute_cachi
                 component_uuid = 'Z' + str(uuid.uuid4())
                 component_cache_put(component_uuid, edge)
                 edge['detail_lookup'] = component_uuid
-                edge['attributes'] = None
-                edge['sources'] = None
+                edge.pop('attributes', None)  # upstream: set to None (TRAPI 2.0 has no nulls)
+                edge.pop('sources', None)
 
         content_size = len(json.dumps(envelope,indent=2))
         envelope['validation_result']['size'] = _size_string(content_size)
@@ -431,11 +479,14 @@ def finish_ars_child_response(response_id, original_response_id, attribute_cachi
 
 ##################################################################################################
 #### Fetch a stored response (upstream's get_response control flow)
-async def get_response(response_id, *, fetch_url, fetch_ars, ars_host, run):
+async def get_response(response_id, *, fetch_url, fetch_ars, ars_host, run, load_local=None):
     """
     fetch_url(url) -> (status_code, content bytes); raises on a connection error
     fetch_ars(pk, trace) -> (status_code, content bytes) from Shepherd's ARS
     run(fn, *args) -> awaitable running a sync step off the event loop
+    load_local(response_id) -> awaitable returning a Shepherd response, finished
+        (validated and summarized, as load_and_finish_local_response does), or an
+        error tuple; by default run(load_and_finish_local_response, response_id)
     """
 
     if response_id is None:
@@ -540,6 +591,8 @@ async def get_response(response_id, *, fetch_url, fetch_ars, ars_host, run):
     #### the UI's X on one of them (DEC-19)
     if response_id.startswith('X'):
         response_id = response_id[1:]
+    if load_local is not None:
+        return await load_local(response_id)
     return await run(load_and_finish_local_response, response_id)
 
 

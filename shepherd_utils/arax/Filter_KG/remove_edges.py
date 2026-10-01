@@ -1,6 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Filter_KG/remove_edges.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - TRAPI 2.0: remove_edges_by_property matches biolink:knowledge_level / biolink:agent_type (1.x attributes) against the top-level Edge properties
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This class will overlay the normalized google distance on a message (all edges)
 #!/bin/env python3
@@ -177,6 +178,10 @@ class RemoveEdges:
                                 # FW: Hack to allow all provided by synonyms
                                 if provided_by_flag and attribute.attribute_type_id in provided_by_attributes:
                                     edge_dict[edge_params['edge_attribute']] = edge_params['value']
+                # TRAPI 2.0: knowledge_level / agent_type are top-level Edge properties, no longer biolink: attributes
+                for property_name in ('knowledge_level', 'agent_type'):
+                    if getattr(edge, property_name, None) == edge_params['value']:
+                        edge_dict[f"biolink:{property_name}"] = edge_params['value']
                 if provided_by_flag and hasattr(edge, 'sources'):
                     for source in edge.sources:
                         if source.resource_id == edge_params['value']:

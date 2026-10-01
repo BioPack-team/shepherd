@@ -46,7 +46,7 @@ Revision history:
 | R2 | Key = hash of the query graph, agnostic to key order, null / missing / empty fields, **and to node/edge/path id names** | Structural canonicalization + SHA-256 (§3) |
 | R3 | **No TTL** on cache entries | Postgres; cache-source trees are exempt from the retention purge while their generation is live (§7) |
 | R4 | Invalidate the **whole cache** on demand | Generation counter; bump = invalidate all; superseded sources age out under normal retention (§7) |
-| R5 | TRAPI `bypass_cache` skips the cache | No read, no write (§5) |
+| R5 | TRAPI `bypass_cache` skips the cache | No read, no write (§5). TRAPI 2.0: `parameters.bypass_cache` |
 | R6 | `parameters.overwrite_cache` overwrites that one entry | No read, forced write (§5) |
 | R7 | Two identical in-flight misses → run once, answer both | The second submit is handed the leader's pk while it is still Running (§6) |
 | R8 | Full-fidelity per-ARA children on a hit | The shared pk *is* the original tree, children included (§6) |
@@ -87,12 +87,24 @@ passed. Hits cost one counter increment.
 
 ```
 { "query_graph": <canonical structural form of body.message.query_graph>,
-  "workflow":    <canonical body.workflow, only when a non-empty list> }
+  "workflow":    <canonical body.workflow, only when a non-empty list>,
+  "parameters":  <canonical body.parameters minus the run-control members,
+                  only when non-empty> }
 ```
 
 Everything else on the submit body is excluded: `submitter`, `callback`,
-`log_level`, `name`, `bypass_cache`, `parameters`, `validate`, any
-pre-populated `knowledge_graph` / `results`.
+`name`, `validate`, any pre-populated `knowledge_graph` / `results`.
+
+History: key version `1` hashed only the query graph and `workflow`.
+Version `2` added `parameters` (the fan-out forwards it verbatim to every
+ARA, so two submits differing there are different queries) minus
+`overwrite_cache`. Version `3` is TRAPI 2.0, which moved `log_level` and
+`bypass_cache` from the top of the query into `parameters` beside the new
+`timeout`: those three steer how a run is logged, cached and budgeted (a
+`timeout` can only lengthen the fleet-wide budget), not what it answers, so
+together with `overwrite_cache` they are excluded from the `parameters`
+material (`cache._NON_KEY_PARAMETERS`). The 1.x top-level spellings never
+reach the cache: submit rejects them with a 400.
 
 ### 3.1 Value canonicalization (`cache.canonicalize`)
 
@@ -193,9 +205,12 @@ Sizing: the index rows are bytes; the storage that grows is
 
 ```
 mode = "normal"
-if body.bypass_cache is true:                 mode = "bypass"     # no read, no write
+if body.parameters.bypass_cache is true:      mode = "bypass"     # no read, no write
 elif body.parameters.overwrite_cache is true: mode = "overwrite"  # no read, forced write
 ```
+
+(TRAPI 2.0 carries `bypass_cache` in `parameters`; before the move it was
+the top-level `body.bypass_cache`, which submit now rejects.)
 
 | mode | lookup | `ready` hit | `pending` hit | miss | at completion |
 |---|---|---|---|---|---|

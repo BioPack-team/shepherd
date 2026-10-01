@@ -4,6 +4,11 @@ They cover the dispatch paths (QG interpreter templates, ARAXi operations, TRAPI
 workflows), the actions each path runs (expand, overlays, filter_kg,
 resultify + automatic ranking, filter_results, infer, the ResultTransformer)
 and ARAX's input validation and error handling.
+
+The TRAPI queries are TRAPI 2.0: the translation (trapi2_goldens.query_case)
+of the TRAPI 1.6 ones upstream's goldens were recorded with
+(inputs_trapi16.json.gz); test_trapi2_goldens.py checks they stay so. ARAXi
+text is not TRAPI and is as recorded.
 """
 
 C = "biolink:ChemicalEntity"
@@ -126,7 +131,7 @@ CASES = [
     ),
     (
         "tpl_one_node",
-        trapi(qg({"n0": {"ids": ["CHEBI:2", "CHEBI:9"]}}, {})),
+        trapi(qg({"n0": {"ids": ["CHEBI:2", "CHEBI:9"]}})),
     ),
     (
         "tpl_no_match_three_pinned",

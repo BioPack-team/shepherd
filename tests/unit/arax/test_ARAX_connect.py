@@ -9,14 +9,14 @@ envelope.
 import json
 
 import pytest
+import translator_tom
+from translator_tom.validation import semantic_validate
 
 import shepherd_utils.arax.ARAX_connect as connect_module
 from shepherd_utils.arax.ARAX_connect import ARAXConnect
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 from shepherd_utils.arax.ARAX_response import ARAXResponse
-from shepherd_utils.arax.openapi_server.models.pathfinder_analysis import (
-    PathfinderAnalysis,
-)
+from shepherd_utils.arax.openapi_server.models.analysis import Analysis
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from shepherd_utils.config import settings
 
@@ -59,19 +59,26 @@ class FakePathfinder:
         FakePathfinder.instances.append(self)
 
     def get_paths(self, **kwargs):
+        # the shapes catrax-pathfinder 2.5.0 returns (ResultPerPathConverter /
+        # PathConverter): TRAPI 1.x-style binding lists and aux graphs
         self.calls.append(kwargs)
         result = {
             "id": "result",
-            "node_bindings": {"n0": [{"id": "CHEBI:1"}], "n1": [{"id": "MONDO:1"}]},
             "analyses": [
                 {
                     "resource_id": "infores:arax",
-                    "path_bindings": {"p0": [{"id": "path_1"}]},
+                    "path_bindings": {"p0": [{"id": "aux_1"}]},
                     "score": 0.7,
                 }
             ],
+            "node_bindings": {
+                "n0": [{"id": "CHEBI:1", "attributes": []}],
+                "n1": [{"id": "MONDO:1", "attributes": []}],
+            },
+            "essence": "result",
+            "resource_id": "infores:arax",
         }
-        aux_graphs = {"path_1": {"edges": ["e1"]}}
+        aux_graphs = {"aux_1": {"edges": ["e1"], "attributes": []}}
         kg = {"nodes": {}, "edges": {"e1": {"subject": "CHEBI:1", "object": "MONDO:1"}}}
         return result, aux_graphs, kg
 
@@ -101,6 +108,8 @@ class FakeHTTPResponse:
                                     "resource_role": "primary_knowledge_source",
                                 }
                             ],
+                            "knowledge_level": "knowledge_assertion",
+                            "agent_type": "manual_agent",
                         }
                     },
                 }
@@ -155,11 +164,92 @@ def test_connect_nodes_uses_shepherds_pathfinder_setup(pathfinder):
     message = response.envelope.message
     (result,) = message.results
     assert result.essence == "result"
-    assert isinstance(result.analyses[0], PathfinderAnalysis)
-    assert result.analyses[0].path_bindings["p0"][0].id == "path_1"
-    assert message.auxiliary_graphs["path_1"].edges == ["e1"]
+    # TRAPI 2.0: one binding per qnode / path, a plain Analysis, aux graph edges only
+    assert {k: b.ids for k, b in result.node_bindings.items()} == {
+        "n0": ["CHEBI:1"],
+        "n1": ["MONDO:1"],
+    }
+    (analysis,) = result.analyses
+    assert type(analysis) is Analysis
+    assert analysis.path_bindings["p0"].ids == ["aux_1"]
+    assert analysis.edge_bindings is None
+    assert analysis.score == 0.7
+    assert message.auxiliary_graphs["aux_1"].to_dict() == {"edges": ["e1"]}
     assert set(message.knowledge_graph.edges) == {"e1"}
     assert hasattr(response, "original_query_graph")
+    _assert_valid_trapi_2_0(message)
+
+
+def _assert_valid_trapi_2_0(message):
+    """What Connect adds (KG, results, aux graphs) is valid TRAPI 2.0. The
+    query graph is the messenger's, not Connect's, so it is not checked here."""
+    as_dict = message.to_dict()
+    kg = translator_tom.KnowledgeGraph.from_dict(as_dict["knowledge_graph"])
+    _, errors = semantic_validate(kg)
+    assert [e.message for e in errors] == []
+    for result in as_dict["results"]:
+        translator_tom.Result.from_dict(result)
+    for aux_graph in (as_dict.get("auxiliary_graphs") or {}).values():
+        translator_tom.AuxiliaryGraph.from_dict(aux_graph)
+    for edge in as_dict["knowledge_graph"]["edges"].values():
+        assert edge["knowledge_level"] and edge["agent_type"]
+        assert not {a["attribute_type_id"] for a in edge.get("attributes") or []} & {
+            "biolink:knowledge_level",
+            "biolink:agent_type",
+        }
+
+
+def test_connect_nodes_reads_required_intermediate_categories(pathfinder):
+    qg = json.loads(json.dumps(PATHFINDER_QG))
+    qg["paths"]["p0"]["constraints"] = [
+        {"required_intermediate_categories": ["biolink:Gene"]}
+    ]
+    response = _response(qg)
+    ARAXConnect().apply(response, {"action": "connect_nodes"})
+    assert response.status == "OK", response.show()
+    (call,) = FakePathfinder.instances[0].calls
+    assert "biolink:Gene" in call["category_constraints"]
+
+
+def test_connect_nodes_leaves_out_aux_graphs_without_edges(pathfinder, monkeypatch):
+    """TRAPI 2.0 forbids an aux graph without edges and a binding without ids:
+    a path whose edges PathFinder could not extract is dropped with its
+    binding, and so is an analysis (and the result) left without any."""
+    fake_get_paths = FakePathfinder.get_paths
+
+    def with_empty_paths(self, **kwargs):
+        result, aux_graphs, kg = fake_get_paths(self, **kwargs)
+        result["analyses"].append(
+            {
+                "resource_id": "infores:arax",
+                "path_bindings": {"p0": [{"id": "aux_2"}]},
+                "score": 0.5,
+            }
+        )
+        aux_graphs["aux_2"] = {"edges": [], "attributes": []}
+        return result, aux_graphs, kg
+
+    monkeypatch.setattr(FakePathfinder, "get_paths", with_empty_paths)
+    response = _response(PATHFINDER_QG)
+    ARAXConnect().apply(response, {"action": "connect_nodes"})
+    assert response.status == "OK", response.show()
+    message = response.envelope.message
+    (result,) = message.results
+    assert [a.path_bindings["p0"].ids for a in result.analyses] == [["aux_1"]]
+    assert set(message.auxiliary_graphs) == {"aux_1"}
+    _assert_valid_trapi_2_0(message)
+
+    def only_empty_paths(self, **kwargs):
+        result, aux_graphs, kg = fake_get_paths(self, **kwargs)
+        aux_graphs["aux_1"]["edges"] = []
+        return result, aux_graphs, kg
+
+    monkeypatch.setattr(FakePathfinder, "get_paths", only_empty_paths)
+    response = _response(PATHFINDER_QG)
+    ARAXConnect().apply(response, {"action": "connect_nodes"})
+    assert response.status == "OK", response.show()
+    assert response.envelope.message.results == []
+    assert not response.envelope.message.auxiliary_graphs
 
 
 def test_connect_nodes_still_validates_max_path_length(pathfinder):
@@ -230,17 +320,19 @@ def xcrg(monkeypatch):
     calls = []
 
     def fake_run_xcrg(query, config, logger):
+        # A TRAPI 2.0 answer, as a 2.0 catrax-xcrg would give (0.1.0 is 1.x
+        # throughout: it reads qualifier_constraints and emits binding lists)
         calls.append((query, config))
         logger.info("xcrg ran with %s TFs", 3)
         return {
-            "schema_version": "1.6.0",
+            "schema_version": "2.0.0",
             "biolink_version": "4.2.5",
             "message": {
                 "query_graph": query["message"]["query_graph"],
                 "knowledge_graph": {"nodes": {}, "edges": {}},
                 "results": [
-                    {"node_bindings": {"gene": [{"id": "NCBIGene:1"}]}, "analyses": []},
-                    {"node_bindings": {"gene": [{"id": "NCBIGene:1"}]}, "analyses": []},
+                    {"node_bindings": {"gene": {"ids": ["NCBIGene:1"]}}},
+                    {"node_bindings": {"gene": {"ids": ["NCBIGene:1"]}}},
                 ],
             },
         }
@@ -263,7 +355,7 @@ def test_xcrg_uses_shepherds_retriever_and_data(xcrg):
     assert config.tf_batch_size == 200
     assert list(config.tiers) == [0]
     assert config.resource_id == "infores:arax"
-    assert config.trapi_schema_version == "1.6.0"
+    assert config.trapi_schema_version == rtx.trapi_version
     assert config.biolink_version == "4.2.5"
 
     assert response.total_results_count == 2

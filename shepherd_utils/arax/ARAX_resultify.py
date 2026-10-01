@@ -1,5 +1,11 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_resultify.py.
-# Changes from upstream: import paths only.
+# Changes from upstream:
+#   - import paths
+#   - TRAPI 2.0 bindings: results carry one NodeBinding per qnode and one EdgeBinding per
+#     qedge ({"ids": [...]}); no empty bindings; no NodeBinding.query_id (so _get_query_id
+#     is gone) and no binding attributes. Readers of bindings (the reference closure,
+#     recompute_qg_keys) read `ids`; a result without `analyses` is valid in 2.0.
+#   - one QueryGraph class: a pathfinder QG is detected by paths-without-edges
 # See docs/ARAX_PORT_BASELINE.md (DEC-1, DEC-14) and shepherd_utils/arax/README.md.
 '''This module defines the `ARAXResultify` class whose `_resultify` method
 enumerates subgraphs of a kowledge graph (KG) that match a pattern set by a
@@ -235,24 +241,23 @@ def analyze_message_get_referenced_IDs(
         if not isinstance(result_node_bindings, dict):
             log.warning(f"Result {result_index} node bindings is not a dictionary; skipping")
             continue
-        for qnode_id, node_binding_list in result.node_bindings.items():
+        # TRAPI 2.0: one NodeBinding per qnode, listing its node ids
+        for qnode_id, node_binding in result.node_bindings.items():
             if skip_result:
                 break
-            for node_binding_index, node_binding in enumerate(node_binding_list):
-                if not isinstance(node_binding, NodeBinding):
-                    log.warning(f"Result {result_index} "
-                                f"qnode {qnode_id} "
-                                f"node binding index {node_binding_index} "
-                                "object is not a NodeBinding object; skipping")
-                    skip_result = True
-                    break
-                if not hasattr(node_binding, 'id') or node_binding.id is None:
-                    log.warning(f"Result {result_index} "
-                                f"qnode {qnode_id} "
-                                "node object has no id attribute; skipping")
-                    skip_result = True
-                    break
-                node_id = node_binding.id
+            if not isinstance(node_binding, NodeBinding):
+                log.warning(f"Result {result_index} "
+                            f"qnode {qnode_id} "
+                            "node binding object is not a NodeBinding object; skipping")
+                skip_result = True
+                break
+            if not hasattr(node_binding, 'ids') or node_binding.ids is None:
+                log.warning(f"Result {result_index} "
+                            f"qnode {qnode_id} "
+                            "node binding has no ids attribute; skipping")
+                skip_result = True
+                break
+            for node_id in node_binding.ids:
                 if node_id not in kg.nodes:
                     log.warning(f"Result {result_index} "
                                 f"qnode {qnode_id} "
@@ -260,13 +265,12 @@ def analyze_message_get_referenced_IDs(
                                 "is not in the KG; skipping")
                     skip_result = True
                     break
-                result_nodes.add(node_binding.id)
+                result_nodes.add(node_id)
         if skip_result:
             continue
-        if not hasattr(result, 'analyses') or result.analyses is None:
-            log.warning(f"Result {result_index} has no analyses attribute; skipping")
-            continue
-        for analysis_index, analysis in enumerate(result.analyses):
+        # TRAPI 2.0: `analyses` is optional (absent when there is nothing to bind,
+        # e.g. an edgeless query graph), so a result without it still stands
+        for analysis_index, analysis in enumerate(result.analyses or []):
             if skip_result:
                 break
             if not hasattr(analysis, 'resource_id') or analysis.resource_id is None:
@@ -317,38 +321,27 @@ def analyze_message_get_referenced_IDs(
                             "edge bindings is not a dictionary, skipping")
                 skip_result = True
                 break
-            for qedge_id, qedge_bindings in edge_bindings.items():
+            # TRAPI 2.0: one EdgeBinding per qedge, listing its edge ids
+            for qedge_id, edge_binding_obj in edge_bindings.items():
                 if skip_result:
                     break
-                if not isinstance(qedge_bindings,
-                                  list):
+                if not isinstance(edge_binding_obj, EdgeBinding):
                     log.warning(f"Result {result_index} "
                                 f"analysis {analysis_index} "
                                 f"(from {resource_id}) "
                                 f"qedge {qedge_id} "
-                                "edge_binding value is not a list, skipping")
+                                "edge binding is not an EdgeBinding object, skipping")
                     skip_result = True
                     break
-                for edge_binding_index, edge_binding_obj in enumerate(qedge_bindings):
-                    if not isinstance(edge_binding_obj, EdgeBinding):
-                        log.warning(f"Result {result_index} "
-                                    f"analysis {analysis_index} "
-                                    f"(from {resource_id}) "
-                                    f"qedge {qedge_id} "
-                                    f"edge_binding_index {edge_binding_index} "
-                                    "is not an EdgeBinding object, skipping")
-                        skip_result = True
-                        break
-                    if not hasattr(edge_binding_obj, 'id') or edge_binding_obj.id is None:
-                        log.warning(f"Result {result_index} "
-                                    f"analysis {analysis_index} "
-                                    f"(from {resource_id}) "
-                                    f"qedge {qedge_id} "
-                                    f"edge_binding_index {edge_binding_index} "
-                                    "does not have an id attribute, skipping")
-                        skip_result = True
-                        break
-                    edge_id = edge_binding_obj.id
+                if not hasattr(edge_binding_obj, 'ids') or edge_binding_obj.ids is None:
+                    log.warning(f"Result {result_index} "
+                                f"analysis {analysis_index} "
+                                f"(from {resource_id}) "
+                                f"qedge {qedge_id} "
+                                "edge binding does not have an ids attribute, skipping")
+                    skip_result = True
+                    break
+                for edge_binding_index, edge_id in enumerate(edge_binding_obj.ids):
                     if edge_id not in kg.edges:
                         log.warning(f"Result {result_index} "
                                     f"analysis {analysis_index} "
@@ -561,7 +554,8 @@ automated reasoning system, not just ones generated by Team ARA Expander."""
         # inspect the message.query_graph to see if there are edges; if there are no edges,
         # this is probably a pathfinder result accidentally passed to ARAX-resultify; give
         # a helpful error message in that case
-        if not hasattr(message.query_graph, 'edges'):
+        # (TRAPI 2.0 has one QueryGraph class; a pathfinder QG is one with paths and no edges)
+        if not message.query_graph.edges and message.query_graph.paths:
             response.warning("In ARAX-resultify, the query graph has no edges attribute; "
                              "most likely this is because a Pathfinder (or ARAX-connect) "
                              "analysis message was passed to ARAX-resultify using the "
@@ -627,29 +621,29 @@ automated reasoning system, not just ones generated by Team ARA Expander."""
         kg_node_keys_to_qnode_keys: dict[str, set[str]] = dict()
         kg_edge_keys_to_qedge_keys: dict[str, set[str]] = dict()
         for result in results:
-            for qnode_key, node_bindings in result.node_bindings.items():
+            for qnode_key, node_binding in result.node_bindings.items():
                 # FW: This is a hack to get reranking to work. might need to fix later
                 if qnode_key not in qg.nodes:
-                    for node_binding in node_bindings:
-                        if node_binding.id in kg.nodes:
-                            del kg.nodes[node_binding.id]
+                    for node_id in node_binding.ids:
+                        if node_id in kg.nodes:
+                            del kg.nodes[node_id]
                     response.warning("While recomputing qnode keys found a node binding in the results without a corresponding query node. Removing the edge from the KG...")
                     continue
-                for node_binding in node_bindings:
-                    node_key = node_binding.id
+                for node_key in node_binding.ids:
                     if node_key not in kg_node_keys_to_qnode_keys:
                         kg_node_keys_to_qnode_keys[node_key] = set()
                     kg_node_keys_to_qnode_keys[node_key].add(qnode_key)
-            for qedge_key, edge_bindings in result.analyses[0].edge_bindings.items():
+            # TRAPI 2.0: a result may have no analyses, and an analysis no edge_bindings
+            first_analysis_edge_bindings = (result.analyses[0].edge_bindings or {}) if result.analyses else {}
+            for qedge_key, edge_binding in first_analysis_edge_bindings.items():
                 # FW: This is a hack to get reranking to work. might need to fix later
                 if qedge_key not in qg.edges:
-                    for edge_binding in edge_bindings:
-                        if edge_binding.id in kg.edges:
-                            del kg.edges[edge_binding.id]
+                    for edge_id in edge_binding.ids:
+                        if edge_id in kg.edges:
+                            del kg.edges[edge_id]
                     response.warning("While recomputing qedge keys found a edge binding in the results without a corresponding query edge. Removing the edge from the KG...")
                     continue
-                for edge_binding in edge_bindings:
-                    edge_key = edge_binding.id
+                for edge_key in edge_binding.ids:
                     if edge_key not in kg_edge_keys_to_qedge_keys:
                         kg_edge_keys_to_qedge_keys[edge_key] = set()
                     kg_edge_keys_to_qedge_keys[edge_key].add(qedge_key)
@@ -1213,21 +1207,24 @@ def _get_results_for_kg_by_qg(kg: KnowledgeGraph,              # all nodes *must
 
     # ------------------ Convert the final result graphs into actual Swagger object model results ----------- #
     log.debug("Loading final result graphs into TRAPI object model")
-    qnodes_with_ids = {qnode_key for qnode_key, qnode in qg.nodes.items() if qnode.ids}
 
     resource_id = "infores:rtx-kg2" if mode == "RTXKG2" else "infores:arax"
     results = []
     for result_graph in final_result_graphs:
+        # TRAPI 2.0: one NodeBinding per qnode and one EdgeBinding per qedge, each listing all
+        # of its bound ids (1.x: a list of single-id bindings, with query_id / attributes, which
+        # 2.0 no longer has). A binding cannot be empty, so a qnode/qedge with nothing bound
+        # (1.x: an empty list) gets no binding.
         node_bindings = dict()
         for qnode_key, node_keys in result_graph['nodes'].items():
-            node_bindings[qnode_key] = [NodeBinding(id=node_key,
-                                                    query_id=_get_query_id(node_key, kg.nodes[node_key], qnode_key,
-                                                                           qnodes_with_ids),
-                                                    attributes=[])
-                                        for node_key in node_keys]
+            if node_keys:
+                node_bindings[qnode_key] = NodeBinding(ids=list(node_keys))
         edge_bindings = dict()
         for qedge_key, edge_keys in result_graph['edges'].items():
-            edge_bindings[qedge_key] = [EdgeBinding(id=edge_key,attributes=[]) for edge_key in edge_keys]
+            if edge_keys:
+                edge_bindings[qedge_key] = EdgeBinding(ids=list(edge_keys))
+        # Note: for an edgeless QG the analysis has no edge bindings; it is kept in memory (the
+        # ranker scores it, as upstream) and dropped when the Response is finalized (ARAX_query)
         result = Result(node_bindings=node_bindings, analyses=[Analysis(resource_id=resource_id,
                                                                         edge_bindings=edge_bindings)])
 
@@ -1406,18 +1403,6 @@ def _get_parallel_qedge_keys(input_qedge: QEdge, query_graph: QueryGraph) -> set
     input_qedge_node_keys = {input_qedge.subject, input_qedge.object}
     parallel_qedge_keys = {qedge_key for qedge_key, qedge in query_graph.edges.items() if {qedge.subject, qedge.object} == input_qedge_node_keys}
     return parallel_qedge_keys
-
-
-def _get_query_id(node_key: str, node: Node, qnode_key: str, qnode_keys_with_ids: set[str]) -> Optional[str]:
-    # TODO: Should this really be looking at child to parent map, instead of node's query_ids?
-    if qnode_key in qnode_keys_with_ids:
-        if hasattr(node, "query_ids") and node.query_ids:
-            query_id = _get_best_parent_id(node.query_ids)  # TODO: How should multiple query_ids be handled?? Separate results? Brought up in #1871
-            return query_id if query_id != node_key else None
-        else:
-            return None
-    else:
-        return None
 
 
 def _get_kg_node_adj_map_by_qg_key(kg_node_keys_by_qg_key: dict[str, set[str]],

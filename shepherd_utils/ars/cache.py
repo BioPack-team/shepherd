@@ -14,8 +14,8 @@ to the source parent's pk; the payloads are the ones already kept in
 ``ars_message.data``. Source trees backing a live generation are exempt
 from the payload retention purge.
 
-Two request-side knobs: TRAPI ``bypass_cache`` (no read, no write) and
-``parameters.overwrite_cache`` (no read, forced write). Whole-cache
+Two request-side knobs: TRAPI 2.0 ``parameters.bypass_cache`` (no read, no
+write) and ``parameters.overwrite_cache`` (no read, forced write). Whole-cache
 invalidation bumps a generation counter; old pks keep working.
 
 Canonicalization is renaming-invariant: node / edge / path ids are labels.
@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import orjson
 
 from shepherd_utils.config import settings
+from shepherd_utils.trapi import query_bypass_cache, query_parameters
 
 import shepherd_utils.db as shepherd_db
 
@@ -41,7 +42,10 @@ from .completion import MERGE_AGENT_NAME
 # Baked into every key: bump when any canonicalization rule changes, which
 # orphans (and lazily purges) every existing entry without an explicit
 # invalidation.
-CACHE_KEY_VERSION = "2"
+#   "3": TRAPI 2.0 -- ``parameters.bypass_cache`` / ``log_level`` / ``timeout``
+#        (1.x kept the first two at the top level, outside the key) are
+#        excluded from the key material.
+CACHE_KEY_VERSION = "3"
 
 MODE_NORMAL = "normal"
 MODE_BYPASS = "bypass"
@@ -245,10 +249,18 @@ def canonical_graph(query_graph: Any) -> Tuple[Any, Dict[str, Dict[str, str]]]:
     return best[1], best[2]
 
 
-# Members of ``parameters`` that steer the cache itself rather than the
-# query. They are handled by ``resolve_mode`` and must not change the key,
-# or an overwrite run would write to a different entry than it read.
-_CACHE_CONTROL_PARAMETERS = ("overwrite_cache",)
+# Members of ``parameters`` that do not change what the query asks:
+#   - ``overwrite_cache`` / ``bypass_cache`` steer the cache itself (see
+#     ``resolve_mode``) and must not change the key, or an overwrite run
+#     would write to a different entry than it read;
+#   - ``log_level`` and ``timeout`` (TRAPI 2.0 moved ``log_level`` here from
+#     the top level) govern how the run is logged and how long it may take,
+#     not its answer, so they must not fragment the cache. (``timeout`` can
+#     only lengthen the fleet-wide budget -- task_deadline.query_budget --
+#     so a run under a key never had less time than the default.)
+_NON_KEY_PARAMETERS = frozenset(
+    {"overwrite_cache", "bypass_cache", "log_level", "timeout"}
+)
 
 
 def key_material(body: Dict[str, Any]) -> Tuple[Any, Dict[str, Dict[str, str]]]:
@@ -256,10 +268,12 @@ def key_material(body: Dict[str, Any]) -> Tuple[Any, Dict[str, Dict[str, str]]]:
     and any non-empty ``parameters``. Returns it with the caller's label map.
 
     ``parameters`` is forwarded verbatim to every ARA by the fanout, so two
-    submits that differ only there are different queries and must not share
-    an entry -- everything else in the body (``submitter``, ``log_level``,
-    ``name``, ``bypass_cache``) does not reach the ARAs as query input and is
-    deliberately excluded so it cannot fragment the cache.
+    submits that differ there are different queries and must not share an
+    entry -- except for the members in ``_NON_KEY_PARAMETERS`` (cache
+    control, ``log_level``, ``timeout``), which do not change the answer.
+    Everything else in the body (``submitter``, ``name``, ``validate``) does
+    not reach the ARAs as query input and is deliberately excluded so it
+    cannot fragment the cache.
     """
     message = body.get("message") if isinstance(body, dict) else None
     query_graph = message.get("query_graph") if isinstance(message, dict) else None
@@ -272,7 +286,7 @@ def key_material(body: Dict[str, Any]) -> Tuple[Any, Dict[str, Dict[str, str]]]:
     parameters = body.get("parameters") if isinstance(body, dict) else None
     if isinstance(parameters, dict):
         parameters = {
-            k: v for k, v in parameters.items() if k not in _CACHE_CONTROL_PARAMETERS
+            k: v for k, v in parameters.items() if k not in _NON_KEY_PARAMETERS
         }
         canonical_parameters = canonicalize(parameters)
         if not _is_empty(canonical_parameters):
@@ -292,12 +306,18 @@ def cache_key(body: Dict[str, Any]) -> Tuple[str, Dict[str, Dict[str, str]]]:
 
 
 def resolve_mode(body: Any) -> str:
+    """The cache mode a submit asks for.
+
+    TRAPI 2.0 carries ``bypass_cache`` in ``parameters``. There is no
+    fallback to the 1.x top-level spelling: /ars/api/submit validates the
+    body as a 2.0 query first and rejects a top-level ``bypass_cache`` with
+    a 400, so it cannot reach here.
+    """
     if not isinstance(body, dict):
         return MODE_NORMAL
-    if body.get("bypass_cache") is True:
+    if query_bypass_cache(body):
         return MODE_BYPASS
-    parameters = body.get("parameters")
-    if isinstance(parameters, dict) and parameters.get("overwrite_cache") is True:
+    if query_parameters(body).get("overwrite_cache") is True:
         return MODE_OVERWRITE
     return MODE_NORMAL
 
@@ -314,7 +334,6 @@ def append_log(payload: Any, message: str) -> Any:
         {
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "level": "INFO",
-            "code": None,
             "message": message,
         }
     )

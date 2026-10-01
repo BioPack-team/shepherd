@@ -7,7 +7,7 @@
       },
       "nA": {
         "categories": ["biolink:Gene", "biolink:Protein"],
-        "is_set": true
+        "set_interpretation": "COLLATE"
       },
       "$target": {
         "ids": ["$target_id"],
@@ -24,16 +24,13 @@
         "subject": "nA",
         "object": "$target",
         "predicates": ["biolink:regulates"],
-        "qualifier_constraints": [
-          {
-            "qualifier_set": [
-              {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "downregulated"
-              }
-            ]
-          }
-        ]
+        "constraints": {
+          "qualifiers": [
+            {
+              "biolink:object_direction_qualifier": "downregulated"
+            }
+          ]
+        }
       }
     }
   }

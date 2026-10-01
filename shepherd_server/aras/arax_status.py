@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
+import shepherd_utils.db as db
 from shepherd_utils.config import settings
 from shepherd_utils.db import data_db_client, get_message, get_recent_queries
 
@@ -142,6 +143,12 @@ async def recent_queries(last_n_hours=None, mode=None) -> dict:
 async def query_by_id(id_):
     """ARAXQueryTracker.get_query_by_id: the stored input query, or None."""
     return await get_message(str(id_), LOGGER)
+
+
+async def query_parameters_for_response(response_id: str) -> dict:
+    """The ``parameters`` of the query whose response is ``response_id``
+    (``shepherd_utils.db.get_response_query_parameters``)."""
+    return await db.get_response_query_parameters(response_id, LOGGER)
 
 
 def kp_cache_listing() -> dict:

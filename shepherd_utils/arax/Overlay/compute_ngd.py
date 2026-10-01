@@ -2,6 +2,7 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - the curie_to_pmids database is RTXConfiguration.curie_to_pmids_path (DEC-6 download) instead of RTX/code/ARAX/KnowledgeSources/NormalizedGoogleDistance/
+#   - TRAPI 2.0: the virtual edges' biolink:knowledge_level / biolink:agent_type attributes (statistical_association / automated_agent) are the Edge's top-level knowledge_level / agent_type
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This class will overlay the normalized google distance on a message (all edges)
 #!/bin/env python3
@@ -169,19 +170,7 @@ class ComputeNGD:
                                               attribute_source=attribute_source,
                                               value_type_id="metatype:Boolean",
                                               value_url=None,
-                                              description="This edge is a container for a computed value between two nodes that is not directly attachable to other edges."),
-                                EdgeAttribute(original_attribute_name=None,
-                                              value="statistical_association",
-                                              attribute_type_id="biolink:knowledge_level",
-                                              value_url=None,
-                                              description=None,
-                                              attribute_source=attribute_source),
-                                EdgeAttribute(original_attribute_name=None,
-                                              value="automated_agent",
-                                              attribute_type_id="biolink:agent_type",
-                                              value_url=None,
-                                              description=None,
-                                              attribute_source=attribute_source)
+                                              description="This edge is a container for a computed value between two nodes that is not directly attachable to other edges.")
                                 #EdgeAttribute(original_attribute_name="confidence", value=confidence, attribute_type_id="biolink:ConfidenceLevel"),
                                 #EdgeAttribute(original_attribute_name="weight", value=weight, attribute_type_id="metatype:Float"),
                                 #EdgeAttribute(original_attribute_name="qedge_keys", value=qedge_keys)
@@ -208,7 +197,8 @@ class ComputeNGD:
                                         RetrievalSource(resource_id="infores:arax", resource_role="primary_knowledge_source")
                             ]
                             edge = Edge(predicate=edge_type, subject=subject_key, object=object_key,
-                                        attributes=edge_attribute_list,sources=retrieval_source)
+                                        attributes=edge_attribute_list,sources=retrieval_source,
+                                        knowledge_level="statistical_association", agent_type="automated_agent")
                             #edge.relation = relation
                             #### /end FIXME
 
@@ -312,19 +302,7 @@ class ComputeNGD:
                                       attribute_source=attribute_source,
                                       value_type_id="metatype:Boolean",
                                       value_url=None,
-                                      description="This edge is a container for a computed value between two nodes that is not directly attachable to other edges."),
-                        EdgeAttribute(original_attribute_name=None,
-                                      value="statistical_association",
-                                      attribute_type_id="biolink:knowledge_level",
-                                      value_url=None,
-                                      description=None,
-                                      attribute_source=attribute_source),
-                        EdgeAttribute(original_attribute_name=None,
-                                      value="automated_agent",
-                                      attribute_type_id="biolink:agent_type",
-                                      value_url=None,
-                                      description=None,
-                                      attribute_source=attribute_source)
+                                      description="This edge is a container for a computed value between two nodes that is not directly attachable to other edges.")
                         #EdgeAttribute(original_attribute_name="confidence", value=confidence, attribute_type_id="biolink:ConfidenceLevel"),
                         #EdgeAttribute(original_attribute_name="weight", value=weight, attribute_type_id="metatype:Float"),
                         #EdgeAttribute(original_attribute_name="qedge_keys", value=qedge_keys)
@@ -351,7 +329,8 @@ class ComputeNGD:
                                         RetrievalSource(resource_id="infores:arax", resource_role="primary_knowledge_source")
                             ]
                     edge = Edge(predicate=edge_type, subject=subject_key, object=object_key,
-                                attributes=edge_attribute_list, sources=retrieval_source)
+                                attributes=edge_attribute_list, sources=retrieval_source,
+                                knowledge_level="statistical_association", agent_type="automated_agent")
                     #edge.relation = relation
                     #### /end FIXME
 

@@ -17,7 +17,7 @@ class QNode(Model):
     Do not edit the class manually.
     """
 
-    def __init__(self, ids=None, categories=None, is_set=False, set_id=None, set_interpretation=None, constraints=[], option_group_id=None):  # noqa: E501
+    def __init__(self, ids=None, categories=None, is_set=False, set_id=None, set_interpretation=None, constraints=[], option_group_id=None, member_ids=None):  # noqa: E501
         """QNode - a model defined in OpenAPI
 
         :param ids: The ids of this QNode.  # noqa: E501
@@ -42,7 +42,8 @@ class QNode(Model):
             'set_id': str,
             'set_interpretation': str,
             'constraints': List[AttributeConstraint],
-            'option_group_id': str
+            'option_group_id': str,
+            'member_ids': List[str]
         }
 
         self.attribute_map = {
@@ -52,7 +53,8 @@ class QNode(Model):
             'set_id': 'set_id',
             'set_interpretation': 'set_interpretation',
             'constraints': 'constraints',
-            'option_group_id': 'option_group_id'
+            'option_group_id': 'option_group_id',
+            'member_ids': 'member_ids'
         }
 
         self._ids = ids
@@ -62,6 +64,7 @@ class QNode(Model):
         self._set_interpretation = set_interpretation
         self._constraints = constraints
         self._option_group_id = option_group_id
+        self._member_ids = member_ids
 
     @classmethod
     def from_dict(cls, dikt) -> 'QNode':
@@ -133,6 +136,11 @@ class QNode(Model):
         :return: The is_set of this QNode.
         :rtype: bool
         """
+        # TRAPI 2.0 (Shepherd change): set_interpretation COLLATE -- collate
+        # the matching nodes of an unpinned QNode into one Result -- is what
+        # ARAX's is_set means, so ARAX's is_set handling honours it.
+        if self._set_interpretation == "COLLATE":
+            return True
         return self._is_set
 
     @is_set.setter
@@ -190,7 +198,7 @@ class QNode(Model):
         :param set_interpretation: The set_interpretation of this QNode.
         :type set_interpretation: str
         """
-        allowed_values = [None,"BATCH", "ALL", "MANY"]  # noqa: E501
+        allowed_values = [None,"BATCH", "ALL", "MANY", "COLLATE"]  # noqa: E501
         if set_interpretation not in allowed_values:
             raise ValueError(
                 "Invalid value for `set_interpretation` ({0}), must be one of {1}"
@@ -244,3 +252,26 @@ class QNode(Model):
         """
 
         self._option_group_id = option_group_id
+
+    @property
+    def member_ids(self):
+        """Gets the member_ids of this QNode.
+
+        TRAPI 2.0 (Shepherd addition; ARAX's generated 1.6 model lacked it):
+        the CURIEs of the members of a queried set, under a
+        set_interpretation of MANY or ALL, when `ids` holds the set's id.  # noqa: E501
+
+        :return: The member_ids of this QNode.
+        :rtype: List[str]
+        """
+        return self._member_ids
+
+    @member_ids.setter
+    def member_ids(self, member_ids):
+        """Sets the member_ids of this QNode.
+
+        :param member_ids: The member_ids of this QNode.
+        :type member_ids: List[str]
+        """
+
+        self._member_ids = member_ids

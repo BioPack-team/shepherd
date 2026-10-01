@@ -2,6 +2,14 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - new forwarded_kps argument: a user-specified kp list is sent to Retriever as parameters.kp, exactly as given (DEC-10)
+#   - TRAPI 2.0: node/edge bindings are one {"ids": [...]} object per qnode/qedge; there is no
+#     NodeBinding.query_id, so the parent query curie of an answer node is the implied one (upstream's
+#     handling of a KP that returns no query_id), or, for a qnode with several ids, the queried curie a
+#     biolink:subclass_of edge in the KP's knowledge graph links it to; ARAX-made edges set knowledge_level /
+#     agent_type as top-level Edge properties (not attributes); AuxiliaryGraph has no attributes; a
+#     TRAPI parameters.bypass_cache=true is forwarded to Retriever in parameters (2.0 requires it);
+#     a KP knowledge graph without edges (optional in 2.0) is an empty one, not a malformed one;
+#     request bodies leave out empty containers (a single-node query graph has no 'edges')
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import copy
 import json
@@ -52,7 +60,7 @@ def _remove_attributes_with_invalid_values(response_json: dict,
                                            list[object]:
     r = response_json
     count_att_dropped = 0
-    for ekey, edge_obj in r['message']['knowledge_graph']['edges'].items():
+    for ekey, edge_obj in r['message']['knowledge_graph'].get('edges', {}).items():  # edges are optional in TRAPI 2.0
         new_attributes = []
         if 'attributes' in edge_obj:
             for attribute_obj in edge_obj['attributes']:
@@ -228,13 +236,8 @@ class TRAPIQuerier:
                     if aux_graph_id not in result_aux_graphs:
                         # => no, we have to make a new aux graph object and store it
 
-                        ## [One has to specify an empty list for attributes in
-                        ## the initializer for AuxiliaryGraph, or one will get a
-                        ## ValueError later when the response gets serialized to
-                        ## JSON; I conjecture this represents a bug in the
-                        ## OpenAPI-generated model class, but anyhow, the
-                        ## workaround is easy here:]
-                        aux_graph = AuxiliaryGraph(edges=[], attributes=[])
+                        ## [TRAPI 2.0: AuxiliaryGraph has no attributes]
+                        aux_graph = AuxiliaryGraph(edges=[])
                         result_aux_graphs[aux_graph_id] = aux_graph
                     else:
                         # => yes, so just get a reference to the stored aux graph
@@ -257,28 +260,14 @@ class TRAPIQuerier:
                                 description = None,
                                 attribute_source = self.arax_infores_curie
                             ),
-                            Attribute(
-                                original_attribute_name=None,
-                                value="automated_agent",
-                                attribute_type_id="biolink:agent_type",
-                                value_url=None,
-                                description=None,
-                                attribute_source = self.arax_infores_curie
-                            ),
-                            Attribute(
-                                original_attribute_name=None,
-                                value="prediction",
-                                attribute_type_id="biolink:knowledge_level",
-                                value_url=None,
-                                description=None,
-                                attribute_source = self.arax_infores_curie
-                            ),
                         ]
                         heuristic_predicted_edge = Edge(predicate="biolink:treats",
                                                         subject=edge.subject,
                                                         object=edge.object,
                                                         attributes=edge_attributes,
-                                                        sources=[self.arax_primary_source])
+                                                        sources=[self.arax_primary_source],
+                                                        knowledge_level="prediction",
+                                                        agent_type="automated_agent")
                         add_bound_edges[heuristic_edge_id] = heuristic_predicted_edge
                     delete_bound_edges.add(edge_id)
 
@@ -328,7 +317,8 @@ class TRAPIQuerier:
     def _get_kg_to_qg_mappings_from_results(
             self,
             results: list[Result],
-            qg: QueryGraph
+            qg: QueryGraph,
+            kg_edges: Optional[dict[str, Edge]] = None
     ) -> tuple[dict[str, dict[str, set[str]]], dict[str, set[str]]]:
         """
         This function returns a dictionary in which one can lookup which qnode_keys/qedge_keys a given node/edge
@@ -339,42 +329,45 @@ class TRAPIQuerier:
         qnode_key_mappings = defaultdict(set)
         kg_id_to_parent_query_id_map = defaultdict(set)
         qedge_key_mappings = defaultdict(set)
+        unattributed_kg_ids = defaultdict(set)
+        # TRAPI 2.0 has no NodeBinding.query_id; the only 2.0 carrier of "this answer is a subclass of that
+        # queried curie" is a biolink:subclass_of edge in the KP's knowledge graph
+        kp_subclass_parents = defaultdict(set)
+        for kg_edge in (kg_edges or {}).values():
+            if kg_edge.predicate == "biolink:subclass_of" and kg_edge.subject and kg_edge.object:
+                kp_subclass_parents[kg_edge.subject].add(kg_edge.object)
         for result in results:
             # Record mappings from the returned node to the parent curie listed in the QG that it is fulfilling
-            for qnode_key, node_bindings in result.node_bindings.items():
+            for qnode_key, node_binding in result.node_bindings.items():
                 query_node_ids = set(eu.convert_to_list(qg.nodes[qnode_key].ids))
-                for node_binding in node_bindings:
-                    kg_id = node_binding.id
+                for kg_id in node_binding.ids:
                     qnode_key_mappings[kg_id].add(qnode_key)
-                    # Handle case where the KP does return a query_id
-                    if node_binding.query_id:
-                        if node_binding.query_id in query_node_ids:
-                            kg_id_to_parent_query_id_map[kg_id].add(node_binding.query_id)
-                        else:
-                            self.log.warning(f"{self.kp_infores_curie} returned a NodeBinding.query_id ({node_binding.query_id})"
-                                             f" for {qnode_key} that is not in {qnode_key}'s ids in the QG sent "
-                                             f"to {self.kp_infores_curie}. This is invalid TRAPI. Skipping this binding.")
-                    # Handle case where KP does NOT return a query_id (may or may not be valid TRAPI)
-                    else:
-                        if qnode_key in qnodes_with_single_id:
-                            implied_parent_id = list(query_node_ids)[0]
+                    # TRAPI 2.0 has no NodeBinding.query_id, so the parent query curie can only be implied
+                    # (this was upstream's handling of a KP that does not return a query_id)
+                    if qnode_key in qnodes_with_single_id:
+                        implied_parent_id = list(query_node_ids)[0]
+                        kg_id_to_parent_query_id_map[kg_id].add(implied_parent_id)
+                    elif qnode_key in qnodes_with_multiple_ids:
+                        if kg_id in query_node_ids:
+                            implied_parent_id = kg_id
                             kg_id_to_parent_query_id_map[kg_id].add(implied_parent_id)
-                        elif qnode_key in qnodes_with_multiple_ids:
-                            if kg_id in query_node_ids:
-                                implied_parent_id = kg_id
-                                kg_id_to_parent_query_id_map[kg_id].add(implied_parent_id)
-                            else:
-                                self.log.warning(f"{self.kp_infores_curie} returned a node binding for {qnode_key} that does "
-                                                 f"not include a query_id, and {qnode_key} has multiple ids in the "
-                                                 f"query sent to {self.kp_infores_curie}, none of which are the KG ID ({kg_id})."
-                                                 f" This is invalid TRAPI. Skipping this binding.")
+                        elif kp_subclass_parents[kg_id] & query_node_ids:
+                            kg_id_to_parent_query_id_map[kg_id].update(kp_subclass_parents[kg_id] & query_node_ids)
+                        else:
+                            unattributed_kg_ids[qnode_key].add(kg_id)
 
-            for analysis in result.analyses:  # TODO: Maybe later extract Analysis support graphs from KPs?
+            for analysis in result.analyses or []:  # TODO: Maybe later extract Analysis support graphs from KPs?
                 if analysis.edge_bindings:
-                    for qedge_key, edge_bindings in analysis.edge_bindings.items():
-                        for edge_binding in edge_bindings:
-                            kg_id = edge_binding.id
+                    for qedge_key, edge_binding in analysis.edge_bindings.items():
+                        for kg_id in edge_binding.ids:
                             qedge_key_mappings[kg_id].add(qedge_key)
+
+        for qnode_key, kg_ids in unattributed_kg_ids.items():
+            self.log.warning(f"{self.kp_infores_curie} returned {len(kg_ids)} node(s) for {qnode_key} that are not "
+                             f"among {qnode_key}'s multiple ids in the query sent to {self.kp_infores_curie}: "
+                             f"{util.summarize_set_elements(kg_ids)}. TRAPI 2.0 node bindings carry no query_id "
+                             f"and the KP returned no subclass_of edge for them, so which queried curie they "
+                             f"answer is unknown and no subclass_of edges are added for them.")
 
         return {"nodes": qnode_key_mappings, "edges": qedge_key_mappings}, kg_id_to_parent_query_id_map
 
@@ -448,7 +441,7 @@ class TRAPIQuerier:
             self.log.warning(f"{self.kp_endpoint}: response.message.knowledge_graph is not a dict; got {type(kg).__name__}")
             self.log.update_query_plan(qedge_key, self.kp_infores_curie, "Warning", "Message KG is malformed")
             return QGOrganizedKnowledgeGraph(), None
-        edges = kg.get('edges')
+        edges = kg.get('edges', {})  # optional in TRAPI 2.0
         if not isinstance(edges, dict):
             self.log.warning(f"{self.kp_endpoint}: response.message.knowledge_graph.edges is not a dict; got {type(edges).__name__}")
             self.log.update_query_plan(qedge_key, self.kp_infores_curie, "Warning", "KG edges are malformed")
@@ -546,11 +539,21 @@ class TRAPIQuerier:
         # Strip non-essential and 'empty' properties off of our qnodes and qedges
         stripped_qnodes = {qnode_key: self._strip_empty_properties(qnode)
                            for qnode_key, qnode in qg.nodes.items()}
+        # TRAPI 2.0 (Shepherd change): a query's set_interpretation COLLATE is
+        # ARAX's is_set, which ARAX honours itself (resultify), and which the
+        # request above already carries as is_set. It is not forwarded: ARAX
+        # never asked the KP to collate, and COLLATE is only valid on a qnode
+        # without ids, which a later hop's qnode has.
+        for stripped_qnode in stripped_qnodes.values():
+            if stripped_qnode.get("set_interpretation") == "COLLATE":
+                del stripped_qnode["set_interpretation"]
         stripped_qedges = {qedge_key: self._strip_empty_properties(qedge)
                            for qedge_key, qedge in qg.edges.items()}
 
         # Load the query into a JSON Query object
         json_qg = {'nodes': stripped_qnodes, 'edges': stripped_qedges}
+        if not stripped_qedges:
+            del json_qg['edges']  # TRAPI 2.0: edges is optional and may not be empty (single-node query)
         body: dict[str, Any] = {'message': {'query_graph': json_qg},
                                 'submitter': 'infores:arax'}
         if self.kp_infores_curie == "infores:rtx-kg2":
@@ -567,6 +570,10 @@ class TRAPIQuerier:
                 body['parameters']['kp'] = self.forwarded_kps
                 self.log.info(f"For query to {self.kp_infores_curie}, "
                               f"set body.parameters.kp to {body['parameters']['kp']}")
+            # TRAPI 2.0: a parameters.bypass_cache=true received MUST be passed on to downstream sources
+            envelope_parameters = getattr(getattr(self.log, 'envelope', None), 'parameters', None)
+            if isinstance(envelope_parameters, dict) and envelope_parameters.get('bypass_cache') is True:
+                body['parameters']['bypass_cache'] = True
 
         return body
 
@@ -609,7 +616,7 @@ class TRAPIQuerier:
 
         # Build a map that indicates which qnodes/qedges a given node/edge fulfills
         kg_to_qg_mappings, query_curie_mappings = \
-            self._get_kg_to_qg_mappings_from_results(results, qg)
+            self._get_kg_to_qg_mappings_from_results(results, qg, kg.edges)
 
         # Populate our final KG with the returned edges
         unbound_edges = {}
@@ -684,10 +691,9 @@ class TRAPIQuerier:
             for result in results:
                 for analysis in result.analyses or []:
                     edge_bindings_iterable = analysis.edge_bindings or {}
-                    for qedge_key, edge_bindings in edge_bindings_iterable.items():
+                    for qedge_key, edge_binding in edge_bindings_iterable.items():
                         if qedge_key in qg.edges:
-                            for edge_binding in edge_bindings or []:
-                                edge_id = edge_binding.id
+                            for edge_id in edge_binding.ids or []:
                                 if edge_id in edges_dict:
                                     edge = edges_dict[edge_id]
                                     nodes_linked_in_bound_edges.add(edge.subject)
@@ -756,7 +762,7 @@ class TRAPIQuerier:
                          for property_name, value \
                          in dict_version_of_object.items()
                          if dict_version_of_object.get(property_name) \
-                         not in [None, []]}
+                         not in [None, [], {}]}
         return stripped_dict
 
     def _get_arax_edge_key(self, edge: Edge) -> str:
@@ -817,7 +823,8 @@ class TRAPIQuerier:
                 parent_query_ids = answer_kg.nodes_by_qg_id[qnode_key][node_key].query_ids
                 for parent_query_id in parent_query_ids:
                     if parent_query_id is not None and parent_query_id != node_key:
-                        subclass_edge = Edge(subject=node_key, object=parent_query_id, predicate="biolink:subclass_of")
+                        subclass_edge = Edge(subject=node_key, object=parent_query_id, predicate="biolink:subclass_of",
+                                             knowledge_level="not_provided", agent_type="not_provided")
 
                         # Add provenance info to this edge so it's clear where the assertion came from
                         kp_retrieval_source = RetrievalSource(resource_id=self.kp_infores_curie,
@@ -862,8 +869,5 @@ class TRAPIQuerier:
             edge.subject = edge.subject.strip()
             edge.object = edge.object.strip()
         for result in kp_message.results:
-            for qnode_key, node_bindings in result.node_bindings.items():
-                for node_binding in node_bindings:
-                    node_binding.id = node_binding.id.strip()
-                    if node_binding.query_id:
-                        node_binding.query_id = node_binding.query_id.strip()
+            for qnode_key, node_binding in result.node_bindings.items():
+                node_binding.ids = [node_id.strip() for node_id in node_binding.ids]

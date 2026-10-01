@@ -10,10 +10,12 @@ import logging
 import time
 
 import pytest
+from translator_tom import Response
 
 import shepherd_server.aras.arax as api
 import workers.arax.worker as worker
 from shepherd_utils.arax_progress import DONE_MARKER
+from shepherd_utils.trapi import ENVELOPE_MEMBERS
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,17 @@ PLAN = {
 }
 
 
+SHEPHERD_LOG_ENTRY = {
+    "timestamp": "2026-09-01T12:00:00+00:00",
+    "level": "INFO",
+    "message": "Sending qid to arax",
+}
+
+
+def _without_envelope(response):
+    return {k: v for k, v in response.items() if k not in ENVELOPE_MEMBERS}
+
+
 def _row(state="COMPLETED", status="OK"):
     """A shepherd_brain row, in the column order get_query_state returns."""
     return ("qid", None, None, None, None, None, None, "rid", None, state, status, None)
@@ -41,9 +54,12 @@ class FakeShepherd:
         self.messages = {"qid": json.loads(json.dumps(query))}
         self.progress = []
         self.state = _row(state="QUEUED")
+        # the query's log store: Shepherd's own entry, then ARAX's log
+        self.logs = [SHEPHERD_LOG_ENTRY]
         # worker side
         mocker.patch.object(worker, "get_message_sync", side_effect=self._get)
-        mocker.patch.object(worker, "save_message_sync", side_effect=self._save)
+        # where save_response_sync stores, so the stored form is what is kept
+        mocker.patch("shepherd_utils.db.save_message_sync", side_effect=self._save)
         mocker.patch.object(worker, "push_progress", side_effect=self._push)
         mocker.patch.object(
             worker,
@@ -67,12 +83,7 @@ class FakeShepherd:
 
         self.redis = fakeredis.aioredis.FakeRedis()
         mocker.patch.object(api.arax_status, "data_db_client", self.redis)
-        mocker.patch.object(
-            api,
-            "get_logs",
-            new_callable=mocker.AsyncMock,
-            return_value=[{"shepherd": 1}],
-        )
+        mocker.patch.object(api, "get_logs", side_effect=self._logs)
         mocker.patch(
             "shepherd_server.base_routes.asyncio.sleep", new_callable=mocker.AsyncMock
         )
@@ -97,8 +108,13 @@ class FakeShepherd:
     async def _aget(self, key, logger):
         return self._get(key) if key in self.messages else None
 
+    async def _logs(self, key, logger):
+        return json.loads(json.dumps(self.logs))
+
     def run_worker(self):
         summary = worker.arax_query_task("qid", "rid")
+        # what the worker's save_arax_logs puts in the log store
+        self.logs.extend(summary["logs"])
         self.state = _row()
         return summary
 
@@ -141,11 +157,14 @@ async def test_stream_relays_arax_progress_then_the_response(mocker):
     # the server's own token, which /status?terminate_pid resolves to this query
     assert tokens[0]["pid"] == 1
     assert tokens[0]["authorization"] == api.arax_status.pid_authorization(1)
-    # ... then the response, as saved
+    # ... then the response, as saved, finished as a TRAPI 2.0 Response
     final = lines[-1]
     assert final["status"] == "Success"
     assert set(final["message"]["query_graph"]["nodes"]) == {"n0", "n1"}
-    assert final == shepherd.messages["rid"]
+    assert _without_envelope(final) == shepherd.messages["rid"]
+    assert final["schema_version"] == "2.0.0"
+    assert final["logs"] == shepherd.logs
+    Response.from_dict(final)
     # nothing but the done marker is left out
     assert len(lines) == len(shepherd.progress)
 
@@ -174,11 +193,16 @@ async def test_stream_of_a_failed_query_ends_with_arax_error_envelope(mocker):
 async def test_stream_without_worker_progress_ends_when_the_query_does(mocker):
     """A pathfinder query goes to arax.pathfinder, which relays nothing."""
     shepherd = FakeShepherd(mocker, {})
-    shepherd.messages["rid"] = {"message": {"results": [1]}}
+    shepherd.messages["rid"] = {"message": {"results": []}}
     shepherd.state = _row()
     lines = await _collect(await api.arax_stream_query({"stream_progress": True}))
     assert [json.loads(line) for line in lines] == [
-        {"logs": [{"shepherd": 1}], "message": {"results": [1]}}
+        {
+            "biolink_version": api.finalize_response({})["biolink_version"],
+            "logs": [SHEPHERD_LOG_ENTRY],
+            "message": {"results": []},
+            "schema_version": "2.0.0",
+        }
     ]
 
 
@@ -187,7 +211,9 @@ async def test_stream_times_out(mocker):
     FakeShepherd(mocker, {})
     lines = await _collect(
         await api.arax_stream_query(
-            {"stream_progress": True, "parameters": {"timeout": -1}}
+            # TRAPI 2.0: a timeout of 0 means "don't wait" (a negative one
+            # asks for the server's default; see base_routes.sync_timeout)
+            {"stream_progress": True, "parameters": {"timeout": 0}}
         )
     )
     assert json.loads(lines[-1]) == {
@@ -204,8 +230,23 @@ async def test_sync_query_returns_arax_envelope_logs_and_status(mocker):
     body = json.loads(bytes(response.body))
     assert response.status_code == 200
     assert body["http_status"] == 200
-    # ARAX's own log, not Shepherd's
+    # ARAX's own log, from the query's log store
     assert any("Processing action" in entry["message"] for entry in body["logs"])
+
+
+@pytest.mark.asyncio
+async def test_sync_query_response_is_valid_trapi_2(mocker):
+    query = dict(PLAN, parameters={"log_level": "DEBUG", "timeout": 30})
+    shepherd = FakeShepherd(mocker, query)
+    shepherd.run_worker()
+    response = await api.arax_sync_query(json.loads(json.dumps(query)))
+    body = json.loads(bytes(response.body))
+    assert body["schema_version"] == "2.0.0"
+    assert body["biolink_version"]
+    # TRAPI 2.0: the server repeats the query's parameters
+    assert body["parameters"] == {"log_level": "DEBUG", "timeout": 30}
+    assert body["logs"]
+    Response.from_dict(body)
 
 
 @pytest.mark.asyncio
@@ -228,7 +269,8 @@ async def test_sync_query_non_arax_response_is_finished_like_shepherds(mocker):
     response = await api.arax_sync_query({})
     body = json.loads(bytes(response.body))
     assert response.status_code == 500
-    assert body["logs"] == [{"shepherd": 1}]
+    assert body["logs"] == [SHEPHERD_LOG_ENTRY]
+    Response.from_dict(body)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +305,13 @@ def arax_client(mocker):
 
     mocker.patch.object(api, "_run_in_pool", side_effect=inline)
     mocker.patch.object(response_lookup, "_TRAPIResponseValidator", _Validator)
+    mocker.patch.object(
+        api.arax_status,
+        "query_parameters_for_response",
+        new_callable=mocker.AsyncMock,
+        return_value={},
+    )
+    mocker.patch.object(api, "get_logs", new_callable=mocker.AsyncMock, return_value=[])
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=api.ARAX), base_url="http://testserver"
     )
@@ -322,6 +371,93 @@ async def test_get_response_not_found_is_arax_404(arax_client, mocker):
         "detail": "There is no response corresponding to response_id=nope",
         "type": "about:blank",
     }
+
+
+@pytest.mark.asyncio
+async def test_get_response_is_a_trapi_2_response(arax_client, mocker):
+    """A stored response is envelope-free; /response finishes it as it is
+    delivered: versions, the query's parameters and the query's logs."""
+    stored = {
+        "message": {"knowledge_graph": {"nodes": {}, "edges": {}}, "results": []},
+        "status": "Success",
+        "tool_version": "ARAX 1.6.2",
+    }
+    mocker.patch("shepherd_utils.db.get_message_sync", return_value=stored)
+    lookup = mocker.patch.object(
+        api.arax_status,
+        "query_parameters_for_response",
+        new_callable=mocker.AsyncMock,
+        return_value={"log_level": "DEBUG"},
+    )
+    mocker.patch.object(
+        api,
+        "get_logs",
+        new_callable=mocker.AsyncMock,
+        return_value=[SHEPHERD_LOG_ENTRY],
+    )
+    async with arax_client as client:
+        response = await client.get("/response/Xabc12345")
+    assert response.status_code == 200
+    lookup.assert_awaited_once_with("abc12345")
+    body = response.json()
+    assert body["schema_version"] == "2.0.0"
+    assert body["parameters"] == {"log_level": "DEBUG"}
+    assert body["logs"] == [SHEPHERD_LOG_ENTRY]
+    assert body["validation_result"]["status"] == "PASS"
+    Response.from_dict(body)
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self.row = row
+
+    async def fetchone(self):
+        return self.row
+
+
+class _FakePool:
+    def __init__(self, row):
+        self.row = row
+        self.executed = []
+
+    def connection(self, timeout=None):
+        pool = self
+
+        class _Connection:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, sql, params):
+                pool.executed.append((sql, params))
+                return _FakeCursor(pool.row)
+
+        return _Connection()
+
+
+@pytest.mark.asyncio
+async def test_query_parameters_for_response_reads_the_query(mocker):
+    pool = _FakePool(("q1",))
+    mocker.patch.object(api.arax_status.db, "pool", pool)
+    # The lookup lives in shepherd_utils.db (get_response_query_parameters),
+    # which the base GET /response/{id} uses too.
+    get = mocker.patch.object(
+        api.arax_status.db,
+        "get_message",
+        new_callable=mocker.AsyncMock,
+        return_value={"message": {}, "parameters": {"timeout": 5}},
+    )
+    assert await api.arax_status.query_parameters_for_response("r1") == {"timeout": 5}
+    assert pool.executed[0][1] == ("r1",)
+    assert get.await_args.args[0] == "q1"
+
+    mocker.patch.object(api.arax_status.db, "pool", _FakePool(None))
+    assert await api.arax_status.query_parameters_for_response("r2") == {}
+    get.return_value = None
+    mocker.patch.object(api.arax_status.db, "pool", pool)
+    assert await api.arax_status.query_parameters_for_response("r1") == {}
 
 
 @pytest.mark.asyncio
@@ -846,3 +982,112 @@ async def test_arax_rejects_a_workflow_operation_it_does_not_know(mocker):
     assert response.status_code == 400
     assert body["status"] == "UnhandledError"
     assert any(entry.get("code") == "NotImplementedError" for entry in body["logs"])
+
+
+# ---------------------------------------------------------------------------
+# /query bodies: TRAPI 2.0 members are validated; ARAX's own members pass
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def query_client(mocker):
+    import httpx
+
+    sync = mocker.patch.object(
+        api,
+        "arax_sync_query",
+        new_callable=mocker.AsyncMock,
+        return_value=api.ORJSONResponse(content={"ok": True}),
+    )
+    stream = mocker.patch.object(
+        api,
+        "arax_stream_query",
+        new_callable=mocker.AsyncMock,
+        return_value=api.ORJSONResponse(content={"ok": True}),
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api.ARAX), base_url="http://testserver"
+    )
+    return client, sync, stream
+
+
+QG_2 = {
+    "nodes": {"n0": {"ids": ["CHEBI:1"]}, "n1": {"categories": ["biolink:Disease"]}},
+    "edges": {"e0": {"subject": "n0", "object": "n1"}},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": {"query_graph": QG_2}, "log_level": "DEBUG"},
+        {"message": {"query_graph": QG_2}, "bypass_cache": True},
+        {
+            "message": {
+                "query_graph": {
+                    "nodes": QG_2["nodes"],
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "qualifier_constraints": [],
+                        }
+                    },
+                }
+            }
+        },
+        # ARAX's DSL-only bodies are still checked for 1.x spellings
+        {"operations": {"actions": ["return(message=true)"]}, "log_level": "DEBUG"},
+        dict(PLAN, stream_progress=True, log_level="DEBUG"),
+        {"message": None},
+        {"message": {"query_graph": {"nodes": {}, "edges": {}}}},
+    ],
+)
+async def test_query_rejects_a_trapi_1_or_invalid_body(query_client, body):
+    client, sync, stream = query_client
+    async with client:
+        response = await client.post("/query", json=body)
+    assert response.status_code == 400
+    assert response.json()["status"] == "ERROR"
+    sync.assert_not_called()
+    stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        # ARAXi only, no message (ARAX's own /query takes it)
+        PLAN,
+        {"message": {}, "operations": PLAN["operations"], "query_options": {}},
+        {
+            "message": {"query_graph": QG_2},
+            "parameters": {"log_level": "DEBUG", "bypass_cache": True},
+            "return_minimal_metadata": True,
+            "max_results": 10,
+        },
+        # ARAX translates and validates a TRAPI workflow itself (DEC-17)
+        {"message": {"query_graph": QG_2}, "workflow": [{"id": "teleport"}]},
+        # nothing at all: ARAX answers NoQueryMessageOrOperations itself
+        {"submitter": "tester"},
+    ],
+)
+async def test_query_accepts_arax_bodies(query_client, body):
+    client, sync, stream = query_client
+    async with client:
+        response = await client.post("/query", json=body)
+    assert response.status_code == 200
+    sync.assert_awaited_once()
+    assert sync.await_args.args[0] == body
+    stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_streamed_query_body_is_validated_then_streamed(query_client):
+    client, sync, stream = query_client
+    async with client:
+        response = await client.post("/query", json=dict(PLAN, stream_progress=True))
+    assert response.status_code == 200
+    stream.assert_awaited_once()
+    sync.assert_not_called()

@@ -9,10 +9,13 @@ import json
 import logging
 
 import pytest
+from translator_tom import Response
 
 import workers.arax.worker as worker
 from workers.arax.worker import INTERNAL_ERROR, ARAXServiceError, arax
 from shepherd_utils.db import encode_message
+from shepherd_utils.logger import attach_query_handler, get_query_handler
+from shepherd_utils.trapi import ENVELOPE_MEMBERS, finalize_response
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +57,22 @@ def _task():
 
 
 @pytest.fixture
+def query_logger():
+    """A task logger with a query log handler, as the worker's tasks have."""
+    task_logger = logging.getLogger(f"{__name__}.query")
+    attach_query_handler(task_logger)
+    get_query_handler(task_logger).drain()
+    return task_logger
+
+
+@pytest.fixture
 def db(mocker):
-    """Stub the worker's db calls; returns the dict of saved messages."""
+    """Stub the worker's db calls; returns the dict of saved messages.
+
+    The response is captured where ``save_response_sync`` stores it, so what
+    the tests see is the stored form. The query's log store is
+    ``store["logs"]``.
+    """
     store = {}
 
     def _setup(message):
@@ -69,9 +86,18 @@ def db(mocker):
             side_effect=lambda query_id: json.loads(json.dumps(message)),
         )
         mocker.patch(
-            "workers.arax.worker.save_message_sync",
-            side_effect=lambda response_id, msg: store.__setitem__(response_id, msg),
+            "shepherd_utils.db.save_message_sync",
+            side_effect=lambda response_id, msg: store.__setitem__(
+                response_id, json.loads(json.dumps(msg))
+            ),
         )
+
+        async def save_logs(response_id, task_logger):
+            store.setdefault("logs", {}).setdefault(response_id, []).extend(
+                get_query_handler(task_logger).drain()
+            )
+
+        mocker.patch("workers.arax.worker.save_logs", side_effect=save_logs)
         return store
 
     return _setup
@@ -85,12 +111,14 @@ def span(mocker):
 
 
 @pytest.mark.asyncio
-async def test_query_runs_in_process_and_saves_arax_response(db, span, mocker):
+async def test_query_runs_in_process_and_saves_arax_response(
+    db, span, mocker, query_logger
+):
     mocker.patch.object(worker.settings, "server_url", "http://shepherd.test")
     store = db(OPERATIONS_QUERY)
     task = _task()
 
-    await arax(task, logger)
+    await arax(task, query_logger)
 
     saved = store["response_id"]
     assert saved["status"] == "Success"
@@ -99,12 +127,38 @@ async def test_query_runs_in_process_and_saves_arax_response(db, span, mocker):
     assert set(saved["message"]["query_graph"]["nodes"]) == {"n0", "n1"}
     assert saved["operations"]["actions"] == OPERATIONS_QUERY["operations"]["actions"]
     assert saved["tool_version"] == "ARAX 1.6.2"
-    # ARAX's log is part of the response, as in ARAX
+    # Stored in Shepherd's stored form: no delivery envelope ...
+    assert not set(ENVELOPE_MEMBERS) & set(saved)
+    # ... and ARAX's log, part of its response, is in the query's log store,
+    # which the delivered response's logs come from
+    arax_logs = store["logs"]["response_id"]
     assert any(
-        "Processing action 'add_qedge'" in entry["message"] for entry in saved["logs"]
+        "Processing action 'add_qedge'" in entry["message"] for entry in arax_logs
     )
+    assert all(None not in entry.values() for entry in arax_logs)
     span.set_attribute.assert_any_call("arax.status_code", 200)
     assert json.loads(task[1]["workflow"]) == [{"id": "arax"}]
+
+
+@pytest.mark.asyncio
+async def test_stored_arax_response_is_valid_trapi_2(db, span, query_logger):
+    """What the worker stores is valid TRAPI 2.0 content, and so is it once
+    delivered (the envelope and logs added)."""
+    query = json.loads(json.dumps(OPERATIONS_QUERY))
+    query["parameters"] = {"log_level": "DEBUG", "timeout": 60}
+    store = db(query)
+
+    await arax(_task(), query_logger)
+
+    saved = store["response_id"]
+    Response.from_dict(saved)
+    delivered = finalize_response(
+        json.loads(json.dumps(saved)), query, store["logs"]["response_id"]
+    )
+    assert delivered["schema_version"] == "2.0.0"
+    assert delivered["parameters"] == query["parameters"]
+    assert delivered["logs"]
+    Response.from_dict(delivered)
 
 
 def test_run_arax_fills_in_the_shepherd_submitter():
@@ -124,11 +178,12 @@ async def test_arax_error_saves_arax_response_and_raises_its_status(db, span):
     assert "NoQueryMessageOrOperations" in str(excinfo.value)
     span.set_attribute.assert_any_call("arax.status_code", 400)
     saved = store["response_id"]
-    # ARAX's own error response, as its /query returns it
+    # ARAX's own error response, as its /query returns it (in stored form: the
+    # query's submitter is not a Response member)
     assert saved["status"] == "NoQueryMessageOrOperations"
     assert saved["http_status"] == 400
     assert saved["description"] == "No message or operations present in Query"
-    assert saved["submitter"] == "tester"
+    assert "submitter" not in saved
 
 
 @pytest.mark.asyncio
@@ -147,6 +202,9 @@ async def test_successful_response_gets_shepherd_provenance(db, span, mocker):
                             "e0": {
                                 "subject": "a",
                                 "object": "b",
+                                "predicate": "biolink:related_to",
+                                "knowledge_level": "not_provided",
+                                "agent_type": "not_provided",
                                 "sources": [
                                     {
                                         "resource_id": "infores:arax",
@@ -174,7 +232,11 @@ async def test_successful_response_gets_shepherd_provenance(db, span, mocker):
 
 @pytest.mark.asyncio
 async def test_unserializable_response_is_an_internal_error(db, span, mocker):
-    query = {"message": {"query_graph": {"nodes": {}, "edges": {}}}}
+    query_graph = {
+        "nodes": {"n0": {"ids": ["CHEBI:1"]}, "n1": {}},
+        "edges": {"e0": {"subject": "n0", "object": "n1"}},
+    }
+    query = {"message": {"query_graph": query_graph}}
     store = db(query)
     mocker.patch(
         "workers.arax.worker.run_arax",
@@ -190,6 +252,7 @@ async def test_unserializable_response_is_an_internal_error(db, span, mocker):
     assert f"[HTTP {INTERNAL_ERROR}]" in saved["description"]
     assert saved["message"]["query_graph"] == query["message"]["query_graph"]
     assert saved["message"]["results"] == []
+    Response.from_dict(saved)
 
 
 @pytest.mark.asyncio
@@ -212,7 +275,7 @@ async def test_numpy_values_are_saved_as_json_numbers(db, span, mocker):
     saved = store["response_id"]
     assert type(saved["message"]["score"]) is float
     assert saved["message"]["score"] == 0.5
-    encode_message(saved)  # what save_message_sync stores
+    encode_message(saved)  # what save_response_sync stores
 
 
 @pytest.mark.asyncio

@@ -1,17 +1,34 @@
 """Build the ARS parity corpus fixtures.
 
-Deterministically writes the TRAPI-shaped inputs that both the upstream ARS
-functions (via generate_goldens.py, run in the pinned Relay checkout's venv)
-and the Shepherd ports (via tests/unit/ars/test_golden_parity.py) are run
-against. Edit here, re-run, then regenerate goldens.
+Deterministically writes the TRAPI-shaped inputs the upstream ARS functions
+and the Shepherd ports are run against, in two versions:
+
+  - tests/fixtures/ars_corpus/trapi15/ -- TRAPI 1.5, as authored below. This
+    is what upstream Relay (reasoner-pydantic, TRAPI 1.5) consumes when
+    generate_goldens.py runs it in the pinned Relay checkout's venv.
+  - tests/fixtures/ars_corpus/ -- the TRAPI 2.0 translation of the same
+    files (scripts/ars_parity/trapi2.py: TOM's 1.6 -> 2.0 transforms), which
+    is what Shepherd's 2.0 ports are run on by
+    tests/unit/ars/test_golden_parity.py.
+
+The corpus stays authored in 1.5 because upstream only runs on 1.5; the 2.0
+files are always derived, never edited by hand. Edit here, re-run (in the
+Shepherd venv -- the translation needs translator_tom), then regenerate the
+goldens (generate_goldens.py, then upconvert_goldens.py).
 
 Usage: python scripts/ars_parity/build_corpus.py
 """
 
 import json
 import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import trapi2  # noqa: E402
 
 OUT = pathlib.Path(__file__).resolve().parents[2] / "tests/fixtures/ars_corpus"
+OUT_TRAPI15 = OUT / "trapi15"
 
 
 def edge(
@@ -19,7 +36,9 @@ def edge(
 ):
     """A TRAPI-1.5-valid KG edge: reasoner-pydantic 5.1.1 requires both
     ``attributes`` and ``sources`` on every knowledge-graph edge, so the
-    defaults keep corpus responses upstream-valid."""
+    defaults keep corpus responses upstream-valid. (The 2.0 translation
+    drops an empty ``attributes`` and adds the required ``knowledge_level``
+    / ``agent_type``, ``not_provided`` unless an attribute says otherwise.)"""
     e = {"subject": subject, "object": obj, "predicate": predicate}
     e["sources"] = sources if sources is not None else [primary("infores:test-kp")]
     e["attributes"] = attributes if attributes is not None else []
@@ -517,8 +536,9 @@ def decorate_cases():
         },
         {
             # sources present, none primary, not self: upstream hits an
-            # uninitialized has_primary -> raises. Recorded as an error case.
-            "name": "no_primary_raises",
+            # uninitialized has_primary -> raises. The port does not (a
+            # declared divergence; the golden records the port's output).
+            "name": "no_primary",
             "inforesid": "infores:aragorn",
             "data": {
                 "message": {
@@ -974,10 +994,14 @@ def main():
         "ordering_cases.json": ordering_cases(),
         "mergedicts_cases.json": mergedicts_cases(),
     }
+    OUT_TRAPI15.mkdir(parents=True, exist_ok=True)
     for name, data in fixtures.items():
-        path = OUT / name
-        path.write_text(json.dumps(data, indent=2) + "\n")
-        print(f"wrote {path}")
+        for path, doc in (
+            (OUT_TRAPI15 / name, data),
+            (OUT / name, trapi2.corpus_file(name, data)),
+        ):
+            path.write_text(json.dumps(doc, indent=2) + "\n")
+            print(f"wrote {path}")
 
 
 if __name__ == "__main__":

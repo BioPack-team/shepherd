@@ -4,7 +4,7 @@ mergeMessagesRecursive, mergeDicts, get_msg_stats).
 
 Control flow, special-cased keys and the swallow-and-continue exception
 handling follow upstream, and the golden parity suite
-(tests/unit/ars/test_golden_parity.py) pins the outputs. Three upstream bugs
+(tests/unit/ars/test_golden_parity.py) pins the outputs. These upstream bugs
 are deliberately NOT reproduced (see docs/ARS_PARITY_REGISTER.md):
 
   - ``mergeDicts`` returned out of the ``attributes`` and ``analyses``
@@ -21,6 +21,22 @@ are deliberately NOT reproduced (see docs/ARS_PARITY_REGISTER.md):
     ``qualifier_type_id`` and dropped every object carrying neither, from
     both sides, so such a list merged to ``[]``.
 
+TRAPI 2.0 (Shepherd speaks 2.0; upstream is 1.5, and the goldens are 2.0
+translations of the Relay goldens -- see the register):
+
+  - node bindings are one ``{"ids": [...]}`` object per query node; the
+    result map keys on single-id bindings and the ``node_bindings`` branch
+    unions ``ids``;
+  - a conflict on a single-valued TRAPI member (``knowledge_level``,
+    ``agent_type``, ``predicate``, ``qualifier_value`` ...) keeps the first
+    value (a provided knowledge level / agent type beats ``not_provided``)
+    instead of becoming ``[merged, current]`` (``_resolve_scalar_conflict``);
+  - ``to_dict`` omits an absent query graph / knowledge graph / auxiliary
+    graphs rather than emitting ``{}``;
+  - the 1.x-only paths (result-level ``edge_bindings``, the node-binding
+    ``query_ids`` special case, the legacy ``curie`` query-node lookup) are
+    gone.
+
 Any further change here needs the goldens re-recorded and the divergence
 written down.
 """
@@ -29,6 +45,8 @@ import copy
 import json
 import logging
 import typing
+
+from shepherd_utils.trapi import binding_ids
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +69,6 @@ class QueryGraph:
 
     def getPaths(self):
         return self.__paths
-
-    def getAllCuries(self):
-        nodes = self.getNodes()
-        curies = []
-        for node in nodes:
-            if "curie" in node:
-                curies.append(node["curie"])
-        return curies
 
     def getRawGraph(self):
         return self.__rawGraph
@@ -110,16 +120,6 @@ class Results:
         # as QueryGraph: empty rather than unset
         self.__results = results if results is not None else []
 
-    def getEdgeBindings(self):
-        edgeBindings = []
-        for result in self.__results:
-            try:
-                bindings = result["edge_bindings"]
-                edgeBindings.append(bindings)
-            except Exception as e:
-                logger.error(f"Unexpected error 3: {e}")
-        return edgeBindings
-
     def getNodeBindings(self):
         nodeBindings = []
         for result in self.__results:
@@ -166,8 +166,12 @@ class TranslatorMessage:
         return self.__ag
 
     def getResultMap(self):
-        """{frozenset(single-binding node ids): result} -- multi-binding
-        nodes are excluded from the key, exactly like upstream."""
+        """{frozenset(single-binding node ids): result} -- a query node bound
+        to more than one id is excluded from the key, exactly like upstream.
+
+        TRAPI 2.0: a node binding is one ``{"ids": [...]}`` object per query
+        node, so "single-binding" means a single id (upstream: a one-element
+        list of ``{"id"}`` objects)."""
         map = {}
         results = self.getResults()
         if results is not None:
@@ -176,14 +180,13 @@ class TranslatorMessage:
             return None
         for result in results:
             nodes = set()
-            nb = result["node_bindings"]
+            nb = result.get("node_bindings") or {}
             for nodeid in nb.keys():
-                binding = nb.get(nodeid)
-                if len(binding) > 1:
+                ids = binding_ids(nb.get(nodeid))
+                if len(ids) > 1:
                     logger.debug("Multiple bindings found for a single node")
-                else:
-                    binding = binding[0]
-                    nodes.add(binding["id"])
+                elif ids:
+                    nodes.add(ids[0])
             map[frozenset(nodes)] = result
         return map
 
@@ -200,24 +203,29 @@ class TranslatorMessage:
         self.__ag = aux_graphs
 
     def to_dict(self):
+        """The message as a TRAPI 2.0 ``{"message": ...}`` dict.
+
+        Upstream filled every absent component with ``{}`` (and ``results``
+        too, which is an array). In TRAPI 2.0 an empty query graph or
+        knowledge graph is invalid (``nodes`` is required) and
+        ``auxiliary_graphs`` has minProperties 1, so an absent or empty
+        component is omitted instead; ``results`` is ``[]`` when there are
+        none, as 2.0 asks of a response.
+        """
         d = {}
-        if self.getQueryGraph() is not None:
-            d["query_graph"] = self.getQueryGraph().getRawGraph()
-        else:
-            d["query_graph"] = {}
-        if self.getKnowledgeGraph() is not None:
-            d["knowledge_graph"] = self.getKnowledgeGraph().rawGraph
-        else:
-            d["knowledge_graph"] = {}
+        qg = self.getQueryGraph()
+        if qg is not None and qg.getRawGraph():
+            d["query_graph"] = qg.getRawGraph()
+        kg = self.getKnowledgeGraph()
+        if kg is not None and kg.getRaw():
+            kg.getRaw().setdefault("nodes", {})
+            d["knowledge_graph"] = kg.getRaw()
         if self.getResults() is not None:
             d["results"] = self.getResults().getRaw()
         else:
-            # upstream emitted {} here -- results is a TRAPI array
             d["results"] = []
-        if self.getAuxiliaryGraphs() is not None:
+        if self.getAuxiliaryGraphs():
             d["auxiliary_graphs"] = self.getAuxiliaryGraphs()
-        else:
-            d["auxiliary_graphs"] = {}
         return {"message": d}
 
 
@@ -250,12 +258,16 @@ def mergeMessagesRecursive(mergedMessage, messageList, pk):
         return mergedMessage
     else:
         currentMessage = messageList.pop()
-        ckg = currentMessage.getKnowledgeGraph().getRaw()
-        mkg = mergedMessage.getKnowledgeGraph().getRaw()
+        # knowledge_graph and results are optional in TRAPI 2.0; upstream
+        # dereferenced both unconditionally (AttributeError / TypeError)
+        ckg = _raw_kg(currentMessage)
+        mkg = _raw_kg(mergedMessage)
         mergedKnowledgeGraph = mergeDicts(ckg, mkg)
 
         currentResultMap = currentMessage.getResultMap()
         mergedResultMap = mergedMessage.getResultMap()
+        if mergedResultMap is None:
+            mergedResultMap = {}
         mergeDicts(currentResultMap, mergedResultMap)
 
         currentAux = currentMessage.getAuxiliaryGraphs()
@@ -269,6 +281,11 @@ def mergeMessagesRecursive(mergedMessage, messageList, pk):
         mergedMessage.setAuxGraphs(mergedAux)
 
         return mergeMessagesRecursive(mergedMessage, messageList, pk)
+
+
+def _raw_kg(message):
+    kg = message.getKnowledgeGraph()
+    return kg.getRaw() if kg is not None else None
 
 
 def _object_key(item):
@@ -323,6 +340,70 @@ def _union_values(merged_value, current_value):
     return out
 
 
+#: TRAPI 2.0 members whose schema type is a single string / boolean / enum,
+#: which is to say every scalar member of Edge, Node (``name`` is handled on
+#: its own, as upstream did), RetrievalSource, Qualifier and Attribute, plus
+#: Analysis's. Upstream turned ANY conflicting scalar into ``[merged,
+#: current]``; for these that produces an invalid document (a list where a
+#: string is required), so a conflict keeps one value instead -- see
+#: ``_resolve_scalar_conflict``. Free-form members (``Attribute.value``) and
+#: extra properties the ARS or an ARA hangs on a result keep upstream's
+#: list-of-both behaviour.
+_SINGLE_VALUED_MEMBERS = frozenset(
+    {
+        # Edge
+        "subject",
+        "object",
+        "predicate",
+        "knowledge_level",
+        "agent_type",
+        # Node
+        "is_set",
+        # RetrievalSource
+        "resource_id",
+        "resource_role",
+        # Qualifier
+        "qualifier_type_id",
+        "qualifier_value",
+        # Attribute
+        "attribute_type_id",
+        "value_type_id",
+        "original_attribute_name",
+        "value_url",
+        "attribute_source",
+        "description",
+        # Analysis
+        "scoring_method",
+    }
+)
+
+#: The biolink value that says a knowledge_level / agent_type is unknown.
+NOT_PROVIDED = "not_provided"
+
+
+def _resolve_scalar_conflict(key, merged_value, current_value):
+    """Pick the one value a conflicting single-valued member keeps.
+
+    The value that got there first wins: ``current_value`` (``dcurrent``).
+    In the ARS fold ``merge_received`` folds the accumulated merged version
+    (``dcurrent``) INTO the newly arriving ARA's message (``dmerged``), so
+    that is the value every earlier merged version already served -- a
+    later ARA cannot flip an edge's knowledge level under a client that has
+    read it. (For ``mergeMessages([a, b])`` generally: ``a``'s value.)
+
+    ``knowledge_level`` / ``agent_type`` add one precedence: a provided
+    value beats biolink's ``not_provided`` (the value TOM's 1.x -> 2.0
+    conversion fills in when an ARA said nothing), so the merge never loses
+    information to a default. There is no biolink ordering between two
+    provided knowledge levels that would make a better tie-break than
+    arrival order.
+    """
+    if key in ("knowledge_level", "agent_type"):
+        if current_value == NOT_PROVIDED and merged_value != NOT_PROVIDED:
+            return merged_value
+    return current_value
+
+
 def mergeDicts(dcurrent, dmerged):
     if dcurrent is None:
         dcurrent = {}
@@ -341,25 +422,26 @@ def mergeDicts(dcurrent, dmerged):
                 # the LAST current-only id, into a local dict it never wrote
                 # back. So bindings past the first were ignored and
                 # current-only bindings were dropped.
-                for node_key, current_bindings in cv.items():
-                    merged_bindings = mv.get(node_key)
-                    if merged_bindings is None:
-                        mv[node_key] = current_bindings
+                #
+                # TRAPI 2.0: one {"ids": [...]} object per query node, so the
+                # union is of ids (order-stable, merged side first); any other
+                # member a binding carries is folded with mergeDicts.
+                for node_key, current_binding in cv.items():
+                    merged_binding = mv.get(node_key)
+                    if not isinstance(merged_binding, dict):
+                        mv[node_key] = current_binding
                         continue
-                    by_id = {
-                        b["id"]: b
-                        for b in merged_bindings
-                        if isinstance(b, dict) and "id" in b
-                    }
-                    for binding in current_bindings:
-                        if not isinstance(binding, dict) or "id" not in binding:
-                            continue
-                        existing = by_id.get(binding["id"])
-                        if existing is not None:
-                            mergeDicts(binding, existing)
-                        else:
-                            merged_bindings.append(binding)
-                            by_id[binding["id"]] = binding
+                    if not isinstance(current_binding, dict):
+                        continue
+                    ids = list(
+                        dict.fromkeys(
+                            binding_ids(merged_binding) + binding_ids(current_binding)
+                        )
+                    )
+                    rest = {k: v for k, v in current_binding.items() if k != "ids"}
+                    if rest:
+                        mergeDicts(rest, merged_binding)
+                    merged_binding["ids"] = ids
                 dmerged[key] = mv
 
             # attributes are another special case. We largely want to append,
@@ -478,11 +560,12 @@ def mergeDicts(dcurrent, dmerged):
                         if key == "score":
                             del dmerged[key]
                             dmerged["scores"] = [mv, cv]
-                        elif key == "query_ids":
-                            dmerged["query_ids"] = [mv, cv]
                         elif key == "name":
                             # kg node names can't be a list
                             continue
+                        elif key in _SINGLE_VALUED_MEMBERS:
+                            # a TRAPI-typed scalar can't be a list either
+                            dmerged[key] = _resolve_scalar_conflict(key, mv, cv)
                         else:
                             dmerged[key] = [mv, cv]
                 except Exception as e:
@@ -492,17 +575,23 @@ def mergeDicts(dcurrent, dmerged):
     return dmerged
 
 
-def get_msg_stats(mesg_dict):
-    """Component counts for the parent's params.stats, ported verbatim."""
-    from .premerge import get_safe
+#: Components every stats block reports, 0 when absent. Upstream's to_dict
+#: always emitted all four (as ``{}`` when empty); the 2.0 to_dict omits an
+#: absent one, and the stats shape subscribers see must not change with it.
+_STATS_COMPONENTS = ("query_graph", "knowledge_graph", "results", "auxiliary_graphs")
 
+
+def get_msg_stats(mesg_dict):
+    """Component counts for the parent's params.stats (upstream's shape).
+
+    Tolerates absent / null components, which TRAPI 2.0 allows."""
+    message = mesg_dict.get("message") or {}
     stats = {}
-    for component in mesg_dict["message"].keys():
+    for component in dict.fromkeys((*_STATS_COMPONENTS, *message.keys())):
+        value = message.get(component) or {}
         if component == "knowledge_graph":
             for subComp in ["nodes", "edges"]:
-                stats[f"{component}_{subComp}"] = len(
-                    get_safe(mesg_dict, "message", f"{component}", f"{subComp}")
-                )
+                stats[f"{component}_{subComp}"] = len(value.get(subComp) or {})
         else:
-            stats[component] = len(get_safe(mesg_dict, "message", f"{component}"))
+            stats[component] = len(value)
     return stats

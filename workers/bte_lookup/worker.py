@@ -297,12 +297,11 @@ def get_params(
     object_curie = next(iter(q_object.get("ids") or []), None)
     qualifiers: dict[str, str] = {}
 
-    qualifier_constraints = edge.get("qualifier_constraints") or []
-    if qualifier_constraints is not None and len(qualifier_constraints) > 0:
-        qualifiers = {
-            qualifier["qualifier_type_id"]: qualifier["qualifier_value"]
-            for qualifier in qualifier_constraints[0]["qualifier_set"]
-        }
+    # TRAPI 2.0: each qualifier set is a {qualifier_type_id: value} mapping in
+    # constraints.qualifiers. Only the first set is used for template matching.
+    qualifier_sets = (edge.get("constraints") or {}).get("qualifiers") or []
+    if len(qualifier_sets) > 0:
+        qualifiers = dict(qualifier_sets[0] or {})
 
     return (
         edge["subject"],
@@ -352,9 +351,16 @@ def match_templates(
         conditions.append(len(subject_types.intersection(group.subject)) > 0)
         conditions.append(len(object_types.intersection(group.object)) > 0)
         conditions.append(len(predicates.intersection(group.predicate)) > 0)
-        conditions.append(  # Qualifiers (if they exist) are satisfied
+        # Qualifiers (if they exist) are satisfied. template_groups.json names
+        # qualifier types without the "biolink:" prefix the query uses.
+        group_qualifiers = {
+            qualifier_type.removeprefix("biolink:"): value
+            for qualifier_type, value in (group.qualifiers or {}).items()
+        }
+        conditions.append(
             all(
-                (group.qualifiers or {}).get(qualifier_type, False) == value
+                group_qualifiers.get(qualifier_type.removeprefix("biolink:"), False)
+                == value
                 for qualifier_type, value in qualifiers.items()
             )
         )
@@ -401,8 +407,6 @@ def fill_templates(
             "message": query,
             "parameters": query_body["parameters"],
         }
-        if "log_level" in query_body:
-            message["log_level"] = query_body["log_level"]
         if message["message"].get("knowledge_graph") is not None:
             del message["message"]["knowledge_graph"]
         message["parameters"] = query_body["parameters"]

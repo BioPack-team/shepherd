@@ -21,6 +21,7 @@ import shepherd_utils.ars.db as ars_db
 from shepherd_utils.ars import aras
 from shepherd_utils.ars.handoff import handoff_callback_url
 from shepherd_utils.config import settings
+from shepherd_utils.logger import resolve_log_level
 from workers.ars_fanout import worker as fanout
 
 LOGGER = logging.getLogger(__name__)
@@ -168,6 +169,28 @@ async def test_fanout_forwards_the_workflow(env):
     for ara in aras.ARAS:
         (task,) = await _stream_tasks(ara.name)
         assert json.loads(task[1]["workflow"]) == [{"id": "lookup"}]
+
+
+@pytest.mark.parametrize(
+    "query_extra, expected",
+    [
+        ({"parameters": {"log_level": "DEBUG"}}, logging.DEBUG),
+        ({"parameters": {"log_level": "ERROR"}}, logging.ERROR),
+        # 1.x top-level spelling: not read (submit rejects it anyway)
+        ({"log_level": "DEBUG"}, None),
+    ],
+)
+async def test_fanout_log_level_comes_from_parameters(env, query_extra, expected):
+    """TRAPI 2.0: each ARA task's log level is the query's
+    parameters.log_level, falling back to the configured level."""
+    env["load_message_data"].return_value = dict(QUERY, **query_extra)
+    await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
+    default = resolve_log_level(settings.log_level)
+    for ara in aras.ARAS:
+        (task,) = await _stream_tasks(ara.name)
+        assert int(task[1]["log_level"]) == (
+            expected if expected is not None else default
+        )
 
 
 async def test_fanout_does_not_mutate_the_parent_payload(env):

@@ -111,7 +111,8 @@ def edge_values(message, attribute_name):
     return out
 
 
-# 1. Overlays over an uploaded message: every seed drug -> disease/phenotype edge
+# 1. Overlays over an uploaded (TRAPI 2.0) message: every seed drug ->
+# disease/phenotype edge
 kg_nodes, kg_edges, results = {}, {}, []
 for key, edge in sorted(GRAPH.edges.items()):
     if not GRAPH.is_drug(edge["subject"]) or not GRAPH.is_disease(edge["object"]):
@@ -122,6 +123,8 @@ for key, edge in sorted(GRAPH.edges.items()):
         "predicate": edge["predicate"],
         "sources": edge["sources"],
         "attributes": [],
+        "knowledge_level": "knowledge_assertion",
+        "agent_type": "manual_agent",
     }
     for curie in (edge["subject"], edge["object"]):
         node = GRAPH.nodes[curie]
@@ -133,13 +136,13 @@ for key, edge in sorted(GRAPH.edges.items()):
     results.append(
         {
             "node_bindings": {
-                "n0": [{"id": edge["subject"], "attributes": []}],
-                "n1": [{"id": edge["object"], "attributes": []}],
+                "n0": {"ids": [edge["subject"]]},
+                "n1": {"ids": [edge["object"]]},
             },
             "analyses": [
                 {
                     "resource_id": "infores:mock",
-                    "edge_bindings": {"e0": [{"id": key, "attributes": []}]},
+                    "edge_bindings": {"e0": {"ids": [key]}},
                 }
             ],
         }

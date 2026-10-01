@@ -1,11 +1,14 @@
 """Expand parity: the Shepherd port vs. goldens recorded from upstream ARAX.
 
-``expand_parity/run_upstream.py`` ran each case in ``expand_parity/cases.py``
-through ARAX's own Expand (RTXteam/RTX @ 9485431) against a mock Retriever and
-recorded everything observable: KG, QG, aux graphs, the in-memory
+``expand_parity/run_upstream.py`` ran each case through ARAX's own Expand
+(RTXteam/RTX @ 9485431, TRAPI 1.6) against a mock Retriever and recorded
+everything observable: KG, QG, aux graphs, the in-memory
 qnode_keys/qedge_keys/query_ids/filled annotations, excluded-edge info, the
-query plan, INFO+ logs, and every request body sent to the KP. This test runs
-the same cases through the port and requires identical results.
+query plan, INFO+ logs, and every request body sent to the KP
+(``goldens_trapi16.json.gz``). The port speaks TRAPI 2.0: it runs the 2.0
+cases in ``expand_parity/cases.py`` against the mock Retriever's 2.0 mode, and
+must produce ``goldens.json.gz``, the TRAPI 2.0 translation of that record
+(``trapi2_goldens.py``, which lists its rules), identically.
 
 It runs the port in a subprocess with PYTHONHASHSEED=0, because ARAX builds
 several lists from sets (and so do the goldens); Shepherd's Dockerfiles pin the
@@ -24,6 +27,14 @@ import pytest
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expand_parity")
 sys.path.insert(0, HERE)
 from cases import CASES  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(HERE))
+from trapi2_goldens import (  # noqa: E402
+    QUERY_ID_LOST,
+    golden_paths,
+    query_id_lost_pairs,
+    read_json_gz,
+)
 
 FIELDS = [
     "exception",
@@ -47,6 +58,30 @@ EXPECTED_DIFFERENCES = {
     # parameters.tiers, and log setting it) instead of infores:rtx-kg2
     "single_node": {"requests", "logs"},
 }
+# TRAPI 2.0 (H5 in trapi2_goldens.py): these cases bind a subclass child to a
+# qnode with several ids, and upstream learned which one it fulfils from
+# NodeBinding.query_id, which 2.0 removed. Without it ARAX keeps no parent for
+# the child, so it adds no subclass_of edge for it, and everything built on
+# that differs. What 2.0 can still carry is compared, and
+# test_subclass_parent_is_not_expressible_in_trapi2 pins the difference.
+# The KP requests and the plan are compared where the case sends one request
+# (it is built before any answer); later requests depend on the KG.
+for _case in QUERY_ID_LOST["expand_parity"]:
+    EXPECTED_DIFFERENCES.setdefault(_case, set()).update(
+        {
+            "qg",
+            "qg_filled",
+            "kg",
+            "node_qnode_keys",
+            "node_query_ids",
+            "edge_qedge_keys",
+            "aux",
+            "kryptonite",
+            "logs",
+        }
+    )
+for _case in ("kryptonite", "prune_threshold", "three_hop"):
+    EXPECTED_DIFFERENCES[_case].update({"requests", "plan"})
 
 
 def _sort_ids(obj):
@@ -165,3 +200,24 @@ def test_kp_list_leaves_every_other_kp_skipped(outputs):
         "infores:rtx-kg2": "Skipped",
         "infores:spoke": "Skipped",
     }
+
+
+@pytest.mark.parametrize("case", QUERY_ID_LOST["expand_parity"])
+def test_subclass_parent_is_not_expressible_in_trapi2(outputs, case):
+    """TRAPI 2.0 has no NodeBinding.query_id: a subclass child that Retriever
+    bound to a qnode with several ids (in any of the case's queries) has no
+    recorded parent in the port, where upstream had the one Retriever named;
+    every other KG node keeps upstream's query_ids."""
+    upstream, port = outputs
+    lost = query_id_lost_pairs(
+        read_json_gz(golden_paths("expand_parity")[0])[case]["requests"]
+    )
+    assert lost, "the case no longer exercises a lost query_id"
+    want, got = upstream[case]["node_query_ids"], port[case]["node_query_ids"]
+    for node, parents in lost.items():
+        if node in want:  # (a node may be pruned later)
+            assert set(parents) <= set(want[node]), node
+        assert not set(got.get(node) or []) & set(parents), node
+    for node, parents in want.items():
+        if node in got and node not in lost:
+            assert got[node] == parents, node

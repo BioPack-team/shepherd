@@ -6,7 +6,9 @@ For each curie this:
      {base}/asyncquery with a callback URL served by this script,
   2. polls {base}/asyncquery_status/{job_id}, printing each status change,
   3. waits for Shepherd's finish_query to POST the response to the callback,
-and records timings and result counts in benchmark_metrics.json (under
+checks the callback body is a TRAPI 2.0 Response to the query (schema_version
+2.0.0, the query's parameters repeated), and records timings and result
+counts in benchmark_metrics.json (under
 "<target>-async") and the callback body in responses/<target>-async/.
 
 Shepherd runs in Docker, so the callback URL has to reach this machine from
@@ -87,6 +89,17 @@ def async_base_url(target: str) -> str:
     if not url.endswith("/query"):
         raise SystemExit(f"{target} ({url}) is not a /query endpoint")
     return url[: -len("/query")]
+
+
+def trapi_2_problem(response: dict, query: dict) -> "str | None":
+    """Why the callback body is not a TRAPI 2.0 Response to ``query``, if it isn't."""
+    if response.get("schema_version") != "2.0.0":
+        return f"schema_version {response.get('schema_version')!r}, not 2.0.0"
+    if (response.get("parameters") or {}) != (query.get("parameters") or {}):
+        return "the response does not repeat the query's parameters"
+    if "logs" in response and not response["logs"]:
+        return "empty logs (TRAPI 2.0: omit them)"
+    return None
 
 
 async def single_async_query(
@@ -191,6 +204,8 @@ async def single_async_query(
                 f"response status {response_json.get('status')}: "
                 f"{response_json.get('description')}"
             )
+        elif not_trapi_2 := trapi_2_problem(response_json, query):
+            metrics["error"] = not_trapi_2
     except Exception as e:
         metrics["error"] = f"{type(e).__name__}: {e}"
         response_json = response_json or {"error": metrics["error"]}

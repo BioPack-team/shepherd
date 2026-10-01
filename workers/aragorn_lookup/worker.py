@@ -270,13 +270,14 @@ def get_infer_parameters(input_message):
     """Given an infer input message, return the parameters needed to run the infer.
     input_id: the curie of the input node
     predicate: the predicate of the inferred edge
-    qualifiers: the qualifiers of the inferred edge
+    qualifiers: the inferred edge's TRAPI 2.0 ``constraints.qualifiers``, a list
+        of ``{qualifier_type_id: qualifier_value}`` qualifier sets ([] if none)
     source: the query node id of the source node
     target: the query node id of the target node
     source_input: True if the source node is the input node, False if the target node is the input node
     """
     predicate = ""
-    qualifiers = {}
+    qualifiers: list[dict[str, str]] = []
     source = ""
     target = ""
     query_edge = ""
@@ -285,11 +286,7 @@ def get_infer_parameters(input_message):
         target = edge["object"]
         query_edge = edge_id
         predicate = edge["predicates"][0]
-        qc = edge.get("qualifier_constraints", [])
-        if len(qc) == 0:
-            qualifiers = {}
-        else:
-            qualifiers = {"qualifier_constraints": qc}
+        qualifiers = list((edge.get("constraints") or {}).get("qualifiers") or [])
     if ("ids" in input_message["message"]["query_graph"]["nodes"][source]) and (
         input_message["message"]["query_graph"]["nodes"][source]["ids"] is not None
     ):
@@ -302,34 +299,39 @@ def get_infer_parameters(input_message):
     return input_id, predicate, qualifiers, source, source_input, target, query_edge
 
 
+#: Qualifier types that select an AMIE rule set, mapped to their (internal,
+#: un-prefixed) name in the keys of rules_with_types_cleaned_finalized.json.
+RULE_KEY_QUALIFIERS = {
+    "biolink:object_aspect_qualifier": "object_aspect_qualifier",
+    "biolink:object_direction_qualifier": "object_direction_qualifier",
+}
+
+
 def get_rule_key(
     predicate: str,
-    qualifiers: dict[str, list],
+    qualifiers: list[dict[str, str]],
     logger: logging.Logger,
 ) -> str:
-    """Given some query parameters, construct a string key for expanded queries lookup."""
+    """Given some query parameters, construct a string key for expanded queries lookup.
+
+    ``qualifiers`` is a QEdge's TRAPI 2.0 ``constraints.qualifiers``: a list of
+    qualifier sets, each a ``{qualifier_type_id: qualifier_value}`` mapping. The
+    key format is internal to the rules file and is unchanged from TRAPI 1.x.
+    """
     keydict: dict[str, str] = {"predicate": predicate}
-    if len(qualifiers.keys()) > 0:
-        # this is a bunch of logic to parse the dict of list of dicts of lists
-        # We're currently expecting it to be a specific format with specific keys
-        qualifier_constraints = qualifiers.get("qualifier_constraints", [])
-        if len(qualifier_constraints) < 1:
-            return json.dumps(keydict)
-        if len(qualifier_constraints) > 1:
-            logger.warning(
-                "Got more than one qualifier_constraints dict, just using the first one."
-            )
-        qualifier_set = qualifier_constraints[0].get("qualifier_set", [])
-        if len(qualifier_set) < 1:
-            return json.dumps(keydict)
-        for qualifier in qualifier_set:
-            if qualifier.get("qualifier_type_id") == "biolink:object_aspect_qualifier":
-                keydict["object_aspect_qualifier"] = qualifier.get("qualifier_value")
-            elif (
-                qualifier.get("qualifier_type_id")
-                == "biolink:object_direction_qualifier"
-            ):
-                keydict["object_direction_qualifier"] = qualifier.get("qualifier_value")
+    if not qualifiers:
+        return json.dumps(keydict)
+    if len(qualifiers) > 1:
+        logger.warning(
+            "Got more than one qualifier constraint set, just using the first one."
+        )
+    qualifier_set = qualifiers[0] or {}
+    if len(qualifier_set) < 1:
+        return json.dumps(keydict)
+    for qualifier_type_id, qualifier_value in qualifier_set.items():
+        key_name = RULE_KEY_QUALIFIERS.get(qualifier_type_id)
+        if key_name is not None:
+            keydict[key_name] = qualifier_value
     return json.dumps(keydict, sort_keys=True)
 
 
@@ -380,8 +382,6 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
             "message": query,
             "parameters": input_message.get("parameters") or {},
         }
-        if "log_level" in input_message:
-            message["log_level"] = input_message["log_level"]
         message["parameters"] = input_message["parameters"]
         message["submitter"] = input_message["submitter"]
         messages.append(message)

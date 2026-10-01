@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
+from .trapi import prepare_stored_response, query_log_level, query_parameters
 
 PG_RETRIES = 5
 # Retries for the handful of Redis writes that are correctness-critical
@@ -220,6 +221,13 @@ _SCHEMA_UPGRADES = (
         "idx_callbacks_query_id",
         "CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id)",
     ),
+    # GET /response/{id} maps a response back to its query (to repeat the
+    # query's TRAPI 2.0 parameters); see get_response_query_parameters.
+    (
+        "idx_shepherd_brain_response_id",
+        "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_response_id "
+        "ON shepherd_brain (response_id)",
+    ),
 )
 
 
@@ -389,9 +397,16 @@ async def add_query(
     """
     start = time.time()
     try:
-        encoded = encode_message(query)
-        await data_db_client.set(query_id, encoded, ex=settings.redis_ttl)
-        await data_db_client.set(response_id, encoded, ex=settings.redis_ttl)
+        await data_db_client.set(query_id, encode_message(query), ex=settings.redis_ttl)
+        # The response starts as the query's message; the query-level members
+        # stay on the query only (see prepare_stored_response).
+        response = prepare_stored_response(
+            {k: v for k, v in query.items() if k != "message"}
+            | {"message": dict(query.get("message") or {})}
+        )
+        await data_db_client.set(
+            response_id, encode_message(response), ex=settings.redis_ttl
+        )
     except Exception as e:
         # failed to put message in db
         # TODO: do something more severe
@@ -461,6 +476,52 @@ async def save_message(
             logger.error(f"Failed to save a message into redis: {e}")
             if raise_on_failure:
                 raise
+
+
+async def get_response_query_parameters(
+    response_id: str, logger: logging.Logger
+) -> dict:
+    """The TRAPI ``parameters`` of the query whose response is ``response_id``.
+
+    TRAPI 2.0 says a Response repeats its query's ``parameters``, and a stored
+    response carries none (``save_response``), so a route serving a stored
+    response by its id looks the query up: ``shepherd_brain`` maps the response
+    id to the query id, and the query is in the data store. ``{}`` when either
+    is gone (the query expired, or the id was never a query's response).
+    """
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cursor = await conn.execute(
+                "SELECT qid FROM shepherd_brain WHERE response_id = %s LIMIT 1",
+                (response_id,),
+            )
+            row = await cursor.fetchone()
+    except Exception as e:
+        logger.warning(f"Could not look up the query of response {response_id}: {e}")
+        return {}
+    if row is None:
+        return {}
+    try:
+        query = await get_message(row[0], logger)
+    except KeyError:
+        return {}
+    return dict(query_parameters(query if isinstance(query, dict) else None))
+
+
+async def save_response(
+    response_id: str,
+    response: dict[str, Any],
+    logger: logging.Logger,
+    **kwargs: Any,
+):
+    """Store a query's response, in its stored form (see
+    ``shepherd_utils.trapi.prepare_stored_response``).
+
+    Every write of a response goes through here (or ``save_response_sync``):
+    it is what guarantees a stored response carries no delivery envelope, so
+    ``finish_query`` can add one to the stored bytes without decoding them.
+    """
+    await save_message(response_id, prepare_stored_response(response), logger, **kwargs)
 
 
 class ResponseTooLargeError(Exception):
@@ -590,7 +651,9 @@ async def get_query_log_level(
     """The log level the client asked for, read back from the stored query.
 
     The stored query is the only record of the requested level once a request
-    has been handed off. A TRAPI *response* has no ``log_level`` field, so
+    has been handed off (TRAPI 2.0 carries it in ``parameters.log_level``).
+    What a subservice posts back to ``/callback`` is the subservice's own
+    response, so
     nothing a subservice posts back to ``/callback`` carries it -- everything
     hanging off a callback (the handler's own logs, the merge task it enqueues,
     the retrieval logs that merge folds into the query's log list) has to come
@@ -606,7 +669,7 @@ async def get_query_log_level(
     except Exception as e:
         logger.warning(f"Couldn't read the log level for query {query_id}: {e}")
         return default
-    return resolve_log_level(query.get("log_level"), default)
+    return resolve_log_level(query_log_level(query), default)
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +864,11 @@ def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
         encode_message(message),
         ex=settings.redis_ttl,
     )
+
+
+def save_response_sync(response_id: str, response: dict[str, Any]) -> None:
+    """``save_response`` for the process-pool workers."""
+    save_message_sync(response_id, prepare_stored_response(response))
 
 
 async def _append_logs(response_id: str, entries: List[dict]) -> None:

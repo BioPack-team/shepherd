@@ -17,7 +17,7 @@ import uuid
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
-from shepherd_utils.db import get_message_sync, save_message_sync
+from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -54,14 +54,11 @@ def rank_message(in_message: dict, logger: logging.Logger) -> dict:
     ``run_task_lifecycle``, which records it and routes the query to
     ``finish_query`` with an ERROR status (DEC-8).
     """
-    # save the logs for the response (if any)
-    if "logs" not in in_message or in_message["logs"] is None:
-        in_message["logs"] = []
-    else:
-        # Convert timestamps to strings for JSON serialization
-        for log in in_message.get("logs", []):
-            if "timestamp" in log:
-                log["timestamp"] = str(log["timestamp"])
+    # Convert timestamps to strings for JSON serialization. Response.logs has
+    # minItems 1 in TRAPI 2.0, so no empty list is created.
+    for log in in_message.get("logs") or []:
+        if "timestamp" in log:
+            log["timestamp"] = str(log["timestamp"])
 
     return arax_rank(in_message, logger)
 
@@ -81,7 +78,7 @@ def arax_rank_task(response_id: str, logger: logging.Logger) -> None:
     ranked_message = rank_message(message, logger)
     if ranked_message is None:
         ranked_message = message
-    save_message_sync(response_id, ranked_message)
+    save_response_sync(response_id, ranked_message)
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):

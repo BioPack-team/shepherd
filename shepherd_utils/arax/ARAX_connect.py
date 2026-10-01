@@ -12,6 +12,11 @@
 #   - the block list is the vendored KnowledgeSources/general_concepts.json (ARAX's own)
 #   - the RTXKG2-mode check around original_query_graph is dropped (E-5)
 #   - main() is dropped
+#   - TRAPI 2.0: convert_to_trapi builds one NodeBinding per qnode and one PathBinding per path (ids) in a plain
+#     Analysis (no PathfinderAnalysis), and AuxiliaryGraph(edges) without attributes; an aux graph without edges is
+#     left out, with its path-binding ids and any analysis/result left empty. The cached-result path no longer
+#     re-types analyses (there is one Analysis model). get_constraint_category reads
+#     PathConstraint.required_intermediate_categories
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import json
 import sys
@@ -40,7 +45,7 @@ from shepherd_utils.arax.openapi_server.models.result import Result
 from shepherd_utils.arax.openapi_server.models.node_binding import NodeBinding
 from shepherd_utils.arax.openapi_server.models.auxiliary_graph import AuxiliaryGraph
 from shepherd_utils.arax.openapi_server.models.path_binding import PathBinding
-from shepherd_utils.arax.openapi_server.models.pathfinder_analysis import PathfinderAnalysis
+from shepherd_utils.arax.openapi_server.models.analysis import Analysis
 
 from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
 
@@ -315,13 +320,6 @@ class ARAXConnect:
                 )
                 self.response.data["xcrg_connect"] = True
                 self.response.total_results_count = len(response_data['message'].get("results") or [])
-            else:
-                # Hack to explicitly convert the analyses to PathfinderAnalysis objects because this doesn't work automatically. It should. Maybe move this into Messenger? FIXME
-                i_analysis = 0
-                for analysis_dict in response_data['message']['results'][0]['analyses']:
-                    analysis_obj = PathfinderAnalysis.from_dict(analysis_dict)
-                    self.response.envelope.message.results[0].analyses[i_analysis] = analysis_obj
-                    i_analysis += 1
 
         else:
             self.response.debug(f"Applying Connect to Message with parameters {parameters}")
@@ -416,15 +414,15 @@ class ARAXConnect:
             return None
         if len(path.constraints) == 0:
             return None
-        if path.constraints[0].intermediate_categories is None:
+        if path.constraints[0].required_intermediate_categories is None:
             return None
-        if len(path.constraints[0].intermediate_categories) == 0:
+        if len(path.constraints[0].required_intermediate_categories) == 0:
             return None
-        if len(path.constraints[0].intermediate_categories) > 1:
+        if len(path.constraints[0].required_intermediate_categories) > 1:
             self.response.error(f"Currently, PathFinder can only handle one constraint node. "
                                 f"Number of constraint nodes: {len(path.intermediate_categories)}")
 
-        return path.constraints[0].intermediate_categories[0]
+        return path.constraints[0].required_intermediate_categories[0]
 
     def __connect_nodes(self, describe=False):
         """
@@ -603,13 +601,20 @@ class ARAXConnect:
         rehydrated_kg = self.rehydrate(knowledge_graph, retriever_url)
         kg = KnowledgeGraph().from_dict(rehydrated_kg)
 
+        # TRAPI 2.0: an aux graph needs edges, so one whose edges PathFinder could not
+        # extract is left out, with the path bindings to it (and an analysis left without any)
+        aux_graph_keys = {key for key, value in aux_graphs.items() if value['edges']}
         analyses = []
         for analys in result['analyses']:
             path_bindings = {}
             for key, value in analys['path_bindings'].items():
-                path_bindings[key] = [PathBinding(id=value[0]['id'])]
+                path_ids = [binding['id'] for binding in value if binding['id'] in aux_graph_keys]
+                if path_ids:
+                    path_bindings[key] = PathBinding(ids=path_ids)
+            if not path_bindings:
+                continue
             analyses.append(
-                PathfinderAnalysis(
+                Analysis(
                     resource_id=analys["resource_id"],
                     path_bindings=path_bindings,
                     score=analys['score']
@@ -618,19 +623,21 @@ class ARAXConnect:
 
         node_bindings = {}
         for key, value in result["node_bindings"].items():
-            node_bindings[key] = [NodeBinding(id=value[0]['id'], attributes=[])]
-        self.response.envelope.message.results.append(
-            Result(
-                id=result["id"],
-                analyses=analyses,
-                node_bindings=node_bindings,
-                essence="result"
+            node_bindings[key] = NodeBinding(ids=[binding['id'] for binding in value])
+        if analyses:
+            self.response.envelope.message.results.append(
+                Result(
+                    id=result["id"],
+                    analyses=analyses,
+                    node_bindings=node_bindings,
+                    essence="result"
+                )
             )
-        )
         for key, value in aux_graphs.items():
+            if key not in aux_graph_keys:
+                continue
             self.response.envelope.message.auxiliary_graphs[key] = AuxiliaryGraph(
-                edges=value['edges'],
-                attributes=[]
+                edges=value['edges']
             )
         self.response.envelope.message.knowledge_graph.edges.update(kg.edges)
         self.response.envelope.message.knowledge_graph.nodes.update(kg.nodes)

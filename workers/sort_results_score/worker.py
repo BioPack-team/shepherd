@@ -6,7 +6,7 @@ import logging
 import uuid
 from shepherd_utils.db import (
     get_message,
-    save_message,
+    save_response,
     get_query_state,
 )
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
@@ -39,19 +39,26 @@ async def sort_results_score(task, logger: logging.Logger):
     # memory on exactly the payloads big enough to be a problem. ``results`` is
     # the same list object as message["message"]["results"], so sorting it in
     # place reorders the message too.
+    # TRAPI 2.0: ``Result.analyses`` is optional (minItems 1 when present).
     for result in results:
+        if not result.get("analyses"):
+            continue
         result["analyses"].sort(
             key=lambda x: x.get("score", 0),
             reverse=reverse,
         )
     if reverse:
         results.sort(
-            key=lambda x: x["analyses"][0].get("score", 0) if x["analyses"] else 0,
+            key=lambda x: (
+                x["analyses"][0].get("score", 0) if x.get("analyses") else 0
+            ),
             reverse=reverse,
         )
     else:
         results.sort(
-            key=lambda x: x["analyses"][-1].get("score", 0) if x["analyses"] else 0,
+            key=lambda x: (
+                x["analyses"][-1].get("score", 0) if x.get("analyses") else 0
+            ),
             reverse=reverse,
         )
     # Reattach so the key exists even when the response arrived without a
@@ -61,7 +68,7 @@ async def sort_results_score(task, logger: logging.Logger):
     logger.info("Returning sorted results.")
 
     # save merged message back to db
-    await save_message(response_id, message, logger)
+    await save_response(response_id, message, logger)
 
 
 async def process_task(task, parent_ctx, logger, limiter):

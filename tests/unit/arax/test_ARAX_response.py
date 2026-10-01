@@ -1,5 +1,6 @@
 """ARAX's own ARAXResponse tests (the unittest block from
-RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_response.py), run against the port.
+RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_response.py), run against the port,
+plus Shepherd's check that its log entries are TRAPI 2.0 LogEntry objects.
 """
 
 import unittest
@@ -36,3 +37,15 @@ class ResponseTests(unittest.TestCase):
 
     def test_show(self):
         self.assertGreater(len(self.response.show(level=self.response.INFO)), 285)
+
+    def test_log_entries_are_trapi2(self):
+        """TRAPI 2.0 LogEntry: RFC 3339 timestamps with an offset, levels from
+        the LogLevel enum."""
+        from datetime import datetime
+
+        from translator_tom.v2_0 import LogEntry
+
+        for entry in self.response.messages:
+            self.assertIsNotNone(datetime.fromisoformat(entry["timestamp"]).utcoffset())
+            self.assertIn(entry["level"], {"ERROR", "WARNING", "INFO", "DEBUG"})
+            LogEntry.from_dict(entry)

@@ -10,6 +10,14 @@
 #     the response=false return
 #   - ARAXResponse.output is not switched to STDERR at import (Shepherd has its own
 #     logging; the response log is unchanged)
+#   - TRAPI 2.0: the envelope carries the query's `parameters` from the start (the Response
+#     repeats them; Expand reads bypass_cache there; log_level stays ignored, ORC-05); the envelope ARAX answers with is made
+#     2.0-valid when query() returns (no nulls, and none of the empty containers 2.0
+#     forbids, e.g. the in-memory Analysis of an edgeless result, which has no bindings);
+#     the incoming QG's qedges may carry 2.0 `constraints` (not 1.x attribute_constraints /
+#     qualifier_constraints); a QG with neither edges nor paths is the 2.0 form of an
+#     edgeless QG (1.x `edges: {}`), no longer a MissingQEdgeAndQPath error; stream
+#     heartbeats carry an RFC 3339 timestamp with offset
 #   - removed as dead code (DEC-5): the RTXKG2 mode (E-5), the ARAXFilter import and the
 #     filter and fetch_message DSL commands (E-4, E-6), the `if False:` block,
 #     query_tracker_reset(), limit_message() and stringify_dict() (no callers)
@@ -26,6 +34,7 @@ import threading
 import requests
 import gc
 import contextlib
+import functools
 
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.actions_parser import ActionsParser
@@ -64,6 +73,94 @@ def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
 
 
 null_context_manager = contextlib.nullcontext()
+
+
+def _drop_empty_bindings(bindings):
+    """A TRAPI 2.0 binding lists at least one id: drop the ones left with none."""
+    if not bindings:
+        return None
+    for key in [key for key, binding in bindings.items() if not binding.ids]:
+        del bindings[key]
+    return bindings or None
+
+
+def _finalizing_trapi2_envelope(query_method):
+    """ARAXQuery.query, then TRAPI 2.0's envelope rules (Shepherd addition): repeat
+    the query's parameters, and no nulls / forbidden empties. Also when query()
+    raises (the exception propagates as upstream's does), since the envelope
+    built so far is still what is returned."""
+    @functools.wraps(query_method)
+    def query(self, query, *args, **kwargs):
+        try:
+            return query_method(self, query, *args, **kwargs)
+        finally:
+            response = self.response
+            if response is not None and response.envelope is not None:
+                parameters = query.get('parameters') if isinstance(query, dict) else None
+                finalize_trapi2_envelope(response.envelope, parameters)
+    return query
+
+
+def finalize_trapi2_envelope(envelope, parameters=None):
+    """Make ARAX's Response envelope valid TRAPI 2.0, in place (Shepherd addition).
+
+    ARAX works on its models the way upstream does, which leaves some containers
+    empty that TRAPI 2.0 forbids to be empty; Model.to_dict() already omits None.
+    This also repeats the query's `parameters`, which a 2.0 server MUST do.
+    """
+    if parameters is not None:
+        envelope.parameters = parameters
+    if not envelope.logs:
+        envelope.logs = None
+    message = envelope.message
+    if message is None:
+        return envelope
+    if not message.auxiliary_graphs:
+        message.auxiliary_graphs = None
+    query_graph = message.query_graph
+    if query_graph is not None:
+        if not query_graph.nodes:
+            message.query_graph = None
+        else:
+            for qnode in query_graph.nodes.values():
+                for attribute_name in ('ids', 'categories', 'constraints'):
+                    if getattr(qnode, attribute_name, None) is not None and not getattr(qnode, attribute_name):
+                        setattr(qnode, attribute_name, None)
+            for qedge in (query_graph.edges or {}).values():
+                if qedge.predicates is not None and not qedge.predicates:
+                    qedge.predicates = None
+                constraints = qedge.constraints
+                if constraints is not None:
+                    for attribute_name in ('attributes', 'qualifiers'):
+                        if getattr(constraints, attribute_name) is not None and not getattr(constraints, attribute_name):
+                            setattr(constraints, attribute_name, None)
+                    if all(getattr(constraints, attribute_name) is None for attribute_name in constraints.openapi_types):
+                        qedge.constraints = None
+            if not query_graph.edges:
+                query_graph.edges = None
+            if not query_graph.paths:
+                query_graph.paths = None
+    for result in message.results or []:
+        if result.node_bindings:
+            _drop_empty_bindings(result.node_bindings)
+        analyses = []
+        for analysis in result.analyses or []:
+            analysis.edge_bindings = _drop_empty_bindings(analysis.edge_bindings)
+            analysis.path_bindings = _drop_empty_bindings(analysis.path_bindings)
+            if not analysis.support_graphs:
+                analysis.support_graphs = None
+            if analysis.edge_bindings or analysis.path_bindings:
+                analyses.append(analysis)
+        result.analyses = analyses or None
+    if message.knowledge_graph is not None and message.knowledge_graph.edges:
+        for edge in message.knowledge_graph.edges.values():
+            if edge.qualifiers is not None and not edge.qualifiers:
+                edge.qualifiers = None
+            for source in edge.sources or []:
+                for attribute_name in ('upstream_resource_ids', 'source_record_urls'):
+                    if getattr(source, attribute_name, None) is not None and not getattr(source, attribute_name):
+                        setattr(source, attribute_name, None)
+    return envelope
 
 
 class response_locking(ARAXResponse):
@@ -152,7 +249,7 @@ class ARAXQuery:
                     time.sleep(0.2)
                     idle_ticks += 0.2
                     if idle_ticks > 180.0:
-                        timestamp = str(datetime.now().isoformat())
+                        timestamp = str(datetime.now().astimezone().isoformat())
                         yield json.dumps({ 'timestamp': timestamp, 'level': 'DEBUG', 'code': '', 'message': 'Query is still progressing...' }) + "\n"
                         idle_ticks = 0.0
             except MemoryError as e:
@@ -289,6 +386,7 @@ class ARAXQuery:
 
 
     ########################################################################################
+    @_finalizing_trapi2_envelope
     def query(self, query, mode='ARAX', origin='local'):
 
         #### Create the skeleton of the response
@@ -325,6 +423,10 @@ class ARAXQuery:
             response.envelope.query_options = query['query_options']
         else:
             response.envelope.query_options = {}
+
+        #### TRAPI 2.0: the query's parameters (the Response repeats them; Expand reads bypass_cache there)
+        if 'parameters' in query and query['parameters'] is not None:
+            response.envelope.parameters = query['parameters']
 
         #### Need to put certain input Query parameters into query_options to later use by Expand et al.
         if 'return_minimal_metadata' in query:
@@ -493,7 +595,7 @@ class ARAXQuery:
 
         # Define allowed qnode and qedge attributes to check later
         allowed_qnode_attributes = { 'ids': 1, 'categories':1, 'is_set': 1, 'set_interpretation': 1, 'set_id': 1, 'member_ids': 1, 'option_group_id': 1, 'name': 1, 'constraints': 1 }
-        allowed_qedge_attributes = { 'predicates': 1, 'subject': 1, 'object': 1, 'option_group_id': 1, 'exclude': 1, 'relation': 1, 'attribute_constraints': 1, 'qualifier_constraints': 1, 'knowledge_type': 1 }
+        allowed_qedge_attributes = { 'predicates': 1, 'subject': 1, 'object': 1, 'option_group_id': 1, 'exclude': 1, 'relation': 1, 'constraints': 1, 'knowledge_type': 1 }
 
         #### Loop through nodes checking the attributes
         for id,qnode in message['query_graph']['nodes'].items():
@@ -503,9 +605,10 @@ class ARAXQuery:
                     return response
 
         #### Check to ensure that either edges EOR paths is present
+        #### (TRAPI 2.0: `edges` has at least one entry, so an edgeless query graph -- 1.x `edges: {}` --
+        #### has neither; ARAX works on it as on the 1.x one, with empty edges, which the Response omits)
         if 'edges' not in message['query_graph'] and 'paths' not in message['query_graph']:
-            response.error("QueryGraph is missing both 'edges' and 'paths'. At least one must be present.", error_code="MissingQEdgeAndQPath")
-            return response
+            message['query_graph']['edges'] = {}
 
         #### Loop through edges checking the attributes
         if 'edges' in message['query_graph']:

@@ -144,13 +144,17 @@ def orchestration(mocker):
             lifecycle.ars_db,
             "load_message_data",
             new_callable=AsyncMock,
+            # the parent's data is the submitted TRAPI 2.0 query
             return_value={
                 "message": {
-                    "query_graph": {"nodes": {}, "edges": {}},
-                    "knowledge_graph": {"nodes": {"n": {}}, "edges": {}},
-                    "results": [{"x": 1}],
-                    "auxiliary_graphs": {"a": {}},
-                }
+                    "query_graph": {
+                        "nodes": {"n0": {"ids": ["X:1"]}, "n1": {}},
+                        "edges": {"e0": {"subject": "n0", "object": "n1"}},
+                    },
+                },
+                "parameters": {"log_level": "DEBUG", "timeout": 300},
+                "workflow": [{"id": "lookup"}],
+                "submitter": "someone",
             },
         ),
         "persist_data_copy": mocker.patch.object(
@@ -247,11 +251,26 @@ async def test_completion_empty_synthesizes_merged_message(orchestration):
     create_kwargs = orchestration["create_message"].await_args.kwargs
     assert create_kwargs.get("agent") == "ars-ars-agent"
 
-    # its payload is the parent's data with results/aux/kg emptied
+    # its payload is a TRAPI 2.0 Response built from the parent's query:
+    # the query graph, an empty knowledge graph and results, no
+    # auxiliary_graphs (minProperties 1), the version stamps, the query's
+    # parameters echoed -- and none of the query-only top-level members
+    from translator_tom import Response
+
+    from shepherd_utils.trapi import BIOLINK_VERSION, SCHEMA_VERSION
+
     saved_pk, saved_payload = orchestration["save_message_data"].await_args.args[:2]
+    query = orchestration["load_message_data"].return_value
     assert saved_payload["message"]["results"] == []
-    assert saved_payload["message"]["auxiliary_graphs"] == {}
+    assert "auxiliary_graphs" not in saved_payload["message"]
     assert saved_payload["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
+    assert saved_payload["message"]["query_graph"] == query["message"]["query_graph"]
+    assert saved_payload["parameters"] == {"log_level": "DEBUG", "timeout": 300}
+    assert saved_payload["schema_version"] == SCHEMA_VERSION
+    assert saved_payload["biolink_version"] == BIOLINK_VERSION
+    assert "workflow" not in saved_payload
+    assert "submitter" not in saved_payload
+    Response.from_dict(saved_payload)
 
     # the parent goes Done and gains its merged_version in ONE claim, so no
     # reader can catch it 'D' with nothing merged
@@ -419,3 +438,34 @@ async def test_live_notify_without_resolvable_subscribers_still_enqueues(
     await notify_mod.notify_subscribers(_done_parent([]), None, LOGGER)
     assert len(replay_env) == 1
     assert "client_pks" not in replay_env[0][1]  # worker falls back to the list
+
+
+@pytest.mark.parametrize(
+    "query",
+    [None, {}, {"message": {}}, {"message": {"query_graph": {}}}, "garbage"],
+)
+def test_empty_merged_response_is_valid_trapi2_for_any_parent_data(query):
+    """No query graph to echo, no parameters: still a valid 2.0 Response."""
+    from translator_tom import Response
+
+    out = lifecycle.empty_merged_response(query)
+    assert out["message"] == {
+        "knowledge_graph": {"nodes": {}, "edges": {}},
+        "results": [],
+    }
+    assert "parameters" not in out
+    Response.from_dict(out)
+
+
+def test_empty_merged_response_does_not_alias_the_query():
+    query = {
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["X:1"]}},
+                "paths": {"p": {"subject": "n0", "object": "n0"}},
+            }
+        }
+    }
+    out = lifecycle.empty_merged_response(query)
+    out["message"]["query_graph"]["nodes"]["n0"]["ids"].append("X:2")
+    assert query["message"]["query_graph"]["nodes"]["n0"]["ids"] == ["X:1"]

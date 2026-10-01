@@ -16,7 +16,7 @@ def test_create_message_basic():
     messenger.create_envelope(response)
     assert response.status == 'OK'
     assert response.envelope.type == 'translator_reasoner_response'
-    assert response.envelope.schema_version == '1.6.0'
+    assert response.envelope.schema_version == '2.0.0'  # TRAPI 2.0: was '1.6.0'
 
 
 def test_create_message_node_edge_types():
