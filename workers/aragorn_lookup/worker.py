@@ -16,11 +16,11 @@ from opentelemetry.propagate import inject
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
     get_message,
     get_running_callbacks,
-    message_exists,
     remove_callback_id,
     save_message,
 )
@@ -246,28 +246,14 @@ async def aragorn_lookup(task, logger: logging.Logger):
         try:
             # see if there are existing lookups going
             running_callback_ids = await get_running_callbacks(query_id, logger)
-            # The callbacks we wait on can only be merged into a query and
-            # response that still exist. If either blob is gone (e.g. Redis
-            # restarted and reloaded an older snapshot), the outstanding
-            # callbacks will never be merged and their rows never cleared, so
-            # waiting out the timeout only delays the failure. An error from
-            # the check itself (Redis down or still loading) is retried below.
-            lost = [
-                message_id
-                for message_id in (query_id, response_id)
-                if running_callback_ids and not await message_exists(message_id)
-            ]
         except Exception:
             # Brief backoff then retry the check rather than giving up
             await asyncio.sleep(5)
             continue
-        if lost:
-            logger.error(
-                f"Query data {lost} is gone from the db; abandoning "
-                f"{len(running_callback_ids)} outstanding lookup(s)."
-            )
-            await cleanup_callbacks(query_id, logger)
-            raise KeyError(f"Failed to get {', '.join(lost)} from db")
+        # fail now if the query data the callbacks merge into is gone
+        await abandon_lookup_if_data_lost(
+            query_id, response_id, running_callback_ids, logger
+        )
         # if there are, continue to wait
         if len(running_callback_ids) > 0:
             await asyncio.sleep(1)

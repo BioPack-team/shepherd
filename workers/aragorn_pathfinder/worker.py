@@ -10,6 +10,7 @@ import httpx
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
     get_message,
@@ -266,6 +267,10 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         while time.time() - start_time < MAX_QUERY_TIME:
             # see if there are existing lookups going
             running_callback_ids = await get_running_callbacks(query_id, logger)
+            # fail now if the query data the callbacks merge into is gone
+            await abandon_lookup_if_data_lost(
+                query_id, response_id, running_callback_ids, logger
+            )
             # logger.info(f"Got back {len(running_callback_ids)} running lookups")
             # if there are, continue to wait
             if len(running_callback_ids) > 0:

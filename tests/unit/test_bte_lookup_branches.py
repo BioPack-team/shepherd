@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from shepherd_utils import shared
+from shepherd_utils.db import save_message
 from workers.bte_lookup import worker as btel
 from workers.bte_lookup.worker import (
     AsyncResponse,
@@ -42,6 +43,13 @@ def _make_task():
             "otel": json.dumps({}),
         },
     ]
+
+
+async def _store_query_data():
+    """Store the task's query and response, which the polling loop checks are
+    still there while callbacks are outstanding."""
+    for message_id in ("qid", "rid"):
+        await save_message(message_id, {"message": {}}, logger)
 
 
 # --- run_async_lookup ----------------------------------------------------
@@ -412,6 +420,7 @@ async def test_bte_lookup_polling_loop_iterates_until_callbacks_drain(
         new_callable=mocker.AsyncMock,
         side_effect=[[("running",)], []],
     )
+    await _store_query_data()
     # Don't actually sleep.
     mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
     await bte_lookup(_make_task(), logger)
@@ -481,6 +490,7 @@ async def test_bte_lookup_timeout_triggers_cleanup_callbacks(redis_mock, mocker)
         new_callable=mocker.AsyncMock,
         return_value=[("still-running",)],
     )
+    await _store_query_data()
 
     # Patch time.time so the loop goes through one iteration and then exceeds
     # the 5s timeout. We can't predict exactly how many ``time.time`` calls

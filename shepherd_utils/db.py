@@ -1160,6 +1160,51 @@ async def cleanup_callbacks(
             break
 
 
+class QueryDataLostError(KeyError):
+    """A running query's query or response blob is gone from the data db."""
+
+
+async def abandon_lookup_if_data_lost(
+    query_id: str,
+    response_id: str,
+    running_callback_ids: List[str],
+    logger: logging.Logger,
+) -> None:
+    """Fail a lookup's callback wait whose query data has been lost.
+
+    The lookup workers wait for their callbacks' rows to clear, which happens
+    once merge_message has merged each one into the query's response. If the
+    query or response blob is gone (e.g. Redis restarted and reloaded an older
+    snapshot), those callbacks can never be merged and their rows never
+    cleared, so waiting out the lookup timeout only delays the failure. Clears
+    the query's callback rows and raises ``QueryDataLostError`` so the task
+    goes straight to ``finish_query`` as an error.
+
+    Only checked while callbacks are outstanding. An error from the check
+    itself (Redis down or still loading) is not data loss: it is logged and
+    the wait carries on.
+    """
+    if not running_callback_ids:
+        return
+    try:
+        lost = [
+            message_id
+            for message_id in (query_id, response_id)
+            if not await message_exists(message_id)
+        ]
+    except Exception as e:
+        logger.warning(f"Couldn't check that query {query_id}'s data is intact: {e}")
+        return
+    if not lost:
+        return
+    logger.error(
+        f"Query data {lost} is gone from the db; abandoning "
+        f"{len(running_callback_ids)} outstanding lookup(s)."
+    )
+    await cleanup_callbacks(query_id, logger)
+    raise QueryDataLostError(f"Failed to get {', '.join(lost)} from db")
+
+
 async def reap_completed_callbacks(logger: logging.Logger) -> int:
     """Delete callback rows whose parent query is already COMPLETED.
 
