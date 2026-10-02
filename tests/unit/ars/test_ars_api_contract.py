@@ -643,6 +643,15 @@ async def test_retain_done_parent(client, db, redis_mock):
     db["retain_tree"].assert_awaited_once()
 
 
+async def test_retain_accepts_any_method(client, db, redis_mock):
+    """Upstream's retain view has no method check, so POST etc. must not 405."""
+    db["parent"]["status"] = "D"
+    for method in ("POST", "PUT", "DELETE", "PATCH"):
+        resp = await client.request(method, f"/api/retain/{db['parent_pk']}")
+        assert resp.status_code == 200, method
+        assert resp.json()["success"] is True, method
+
+
 async def test_get_status_post(client, db, redis_mock):
     pk = str(db["parent_pk"])
     db["get_status_rows"].return_value = {
