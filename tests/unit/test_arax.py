@@ -305,7 +305,11 @@ async def test_query_runs_in_the_pool_when_given_one(db, span, mocker):
     await arax(_task(), logger, pool=pool)
 
     assert pool.run.await_args.args[1] is worker.arax_query_task
-    assert pool.run.await_args.args[2:] == ("query_id", "response_id")
+    query_id, response_id, carrier, submitted_at = pool.run.await_args.args[2:]
+    assert (query_id, response_id) == ("query_id", "response_id")
+    # the task span's context, for the child's spans, and the submit time
+    assert isinstance(carrier, dict)
+    assert isinstance(submitted_at, float)
     assert store["response_id"]["status"] == "Success"
 
 

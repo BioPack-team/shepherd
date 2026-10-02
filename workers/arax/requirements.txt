@@ -12,3 +12,7 @@ pandas
 python-dateutil
 requests
 requests-cache==1.2.1
+# Client spans for ARAX's KP, Node Normalizer and Connect calls
+# (shepherd_utils.arax_tracing)
+opentelemetry-instrumentation-aiohttp-client==0.63b1
+opentelemetry-instrumentation-requests==0.63b1
