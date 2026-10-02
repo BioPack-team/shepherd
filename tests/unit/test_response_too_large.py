@@ -743,6 +743,27 @@ async def test_merge_drops_callbacks_the_query_no_longer_waits_for(
     assert await get_ready_callbacks("r1", logger) == []
 
 
+@pytest.mark.parametrize("lost", ["q1", "r1"])
+async def test_merge_discards_callbacks_when_the_query_data_is_gone(
+    merge_query, mocker, monkeypatch, lost
+):
+    """The query or its response blob vanished (e.g. Redis restarted and
+    reloaded an older snapshot): nothing can be merged, so the ready
+    callbacks and their rows are cleared -- releasing the lookup waiting on
+    them -- instead of failing and retrying every pass."""
+    monkeypatch.setattr(settings, "max_response_size", "0")
+    await db_module.data_db_client.delete(lost)
+    pool = _FakePool([])
+
+    reenqueued = await _drive_merge(mocker, pool, _wake_task())
+
+    assert pool.calls == []
+    assert await get_ready_callbacks("r1", logger) == []
+    removed = {c.args[0] for c in merge_worker.remove_callback_id.await_args_list}
+    assert removed == {"cb1", "cb2"}
+    reenqueued.assert_not_awaited()
+
+
 async def test_merge_does_nothing_when_no_callback_is_wanted(
     merge_query, mocker, monkeypatch
 ):
