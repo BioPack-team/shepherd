@@ -18,6 +18,7 @@ from opentelemetry.propagate import extract, inject
 from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    DatabaseUnavailableError,
     DecompressedTooLargeError,
     add_query,
     add_ready_callback,
@@ -864,7 +865,15 @@ async def query_status(
     logger = logging.getLogger("shepherd.query_status")
     logger.setLevel(logging.INFO)
     attach_query_handler(logger)
-    query_state = await get_query_state(qid, logger)
+    try:
+        # Unreachable must not read as "not found": a client told 404 stops
+        # asking about a query that may be running fine.
+        query_state = await get_query_state(qid, logger, raise_on_unavailable=True)
+    except DatabaseUnavailableError:
+        return JSONResponse(
+            content={"error": "Query state temporarily unavailable"},
+            status_code=503,
+        )
     if query_state is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
 

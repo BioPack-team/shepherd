@@ -15,6 +15,7 @@ from opentelemetry.trace import Status, StatusCode, get_current_span
 from shepherd_utils.ars.handoff import parse_handoff_callback
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.db import (
+    DatabaseUnavailableError,
     ResponseTooLargeError,
     cleanup_callbacks,
     enforce_response_size_limit,
@@ -69,6 +70,35 @@ CALLBACK_ERROR_BODY_BYTES = 500
 # note is in the query's own logs either way, so oversized payloads just skip
 # the inline copy.
 RETRY_LOG_SPLICE_MAX_BYTES = 64 * 1024 * 1024
+
+
+# How long finish_query waits out a Postgres outage before giving up on a
+# query, and how often it looks again meanwhile. Everything this worker does
+# needs Postgres, and giving up drops the query on the floor (the task is acked
+# either way), so it waits rather than failing at the first unreachable read.
+DB_WAIT_SEC = 600
+DB_RETRY_SEC = 5
+
+
+async def _wait_for_query_state(query_id: str, logger: logging.Logger):
+    """``get_query_state``, waiting out a Postgres outage.
+
+    A row of None from a reachable database really means "no such query";
+    an unreachable one used to read the same way, and the query was then
+    finished without being delivered or marked complete.
+    """
+    deadline = time.time() + DB_WAIT_SEC
+    while True:
+        try:
+            return await get_query_state(query_id, logger, raise_on_unavailable=True)
+        except DatabaseUnavailableError as e:
+            if time.time() >= deadline:
+                raise
+            logger.warning(
+                f"Postgres unavailable finishing {query_id}; retrying in "
+                f"{DB_RETRY_SEC}s: {e}"
+            )
+            await asyncio.sleep(DB_RETRY_SEC)
 
 
 # ``status`` recorded in ``shepherd_brain`` for a query whose response was lost
@@ -360,7 +390,7 @@ async def finish_query(task, logger: logging.Logger):
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
     status = task[1].get("status", "OK")
-    query_state = await get_query_state(query_id, logger)
+    query_state = await _wait_for_query_state(query_id, logger)
 
     if query_state is None:
         logger.error(f"Query id {query_id} not found in db.")

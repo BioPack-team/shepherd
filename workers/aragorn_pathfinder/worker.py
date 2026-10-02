@@ -265,8 +265,13 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     running_callback_ids = [""]
     try:
         while time.time() - start_time < MAX_QUERY_TIME:
-            # see if there are existing lookups going
-            running_callback_ids = await get_running_callbacks(query_id, logger)
+            try:
+                # see if there are existing lookups going
+                running_callback_ids = await get_running_callbacks(query_id, logger)
+            except Exception:
+                # Brief backoff then retry the check rather than giving up
+                await asyncio.sleep(5)
+                continue
             # fail now if the query data the callbacks merge into is gone
             await abandon_lookup_if_data_lost(
                 query_id, response_id, running_callback_ids, logger

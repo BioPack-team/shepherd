@@ -37,6 +37,16 @@ def is_disk_full_error(exc: BaseException) -> bool:
     return getattr(exc, "sqlstate", None) == PG_DISK_FULL_SQLSTATE
 
 
+class DatabaseUnavailableError(Exception):
+    """Postgres couldn't be reached (or refused the write) after the retries.
+
+    Raised instead of returning a default the caller can't tell from a real
+    answer -- an empty list read as "no callbacks outstanding", ``None`` read
+    as "no such query" -- which turned a Postgres outage of more than a few
+    seconds into silently wrong behavior.
+    """
+
+
 def log_pg_disk_full(
     logger: logging.Logger, operation: str, exc: BaseException
 ) -> None:
@@ -1007,7 +1017,14 @@ async def add_callback_id(
     otel_trace: str,
     logger: logging.Logger,
 ):
-    """Add a callback->query mapping."""
+    """Add a callback->query mapping.
+
+    Raises ``DatabaseUnavailableError`` if the row can't be written: a lookup
+    sent out with an unregistered callback id has its results rejected when
+    they come back (nothing maps them to a query), so the caller must not
+    send it.
+    """
+    last_error: Optional[Exception] = None
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(settings.postgres_pool_timeout) as conn:
@@ -1024,8 +1041,9 @@ async def add_callback_id(
                     ),
                 )
                 await conn.commit()
-            break
+            return
         except OperationalError as e:
+            last_error = e
             if is_disk_full_error(e):
                 log_pg_disk_full(logger, "add_callback_id", e)
                 break
@@ -1035,7 +1053,10 @@ async def add_callback_id(
             continue
         except Exception as e:
             logger.error(f"Failed to save callback: {e}")
-            break
+            raise
+    raise DatabaseUnavailableError(
+        f"Couldn't register callback {callback_id}: {last_error}"
+    ) from last_error
 
 
 async def remove_callback_id(
@@ -1073,8 +1094,13 @@ async def get_running_callbacks(
     query_id: str,
     logger: logging.Logger,
 ) -> List[str]:
-    """Get all currently running callbacks for a single query."""
-    running_lookups = []
+    """Get all currently running callbacks for a single query.
+
+    Raises ``DatabaseUnavailableError`` when Postgres can't be read: an empty
+    list here means every lookup is back, and the lookup workers would move
+    the query on with partial results.
+    """
+    last_error: Optional[Exception] = None
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(settings.postgres_pool_timeout) as conn:
@@ -1084,10 +1110,9 @@ async def get_running_callbacks(
                 """,
                     (query_id,),
                 )
-                rows = await cursor.fetchall()
-                running_lookups = rows
-            break
+                return await cursor.fetchall()
         except OperationalError as e:
+            last_error = e
             if is_disk_full_error(e):
                 log_pg_disk_full(logger, "get_running_callbacks", e)
                 break
@@ -1100,7 +1125,9 @@ async def get_running_callbacks(
         except Exception as e:
             logger.error(f"Failed to get running lookups: {e}")
             raise
-    return running_lookups
+    raise DatabaseUnavailableError(
+        f"Couldn't read the running callbacks of {query_id}: {last_error}"
+    ) from last_error
 
 
 async def get_existing_callback_ids(
@@ -1504,9 +1531,17 @@ async def get_recent_queries(
 async def get_query_state(
     query_id: str,
     logger: logging.Logger,
+    raise_on_unavailable: bool = False,
 ):
-    """Get the query state."""
+    """Get the query state: its ``shepherd_brain`` row, or None.
+
+    By default None also stands in for "Postgres couldn't be read", which
+    suits the callers that poll and just try again. A caller for which None
+    means "no such query" -- one that would give up on it -- passes
+    ``raise_on_unavailable`` to get ``DatabaseUnavailableError`` instead.
+    """
     query_state = None
+    last_error: Optional[Exception] = None
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(settings.postgres_pool_timeout) as conn:
@@ -1516,10 +1551,9 @@ async def get_query_state(
                 """,
                     (query_id,),
                 )
-                row = await cursor.fetchone()
-                query_state = row
-            break
+                return await cursor.fetchone()
         except OperationalError as e:
+            last_error = e
             if is_disk_full_error(e):
                 log_pg_disk_full(logger, "get_query_state", e)
                 break
@@ -1531,7 +1565,12 @@ async def get_query_state(
             continue
         except Exception as e:
             logger.error(f"Failed to get query state: {e}")
+            last_error = e
             break
+    if raise_on_unavailable:
+        raise DatabaseUnavailableError(
+            f"Couldn't read the state of query {query_id}: {last_error}"
+        ) from last_error
     return query_state
 
 

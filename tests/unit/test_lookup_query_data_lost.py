@@ -176,3 +176,22 @@ async def test_worker_fails_fast_when_the_query_data_is_gone(lookup, cleanup):
     # cleared the outstanding callback rows on the way out
     assert lookup["running"].await_count == 1
     cleanup.assert_awaited_once_with("qid", logger)
+
+
+async def test_worker_waits_out_a_postgres_outage(lookup, cleanup):
+    """Postgres unreachable is not "every callback is back": the wait goes on
+    until it can read the callbacks again, then sees them through."""
+    from shepherd_utils.db import DatabaseUnavailableError
+
+    await _store("qid", "rid")
+    lookup["running"].side_effect = [
+        ["cb1"],
+        DatabaseUnavailableError("connection refused"),
+        ["cb1"],
+        [],
+    ]
+
+    await lookup["run"](_task(), logger)
+
+    assert lookup["running"].await_count == 4
+    cleanup.assert_not_awaited()
