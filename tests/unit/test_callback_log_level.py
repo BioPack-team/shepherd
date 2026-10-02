@@ -214,3 +214,34 @@ async def test_callback_is_stored_as_it_was_posted(redis_mock, monkeypatch):
     assert response.status_code == 200
     assert tasks and tasks[0][0] == "merge_message"
     assert await get_message("cb-7", logger) == body
+
+
+@pytest.mark.asyncio
+async def test_callback_that_cannot_be_stored_asks_for_redelivery(
+    redis_mock, monkeypatch
+):
+    """A payload that can't be saved (e.g. Redis down or restarting) is never
+    acknowledged: the sender gets a 500 and redelivers, and the callback is
+    not recorded as ready -- which would have merge_message skip it as
+    missing and silently drop its results."""
+    tasks = _patch_callback_deps(monkeypatch)
+    await save_message("q-1", {"message": {}}, logger)
+    ready = []
+
+    async def _add_ready_callback(response_id, callback_id, logger):
+        ready.append(callback_id)
+
+    async def _save_message(callback_id, response, logger, **kwargs):
+        assert kwargs.get("raise_on_failure") is True
+        raise ConnectionError("Error 111 connecting to shepherd_broker:6379")
+
+    monkeypatch.setattr(base_routes, "add_ready_callback", _add_ready_callback)
+    monkeypatch.setattr(base_routes, "save_message", _save_message)
+
+    response = await callback(
+        ARATargetEnum.ARAGORN, "cb-8", _make_request(_callback_body())
+    )
+
+    assert response.status_code == 500
+    assert ready == []
+    assert tasks == []

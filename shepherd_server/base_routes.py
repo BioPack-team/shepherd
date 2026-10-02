@@ -791,7 +791,20 @@ async def callback(
     response_id = query_state[7]
     # save callback to redis
     logger.debug(f"Saving callback {callback_id} to redis")
-    await save_message(callback_id, response, logger)
+    try:
+        # Strict: if the payload can't be stored, the sender has to be told so
+        # it redelivers. Swallowing the failure and carrying on (as this used
+        # to) could still record the callback as ready once Redis was back --
+        # e.g. across a Redis restart -- and merge_message would then skip it
+        # as missing, silently dropping results the sender was told arrived.
+        await save_message(callback_id, response, logger, raise_on_failure=True)
+    except Exception:
+        logger.error(
+            f"[{callback_id}] could not save callback payload after retries; "
+            "asking the sender to retry delivery"
+        )
+        await save_logs(response_id, logger)
+        return Response("Failed to save callback.", 500)
     logger.debug(f"Saved callback {callback_id} to redis")
     # Record this callback in the per-query ready index *before* enqueuing the
     # wake task, so that whichever merge_message worker picks up the wake signal
