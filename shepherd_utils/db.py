@@ -228,6 +228,23 @@ _SCHEMA_UPGRADES = (
         "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_response_id "
         "ON shepherd_brain (response_id)",
     ),
+    # The monitor's recent-query counts (last 1h/24h, per ARA) are time
+    # windows; without this each one was a scan of the whole retention window.
+    # Carrying ``domain`` lets the per-ARA count be an index-only scan.
+    (
+        "idx_shepherd_brain_start_time",
+        "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_start_time "
+        "ON shepherd_brain (start_time) INCLUDE (domain)",
+    ),
+    # Just the unfinished queries, which are a sliver of the table: what the
+    # abandoned-query reaper and the post-Redis-restart sweep look for. Their
+    # predicate must match this one for the planner to use it.
+    (
+        "idx_shepherd_brain_unfinished",
+        "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_unfinished "
+        "ON shepherd_brain (start_time) "
+        "WHERE state NOT IN ('COMPLETED', 'ABANDONED')",
+    ),
 )
 
 

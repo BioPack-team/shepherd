@@ -237,10 +237,17 @@ def _note_pg_unreachable(exc: Exception) -> None:
 
 
 async def _collect_postgres() -> Dict[str, Any]:
-    """Query state breakdown, callback backlog, ARA volume."""
+    """Query state breakdown, callback backlog, ARA volume.
+
+    This runs every poll tick (a few seconds), so everything here must stay
+    cheap as ``shepherd_brain`` grows over its retention window: the recent
+    windows are an index range scan (``idx_shepherd_brain_start_time``), and
+    the per-state counts of *unfinished* queries ride the partial
+    ``idx_shepherd_brain_unfinished``. The finished-query counts, which need
+    the whole table and barely move, come from ``_collect_postgres_slow``.
+    """
     snapshot: Dict[str, Any] = {
         "state_counts": {},
-        "status_counts": {},
         "queries_last_1h": 0,
         "queries_last_24h": 0,
         "callbacks_pending": 0,
@@ -250,50 +257,43 @@ async def _collect_postgres() -> Dict[str, Any]:
     }
     try:
         async with pg_pool.connection(settings.postgres_pool_timeout) as conn:
-            cur = await conn.execute(
-                "SELECT state, COUNT(*) FROM shepherd_brain GROUP BY state"
-            )
-            for state, count in await cur.fetchall():
-                snapshot["state_counts"][state or "UNKNOWN"] = int(count)
-
-            cur = await conn.execute(
-                "SELECT status, COUNT(*) FROM shepherd_brain GROUP BY status"
-            )
-            for status, count in await cur.fetchall():
-                snapshot["status_counts"][status or "UNKNOWN"] = int(count)
-
-            cur = await conn.execute(
-                "SELECT COUNT(*) FROM shepherd_brain WHERE start_time > NOW() - INTERVAL '1 hour'"
-            )
-            row = await cur.fetchone()
-            snapshot["queries_last_1h"] = int(row[0] or 0)
-
-            cur = await conn.execute(
-                "SELECT COUNT(*) FROM shepherd_brain WHERE start_time > NOW() - INTERVAL '24 hours'"
-            )
-            row = await cur.fetchone()
-            snapshot["queries_last_24h"] = int(row[0] or 0)
-
-            cur = await conn.execute("SELECT COUNT(*) FROM callbacks")
-            row = await cur.fetchone()
-            snapshot["callbacks_pending"] = int(row[0] or 0)
-
             cur = await conn.execute("""
-                SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(b.start_time))), 0)
-                FROM callbacks c
-                JOIN shepherd_brain b ON b.qid = c.query_id
+                SELECT state, COUNT(*) FROM shepherd_brain
+                WHERE state NOT IN ('COMPLETED', 'ABANDONED')
+                GROUP BY state
                 """)
-            row = await cur.fetchone()
-            snapshot["oldest_callback_age_sec"] = float(row[0] or 0)
+            for state, count in await cur.fetchall():
+                snapshot["state_counts"][state] = int(count)
 
+            # One range scan for the 24h window, the 1h window inside it, and
+            # the per-ARA split.
             cur = await conn.execute("""
-                SELECT domain, COUNT(*) FROM shepherd_brain
+                SELECT domain,
+                       COUNT(*),
+                       COUNT(*) FILTER (
+                           WHERE start_time > NOW() - INTERVAL '1 hour'
+                       )
+                FROM shepherd_brain
                 WHERE start_time > NOW() - INTERVAL '24 hours'
                 GROUP BY domain
                 """)
-            for domain, count in await cur.fetchall():
+            for domain, last_24h, last_1h in await cur.fetchall():
+                snapshot["queries_last_24h"] += int(last_24h or 0)
+                snapshot["queries_last_1h"] += int(last_1h or 0)
                 if domain:
-                    snapshot["per_ara_24h"][domain] = int(count)
+                    snapshot["per_ara_24h"][domain] = int(last_24h or 0)
+
+            # qid is the primary key, so the join never multiplies a callback;
+            # LEFT keeps the count to every row, as COUNT(*) FROM callbacks.
+            cur = await conn.execute("""
+                SELECT COUNT(*),
+                       COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(b.start_time))), 0)
+                FROM callbacks c
+                LEFT JOIN shepherd_brain b ON b.qid = c.query_id
+                """)
+            row = await cur.fetchone()
+            snapshot["callbacks_pending"] = int(row[0] or 0)
+            snapshot["oldest_callback_age_sec"] = float(row[1] or 0)
 
             cur = await conn.execute(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
@@ -305,6 +305,40 @@ async def _collect_postgres() -> Dict[str, Any]:
         _note_pg_unreachable(e)
         snapshot["error"] = str(e)
     return snapshot
+
+
+# The whole-table finished-query counts and the on-disk size, refreshed once
+# per ``monitor_history_interval_sec`` instead of every tick: they need a scan
+# of the whole retention window (or of every data file), and they move far too
+# slowly for anyone to see the difference. Kept between refreshes here.
+_pg_slow: Dict[str, Any] = {}
+_pg_slow_at = 0.0
+
+
+async def _collect_postgres_slow() -> Dict[str, Any]:
+    """Finished-query counts by state, plus DB/WAL size; cached between
+    refreshes. A failed refresh keeps the last values and retries next tick."""
+    global _pg_slow, _pg_slow_at
+    now = time.time()
+    if _pg_slow and now - _pg_slow_at < settings.monitor_history_interval_sec:
+        return _pg_slow
+    finished: Dict[str, int] = {}
+    try:
+        async with pg_pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute("""
+                SELECT state, COUNT(*) FROM shepherd_brain
+                WHERE state IS NULL OR state IN ('COMPLETED', 'ABANDONED')
+                GROUP BY state
+                """)
+            for state, count in await cur.fetchall():
+                finished[state or "UNKNOWN"] = int(count)
+    except Exception as e:
+        logger.debug(f"Couldn't refresh the finished-query counts: {e}")
+        return _pg_slow
+    sizes = await _collect_postgres_size()
+    _pg_slow = {"finished_state_counts": finished, **sizes}
+    _pg_slow_at = now
+    return _pg_slow
 
 
 # Previous ``evicted_keys`` counter reading, so we can expose a per-tick delta
@@ -613,14 +647,19 @@ async def collect_snapshot() -> Dict[str, Any]:
         _known_workers(),
     )
     streams = _discover_streams(workers, known)
-    stream_stats, pg_state, redis_info, pg_sizes = await asyncio.gather(
+    stream_stats, pg_state, redis_info, pg_slow = await asyncio.gather(
         _collect_streams(streams),
         _collect_postgres(),
         _collect_redis_info(),
-        _collect_postgres_size(),
+        _collect_postgres_slow(),
     )
-    db_size = pg_sizes.get("db_size_bytes", 0)
-    wal_size = pg_sizes.get("wal_size_bytes", 0)
+    # live unfinished counts on top of the cached finished ones
+    pg_state["state_counts"] = {
+        **pg_slow.get("finished_state_counts", {}),
+        **pg_state["state_counts"],
+    }
+    db_size = pg_slow.get("db_size_bytes", 0)
+    wal_size = pg_slow.get("wal_size_bytes", 0)
     capacity = settings.pg_volume_capacity_bytes
     on_disk = db_size + wal_size
     pg_state["db_size_bytes"] = db_size
