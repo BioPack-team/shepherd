@@ -504,7 +504,8 @@ async def _retain_all(parent_mesg, json_response):
     return json_response
 
 
-@route("/api/retain/{key}", ["GET"])
+# Upstream's retain view has no method check: any verb retains the tree.
+@route("/api/retain/{key}", ["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def retain(key: str) -> Response:
     pk = _parse_uuid(key)
     if pk is None:
