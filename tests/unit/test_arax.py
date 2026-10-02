@@ -409,3 +409,120 @@ async def test_kp_cache_refresh_loop_is_off_when_disabled(mocker):
     mocker.patch.object(worker.settings, "arax_kp_cache_enabled", False)
     await worker.kp_cache_refresh_loop(None, logger)
     once.assert_not_called()
+
+
+# --- pool children: prewarm and cold-start tracing ---
+
+
+def _child_state():
+    """Run in a pool child: what its setup looked like before this task."""
+    startup = dict(worker._child_startup)
+    did_setup = worker.prepare_pool_child()
+    return startup, did_setup
+
+
+@pytest.mark.asyncio
+async def test_prewarmed_child_is_ready_before_its_first_task(monkeypatch):
+    import asyncio
+
+    from shepherd_utils.process_pool import ProcessPoolManager
+
+    # inherited by the spawned child: no OTLP exporter there
+    monkeypatch.setenv("OTEL_ENABLED", "false")
+    pool = ProcessPoolManager(
+        max_workers=1, name="test arax pool", warmup=worker._warm_pool_child
+    )
+    try:
+        startup, did_setup = await pool.run(asyncio.get_running_loop(), _child_state)
+    finally:
+        pool.shutdown()
+    assert startup["prewarmed"] is True
+    assert did_setup is False
+    assert (
+        startup["process_started_ns"]
+        <= startup["setup_started_ns"]
+        <= startup["tracer_ready_ns"]
+        <= startup["arax_ready_ns"]
+    )
+
+
+def test_process_start_time_is_in_the_past():
+    import time
+
+    started = worker._process_started_ns()
+    assert started is not None
+    assert time.time_ns() - 24 * 3600 * 10**9 < started <= time.time_ns()
+
+
+@pytest.fixture
+def child_spans(monkeypatch, mocker):
+    """Run arax_query_task as a fresh pool child, recording its spans."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(worker, "tracer", provider.get_tracer("test"))
+    monkeypatch.setattr(worker, "_child_startup", {})
+    monkeypatch.setattr(worker, "_child_tasks", 0)
+    mocker.patch(
+        "workers.arax.worker.multiprocessing.parent_process", return_value=object()
+    )
+    mocker.patch("workers.arax.worker.setup_pool_child_tracer")
+    mocker.patch("workers.arax.worker.instrument_arax")
+    exporter.tracer = provider.get_tracer("test")
+    return exporter
+
+
+def _query_spans(exporter):
+    by_name = {}
+    for span in exporter.get_finished_spans():
+        by_name.setdefault(span.name, []).append(span)
+    return by_name
+
+
+def test_cold_child_records_its_startup_beside_the_query(db, child_spans):
+    from opentelemetry.propagate import inject
+
+    db(OPERATIONS_QUERY)
+    with child_spans.tracer.start_as_current_span("arax") as task_span:
+        carrier = {}
+        inject(carrier)
+    worker.arax_query_task("query_id", "r1", carrier)
+    worker.arax_query_task("query_id", "r2", carrier)
+
+    spans = _query_spans(child_spans)
+    (startup,) = spans["arax.pool.child_startup"]
+    first, second = spans["arax.query"]
+    task_span_id = task_span.get_span_context().span_id
+    assert startup.parent.span_id == task_span_id
+    assert first.parent.span_id == task_span_id
+    for key in (
+        "arax.pool.spawn_and_import_ms",
+        "arax.pool.tracer_setup_ms",
+        "arax.pool.arax_import_ms",
+    ):
+        assert startup.attributes[key] >= 0
+    assert startup.end_time <= first.start_time
+    assert first.attributes["arax.pool.child_cold"] is True
+    assert first.attributes["arax.pool.child_prewarmed"] is False
+    assert first.attributes["arax.pool.child_task_number"] == 1
+    # the same child's next query is warm, with no startup span
+    assert second.attributes["arax.pool.child_cold"] is False
+    assert second.attributes["arax.pool.child_task_number"] == 2
+
+
+def test_prewarmed_child_has_no_startup_span(db, child_spans):
+    db(OPERATIONS_QUERY)
+    worker._warm_pool_child()
+    worker.arax_query_task("query_id", "r1")
+
+    spans = _query_spans(child_spans)
+    assert "arax.pool.child_startup" not in spans
+    (query,) = spans["arax.query"]
+    assert query.attributes["arax.pool.child_cold"] is False
+    assert query.attributes["arax.pool.child_prewarmed"] is True

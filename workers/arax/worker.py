@@ -15,11 +15,20 @@ from a carrier the parent injects (``setup_pool_child_tracer``). The child's
 ``arax.query`` span holds ``arax.load_query``, ARAX's own steps -- one span
 per ARAXi action, per KP Expand queried, and the HTTP calls beneath them
 (``shepherd_utils.arax_tracing``) -- and ``arax.save_response``.
+
+Pool children are prewarmed (``pool_prewarm``): each one sets up tracing and
+imports the ARAX library when the pool is built, not on a query's critical
+path. A child that still starts cold (prewarm off, or a replacement after
+``max_tasks_per_child`` recycling or a pool rebuild) records its startup as an
+``arax.pool.child_startup`` span beside ``arax.query``, and every
+``arax.query`` says whether its child was cold.
 """
 
 import asyncio
 import json
 import logging
+import multiprocessing
+import os
 import time
 import uuid
 
@@ -71,6 +80,10 @@ ARAX_WORKER_DBS = (
     ARAX_FDA_APPROVED_DRUGS,
     ARAX_COHD,
 )
+# This process's pool-child setup (done once, by the warmup or the first task)
+# and the number of tasks it has run
+_child_startup: dict = {}
+_child_tasks = 0
 # Used when ARAX produced a response that can't be returned at all. ARAX's
 # /query fails the same way (its child process dies serializing it).
 INTERNAL_ERROR = 500
@@ -220,6 +233,102 @@ def arax_log_entries(response: dict) -> list:
     ]
 
 
+def _process_started_ns() -> int | None:
+    """When this process started (epoch ns, ~10 ms resolution), from /proc.
+
+    That is when the pool spawned it, so a span from here covers interpreter
+    start-up and the spawn's re-import of this module too. None off Linux.
+    """
+    try:
+        with open("/proc/self/stat") as f:
+            # field 22, starttime (clock ticks after boot); the command name
+            # (field 2) is parenthesized and may contain spaces
+            start_ticks = int(f.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+        age = uptime - start_ticks / os.sysconf("SC_CLK_TCK")
+        return time.time_ns() - int(max(0.0, age) * 1e9)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def prepare_pool_child(prewarmed: bool = False) -> bool:
+    """Set up a pool child to run queries: its tracer, and the ARAX library
+    (imported by ``instrument_arax``), which takes seconds on a cold start.
+
+    Runs once per process; returns whether this call did the work. The
+    timings are kept for the first query's ``arax.pool.child_startup`` span.
+    """
+    if _child_startup:
+        return False
+    process_started_ns = _process_started_ns()
+    setup_started_ns = time.time_ns()
+    setup_pool_child_tracer(STREAM)
+    tracer_ready_ns = time.time_ns()
+    instrument_arax(http_clients=settings.otel_enabled)
+    _child_startup.update(
+        process_started_ns=process_started_ns or setup_started_ns,
+        setup_started_ns=setup_started_ns,
+        tracer_ready_ns=tracer_ready_ns,
+        arax_ready_ns=time.time_ns(),
+        prewarmed=prewarmed,
+    )
+    return True
+
+
+def _warm_pool_child() -> None:
+    """Pool prewarm hook (``ProcessPoolManager(warmup=...)``)."""
+    try:
+        prepare_pool_child(prewarmed=True)
+    except Exception as e:
+        # The first query then does the setup, and its trace shows it
+        logging.warning(f"arax pool child warmup failed: {type(e).__name__}: {e}")
+        return
+    startup = _child_startup
+    logging.info(
+        "arax pool child ready in "
+        f"{(startup['arax_ready_ns'] - startup['process_started_ns']) / 1e9:.1f}s "
+        f"(ARAX import {(startup['arax_ready_ns'] - startup['tracer_ready_ns']) / 1e9:.1f}s)"
+    )
+
+
+def _record_child_startup(parent_ctx) -> None:
+    """A cold child's startup, as a span beside ``arax.query``: it accounts for
+    the part of ``arax.pool.wait_ms`` the query spent waiting on the child."""
+    startup = _child_startup
+    span = tracer.start_span(
+        "arax.pool.child_startup",
+        context=parent_ctx,
+        start_time=startup["process_started_ns"],
+    )
+    ms = 1e6
+    span.set_attribute("arax.pool.child_pid", os.getpid())
+    span.set_attribute(
+        "arax.pool.spawn_and_import_ms",
+        (startup["setup_started_ns"] - startup["process_started_ns"]) / ms,
+    )
+    span.set_attribute(
+        "arax.pool.tracer_setup_ms",
+        (startup["tracer_ready_ns"] - startup["setup_started_ns"]) / ms,
+    )
+    span.set_attribute(
+        "arax.pool.arax_import_ms",
+        (startup["arax_ready_ns"] - startup["tracer_ready_ns"]) / ms,
+    )
+    span.add_event("worker module imported", timestamp=startup["setup_started_ns"])
+    span.add_event("tracer ready", timestamp=startup["tracer_ready_ns"])
+    span.end(end_time=startup["arax_ready_ns"])
+
+
+def _set_pool_attributes(span, cold: bool) -> None:
+    span.set_attribute("arax.pool.child_cold", cold)
+    span.set_attribute(
+        "arax.pool.child_prewarmed", bool(_child_startup.get("prewarmed"))
+    )
+    span.set_attribute("arax.pool.child_task_number", _child_tasks)
+    span.set_attribute("arax.pool.child_pid", os.getpid())
+
+
 def arax_query_task(
     query_id: str,
     response_id: str,
@@ -245,11 +354,19 @@ def arax_query_task(
     under it. ``submitted_at`` (``time.time()`` in the parent) gives the time
     the task waited for a free pool child.
     """
-    setup_pool_child_tracer(STREAM)
-    instrument_arax(http_clients=settings.otel_enabled)
+    global _child_tasks
+    cold = prepare_pool_child()
+    _child_tasks += 1
+    # A spawned pool child, not the worker itself (which runs the task on a
+    # thread when it has no pool)
+    in_pool_child = multiprocessing.parent_process() is not None
     parent_ctx = extract(otel_carrier) if otel_carrier else None
+    if cold and in_pool_child:
+        _record_child_startup(parent_ctx)
     with tracer.start_as_current_span("arax.query", context=parent_ctx) as span:
         span.set_attribute("arax.response_id", response_id)
+        if in_pool_child:
+            _set_pool_attributes(span, cold)
         if submitted_at is not None:
             span.set_attribute(
                 "arax.pool.wait_ms", max(0.0, (time.time() - submitted_at) * 1000)
@@ -526,6 +643,8 @@ async def poll_for_tasks():
         max_tasks_per_child=settings.pool_max_tasks_per_child,
         name="arax process pool",
         task_timeout=settings.pool_task_timeout_sec,
+        # Each child imports ARAX (seconds, cold) before the first query needs it
+        warmup=_warm_pool_child if settings.pool_prewarm else None,
     )
     while True:
         try:
