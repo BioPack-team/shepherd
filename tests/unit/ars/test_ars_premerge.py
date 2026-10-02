@@ -512,13 +512,34 @@ async def test_intake_errored_child_skips(env, intake, redis_mock):
     assert await _merge_tasks() == []
 
 
-async def test_intake_missing_blob_leaves_child_running(env, intake, redis_mock):
-    """No stored response = the callback never arrived: the child stays R
-    for the watchdog, and nothing is notified or saved."""
+async def test_intake_missing_blob_fails_the_child(env, intake, redis_mock):
+    """A finished response whose blob is gone (e.g. lost in a Redis restart)
+    will never be re-delivered: the child fails E/500 right away and the
+    parent completion check runs, instead of the child sitting Running until
+    the watchdog times it out."""
     intake["get_message"].side_effect = KeyError("gone")
     await pm.ars_premerge(_intake_task(env), LOGGER)
     env["notify"].assert_not_awaited()
+    final = _final_status_update(env)
+    assert final["status"] == "E"
+    assert final["code"] == 500
+    saved = env["save_message_data"].await_args_list[-1].args[1]
+    assert any(e["message"] == "Internal ARS Server Error" for e in saved["logs"])
+    env["completion"].assert_awaited_once_with(env["parent_pk"], LOGGER)
+    assert await _merge_tasks() == []
+
+
+@pytest.mark.parametrize("status", ["D", "E"])
+async def test_intake_missing_blob_leaves_terminal_child_alone(
+    env, intake, redis_mock, status
+):
+    """A child the watchdog (or an earlier delivery) already finished is not
+    rewritten when its response blob turns out to be missing."""
+    env["child_row"]["status"] = status
+    intake["get_message"].side_effect = KeyError("gone")
+    await pm.ars_premerge(_intake_task(env), LOGGER)
     env["update_message"].assert_not_awaited()
+    env["save_message_data"].assert_not_awaited()
     env["completion"].assert_not_awaited()
 
 
