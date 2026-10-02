@@ -583,6 +583,13 @@ class Settings(BaseSettings):
     # exceed the whole-query upstream budget (~5 min) so genuinely in-flight
     # queries are never reaped; the default matches the callback-age alert.
     monitor_abandoned_query_sec: float = 600.0
+    # After a broker Redis restart (spotted by its run_id changing), the
+    # monitor waits for Redis to finish loading and then this long before
+    # finishing, as errors, the queries that lost their data in it (see
+    # workers/monitor/recovery.py). The wait lets the workers that were
+    # holding those queries fail them on their own first, so none is
+    # finished twice.
+    monitor_redis_restart_grace_sec: float = 60.0
     monitor_alerts_config: str = "/app/monitor_alerts.yaml"
     slack_webhook_url: str = ""
     alert_email_to: str = ""

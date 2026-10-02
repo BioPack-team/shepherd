@@ -220,3 +220,50 @@ async def test_finish_async_query_never_decodes_the_response(redis_mock, mocker)
     payload = orjson.loads(mock_post.call_args.kwargs["content"])
     assert payload["parameters"] == {"timeout": 30}
     assert payload["message"] == {"results": []}
+
+
+@pytest.mark.asyncio
+async def test_finish_async_query_with_a_lost_response(redis_mock, mocker):
+    """A response gone from the data store (e.g. Redis restarted and reloaded
+    an older snapshot) is reported to the caller as an error, and the query is
+    finished, instead of finish_query crashing on the load and leaving both
+    the query and the caller hanging."""
+    from translator_tom import Response
+
+    mock_query_state = mocker.patch("workers.finish_query.worker.get_query_state")
+    mock_query_state.return_value = ["", "", "", "", "", "", "", "lost", "http://test"]
+    mock_set_query_completed = mocker.patch(
+        "workers.finish_query.worker.set_query_completed"
+    )
+    query_graph = {
+        "nodes": {"n0": {"ids": ["X:1"]}, "n1": {}},
+        "edges": {"e0": {"subject": "n0", "object": "n1"}},
+    }
+    _patch_messages(
+        mocker,
+        {"test": {"message": {"query_graph": query_graph}, "parameters": {}}},
+    )
+    mock_post = mocker.patch("httpx.AsyncClient.post")
+    logger = logging.getLogger(__name__)
+
+    await finish_query(
+        [
+            "test",
+            {
+                "query_id": "test",
+                "response_id": "lost",
+                "workflow": json.dumps([]),
+                "log_level": "20",
+            },
+        ],
+        logger,
+    )
+
+    mock_post.assert_called_once()
+    posted = orjson.loads(mock_post.call_args.kwargs["content"])
+    assert posted["status"] == "Error"
+    assert posted["description"].startswith("Response lost")
+    assert posted["message"]["results"] == []
+    assert posted["message"]["query_graph"] == query_graph
+    Response.from_dict(posted)
+    mock_set_query_completed.assert_called_once_with("test", "ERROR", logger)

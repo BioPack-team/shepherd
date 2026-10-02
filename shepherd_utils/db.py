@@ -1313,6 +1313,51 @@ async def reap_abandoned_queries(
     return abandoned
 
 
+async def find_queries_with_lost_data(
+    min_age_sec: float, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Unfinished queries whose query or response blob is gone from Redis.
+
+    Used after a Redis restart: Redis comes back from its last snapshot (or
+    AOF), so any query whose blobs were written after that point has lost them
+    while its ``shepherd_brain`` row, in Postgres, still says it is running.
+    Nothing can finish such a query normally, and nothing would end it before
+    the abandoned-query reaper, which also never tells the caller.
+
+    Only queries older than ``min_age_sec`` are considered (anything newer was
+    submitted after the restart, so its blobs were written to the restarted
+    Redis), and only those with no outstanding callback rows: a query that is
+    still waiting on lookups is ended by its lookup worker
+    (``abandon_lookup_if_data_lost``), and finishing it here as well would
+    deliver it twice. Redis errors propagate, so a check made while Redis is
+    unreachable or still loading never reads as data loss.
+    """
+    async with pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            SELECT b.qid, b.response_id
+            FROM shepherd_brain b
+            WHERE b.state NOT IN ('COMPLETED', 'ABANDONED')
+              AND b.start_time < NOW() - make_interval(secs => %s)
+              AND NOT EXISTS (SELECT 1 FROM callbacks c WHERE c.query_id = b.qid)
+            """,
+            (float(min_age_sec),),
+        )
+        rows = await cur.fetchall()
+    lost: List[Dict[str, Any]] = []
+    for qid, response_id in rows:
+        missing = [
+            message_id
+            for message_id in (qid, response_id)
+            if message_id and not await message_exists(message_id)
+        ]
+        if missing:
+            lost.append({"qid": qid, "response_id": response_id, "missing": missing})
+    if lost:
+        logger.warning(f"{len(lost)} unfinished queries have lost their data: {lost}")
+    return lost
+
+
 async def purge_old_queries(
     retention_days: int, logger: logging.Logger
 ) -> Dict[str, int]:

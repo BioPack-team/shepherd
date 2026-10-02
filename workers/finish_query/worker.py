@@ -71,6 +71,29 @@ CALLBACK_ERROR_BODY_BYTES = 500
 RETRY_LOG_SPLICE_MAX_BYTES = 64 * 1024 * 1024
 
 
+# ``status`` recorded in ``shepherd_brain`` for a query whose response was lost
+# from the data store before it could be delivered.
+LOST_STATUS = "ERROR"
+LOST_DESCRIPTION = (
+    "Response lost: the query's stored response is gone from the data store "
+    "(most likely the store restarted and lost recent writes)"
+)
+
+
+def build_lost_response(original_query) -> dict:
+    """The empty error response delivered in place of a lost one.
+
+    Carries the original query graph when the query itself survived, so the
+    caller can still tell which query this answers (TRAPI 2.0 forbids an
+    empty one, so it is left out otherwise).
+    """
+    message: dict = {"knowledge_graph": {"nodes": {}, "edges": {}}, "results": []}
+    query_graph = ((original_query or {}).get("message") or {}).get("query_graph")
+    if query_graph:
+        message["query_graph"] = query_graph
+    return {"message": message, "status": "Error", "description": LOST_DESCRIPTION}
+
+
 def _log_entry(message: str, level: str = "ERROR") -> dict:
     """Build a TRAPI LogEntry, matching ReasonerLogEntryFormatter's shape.
 
@@ -392,11 +415,6 @@ async def finish_query(task, logger: logging.Logger):
                 )
         elif callback_url is not None:
             # this was an async query, need to send message back
-            if too_large is not None:
-                message_bytes = orjson.dumps(too_large_response)
-            else:
-                message_bytes = await get_message(response_id, logger, raw=True)
-            logs = await get_logs(response_id, logger)
             try:
                 original_query = await get_message(query_id, logger)
             except Exception as e:
@@ -407,6 +425,24 @@ async def finish_query(task, logger: logging.Logger):
                     f"Couldn't load query {query_id} to echo its parameters: {e}"
                 )
                 original_query = None
+            if too_large is not None:
+                message_bytes = orjson.dumps(too_large_response)
+            else:
+                try:
+                    message_bytes = await get_message(response_id, logger, raw=True)
+                except KeyError as e:
+                    # The response is gone (e.g. Redis restarted and reloaded
+                    # an older snapshot). Tell the caller instead of crashing
+                    # here, which left the query unfinished and the caller
+                    # waiting until the abandoned-query reaper -- which never
+                    # tells them either.
+                    status = LOST_STATUS
+                    logger.error(
+                        f"Query {query_id} finishing with status {status}: "
+                        f"its response is gone ({e})"
+                    )
+                    message_bytes = orjson.dumps(build_lost_response(original_query))
+            logs = await get_logs(response_id, logger)
             # Build the TRAPI 2.0 Response around the stored bytes rather
             # than decoding them: the decoded tree is several times the size
             # of its JSON, and this worker holds many responses at once.

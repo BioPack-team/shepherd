@@ -342,6 +342,10 @@ async def _collect_redis_info() -> Dict[str, Any]:
         "connected_clients": info.get("connected_clients"),
         "instantaneous_ops_per_sec": info.get("instantaneous_ops_per_sec"),
         "uptime_in_seconds": info.get("uptime_in_seconds"),
+        # New on every Redis start: how the monitor spots a restart (see
+        # monitor.recovery), and whether it is still loading its dataset.
+        "run_id": info.get("run_id"),
+        "loading": int(info.get("loading", 0) or 0),
     }
 
 
