@@ -79,6 +79,22 @@ async def test_status_unknown_query_is_not_found(mocker):
 
 
 @pytest.mark.asyncio
+async def test_status_with_postgres_down_is_unavailable_not_missing(mocker):
+    """A client told 404 stops asking about a query that may be running
+    fine; an outage answers 503 so it tries again."""
+    from shepherd_utils.db import DatabaseUnavailableError
+
+    state = mocker.patch(
+        "shepherd_server.base_routes.get_query_state",
+        new_callable=mocker.AsyncMock,
+        side_effect=DatabaseUnavailableError("connection refused"),
+    )
+    response = await query_status("qid")
+    assert response.status_code == 503
+    assert state.await_args.kwargs == {"raise_on_unavailable": True}
+
+
+@pytest.mark.asyncio
 async def test_status_in_flight_query_is_running(mocker):
     _patch_state(mocker, _row(state="QUEUED", status="OK"))
     assert _body(await query_status("qid"))["status"] == "Running"

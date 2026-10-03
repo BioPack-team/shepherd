@@ -18,6 +18,7 @@ from opentelemetry.propagate import extract, inject
 from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    DatabaseUnavailableError,
     DecompressedTooLargeError,
     add_query,
     add_ready_callback,
@@ -791,7 +792,20 @@ async def callback(
     response_id = query_state[7]
     # save callback to redis
     logger.debug(f"Saving callback {callback_id} to redis")
-    await save_message(callback_id, response, logger)
+    try:
+        # Strict: if the payload can't be stored, the sender has to be told so
+        # it redelivers. Swallowing the failure and carrying on (as this used
+        # to) could still record the callback as ready once Redis was back --
+        # e.g. across a Redis restart -- and merge_message would then skip it
+        # as missing, silently dropping results the sender was told arrived.
+        await save_message(callback_id, response, logger, raise_on_failure=True)
+    except Exception:
+        logger.error(
+            f"[{callback_id}] could not save callback payload after retries; "
+            "asking the sender to retry delivery"
+        )
+        await save_logs(response_id, logger)
+        return Response("Failed to save callback.", 500)
     logger.debug(f"Saved callback {callback_id} to redis")
     # Record this callback in the per-query ready index *before* enqueuing the
     # wake task, so that whichever merge_message worker picks up the wake signal
@@ -851,7 +865,15 @@ async def query_status(
     logger = logging.getLogger("shepherd.query_status")
     logger.setLevel(logging.INFO)
     attach_query_handler(logger)
-    query_state = await get_query_state(qid, logger)
+    try:
+        # Unreachable must not read as "not found": a client told 404 stops
+        # asking about a query that may be running fine.
+        query_state = await get_query_state(qid, logger, raise_on_unavailable=True)
+    except DatabaseUnavailableError:
+        return JSONResponse(
+            content={"error": "Query state temporarily unavailable"},
+            status_code=503,
+        )
     if query_state is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
 

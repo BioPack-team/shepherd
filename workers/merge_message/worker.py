@@ -1092,13 +1092,25 @@ async def poll_for_tasks():
                     return
 
                 logger.debug(f"[{callback_id}] Obtained lock for {response_id}.")
-                # Sanity check: if the original query is gone, every ready
-                # callback for it is undeliverable -- clean them all up. Use a
-                # cheap EXISTS rather than loading the whole query blob just to
-                # learn whether it's present.
-                if not await message_exists(query_id):
+                # Sanity check: if the original query or the response it
+                # accumulates into is gone (e.g. lost when Redis restarted and
+                # reloaded an older snapshot), every ready callback for it is
+                # unmergeable -- each pass would raise and retry until the
+                # batch aged out, while the lookup waited on the callbacks'
+                # rows. Clean them all up, rows included, so the lookup stops
+                # waiting. Use a cheap EXISTS rather than loading a whole blob
+                # just to learn whether it's present.
+                missing = [
+                    f"{kind} {message_id}"
+                    for kind, message_id in (
+                        ("original query", query_id),
+                        ("response", response_id),
+                    )
+                    if not await message_exists(message_id)
+                ]
+                if missing:
                     logger.error(
-                        f"Failed to get original query for {query_id}. "
+                        f"Failed to get {' and '.join(missing)}. "
                         "Discarding ready callbacks."
                     )
                     orphans = await get_ready_callbacks(response_id, logger)

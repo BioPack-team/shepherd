@@ -27,7 +27,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.db import initialize_db, shutdown_db
 from shepherd_utils.logger import setup_logging
 
-from . import alerts, history, janitor, latency, poller, storage
+from . import alerts, history, janitor, latency, poller, recovery, storage
 
 setup_logging()
 logger = logging.getLogger("shepherd.monitor")
@@ -83,7 +83,9 @@ async def _broadcast(payload: Dict[str, Any]) -> None:
                 _clients.discard(ws)
 
 
-async def _poll_loop(engine: alerts.AlertEngine) -> None:
+async def _poll_loop(
+    engine: alerts.AlertEngine, restarts: recovery.RedisRestartWatcher
+) -> None:
     global _latest_snapshot
     interval = max(0.5, settings.monitor_poll_interval_sec)
     history_interval = max(interval, settings.monitor_history_interval_sec)
@@ -121,6 +123,9 @@ async def _poll_loop(engine: alerts.AlertEngine) -> None:
             # Redis memory pressure is an automatic engine state machine (like
             # broker/postgres health), not a YAML rule -- drive it each tick.
             await engine.handle_redis_memory(snapshot)
+            # A Redis restart loses everything written since its snapshot:
+            # alert, and finish the queries that lost their data.
+            await restarts.observe(snapshot)
             _latest_snapshot = snapshot
             # Persist history at a slower cadence than the live UI tick to
             # keep Redis memory bounded.
@@ -146,12 +151,14 @@ async def lifespan(app: FastAPI):
     await storage.ensure_schema()
     rules = alerts.load_rules(settings.monitor_alerts_config)
     engine = alerts.AlertEngine(rules)
-    poll_task = asyncio.create_task(_poll_loop(engine))
+    restarts = recovery.RedisRestartWatcher()
+    poll_task = asyncio.create_task(_poll_loop(engine, restarts))
     janitor_task = asyncio.create_task(janitor.janitor_loop())
     latency_task = asyncio.create_task(latency.aggregator_loop())
     try:
         yield
     finally:
+        restarts.cancel()
         for t in (poll_task, janitor_task, latency_task):
             t.cancel()
             try:
@@ -319,6 +326,14 @@ async def api_alerts(limit: int = 50):
 async def api_admin_cleanup():
     """Run the janitor immediately. Returns what got trimmed/reaped."""
     return await janitor.run_once()
+
+
+@APP.post("/api/admin/reconcile_lost_queries")
+async def api_admin_reconcile_lost_queries(min_age_sec: float = 60.0):
+    """Finish, as errors, unfinished queries older than ``min_age_sec`` whose
+    query or response blob is gone from Redis -- the sweep the monitor runs
+    by itself after a Redis restart. Returns the queries it finished."""
+    return {"finished": await recovery.reconcile_lost_queries(min_age_sec)}
 
 
 @APP.post("/api/admin/reclaim_dead_consumers")

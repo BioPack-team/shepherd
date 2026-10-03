@@ -239,9 +239,16 @@ async def intake_internal_response(fields, logger: logging.Logger):
     try:
         data = await get_message(response_id, logger)
     except Exception as e:
-        # no stored response = the callback never arrived; the child stays
-        # Running for the watchdog, like an undelivered HTTP callback
+        # finish_query only hands over a response the ARA pipeline finished,
+        # so a missing blob means it was lost (e.g. Redis restarted and
+        # reloaded an older snapshot), not that it is still coming. Nothing
+        # will ever re-deliver it: fail the child now instead of leaving it
+        # Running until the watchdog times it out.
         logger.error(f"Intake: no response blob {response_id} for {child_pk}: {e}")
+        if mesg["status"] in ("D", "E"):
+            # already terminal (e.g. the watchdog got there first)
+            return None
+        await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
         return None
     try:
         # the endpoint receives the payload with the query's logs already

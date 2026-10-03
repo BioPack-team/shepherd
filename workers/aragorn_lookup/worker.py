@@ -16,6 +16,7 @@ from opentelemetry.propagate import inject
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
     get_message,
@@ -249,6 +250,10 @@ async def aragorn_lookup(task, logger: logging.Logger):
             # Brief backoff then retry the check rather than giving up
             await asyncio.sleep(5)
             continue
+        # fail now if the query data the callbacks merge into is gone
+        await abandon_lookup_if_data_lost(
+            query_id, response_id, running_callback_ids, logger
+        )
         # if there are, continue to wait
         if len(running_callback_ids) > 0:
             await asyncio.sleep(1)

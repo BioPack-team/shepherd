@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS callbacks (
 CREATE INDEX IF NOT EXISTS idx_callbacks_callback_id ON callbacks (callback_id);
 CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id);
 CREATE INDEX IF NOT EXISTS idx_shepherd_brain_response_id ON shepherd_brain (response_id);
+-- The monitor's recent-query counts are time windows over start_time, and the
+-- abandoned-query reaper / post-Redis-restart sweep look only at unfinished
+-- queries (their predicate must match the partial index's to use it).
+CREATE INDEX IF NOT EXISTS idx_shepherd_brain_start_time ON shepherd_brain (start_time) INCLUDE (domain);
+CREATE INDEX IF NOT EXISTS idx_shepherd_brain_unfinished ON shepherd_brain (start_time)
+  WHERE state NOT IN ('COMPLETED', 'ABANDONED');
 
 -- ---------------------------------------------------------------------------
 -- Translator ARS tables. These mirror the Django models of the upstream ARS
