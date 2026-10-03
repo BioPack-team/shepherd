@@ -1,6 +1,8 @@
 """Shepherd ARA."""
 
+import asyncio
 import json
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -25,6 +27,7 @@ from shepherd_server.openapi import set_open_api_schema
 from shepherd_utils.broker import add_task
 from shepherd_utils.db import (
     initialize_db,
+    monitor_event_loop_lag,
     shutdown_db,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
@@ -38,7 +41,14 @@ tracer = setup_tracer("shepherd-server")
 async def lifespan(app: FastAPI):
     """Handle db connection."""
     await initialize_db()
+    # Logs EVENT_LOOP_LAG when inline CPU work stalls this process -- the
+    # counterpart to the PG_SLOW lines when telling a slow database apart from
+    # a busy server during pool exhaustion.
+    lag_monitor = asyncio.create_task(
+        monitor_event_loop_lag(logging.getLogger("shepherd.server"))
+    )
     yield
+    lag_monitor.cancel()
     await shutdown_db()
 
 

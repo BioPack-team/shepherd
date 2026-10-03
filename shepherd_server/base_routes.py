@@ -69,6 +69,9 @@ ABANDONED_STATUS_PREFIX = "abandoned"
 QUERY_ERROR_CODE = 500
 QUERY_TIMEOUT_CODE = 504
 QUERY_UNAVAILABLE_CODE = 503
+# nginx's code for "the client closed the connection before we answered". Never
+# reaches the caller (it is gone); it only labels the request in access logs.
+CLIENT_CLOSED_REQUEST_CODE = 499
 # What a body we refuse to parse answers with. 422 is what FastAPI's own
 # ``query: dict = Body(...)`` validation returned for the same rejections, kept
 # so the parser swap isn't visible to callers.
@@ -395,6 +398,19 @@ async def run_sync_query(
     logger.info(f"Query running with {timeout} second timeout.")
     while now <= start + timeout:
         now = time.time()
+        # Stop polling once nobody is waiting for the answer. Each poll takes a
+        # pooled connection, and a caller that timed out or went away used to
+        # leave this loop running for the rest of the query's timeout -- so a
+        # load test whose client gives up early stacked abandoned pollers on
+        # top of its live ones (and carried them into whatever ran next) until
+        # the pool was exhausted and intake started answering 503. The query
+        # itself keeps running; only this wait for it ends.
+        if await request.is_disconnected():
+            logger.info(
+                f"Client disconnected after {now - start:.0f}s; no longer "
+                f"waiting on query {query_id}."
+            )
+            return Response(status_code=CLIENT_CLOSED_REQUEST_CODE)
         # poll for completed status
         query_state = await get_query_state(query_id, logger)
         if query_state is not None:

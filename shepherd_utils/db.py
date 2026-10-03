@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Union
 
 import orjson
@@ -54,6 +55,11 @@ CONNINFO = (
     f"&keepalives_count=3"  # Mark dead after 3 failed keepalives
     f"&connect_timeout=10"  # Connection timeout
 )
+if settings.postgres_statement_timeout_ms > 0:
+    # Session default for every pooled connection; see the setting's comment.
+    CONNINFO += (
+        f"&options=-c%20statement_timeout%3D{settings.postgres_statement_timeout_ms}"
+    )
 
 
 async def check_connection(conn):
@@ -72,6 +78,66 @@ pool = AsyncConnectionPool(
     # initialize with the connection closed
     open=False,
 )
+
+
+async def lift_statement_timeout(conn) -> None:
+    """Exempt the rest of *conn*'s current transaction from the statement cap.
+
+    For maintenance statements whose run time grows with table size (schema
+    upgrades waiting on the fleet-wide advisory lock, retention purges), which
+    must not be cancelled by a cap sized for the request paths. ``SET LOCAL``
+    ends with the transaction, so the connection goes back to the pool capped.
+    """
+    if settings.postgres_statement_timeout_ms > 0:
+        await conn.execute("SET LOCAL statement_timeout = 0")
+
+
+@asynccontextmanager
+async def timed_connection(operation: str, logger: logging.Logger):
+    """``pool.connection()`` that reports how long it waited for and held one.
+
+    Logs ``PG_SLOW`` when either time passes ``postgres_slow_ms``, so a
+    pool-exhaustion incident shows which side is slow: a long ``held_ms``
+    alongside ``EVENT_LOOP_LAG`` lines is this process not getting back to the
+    connection; a long ``held_ms`` without them is Postgres itself.
+    """
+    start = time.monotonic()
+    async with pool.connection(settings.postgres_pool_timeout) as conn:
+        acquired = time.monotonic()
+        try:
+            yield conn
+        finally:
+            threshold = settings.postgres_slow_ms / 1000
+            waited = acquired - start
+            held = time.monotonic() - acquired
+            if threshold > 0 and (waited >= threshold or held >= threshold):
+                logger.warning(
+                    f"PG_SLOW op={operation} wait_ms={waited * 1000:.0f} "
+                    f"held_ms={held * 1000:.0f} pool_available="
+                    f"{pool.get_stats().get('pool_available')}"
+                )
+
+
+async def monitor_event_loop_lag(logger: logging.Logger) -> None:
+    """Warn whenever this process's event loop runs late.
+
+    Sleeps a fixed interval and measures how much later than asked it woke up:
+    that overshoot is how long something held the loop without yielding (CPU
+    work done inline). While the loop is held, every coroutine holding a pooled
+    connection is stuck holding it, so this is the other half of ``PG_SLOW``.
+    Runs until cancelled.
+    """
+    threshold = settings.event_loop_lag_warn_ms / 1000
+    if threshold <= 0:
+        return
+    interval = 0.5
+    while True:
+        before = time.monotonic()
+        await asyncio.sleep(interval)
+        lag = time.monotonic() - before - interval
+        if lag >= threshold:
+            logger.warning(f"EVENT_LOOP_LAG lag_ms={lag * 1000:.0f}")
+
 
 data_db_pool = aioredis.BlockingConnectionPool(
     host=settings.redis_host,
@@ -326,6 +392,9 @@ async def apply_schema_upgrades() -> None:
         row = await cursor.fetchone()
         if row is not None and row[0] == len(marker_names):
             return
+        # Waiting on the lock and building indexes both scale with the fleet and
+        # the tables, not with the request-path cap.
+        await lift_statement_timeout(conn)
         await conn.execute(
             "SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_UPGRADE_LOCK_ID,)
         )
@@ -398,7 +467,7 @@ async def add_query(
         logger.error(f"Failed to save initial query or response: {e}")
         raise Exception("Failed to save initial query or response.")
     try:
-        async with pool.connection(settings.postgres_pool_timeout) as conn:
+        async with timed_connection("add_query", logger) as conn:
             await conn.execute(
                 """
             INSERT INTO shepherd_brain (qid, start_time, response_id, callback_url, state, status, domain) VALUES (
@@ -925,7 +994,7 @@ async def add_callback_id(
     """Add a callback->query mapping."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("add_callback_id", logger) as conn:
                 await conn.execute(
                     """
                 INSERT INTO callbacks (query_id, callback_id, otel_trace) VALUES (
@@ -960,7 +1029,7 @@ async def remove_callback_id(
     """Once a callback has been processed, remove it."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("remove_callback_id", logger) as conn:
                 await conn.execute(
                     """
                 DELETE FROM callbacks WHERE callback_id = %s
@@ -992,7 +1061,7 @@ async def get_running_callbacks(
     running_lookups = []
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("get_running_callbacks", logger) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT callback_id FROM callbacks WHERE query_id = %s
@@ -1037,7 +1106,7 @@ async def get_existing_callback_ids(
         return set()
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("get_existing_callback_ids", logger) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT callback_id FROM callbacks WHERE callback_id = ANY(%s)
@@ -1068,7 +1137,7 @@ async def cleanup_callbacks(
     """Remove any current running callbacks."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("cleanup_callbacks", logger) as conn:
                 await conn.execute(
                     """
                 DELETE FROM callbacks WHERE query_id = %s
@@ -1219,6 +1288,9 @@ async def purge_old_queries(
     for attempt in range(PG_RETRIES):
         try:
             async with pool.connection(settings.postgres_pool_timeout) as conn:
+                # A bulk delete over the whole table: not bound by the
+                # request-path statement cap.
+                await lift_statement_timeout(conn)
                 # callbacks FK-references shepherd_brain, so clear any leftover
                 # rows for the doomed queries first (most are already reaped on
                 # completion, but a crash can leave stragglers).
@@ -1274,7 +1346,7 @@ async def get_callback_query_id(
     original_query = None
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("get_callback_query_id", logger) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT query_id, otel_trace FROM callbacks WHERE callback_id = %s
@@ -1309,7 +1381,7 @@ async def get_query_state(
     query_state = None
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("get_query_state", logger) as conn:
                 cursor = await conn.execute(
                     """
                 SELECT * FROM shepherd_brain WHERE qid = %s
@@ -1343,7 +1415,7 @@ async def set_query_completed(
     """This query is done."""
     for attempt in range(PG_RETRIES):
         try:
-            async with pool.connection(settings.postgres_pool_timeout) as conn:
+            async with timed_connection("set_query_completed", logger) as conn:
                 await conn.execute(
                     """
                 UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s

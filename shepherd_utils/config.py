@@ -53,6 +53,24 @@ class Settings(BaseSettings):
     # giving up. Kept short so callers fail fast when the DB is unreachable
     # instead of blocking; raise it if you hit pool timeouts under heavy load.
     postgres_pool_timeout: float = 5.0
+    # Server-side cap (milliseconds) on any single Postgres statement; 0
+    # disables it. Every request-path statement is a primary-key lookup or a
+    # single-row write that takes ~1ms, so one that runs this long means
+    # Postgres is stalled -- and without a cap it keeps its pooled connection
+    # checked out the whole time, which is how a slow database turns into a
+    # fully exhausted pool and a wall of 503s at intake. The unbounded
+    # maintenance statements (schema upgrades, retention purges) lift the cap
+    # for their own transaction, so this only has to fit the hot paths.
+    postgres_statement_timeout_ms: int = 30000
+    # Log a PG_SLOW warning when a request-path DB call waits longer than this
+    # (milliseconds) for a pooled connection, or holds one longer than this.
+    # 0 disables. Read together with EVENT_LOOP_LAG: a long hold with no loop
+    # lag is Postgres being slow; a long hold during loop lag is this process
+    # being too busy to hand the connection back.
+    postgres_slow_ms: int = 250
+    # Log an EVENT_LOOP_LAG warning when a process's asyncio loop wakes up
+    # this many milliseconds later than it asked to. 0 disables.
+    event_loop_lag_warn_ms: int = 250
     # Per-process Postgres pool bounds. Every container (server + each worker)
     # holds its own pool, so the fleet-wide ceiling is (number of containers x
     # max size) and must stay under Postgres's max_connections (400 in
