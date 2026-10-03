@@ -16,6 +16,8 @@
 #     knowledge_level / agent_type as top-level Edge properties, and the text-mining elevation check
 #     reads the top-level agent_type; a TRAPI parameters.bypass_cache=true also bypasses the KP cache;
 #     a query graph without 'edges' (optional in 2.0, e.g. single-node) is read as having none
+#   - no NodeNorm calls on the edge path (DEC-9): the pinned-curie guard when merging a KP answer
+#     uses the QG's ids as given, and the canonical -> input curie remap after Expand is dropped
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import asyncio
 import copy
@@ -706,8 +708,9 @@ class ARAXExpander:
                     f"biolink:description attribute."
                 )
 
-        # Map canonical curies back to the input curies in the QG (where applicable) #1622
-        self._map_back_to_input_curies(message.knowledge_graph, query_graph, log)
+        # Upstream mapped canonical curies back to the input curies in the QG
+        # here (#1622). With DEC-9 the input curies are the canonical ones, so
+        # that remap (one or two NodeNorm calls per Expand) is dropped.
 
         # Return the response and done
         log.info(f"After Expand, the KG has {len(kg.nodes)} nodes and {len(kg.edges)} edges "
@@ -1292,9 +1295,10 @@ class ARAXExpander:
         pinned_curies_map = defaultdict(set)
         for qnode_key, qnode in overarching_qg.nodes.items():
             if qnode.ids:
-                # Get canonicalized versions of any curies in the QG, as appropriate
-                curies = eu.get_canonical_curies_list(qnode.ids, log)
-                for curie in curies:
+                # DEC-9: the QG's curies are assumed normalized and are sent
+                # to Retriever as given, so they are used as given here too
+                # (upstream canonicalized them through NodeNorm)
+                for curie in qnode.ids:
                     pinned_curies_map[curie].add(qnode_key)
 
         # Merge nodes
@@ -1688,56 +1692,6 @@ class ARAXExpander:
         with open(pickle_file_path, "rb") as fda_pickle:
             fda_approved_drug_ids = pickle.load(fda_pickle)
         return fda_approved_drug_ids
-
-    @staticmethod
-    def _map_back_to_input_curies(kg: KnowledgeGraph, qg: QueryGraph, log: ARAXResponse):
-        """
-        This method remaps nodes/edges in the knowledge graph to refer to any 'input' curies (i.e., the specific curies
-        listed in the query graph) instead of the canonical curies for those concepts. See issue #1622.
-        NOTE: If two input curies map to the same canonical curie, we record only ONE of those mappings. We decided at
-              a Sep. 2021 mini-hackathon that that was the least bad option vs. copying nodes/edges in such a situation.
-        """
-        # First create a lookup map of the curies we'll need to remap
-        canonical_to_input_curie_map = {}
-        for qnode_key, qnode in qg.nodes.items():
-            if qnode.ids:
-                canonical_nodes_info = eu.get_canonical_curies_dict(qnode.ids, log)
-                for input_curie, canonical_node_info in canonical_nodes_info.items():
-                    if canonical_node_info:
-                        canonical_curie = canonical_node_info["preferred_curie"]
-                        if input_curie != canonical_curie:
-                            canonical_to_input_curie_map[canonical_curie] = input_curie
-
-        # Then remap nodes to use the input curies (and their corresponding names) instead of canonical curies
-        if canonical_to_input_curie_map:
-            log.debug(f"Mapping {len(canonical_to_input_curie_map)} canonical curies back to their corresponding "
-                      f"'input' curies (listed in the QG)")
-            input_curie_names_map = eu.get_curie_names(list(canonical_to_input_curie_map.values()), log)
-            for canonical_curie, input_curie in canonical_to_input_curie_map.items():
-                if canonical_curie in kg.nodes:  # Curies may have already been remapped on a prior expand() call
-                    # Remap the node to use the input curie instead of canonical
-                    node = kg.nodes[canonical_curie]
-                    node.name = input_curie_names_map.get(input_curie, node.name)
-                    kg.nodes[input_curie] = node
-                    del kg.nodes[canonical_curie]
-                    # Remap any edges that refer to the nodes we just remapped
-                    connected_edge_keys = {edge_key for edge_key, edge in kg.edges.items()
-                                           if edge.subject == canonical_curie or edge.object == canonical_curie}
-                    for edge_key in connected_edge_keys:
-                        edge = kg.edges[edge_key]
-                        if edge.subject == canonical_curie:
-                            edge.subject = input_curie
-                        if edge.object == canonical_curie:
-                            edge.object = input_curie
-            # Remap all KG ID to query ID mappings as needed
-            for node_key, node in kg.nodes.items():
-                if hasattr(node, "query_ids"):
-                    node.query_ids = list({canonical_to_input_curie_map.get(query_id, query_id) for query_id in node.query_ids})
-                else:
-                    # Answers from in-house KPs may not have query_ids filled out (they don't do subclass reasoning)
-                    node.query_ids = []
-        else:
-            log.debug("No KG nodes found that use a different curie than was asked for in the QG")
 
     @staticmethod
     def _get_prune_threshold(one_hop_qg: QueryGraph) -> int:

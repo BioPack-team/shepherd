@@ -8,6 +8,7 @@
 #       `biolink:agent_type` attribute; a manual_agent edge still gets the 0.90
 #       confidence and overrides everything else, as upstream (now also when it has
 #       no attributes, which upstream could not see since the attribute was one)
+#   - the unused QueryGraphInfo().assess() call in rank_results is dropped
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import math
 import os
@@ -23,7 +24,6 @@ import re
 
 from typing import Union, Dict, Callable
 from shepherd_utils.arax.ARAX_response import ARAXResponse
-from shepherd_utils.arax.query_graph_info import QueryGraphInfo
 
 from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
 from shepherd_utils.arax.openapi_server.models.result import Result
@@ -660,13 +660,9 @@ and [frobenius norm](https://en.wikipedia.org/wiki/Matrix_norm#Frobenius_norm).
         message = response.envelope.message
         self.message = message
 
-        # #### Compute some basic information about the query_graph
-        query_graph_info = QueryGraphInfo()
-        result = query_graph_info.assess(message)
-        # response.merge(result)
-        # if result.status != 'OK':
-        #     print(response.show(level=ARAXResponse.DEBUG))
-        #     return response
+        # Upstream ran QueryGraphInfo().assess(message) here and never used
+        # the result (its merge was commented out); dropped, since assess()
+        # could call NodeNorm.
 
         # DMK FIXME: This need to be refactored so that:
         #    1. The attribute names are dynamically mapped to functions that handle their weightings (for ease of renaming attribute names)

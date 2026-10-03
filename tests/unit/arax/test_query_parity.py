@@ -68,9 +68,10 @@ EXPECTED_DIFFERENCES = {
         "http_status",
         "requests",
     },
-    # DEC-9: no curie-prefix conversion before the KP query, so one fewer
-    # "NodeSynonymizer did not recognize" warning for an unknown id; the KP
-    # request itself is identical
+    # DEC-9: no curie-prefix conversion before the KP query and no NodeNorm
+    # canonicalization of the pinned ids when merging the KP's answer, so
+    # neither of upstream's two "NodeSynonymizer did not recognize" warnings
+    # for an unknown id; the KP request itself is identical
     "trapi_set_interpretation_all": {"logs"},
 }
 # TRAPI 2.0 (H5 in trapi2_goldens.py): a subclass child bound to a qnode with
@@ -175,14 +176,17 @@ def test_stored_response_url_is_shepherds(outputs):
         ) in [tuple(x) for x in port[name]["logs"]]
 
 
-def test_set_interpretation_differs_only_by_the_curie_conversion_warning(outputs):
-    """DEC-9: the one log line upstream writes before converting curie prefixes
-    for the KP; everything else, and the KP request, is upstream's."""
+def test_set_interpretation_differs_only_by_the_nodenorm_warnings(outputs):
+    """DEC-9: the log lines upstream writes when it asks NodeNorm about the
+    pinned ids, once before converting curie prefixes for the KP and once when
+    merging the KP's answer; everything else, and the KP request, is
+    upstream's."""
     upstream, port = outputs
     case = "trapi_set_interpretation_all"
     warning = ["WARNING", "", "NodeSynonymizer did not recognize: {'uuid:set1'}"]
     want = list(upstream[case]["logs"])
-    want.remove(warning)  # the first of upstream's two
+    assert want.count(warning) == 2
+    want = [x for x in want if x != warning]
     got = [
         x
         for x in port[case]["logs"]

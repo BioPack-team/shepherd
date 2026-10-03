@@ -1,6 +1,8 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/query_graph_info.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - assess() no longer asks NodeNorm for the category of a pinned qnode
+#     with no categories (it had no effect on the result)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -11,8 +13,6 @@ import ast
 import re
 
 from shepherd_utils.arax.ARAX_response import ARAXResponse
-
-from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
 
 from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
 
@@ -85,23 +85,11 @@ class QueryGraphInfo:
                 node_info[key]['has_ids'] = True
                 have_at_least_one_id = True
 
-                #### If the user did not specify a category, but there is a curie, try to figure out the category
-                if node_info[key]['categories'] is None:
-                    synonymizer = NodeSynonymizer()
-                    curie = qnode.ids
-                    curies_list = qnode.ids
-                    if isinstance(qnode.ids,list):
-                        curie = qnode.ids[0]
-                    else:
-                        curies_list = [ qnode.ids ]
-
-                    canonical_curies = synonymizer.get_canonical_curies(curies=curies_list, return_all_categories=True)
-                    response.debug(f"canonical_curies={canonical_curies}, curie={curie}")
-                    # The synonymizer returns `preferred_category` and not `preferred_type`.
-                    # Put it in a list because QueryGraph categories are stored as a list.
-                    if curie in canonical_curies and canonical_curies[curie] is not None and 'preferred_category' in canonical_curies[curie]:
-                        node_info[key]['has_categories'] = True
-                        node_info[key]['categories'] = [canonical_curies[curie]['preferred_category']]
+                # Upstream looked up the preferred category of a pinned qnode
+                # with no categories through NodeNorm here. The category only
+                # went into node_info, never into qnode.categories, so the
+                # template stayed n00(ids) either way: dropped as a wasted
+                # NodeNorm call.
 
             if qnode.categories is not None:
                 node_info[key]['has_categories'] = True
