@@ -100,8 +100,8 @@ async def test_shadowfax_rejects_multiple_constraints(redis_mock, mocker):
     """Multiple constraints on the path is unsupported."""
     msg = _pathfinder_message(
         constraints=[
-            {"intermediate_categories": ["biolink:Gene"]},
-            {"intermediate_categories": ["biolink:Disease"]},
+            {"required_intermediate_categories": ["biolink:Gene"]},
+            {"required_intermediate_categories": ["biolink:Disease"]},
         ]
     )
     mocker.patch(
@@ -117,7 +117,9 @@ async def test_shadowfax_rejects_multiple_constraints(redis_mock, mocker):
 async def test_shadowfax_rejects_multiple_intermediate_categories(redis_mock, mocker):
     """A single constraint may not list multiple intermediate categories."""
     msg = _pathfinder_message(
-        constraints=[{"intermediate_categories": ["biolink:Gene", "biolink:Disease"]}]
+        constraints=[
+            {"required_intermediate_categories": ["biolink:Gene", "biolink:Disease"]}
+        ]
     )
     mocker.patch(
         "workers.aragorn_pathfinder.worker.get_message",
@@ -168,3 +170,44 @@ async def test_shadowfax_propagates_gandalf_parameters(redis_mock, mocker):
     query_parameters = kwargs["json"]["parameters"]
     assert query_parameters["filter_config"]["min_information_content"] == 1
     assert query_parameters["filter_config"]["max_node_degree"] == 10
+
+
+@pytest.mark.asyncio
+async def test_shadowfax_sends_valid_trapi_2_query(redis_mock, mocker):
+    """A 2.0 path constraint (required_intermediate_categories) is accepted,
+    and the expanded 3-hop query sent to Retriever is a valid TRAPI 2.0 query
+    with no top-level log_level."""
+    from translator_tom import Query
+
+    msg = _pathfinder_message(
+        constraints=[{"required_intermediate_categories": ["biolink:Gene"]}]
+    )
+    msg["parameters"]["log_level"] = "DEBUG"
+    mocker.patch(
+        "workers.aragorn_pathfinder.worker.get_message",
+        new_callable=mocker.AsyncMock,
+        return_value=msg,
+    )
+    mocker.patch(
+        "workers.aragorn_pathfinder.worker.add_callback_id",
+        new_callable=mocker.AsyncMock,
+    )
+    mocker.patch(
+        "workers.aragorn_pathfinder.worker.get_running_callbacks",
+        new_callable=mocker.AsyncMock,
+        return_value=[],
+    )
+    mock_response = mocker.Mock()
+    mock_response.status_code = 200
+    mock_httpx = mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=mock_response,
+    )
+
+    await shadowfax(_make_task(), logger)
+
+    sent = mock_httpx.call_args.kwargs["json"]
+    assert "log_level" not in sent
+    assert sent["parameters"]["log_level"] == "DEBUG"
+    Query.from_dict(sent)

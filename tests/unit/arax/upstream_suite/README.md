@@ -1,0 +1,59 @@
+# Upstream ARAX's test suite, run against the port
+
+The `test_*.py` files here are upstream ARAX's own tests
+(`RTXteam/RTX @ 9485431`, `code/ARAX/test/`, MIT, see `LICENSE.RTX`).
+`upstream_alias.py` resolves their imports (`ARAX_query`,
+`Expand.expand_utilities`, `openapi_server.models.*`, `node_synonymizer`, ...)
+to the port's modules under `shepherd_utils/arax/`, so the same tests exercise
+the port.
+
+**They are no longer verbatim.** Upstream ARAX speaks TRAPI 1.6 and the port
+speaks TRAPI 2.0, so where a test builds or checks a TRAPI 1.x shape it is
+adapted to the 2.0 one, and nothing else: one `NodeBinding(ids=[...])` /
+`EdgeBinding(ids=[...])` per qnode / qedge instead of lists of `id` bindings;
+a QEdge's `constraints` object instead of `attribute_constraints` /
+`qualifier_constraints` (a qualifier set is a `{type: value}` dict);
+`required_intermediate_categories`; `knowledge_level` / `agent_type` as edge
+members instead of attributes; no `attributes` on aux graphs; no
+`NodeBinding.query_id` (the checks on it are removed); `schema_version`
+`2.0.0`. Each change is local, keeps upstream's structure and style, and is
+marked with a `# TRAPI 2.0:` comment, so `diff` against upstream's files still
+shows exactly what changed. Code that was already broken upstream (the TRAPI
+1.3 `result.edge_bindings` in a few live-only tests) is left as it is.
+
+## In CI (offline)
+
+`pytest tests/unit/arax/upstream_suite` runs the 81 tests in
+`offline_passing.txt`. These are every upstream test that passes on upstream
+ARAX itself with no network and no ARAX data files (and all 81 pass on the
+port, adapted to TRAPI 2.0 as above). The rest are skipped because they fail
+offline on upstream too. The two xfails are the port's recorded difference
+DEC-4 (xCRG uses Shepherd's Retriever). With `--arax-live`,
+`test_gene_object_xcrg_full_trapi_integration` is a strict xfail: the
+catrax-xcrg package xCRG runs speaks TRAPI 1.x and has no 2.0 release.
+
+## Against live services (`--arax-live`)
+
+The other upstream tests need the Translator services (Retriever, NodeNorm,
+NameRes, NCBI eUtils) and ARAX's real data files. Run them where those are
+reachable:
+
+```bash
+export SYNC_KG_RETRIEVAL_URL=https://retriever.ci.transltr.io/query   # the Retriever to test against
+export ARAX_DBS_DIR=$PWD/arax_dbs                                     # the real ARAX data files
+export ARAX_PATHFINDER_DBS_DIR=$PWD/arax_pathfinder_dbs
+export ARAX_KP_CACHE_ENABLED=false                                    # no data store needed
+PYTHONHASHSEED=0 pytest tests/unit/arax/upstream_suite --arax-live --runslow --runexternal
+```
+
+Upstream's own options work as in ARAX (`--runslow`, `--runexternal`,
+`--runbroken`, `--runonly*`). Many of these tests assert on real biology, for
+example "acetaminophen has more than N results". So they need the real
+ExplainableDTD, curie_to_pmids and COHD files, not the mock ones from
+`shepherd_utils.arax_mock_data`. They also depend on what the live Retriever
+returns on the day they run.
+
+To see which differences are the port's, run the same command in an upstream
+RTX checkout (`cd RTX/code/ARAX/test && pytest --runslow --runexternal`) and
+compare the two lists of failures. A test that fails on both sides because of
+the services is not a port difference.

@@ -55,15 +55,30 @@ def _ara_conf(infores: str) -> Dict[str, Any]:
     return (STATE["scenario"].get("aras") or {}).get(infores, {"mode": "empty"})
 
 
+#: The TRAPI version the stub ARAs report in the stub registry. They answer
+#: only the Relay stack (Shepherd's de-federated ARS never calls them), and
+#: Relay discovers and speaks TRAPI 1.5, so the registry keeps saying 1.5.
+REGISTRY_TRAPI_VERSION = "1.5.0"
+#: The schema_version stamped on an empty response.
+TRAPI_VERSION = "2.0.0"
+
+
 def _empty_response(query: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "message": {
-            "query_graph": (query.get("message") or {}).get("query_graph", {}),
-            "knowledge_graph": {"nodes": {}, "edges": {}},
-            "results": [],
-            "auxiliary_graphs": {},
-        }
-    }
+    """A valid TRAPI 2.0 empty response: no nulls, no ``auxiliary_graphs:
+    {}`` (minProperties 1), ``results: []``, and the query's ``parameters``
+    echoed as 2.0 requires. Every member of it is also valid TRAPI 1.5
+    (reasoner-pydantic allows extra Response members), so Relay accepts it
+    too."""
+    message: Dict[str, Any] = {}
+    query_graph = (query.get("message") or {}).get("query_graph")
+    if query_graph:
+        message["query_graph"] = query_graph
+    message["knowledge_graph"] = {"nodes": {}, "edges": {}}
+    message["results"] = []
+    response: Dict[str, Any] = {"message": message, "schema_version": TRAPI_VERSION}
+    if isinstance(query.get("parameters"), dict) and query["parameters"]:
+        response["parameters"] = query["parameters"]
+    return response
 
 
 def _response_for(infores: str, query: Dict[str, Any]) -> Dict[str, Any]:
@@ -140,7 +155,7 @@ async def smartapi_registry(request: Request):
                 "_id": infores,
                 "_meta": {"last_updated": "2026-01-01T00:00:00+00:00"},
                 "info": {
-                    "x-trapi": {"version": "1.5.0"},
+                    "x-trapi": {"version": REGISTRY_TRAPI_VERSION},
                     "x-translator": {"infores": infores, "team": ["mock"]},
                 },
                 "servers": [

@@ -22,6 +22,14 @@ Deliberate divergences from upstream (see docs/ARS_PARITY_REGISTER.md):
     ids. Upstream compared them to removed EDGE ids, which never matches, so
     support graphs that really had been removed stayed on the analysis.
 
+TRAPI 2.0 (Shepherd speaks 2.0; upstream is 1.5): bindings are one
+``{"ids": [...]}`` object per query node / edge / path, pruned by id; and no
+container 2.0 requires to be non-empty is left empty -- a binding that loses
+its last id takes its analysis with it, an analysis that loses its last
+support graph drops ``support_graphs``, and a message that loses its last
+auxiliary graph drops ``auxiliary_graphs``. Log entries carry RFC 3339
+timestamps.
+
 The bundled blocklist.json is the upstream config/blocklist.json copied
 verbatim from the pinned commit.
 """
@@ -31,7 +39,9 @@ import json
 import logging
 import pathlib
 
-from .premerge import add_log_entry, get_safe, timestamp_hms
+from shepherd_utils.trapi import binding_ids
+
+from .premerge import add_log_entry, get_safe, log_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -119,52 +129,46 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
                 for result in results:
                     node_bindings = get_safe(result, "node_bindings")
                     if node_bindings is not None:
-                        for k in node_bindings.keys():
-                            nb = node_bindings[k]
-                            for c in nb:
-                                the_id = get_safe(c, "id")
-                                if (
-                                    the_id in nodes_to_remove
-                                    and result not in results_to_remove
-                                ):
-                                    results_to_remove.append(result)
+                        for nb in node_bindings.values():
+                            if (
+                                any(i in nodes_to_remove for i in binding_ids(nb))
+                                and result not in results_to_remove
+                            ):
+                                results_to_remove.append(result)
 
                     analyses = get_safe(result, "analyses")
                     if analyses is not None:
                         analyses_to_remove = []
                         for analysis in analyses:
-                            edge_bindings = get_safe(analysis, "edge_bindings")
-                            if edge_bindings is not None:
-                                for edge_id, bindings in edge_bindings.items():
-                                    bindings_to_remove = []
-                                    for binding in bindings:
-                                        if binding["id"] in edges_to_remove:
-                                            if len(bindings) > 1:
-                                                bindings_to_remove.append(binding)
-                                            elif analysis not in analyses_to_remove:
-                                                analyses_to_remove.append(analysis)
-                                    for br in bindings_to_remove:
-                                        bindings.remove(br)
-
-                            # pathfinder path bindings (upstream MDW 08/17/26).
-                            # Upstream's removal loop sat OUTSIDE the per-path
-                            # loop and reused the loop variable's name, so it
-                            # pruned only the last path id -- and raised an
-                            # UnboundLocalError when path_bindings was empty.
-                            path_bindings = get_safe(analysis, "path_bindings")
-                            if path_bindings is not None:
-                                for path_id, bindings in path_bindings.items():
-                                    path_bindings_to_remove = []
-                                    for path_binding in bindings:
-                                        if path_binding["id"] in aux_graphs_to_remove:
-                                            if len(bindings) > 1:
-                                                path_bindings_to_remove.append(
-                                                    path_binding
-                                                )
-                                            elif analysis not in analyses_to_remove:
-                                                analyses_to_remove.append(analysis)
-                                    for pr in path_bindings_to_remove:
-                                        bindings.remove(pr)
+                            # TRAPI 2.0: one {"ids": [...]} binding per qedge /
+                            # qpath. Removed ids are pruned; a binding left
+                            # with no ids (minItems 1) takes its analysis with
+                            # it -- upstream's rule, which removed the analysis
+                            # when its only binding went and pruned otherwise.
+                            # (Upstream, pruning a multi-binding list down to
+                            # nothing kept the analysis with an empty list.)
+                            for bindings_key, removed_ids in (
+                                ("edge_bindings", edges_to_remove),
+                                # pathfinder path bindings (upstream MDW
+                                # 08/17/26). Upstream's removal loop sat OUTSIDE
+                                # the per-path loop and reused the loop
+                                # variable's name, so it pruned only the last
+                                # path id -- and raised an UnboundLocalError
+                                # when path_bindings was empty.
+                                ("path_bindings", aux_graphs_to_remove),
+                            ):
+                                bindings = get_safe(analysis, bindings_key)
+                                if not bindings:
+                                    continue
+                                for binding in bindings.values():
+                                    ids = binding_ids(binding)
+                                    kept = [i for i in ids if i not in removed_ids]
+                                    if len(kept) == len(ids):
+                                        continue
+                                    if kept:
+                                        binding["ids"] = kept
+                                    elif analysis not in analyses_to_remove:
+                                        analyses_to_remove.append(analysis)
 
                             # analysis-level support_graphs are AUX GRAPH ids;
                             # upstream checked them against removed EDGE ids,
@@ -178,6 +182,9 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
                                     if sg in aux_graphs_to_remove
                                 ]:
                                     support_graphs.remove(sg)
+                                if not support_graphs:
+                                    # minItems 1 in TRAPI 2.0
+                                    del analysis["support_graphs"]
                         for analysis in analyses_to_remove:
                             analyses_count += 1
                             analyses.remove(analysis)
@@ -185,6 +192,10 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
                             results_to_remove.append(result)
                 for result in results_to_remove:
                     results.remove(result)
+
+            # Message.auxiliary_graphs has minProperties 1 in TRAPI 2.0
+            if aux_graphs is not None and not aux_graphs:
+                del data["message"]["auxiliary_graphs"]
 
         list_of_names = []
         for node in removed_nodes:
@@ -195,7 +206,7 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
             data,
             [
                 "Removed the following bad nodes: " + str(list_of_names),
-                timestamp_hms(),
+                log_timestamp(),
                 "DEBUG",
             ],
         )
@@ -211,7 +222,7 @@ def remove_blocked(data, blocklist=None, mesg_id=""):
             data,
             [
                 "Removed the following counts: " + str(log_json),
-                timestamp_hms(),
+                log_timestamp(),
                 "DEBUG",
             ],
         )

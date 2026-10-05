@@ -104,7 +104,7 @@ response_1 = {
                             "attribute_type_id": "biolink:full_name",
                             "value": "Sirolimus",
                             "original_attribute_name": "name",
-                        },
+                        }
                     ],
                 },
                 "CHEBI:0002": {
@@ -115,7 +115,7 @@ response_1 = {
                             "attribute_type_id": "biolink:full_name",
                             "value": "Obesity, Metabolically Benign",
                             "original_attribute_name": "name",
-                        },
+                        }
                     ],
                 },
             },
@@ -142,11 +142,6 @@ response_1 = {
                     ],
                     "attributes": [
                         {
-                            "attribute_type_id": "biolink:agent_type",
-                            "value": "computational_model",
-                            "attribute_source": "infores:spoke",
-                        },
-                        {
                             "attribute_type_id": "biolink:has_evidence",
                             "value": 585,
                             "original_attribute_name": "cooccur",
@@ -170,12 +165,9 @@ response_1 = {
                             "original_attribute_name": "fisher",
                             "attribute_source": "infores:mesh",
                         },
-                        {
-                            "attribute_type_id": "biolink:knowledge_level",
-                            "value": "statistical_association",
-                            "attribute_source": "infores:spoke",
-                        },
                     ],
+                    "knowledge_level": "statistical_association",
+                    "agent_type": "computational_model",
                 },
                 "234": {
                     "subject": "CHEBI:0002",
@@ -199,11 +191,6 @@ response_1 = {
                     ],
                     "attributes": [
                         {
-                            "attribute_type_id": "biolink:agent_type",
-                            "value": "computational_model",
-                            "attribute_source": "infores:spoke",
-                        },
-                        {
                             "attribute_type_id": "biolink:has_evidence",
                             "value": 11,
                             "original_attribute_name": "cooccur",
@@ -211,7 +198,7 @@ response_1 = {
                         },
                         {
                             "attribute_type_id": "biolink:has_evidence",
-                            "value": 7.10693419457017e-5,
+                            "value": 7.10693419457017e-05,
                             "original_attribute_name": "fisher",
                             "attribute_source": "infores:mesh",
                         },
@@ -222,56 +209,51 @@ response_1 = {
                             "attribute_source": "infores:mesh",
                         },
                         {
-                            "attribute_type_id": "biolink:knowledge_level",
-                            "value": "statistical_association",
-                            "attribute_source": "infores:spoke",
-                        },
-                        {
                             "attribute_type_id": "biolink:has_evidence",
                             "value": 4.488906436622872,
                             "original_attribute_name": "odds",
                             "attribute_source": "infores:mesh",
                         },
                     ],
+                    "knowledge_level": "statistical_association",
+                    "agent_type": "computational_model",
                 },
             },
         },
         "results": [
             {
                 "node_bindings": {
-                    "SN": [{"id": "CHEBI:0001", "attributes": []}],
-                    "ON": [{"id": "MONDO:0001", "attributes": []}],
+                    "SN": {"ids": ["CHEBI:0001"]},
+                    "ON": {"ids": ["MONDO:0001"]},
                 },
                 "analyses": [
                     {
                         "resource_id": "infores:aragorn",
-                        "edge_bindings": {"e0": [{"id": "123", "attributes": []}]},
+                        "edge_bindings": {"e0": {"ids": ["123"]}},
                     }
                 ],
             },
             {
                 "node_bindings": {
-                    "SN": [{"id": "CHEBI:0002", "attributes": []}],
-                    "ON": [{"id": "MONDO:0001", "attributes": []}],
+                    "SN": {"ids": ["CHEBI:0002"]},
+                    "ON": {"ids": ["MONDO:0001"]},
                 },
                 "analyses": [
                     {
                         "resource_id": "infores:aragorn",
-                        "edge_bindings": {"e0": [{"id": "234", "attributes": []}]},
+                        "edge_bindings": {"e0": {"ids": ["234"]}},
                     }
                 ],
             },
         ],
-        "auxiliary_graphs": {},
     },
-    "log_level": "INFO",
-    "bypass_cache": True,
+    "parameters": {"log_level": "INFO", "bypass_cache": True},
     "logs": [
         {
             "message": "Doing lookup",
-            "timestamp": "2024-10-31T14:40:50.537320",
+            "timestamp": "2024-10-31T14:40:50.537320+00:00",
             "level": "INFO",
-        },
+        }
     ],
 }
 
@@ -345,7 +327,7 @@ response_2 = {
                             "attribute_type_id": "biolink:full_name",
                             "value": "BRCA1",
                             "original_attribute_name": "name",
-                        },
+                        }
                     ],
                 },
                 "CHEBI:0003": {
@@ -356,7 +338,7 @@ response_2 = {
                             "attribute_type_id": "biolink:full_name",
                             "value": "Obesity, Metabolically Benign",
                             "original_attribute_name": "name",
-                        },
+                        }
                     ],
                 },
             },
@@ -383,11 +365,6 @@ response_2 = {
                     ],
                     "attributes": [
                         {
-                            "attribute_type_id": "biolink:agent_type",
-                            "value": "computational_model",
-                            "attribute_source": "infores:spoke",
-                        },
-                        {
                             "attribute_type_id": "biolink:has_evidence",
                             "value": 585,
                             "original_attribute_name": "cooccur",
@@ -411,12 +388,9 @@ response_2 = {
                             "original_attribute_name": "fisher",
                             "attribute_source": "infores:mesh",
                         },
-                        {
-                            "attribute_type_id": "biolink:knowledge_level",
-                            "value": "statistical_association",
-                            "attribute_source": "infores:spoke",
-                        },
                     ],
+                    "knowledge_level": "statistical_association",
+                    "agent_type": "computational_model",
                 },
                 "456": {
                     "subject": "NCBIGene:0001",
@@ -440,11 +414,6 @@ response_2 = {
                     ],
                     "attributes": [
                         {
-                            "attribute_type_id": "biolink:agent_type",
-                            "value": "computational_model",
-                            "attribute_source": "infores:spoke",
-                        },
-                        {
                             "attribute_type_id": "biolink:has_evidence",
                             "value": 11,
                             "original_attribute_name": "cooccur",
@@ -452,7 +421,7 @@ response_2 = {
                         },
                         {
                             "attribute_type_id": "biolink:has_evidence",
-                            "value": 7.10693419457017e-5,
+                            "value": 7.10693419457017e-05,
                             "original_attribute_name": "fisher",
                             "attribute_source": "infores:mesh",
                         },
@@ -463,44 +432,39 @@ response_2 = {
                             "attribute_source": "infores:mesh",
                         },
                         {
-                            "attribute_type_id": "biolink:knowledge_level",
-                            "value": "statistical_association",
-                            "attribute_source": "infores:spoke",
-                        },
-                        {
                             "attribute_type_id": "biolink:has_evidence",
                             "value": 4.488906436622872,
                             "original_attribute_name": "odds",
                             "attribute_source": "infores:mesh",
                         },
                     ],
+                    "knowledge_level": "statistical_association",
+                    "agent_type": "computational_model",
                 },
             },
         },
         "results": [
             {
                 "node_bindings": {
-                    "SN": [{"id": "CHEBI:0003", "attributes": []}],
-                    "ON": [{"id": "MONDO:0001", "attributes": []}],
-                    "g": [{"id": "NCBIGene:0001", "attributes": []}],
+                    "SN": {"ids": ["CHEBI:0003"]},
+                    "ON": {"ids": ["MONDO:0001"]},
+                    "g": {"ids": ["NCBIGene:0001"]},
                 },
                 "analyses": [
                     {
                         "resource_id": "infores:aragorn",
-                        "edge_bindings": {"e0": [{"id": "123", "attributes": []}]},
+                        "edge_bindings": {"e0": {"ids": ["123"]}},
                     }
                 ],
-            },
+            }
         ],
-        "auxiliary_graphs": {},
     },
-    "log_level": "INFO",
-    "bypass_cache": True,
+    "parameters": {"log_level": "INFO", "bypass_cache": True},
     "logs": [
         {
             "message": "Doing lookup",
-            "timestamp": "2024-10-31T14:40:50.537320",
+            "timestamp": "2024-10-31T14:40:50.537320+00:00",
             "level": "INFO",
-        },
+        }
     ],
 }

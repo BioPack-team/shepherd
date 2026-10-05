@@ -6,7 +6,9 @@ stacks' /ars/api/submit, poll both parents to a terminal state, then diff:
   1. the submit envelope (normalized)
   2. the terminal trace tree summary (per-child terminal facts, parent
      state, merged-version bookkeeping)
-  3. the final merged message content (normalized TRAPI)
+  3. the final merged message content (normalized TRAPI, envelope members
+     dropped; Relay answers in 1.5 and Shepherd in 2.0 and nothing is
+     converted, so shape differences show up here)
   4. the mockworld journal's outbound side effects per stack
 
 Usage:
@@ -29,7 +31,7 @@ import time
 
 import httpx
 
-from normalize import canonical, diff, summarize_tree  # noqa: E402
+from normalize import canonical, diff, strip_envelope, summarize_tree  # noqa: E402
 from scenarios import SCENARIOS  # noqa: E402
 
 TERMINAL = {"Done", "Stopped", "Error", "Unknown"}
@@ -115,7 +117,9 @@ async def run_scenario(name, scenario, args, client):
         summarize_tree(shepherd["trace"]),
         "$.tree",
     )
-    report["diffs"] += diff(relay["merged"], shepherd["merged"], "$.merged")
+    report["diffs"] += diff(
+        strip_envelope(relay["merged"]), strip_envelope(shepherd["merged"]), "$.merged"
+    )
     if relay["journal"] != shepherd["journal"]:
         report["diffs"].append(
             "$.journal: outbound side effects differ\n"

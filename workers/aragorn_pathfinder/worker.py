@@ -10,11 +10,12 @@ import httpx
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
     get_message,
     get_running_callbacks,
-    save_message,
+    save_response,
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -65,7 +66,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
                 )
                 rehydrated_response.raise_for_status()
                 response_json = rehydrated_response.json()
-                await save_message(response_id, response_json, logger)
+                await save_response(response_id, response_json, logger)
                 return json.dumps({})
 
     filter_config = parameters.get("filter_config", {})
@@ -96,8 +97,9 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         if len(constraints) > 1:
             raise Exception("Pathfinder queries do not support multiple constraints.")
         if len(constraints) > 0:
+            # TRAPI 2.0 renamed PathConstraint.intermediate_categories.
             intermediate_categories = (
-                constraints[0].get("intermediate_categories", None) or []
+                constraints[0].get("required_intermediate_categories", None) or []
             )
             if len(intermediate_categories) > 1:
                 raise Exception(
@@ -263,8 +265,17 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     running_callback_ids = [""]
     try:
         while time.time() - start_time < MAX_QUERY_TIME:
-            # see if there are existing lookups going
-            running_callback_ids = await get_running_callbacks(query_id, logger)
+            try:
+                # see if there are existing lookups going
+                running_callback_ids = await get_running_callbacks(query_id, logger)
+            except Exception:
+                # Brief backoff then retry the check rather than giving up
+                await asyncio.sleep(5)
+                continue
+            # fail now if the query data the callbacks merge into is gone
+            await abandon_lookup_if_data_lost(
+                query_id, response_id, running_callback_ids, logger
+            )
             # logger.info(f"Got back {len(running_callback_ids)} running lookups")
             # if there are, continue to wait
             if len(running_callback_ids) > 0:

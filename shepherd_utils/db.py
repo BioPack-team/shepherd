@@ -16,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
+from .trapi import prepare_stored_response, query_log_level, query_parameters
 
 PG_RETRIES = 5
 # Retries for the handful of Redis writes that are correctness-critical
@@ -35,6 +36,16 @@ PG_DISK_FULL_SQLSTATE = "53100"
 def is_disk_full_error(exc: BaseException) -> bool:
     """True if *exc* is a Postgres error caused by a full data volume."""
     return getattr(exc, "sqlstate", None) == PG_DISK_FULL_SQLSTATE
+
+
+class DatabaseUnavailableError(Exception):
+    """Postgres couldn't be reached (or refused the write) after the retries.
+
+    Raised instead of returning a default the caller can't tell from a real
+    answer -- an empty list read as "no callbacks outstanding", ``None`` read
+    as "no such query" -- which turned a Postgres outage of more than a few
+    seconds into silently wrong behavior.
+    """
 
 
 def log_pg_disk_full(
@@ -286,6 +297,30 @@ _SCHEMA_UPGRADES = (
         "idx_callbacks_query_id",
         "CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id)",
     ),
+    # GET /response/{id} maps a response back to its query (to repeat the
+    # query's TRAPI 2.0 parameters); see get_response_query_parameters.
+    (
+        "idx_shepherd_brain_response_id",
+        "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_response_id "
+        "ON shepherd_brain (response_id)",
+    ),
+    # The monitor's recent-query counts (last 1h/24h, per ARA) are time
+    # windows; without this each one was a scan of the whole retention window.
+    # Carrying ``domain`` lets the per-ARA count be an index-only scan.
+    (
+        "idx_shepherd_brain_start_time",
+        "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_start_time "
+        "ON shepherd_brain (start_time) INCLUDE (domain)",
+    ),
+    # Just the unfinished queries, which are a sliver of the table: what the
+    # abandoned-query reaper and the post-Redis-restart sweep look for. Their
+    # predicate must match this one for the planner to use it.
+    (
+        "idx_shepherd_brain_unfinished",
+        "CREATE INDEX IF NOT EXISTS idx_shepherd_brain_unfinished "
+        "ON shepherd_brain (start_time) "
+        "WHERE state NOT IN ('COMPLETED', 'ABANDONED')",
+    ),
 )
 
 
@@ -458,9 +493,16 @@ async def add_query(
     """
     start = time.time()
     try:
-        encoded = encode_message(query)
-        await data_db_client.set(query_id, encoded, ex=settings.redis_ttl)
-        await data_db_client.set(response_id, encoded, ex=settings.redis_ttl)
+        await data_db_client.set(query_id, encode_message(query), ex=settings.redis_ttl)
+        # The response starts as the query's message; the query-level members
+        # stay on the query only (see prepare_stored_response).
+        response = prepare_stored_response(
+            {k: v for k, v in query.items() if k != "message"}
+            | {"message": dict(query.get("message") or {})}
+        )
+        await data_db_client.set(
+            response_id, encode_message(response), ex=settings.redis_ttl
+        )
     except Exception as e:
         # failed to put message in db
         # TODO: do something more severe
@@ -530,6 +572,52 @@ async def save_message(
             logger.error(f"Failed to save a message into redis: {e}")
             if raise_on_failure:
                 raise
+
+
+async def get_response_query_parameters(
+    response_id: str, logger: logging.Logger
+) -> dict:
+    """The TRAPI ``parameters`` of the query whose response is ``response_id``.
+
+    TRAPI 2.0 says a Response repeats its query's ``parameters``, and a stored
+    response carries none (``save_response``), so a route serving a stored
+    response by its id looks the query up: ``shepherd_brain`` maps the response
+    id to the query id, and the query is in the data store. ``{}`` when either
+    is gone (the query expired, or the id was never a query's response).
+    """
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cursor = await conn.execute(
+                "SELECT qid FROM shepherd_brain WHERE response_id = %s LIMIT 1",
+                (response_id,),
+            )
+            row = await cursor.fetchone()
+    except Exception as e:
+        logger.warning(f"Could not look up the query of response {response_id}: {e}")
+        return {}
+    if row is None:
+        return {}
+    try:
+        query = await get_message(row[0], logger)
+    except KeyError:
+        return {}
+    return dict(query_parameters(query if isinstance(query, dict) else None))
+
+
+async def save_response(
+    response_id: str,
+    response: dict[str, Any],
+    logger: logging.Logger,
+    **kwargs: Any,
+):
+    """Store a query's response, in its stored form (see
+    ``shepherd_utils.trapi.prepare_stored_response``).
+
+    Every write of a response goes through here (or ``save_response_sync``):
+    it is what guarantees a stored response carries no delivery envelope, so
+    ``finish_query`` can add one to the stored bytes without decoding them.
+    """
+    await save_message(response_id, prepare_stored_response(response), logger, **kwargs)
 
 
 class ResponseTooLargeError(Exception):
@@ -659,7 +747,9 @@ async def get_query_log_level(
     """The log level the client asked for, read back from the stored query.
 
     The stored query is the only record of the requested level once a request
-    has been handed off. A TRAPI *response* has no ``log_level`` field, so
+    has been handed off (TRAPI 2.0 carries it in ``parameters.log_level``).
+    What a subservice posts back to ``/callback`` is the subservice's own
+    response, so
     nothing a subservice posts back to ``/callback`` carries it -- everything
     hanging off a callback (the handler's own logs, the merge task it enqueues,
     the retrieval logs that merge folds into the query's log list) has to come
@@ -675,7 +765,7 @@ async def get_query_log_level(
     except Exception as e:
         logger.warning(f"Couldn't read the log level for query {query_id}: {e}")
         return default
-    return resolve_log_level(query.get("log_level"), default)
+    return resolve_log_level(query_log_level(query), default)
 
 
 # ---------------------------------------------------------------------------
@@ -872,6 +962,11 @@ def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
     )
 
 
+def save_response_sync(response_id: str, response: dict[str, Any]) -> None:
+    """``save_response`` for the process-pool workers."""
+    save_message_sync(response_id, prepare_stored_response(response))
+
+
 async def _append_logs(response_id: str, entries: List[dict]) -> None:
     """Append log entries to a query's list, cap it, and (re)set the TTL.
 
@@ -991,7 +1086,14 @@ async def add_callback_id(
     otel_trace: str,
     logger: logging.Logger,
 ):
-    """Add a callback->query mapping."""
+    """Add a callback->query mapping.
+
+    Raises ``DatabaseUnavailableError`` if the row can't be written: a lookup
+    sent out with an unregistered callback id has its results rejected when
+    they come back (nothing maps them to a query), so the caller must not
+    send it.
+    """
+    last_error: Optional[Exception] = None
     for attempt in range(PG_RETRIES):
         try:
             async with timed_connection("add_callback_id", logger) as conn:
@@ -1008,8 +1110,9 @@ async def add_callback_id(
                     ),
                 )
                 await conn.commit()
-            break
+            return
         except OperationalError as e:
+            last_error = e
             if is_disk_full_error(e):
                 log_pg_disk_full(logger, "add_callback_id", e)
                 break
@@ -1019,7 +1122,10 @@ async def add_callback_id(
             continue
         except Exception as e:
             logger.error(f"Failed to save callback: {e}")
-            break
+            raise
+    raise DatabaseUnavailableError(
+        f"Couldn't register callback {callback_id}: {last_error}"
+    ) from last_error
 
 
 async def remove_callback_id(
@@ -1057,8 +1163,13 @@ async def get_running_callbacks(
     query_id: str,
     logger: logging.Logger,
 ) -> List[str]:
-    """Get all currently running callbacks for a single query."""
-    running_lookups = []
+    """Get all currently running callbacks for a single query.
+
+    Raises ``DatabaseUnavailableError`` when Postgres can't be read: an empty
+    list here means every lookup is back, and the lookup workers would move
+    the query on with partial results.
+    """
+    last_error: Optional[Exception] = None
     for attempt in range(PG_RETRIES):
         try:
             async with timed_connection("get_running_callbacks", logger) as conn:
@@ -1068,10 +1179,9 @@ async def get_running_callbacks(
                 """,
                     (query_id,),
                 )
-                rows = await cursor.fetchall()
-                running_lookups = rows
-            break
+                return await cursor.fetchall()
         except OperationalError as e:
+            last_error = e
             if is_disk_full_error(e):
                 log_pg_disk_full(logger, "get_running_callbacks", e)
                 break
@@ -1084,7 +1194,9 @@ async def get_running_callbacks(
         except Exception as e:
             logger.error(f"Failed to get running lookups: {e}")
             raise
-    return running_lookups
+    raise DatabaseUnavailableError(
+        f"Couldn't read the running callbacks of {query_id}: {last_error}"
+    ) from last_error
 
 
 async def get_existing_callback_ids(
@@ -1159,6 +1271,51 @@ async def cleanup_callbacks(
         except Exception as e:
             logger.error(f"Failed to remove running lookups: {e}")
             break
+
+
+class QueryDataLostError(KeyError):
+    """A running query's query or response blob is gone from the data db."""
+
+
+async def abandon_lookup_if_data_lost(
+    query_id: str,
+    response_id: str,
+    running_callback_ids: List[str],
+    logger: logging.Logger,
+) -> None:
+    """Fail a lookup's callback wait whose query data has been lost.
+
+    The lookup workers wait for their callbacks' rows to clear, which happens
+    once merge_message has merged each one into the query's response. If the
+    query or response blob is gone (e.g. Redis restarted and reloaded an older
+    snapshot), those callbacks can never be merged and their rows never
+    cleared, so waiting out the lookup timeout only delays the failure. Clears
+    the query's callback rows and raises ``QueryDataLostError`` so the task
+    goes straight to ``finish_query`` as an error.
+
+    Only checked while callbacks are outstanding. An error from the check
+    itself (Redis down or still loading) is not data loss: it is logged and
+    the wait carries on.
+    """
+    if not running_callback_ids:
+        return
+    try:
+        lost = [
+            message_id
+            for message_id in (query_id, response_id)
+            if not await message_exists(message_id)
+        ]
+    except Exception as e:
+        logger.warning(f"Couldn't check that query {query_id}'s data is intact: {e}")
+        return
+    if not lost:
+        return
+    logger.error(
+        f"Query data {lost} is gone from the db; abandoning "
+        f"{len(running_callback_ids)} outstanding lookup(s)."
+    )
+    await cleanup_callbacks(query_id, logger)
+    raise QueryDataLostError(f"Failed to get {', '.join(lost)} from db")
 
 
 async def reap_completed_callbacks(logger: logging.Logger) -> int:
@@ -1269,6 +1426,51 @@ async def reap_abandoned_queries(
     return abandoned
 
 
+async def find_queries_with_lost_data(
+    min_age_sec: float, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Unfinished queries whose query or response blob is gone from Redis.
+
+    Used after a Redis restart: Redis comes back from its last snapshot (or
+    AOF), so any query whose blobs were written after that point has lost them
+    while its ``shepherd_brain`` row, in Postgres, still says it is running.
+    Nothing can finish such a query normally, and nothing would end it before
+    the abandoned-query reaper, which also never tells the caller.
+
+    Only queries older than ``min_age_sec`` are considered (anything newer was
+    submitted after the restart, so its blobs were written to the restarted
+    Redis), and only those with no outstanding callback rows: a query that is
+    still waiting on lookups is ended by its lookup worker
+    (``abandon_lookup_if_data_lost``), and finishing it here as well would
+    deliver it twice. Redis errors propagate, so a check made while Redis is
+    unreachable or still loading never reads as data loss.
+    """
+    async with pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            SELECT b.qid, b.response_id
+            FROM shepherd_brain b
+            WHERE b.state NOT IN ('COMPLETED', 'ABANDONED')
+              AND b.start_time < NOW() - make_interval(secs => %s)
+              AND NOT EXISTS (SELECT 1 FROM callbacks c WHERE c.query_id = b.qid)
+            """,
+            (float(min_age_sec),),
+        )
+        rows = await cur.fetchall()
+    lost: List[Dict[str, Any]] = []
+    for qid, response_id in rows:
+        missing = [
+            message_id
+            for message_id in (qid, response_id)
+            if message_id and not await message_exists(message_id)
+        ]
+        if missing:
+            lost.append({"qid": qid, "response_id": response_id, "missing": missing})
+    if lost:
+        logger.warning(f"{len(lost)} unfinished queries have lost their data: {lost}")
+    return lost
+
+
 async def purge_old_queries(
     retention_days: int, logger: logging.Logger
 ) -> Dict[str, int]:
@@ -1373,12 +1575,45 @@ async def get_callback_query_id(
     return original_query
 
 
+async def get_recent_queries(
+    domain: str,
+    last_n_hours: float,
+    active_only: bool,
+    logger: logging.Logger,
+) -> List[tuple]:
+    """``shepherd_brain`` rows for one ARA's queries started in the last N hours,
+    oldest first (``domain`` holds the ARA a query was routed to). With
+    ``active_only``, only the ones still in flight."""
+    sql = """
+        SELECT * FROM shepherd_brain
+        WHERE domain = %s AND start_time >= NOW() - make_interval(secs => %s)
+    """
+    if active_only:
+        sql += " AND state NOT IN ('COMPLETED', 'ABANDONED')"
+    sql += " ORDER BY start_time"
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cursor = await conn.execute(sql, (domain, float(last_n_hours) * 3600))
+            return await cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to get recent queries: {e}")
+        return []
+
+
 async def get_query_state(
     query_id: str,
     logger: logging.Logger,
+    raise_on_unavailable: bool = False,
 ):
-    """Get the query state."""
+    """Get the query state: its ``shepherd_brain`` row, or None.
+
+    By default None also stands in for "Postgres couldn't be read", which
+    suits the callers that poll and just try again. A caller for which None
+    means "no such query" -- one that would give up on it -- passes
+    ``raise_on_unavailable`` to get ``DatabaseUnavailableError`` instead.
+    """
     query_state = None
+    last_error: Optional[Exception] = None
     for attempt in range(PG_RETRIES):
         try:
             async with timed_connection("get_query_state", logger) as conn:
@@ -1388,10 +1623,9 @@ async def get_query_state(
                 """,
                     (query_id,),
                 )
-                row = await cursor.fetchone()
-                query_state = row
-            break
+                return await cursor.fetchone()
         except OperationalError as e:
+            last_error = e
             if is_disk_full_error(e):
                 log_pg_disk_full(logger, "get_query_state", e)
                 break
@@ -1403,7 +1637,12 @@ async def get_query_state(
             continue
         except Exception as e:
             logger.error(f"Failed to get query state: {e}")
+            last_error = e
             break
+    if raise_on_unavailable:
+        raise DatabaseUnavailableError(
+            f"Couldn't read the state of query {query_id}: {last_error}"
+        ) from last_error
     return query_state
 
 

@@ -153,12 +153,24 @@ async def test_add_callback_id_retries_on_operational_error(mocker):
 
 
 @pytest.mark.asyncio
-async def test_add_callback_id_swallows_non_operational_errors(mocker):
-    """Non-OperationalError exceptions are logged and the function returns
-    without retrying."""
-    _install_pool_mock(mocker, raise_on_execute=ValueError("bad"))
-    # Should not raise.
-    await db.add_callback_id("qid", "cb-1", "{}", logger)
+async def test_add_callback_id_raises_non_operational_errors(mocker):
+    """Non-OperationalError exceptions are re-raised without retrying: a lookup
+    sent with an unregistered callback id has its results rejected."""
+    mock_conn, _ = _install_pool_mock(mocker, raise_on_execute=ValueError("bad"))
+    with pytest.raises(ValueError, match="bad"):
+        await db.add_callback_id("qid", "cb-1", "{}", logger)
+    assert mock_conn.execute.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_add_callback_id_raises_once_postgres_stays_down(mocker):
+    mock_conn, _ = _install_pool_mock(
+        mocker, raise_on_execute=OperationalError("connection refused")
+    )
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+    with pytest.raises(db.DatabaseUnavailableError, match="cb-1"):
+        await db.add_callback_id("qid", "cb-1", "{}", logger)
+    assert mock_conn.execute.call_count == db.PG_RETRIES
 
 
 @pytest.mark.asyncio
@@ -204,6 +216,19 @@ async def test_get_running_callbacks_propagates_non_operational_error(mocker):
 
 
 @pytest.mark.asyncio
+async def test_get_running_callbacks_raises_once_postgres_stays_down(mocker):
+    """Never an empty list for an outage: the lookup workers read [] as every
+    callback being back and move the query on with partial results."""
+    mock_conn, _ = _install_pool_mock(
+        mocker, raise_on_execute=OperationalError("connection refused")
+    )
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+    with pytest.raises(db.DatabaseUnavailableError, match="qid"):
+        await db.get_running_callbacks("qid", logger)
+    assert mock_conn.execute.call_count == db.PG_RETRIES
+
+
+@pytest.mark.asyncio
 async def test_cleanup_callbacks_runs_delete(mocker):
     mock_conn, _ = _install_pool_mock(mocker)
     await db.cleanup_callbacks("qid-99", logger)
@@ -246,6 +271,25 @@ async def test_get_query_state_returns_none_when_missing(mocker):
     _install_pool_mock(mocker, cursor_fetchone=None)
     out = await db.get_query_state("ghost", logger)
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_get_query_state_outage_reads_as_none_by_default(mocker):
+    """The polling callers just look again, so None is fine for them."""
+    _install_pool_mock(mocker, raise_on_execute=OperationalError("down"))
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+    assert await db.get_query_state("qid-1", logger) is None
+
+
+@pytest.mark.asyncio
+async def test_get_query_state_can_tell_an_outage_from_a_missing_query(mocker):
+    _install_pool_mock(mocker, raise_on_execute=OperationalError("down"))
+    mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
+    with pytest.raises(db.DatabaseUnavailableError, match="qid-1"):
+        await db.get_query_state("qid-1", logger, raise_on_unavailable=True)
+
+    _install_pool_mock(mocker, cursor_fetchone=None)
+    assert await db.get_query_state("ghost", logger, raise_on_unavailable=True) is None
 
 
 @pytest.mark.asyncio

@@ -157,7 +157,7 @@ def _callback_with_logs(logs):
 
 def test_take_callback_logs_returns_and_clears_entries():
     """The subservice's entries come back out tagged with the callback id they
-    arrived under, and the field is blanked on the message so the log store
+    arrived under, and the field is removed from the message so the log store
     stays the single source of the final logs."""
     entries = [
         {
@@ -178,7 +178,8 @@ def test_take_callback_logs_returns_and_clears_entries():
     assert taken == [
         {**entry, "message": f"[c1] {entry['message']}"} for entry in entries
     ]
-    assert callback["logs"] == []
+    # Removed, not blanked: an empty logs list is invalid TRAPI 2.0.
+    assert "logs" not in callback
 
 
 def test_take_callback_logs_tags_entries_without_a_message():
@@ -262,7 +263,8 @@ def test_merge_messages_by_ids_keeps_debug_logs_for_a_debug_query(mocker):
     save_message_sync(
         "qid",
         {
-            "log_level": "DEBUG",
+            # TRAPI 2.0: the requested level lives in parameters.
+            "parameters": {"log_level": "DEBUG"},
             "message": {"query_graph": copy.deepcopy(query_graph)},
         },
     )
@@ -297,7 +299,10 @@ def test_merge_messages_by_ids_drops_debug_logs_for_an_info_query(mocker):
 
     save_message_sync(
         "qid",
-        {"log_level": "INFO", "message": {"query_graph": copy.deepcopy(query_graph)}},
+        {
+            "parameters": {"log_level": "INFO"},
+            "message": {"query_graph": copy.deepcopy(query_graph)},
+        },
     )
     save_message_sync("rid", generate_response())
     save_message_sync(
@@ -352,7 +357,7 @@ def test_merge_messages_by_ids_returns_callback_logs(mocker):
     )
     # ...and they aren't left on the merged response, which would duplicate
     # them once finish_query splices the log store in.
-    assert get_message_sync("rid").get("logs") == []
+    assert "logs" not in get_message_sync("rid")
 
 
 def test_merge_messages_by_ids_direct_lookup_logs_not_left_on_message(mocker):
@@ -373,7 +378,7 @@ def test_merge_messages_by_ids_direct_lookup_logs_not_left_on_message(mocker):
     )
 
     assert "[c1] lookup log" in [entry.get("message") for entry in log_entries]
-    assert get_message_sync("rid").get("logs") == []
+    assert "logs" not in get_message_sync("rid")
 
 
 def test_merge_messages_by_id_delegates(mocker):

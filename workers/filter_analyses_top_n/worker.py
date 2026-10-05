@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
-from shepherd_utils.db import get_message, save_message, get_query_state
+from shepherd_utils.db import get_message, save_response, get_query_state
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -35,11 +35,17 @@ async def filter_analyses_top_n(task, logger: logging.Logger):
     # ``analyses[:n]`` slice, so the dropped analyses are freed now rather than
     # allocating a parallel list and holding the originals until save.
     for result in results:
-        del result["analyses"][n:]
+        analyses = result.get("analyses")
+        if analyses is None:
+            continue
+        del analyses[n:]
+        if not analyses:
+            # TRAPI 2.0: Result.analyses has minItems 1, so omit it when empty.
+            del result["analyses"]
     logger.info("Returning filtered analyses.")
 
     # save merged message back to db
-    await save_message(response_id, message, logger)
+    await save_response(response_id, message, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):

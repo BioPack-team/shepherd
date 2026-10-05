@@ -4,7 +4,9 @@ Receives an ARA's response off the broker and runs the per-response pipeline
 that upstream executes inline in its Django result-callback view: the intake
 state machine (guards, counts, the ara_response_complete notification), then
 pre_merge_process (decorate edge sources with the agent's infores,
-normalize scores), phantom support-graph removal, and TRAPI validation.
+normalize scores), phantom support-graph removal, and TRAPI validation --
+TRAPI 2.0, against translator_tom's models (shepherd_utils.ars.trapi), with
+explicit nulls read as absent and stripped first.
 Moved off the server because this is the CPU-heavy stretch of the callback
 path and it saturated the server under concurrent load
 (documented deviation in the parity register; the outcome contract below is
@@ -27,6 +29,13 @@ Redis client, processes it, and writes it back, and only the verdict crosses
 IPC (the same pattern as ars_merge and merge_message). Nothing large stays
 resident in this process past the intake.
 
+With ``ars_annotation_mode = "premerge"`` the pool child also annotates a
+validated ARA response's nodes (shepherd_utils.ars.annotate) before saving
+it, so annotation runs per response and in parallel rather than under the
+parent's merge lock; ars_merge then skips the stage. A failed annotation is
+logged on the response and the nodes are left unannotated -- the response
+still merges.
+
 finish_query enqueues {intake_child_pk, response_id} when an ARA pipeline
 finishes an ARS-originated query (the de-federated ARS receives every
 response over the broker; there is no callback endpoint), and
@@ -37,6 +46,7 @@ fields the premerge stage reads.
 """
 
 import asyncio
+import datetime
 import logging
 import uuid
 from typing import Dict
@@ -46,15 +56,18 @@ from opentelemetry.propagate import extract, inject
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 from shepherd_utils.ars import aras
+from shepherd_utils.ars.annotate import annotate_nodes
 from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
+    add_log_entry,
     get_safe,
+    log_timestamp,
     pre_merge_process,
     remove_phantom_support_graphs,
 )
 from shepherd_utils.ars.statuses import coerce_status
-from shepherd_utils.ars.trapi import validate
+from shepherd_utils.ars.trapi import strip_nulls, validate
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
@@ -81,14 +94,40 @@ _pool = None
 _loop = None
 
 
+def _warm_pool_child():
+    """Pool prewarm hook: the spawn already imported this module; set up the
+    child's tracer too, so a real task pays for neither."""
+    setup_pool_child_tracer(STREAM)
+
+
+def _annotate_in_child(data, agent_name, child_pk) -> None:
+    """Annotate a validated response's nodes in place. A failure never fails
+    the response: it is logged (and noted in the message's logs, as the
+    merge's annotation stage does) and the response merges unannotated."""
+    logger = logging.getLogger(f"shepherd.ars.premerge.child.{child_pk}")
+    try:
+        asyncio.run(annotate_nodes(data, agent_name, logger))
+    except Exception as e:
+        logger.exception(f"node annotation failed for {agent_name} pk {child_pk}")
+        add_log_entry(
+            data,
+            [
+                f"node annotation internal error: {str(e)}",
+                log_timestamp(),
+                "DEBUG",
+            ],
+        )
+
+
 def premerge_in_child(
-    child_pk, agent_name, inforesid, do_validate, otel_carrier=None
+    child_pk, agent_name, inforesid, do_validate, otel_carrier=None, annotate=False
 ) -> bool:
     """Pool-side premerge: fetch the child's blob by pk, process it in place,
     write it back, and return the validation verdict.
 
     The processed payload is saved whether or not it validates, as upstream
     saved the (already premerged) data on both branches of its view.
+    ``annotate`` adds node annotations to a response that validated.
     ``otel_carrier`` is the parent's span context; the stage span starts
     under it (see shepherd_utils.otel.setup_pool_child_tracer).
     """
@@ -101,12 +140,19 @@ def premerge_in_child(
         span.set_attribute("premerge.child_pk", str(child_pk))
         span.set_attribute("premerge.validate", bool(do_validate))
         data = get_message_sync(str(child_pk))
+        # TRAPI 2.0 has no nullable members: a null is read as an absent
+        # member (and so never reaches the merged message). Validated or
+        # not -- see shepherd_utils.ars.trapi.
+        strip_nulls(data)
         pre_merge_process(data, str(child_pk), agent_name, inforesid)
         if do_validate:
             remove_phantom_support_graphs(data)
             valid = validate(data)
         else:
             valid = True
+        span.set_attribute("premerge.annotate", bool(annotate and valid))
+        if annotate and valid:
+            _annotate_in_child(data, agent_name, child_pk)
         save_message_sync(str(child_pk), data)
         span.set_attribute("premerge.valid", bool(valid))
     return bool(valid)
@@ -115,11 +161,31 @@ def premerge_in_child(
 async def _run_premerge_in_pool(
     child_pk, agent_name, inforesid, do_validate, otel_carrier, logger
 ):
-    """Indirection for tests; production runs premerge_in_child in the pool."""
-    args = (child_pk, agent_name, inforesid, do_validate, otel_carrier)
+    """Indirection for tests; production runs premerge_in_child in the pool.
+    Only responses headed for the merge (ara- agents) are annotated here."""
+    annotate = settings.ars_annotation_mode == "premerge" and str(
+        agent_name
+    ).startswith("ara-")
+    args = (child_pk, agent_name, inforesid, do_validate, otel_carrier, annotate)
     if _pool is not None and _loop is not None:
         return await _pool.run(_loop, premerge_in_child, *args)
     return await asyncio.to_thread(premerge_in_child, *args)
+
+
+def _row_timestamp(updated_at) -> str:
+    """The row's updated_at as an RFC 3339 log timestamp (TRAPI 2.0).
+
+    Upstream wrote ``str(updated_at)`` -- a space-separated datetime, or
+    ``"None"`` for a row without one -- neither a valid 2.0 LogEntry
+    timestamp. Falls back to now."""
+    if isinstance(updated_at, datetime.datetime):
+        return log_timestamp(updated_at)
+    if isinstance(updated_at, str) and updated_at:
+        try:
+            return log_timestamp(datetime.datetime.fromisoformat(updated_at))
+        except ValueError:
+            pass
+    return log_timestamp()
 
 
 async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
@@ -135,10 +201,10 @@ async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
         data = {}
     log_entry = {
         "message": "Internal ARS Server Error",
-        "timestamp": str(mesg.get("updated_at")),
+        "timestamp": _row_timestamp(mesg.get("updated_at")),
         "level": "ERROR",
     }
-    if "logs" in data.keys():
+    if isinstance(data.get("logs"), list):
         data["logs"].append(log_entry)
     else:
         data["logs"] = [log_entry]
@@ -173,9 +239,16 @@ async def intake_internal_response(fields, logger: logging.Logger):
     try:
         data = await get_message(response_id, logger)
     except Exception as e:
-        # no stored response = the callback never arrived; the child stays
-        # Running for the watchdog, like an undelivered HTTP callback
+        # finish_query only hands over a response the ARA pipeline finished,
+        # so a missing blob means it was lost (e.g. Redis restarted and
+        # reloaded an older snapshot), not that it is still coming. Nothing
+        # will ever re-deliver it: fail the child now instead of leaving it
+        # Running until the watchdog times it out.
         logger.error(f"Intake: no response blob {response_id} for {child_pk}: {e}")
+        if mesg["status"] in ("D", "E"):
+            # already terminal (e.g. the watchdog got there first)
+            return None
+        await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
         return None
     try:
         # the endpoint receives the payload with the query's logs already
@@ -183,7 +256,9 @@ async def intake_internal_response(fields, logger: logging.Logger):
         try:
             logs = await get_logs(response_id, logger)
             data.pop("logs", None)
-            data["logs"] = logs
+            if logs:
+                # Response.logs has minItems 1 in TRAPI 2.0: absent when empty
+                data["logs"] = logs
         except Exception as e:
             logger.warning(f"Intake: proceeding without logs for {response_id}: {e}")
 
@@ -378,6 +453,7 @@ async def poll_for_tasks():
         max_tasks_per_child=settings.pool_max_tasks_per_child,
         name="ars_premerge process pool",
         task_timeout=settings.pool_task_timeout_sec,
+        warmup=_warm_pool_child if settings.pool_prewarm else None,
     )
     while True:
         try:

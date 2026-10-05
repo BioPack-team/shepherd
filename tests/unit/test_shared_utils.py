@@ -351,11 +351,11 @@ def test_filter_kgraph_orphans_keeps_support_graph_chain():
             "results": [
                 {
                     "node_bindings": {
-                        "qn1": [{"id": "A"}],
-                        "qn2": [{"id": "B"}],
+                        "qn1": {"ids": ["A"]},
+                        "qn2": {"ids": ["B"]},
                     },
                     "analyses": [
-                        {"edge_bindings": {"e0": [{"id": "result_edge"}]}},
+                        {"edge_bindings": {"e0": {"ids": ["result_edge"]}}},
                     ],
                 }
             ],
@@ -368,6 +368,29 @@ def test_filter_kgraph_orphans_keeps_support_graph_chain():
     assert set(nodes.keys()) == {"A", "B", "C"}
     assert set(edges.keys()) == {"result_edge", "support_edge"}
     assert set(auxgraphs.keys()) == {"aux1"}
+
+
+def test_filter_kgraph_orphans_removes_auxiliary_graphs_when_all_are_orphaned():
+    """TRAPI 2.0 gives auxiliary_graphs a minProperties of 1: when every aux
+    graph is dropped, the key goes too rather than being left as {}."""
+    message = {
+        "message": {
+            "knowledge_graph": {
+                "nodes": {"A": {}, "B": {}},
+                "edges": {"result_edge": {"subject": "A", "object": "B"}},
+            },
+            "auxiliary_graphs": {"aux_orphan": {"edges": ["result_edge"]}},
+            "results": [
+                {
+                    "node_bindings": {"qn1": {"ids": ["A"]}, "qn2": {"ids": ["B"]}},
+                    "analyses": [{"edge_bindings": {"e0": {"ids": ["result_edge"]}}}],
+                }
+            ],
+        },
+    }
+    filter_kgraph_orphans(message, logger)
+    assert "auxiliary_graphs" not in message["message"]
+    assert set(message["message"]["knowledge_graph"]["edges"]) == {"result_edge"}
 
 
 def test_filter_kgraph_orphans_warns_on_missing_aux_edge_and_continues():
@@ -395,9 +418,9 @@ def test_filter_kgraph_orphans_warns_on_missing_aux_edge_and_continues():
             },
             "results": [
                 {
-                    "node_bindings": {"qn1": [{"id": "A"}], "qn2": [{"id": "B"}]},
+                    "node_bindings": {"qn1": {"ids": ["A"]}, "qn2": {"ids": ["B"]}},
                     "analyses": [
-                        {"edge_bindings": {"e0": [{"id": "result_edge"}]}},
+                        {"edge_bindings": {"e0": {"ids": ["result_edge"]}}},
                     ],
                 }
             ],
@@ -431,12 +454,12 @@ def test_filter_kgraph_orphans_handles_path_bindings_and_support_graphs():
             },
             "results": [
                 {
-                    "node_bindings": {"qn1": [{"id": "A"}]},
+                    "node_bindings": {"qn1": {"ids": ["A"]}},
                     "analyses": [
                         {
                             "edge_bindings": {},
                             "path_bindings": {
-                                "p0": [{"id": "aux_path"}],
+                                "p0": {"ids": ["aux_path"]},
                             },
                             "support_graphs": ["aux_support"],
                         },
@@ -459,15 +482,16 @@ def test_filter_kgraph_orphans_creates_empty_kg_when_results_present_but_kg_miss
         "message": {
             "results": [
                 {
-                    "node_bindings": {"qn": [{"id": "A"}]},
-                    "analyses": [{"edge_bindings": {"e0": [{"id": "missing"}]}}],
+                    "node_bindings": {"qn": {"ids": ["A"]}},
+                    "analyses": [{"edge_bindings": {"e0": {"ids": ["missing"]}}}],
                 }
             ],
         },
     }
     filter_kgraph_orphans(message, logger)
     assert message["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
-    assert message["message"]["auxiliary_graphs"] == {}
+    # TRAPI 2.0 forbids an empty auxiliary_graphs, so none is created.
+    assert "auxiliary_graphs" not in message["message"]
 
 
 @pytest.mark.asyncio

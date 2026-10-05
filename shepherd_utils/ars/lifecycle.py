@@ -6,10 +6,12 @@ message into a terminal status. Evaluates the ported counting rules and
 applies the transitions, notifications, and empty-merge synthesis.
 """
 
+import copy
 import logging
 from typing import Any, Dict
 
 import shepherd_utils.db as shepherd_db
+from shepherd_utils.trapi import finalize_response
 
 from . import aras
 from . import cache
@@ -20,6 +22,32 @@ from .notify import notify_subscribers
 logger = logging.getLogger(__name__)
 
 MERGE_AGENT_NAME = aras.MERGE_AGENT
+
+
+def empty_merged_response(query: Any) -> Dict[str, Any]:
+    """The merged message a query with no results completes with.
+
+    Upstream (signals.py lines 82-104) re-saved the parent's data -- the
+    submitted QUERY -- with results / knowledge graph / auxiliary graphs
+    emptied, so the "response" still carried the query's top-level members
+    (``workflow``, ``submitter``, ``parameters`` as a query parameter ...)
+    and an ``auxiliary_graphs: {}`` TRAPI 2.0 forbids. This builds a TRAPI
+    2.0 Response instead: the query's query graph, an empty knowledge graph,
+    ``results: []``, the version stamps, and the query's ``parameters``
+    echoed back as 2.0 requires (``finalize_response``).
+    """
+    if not isinstance(query, dict):
+        query = {}
+    query_message = query.get("message")
+    if not isinstance(query_message, dict):
+        query_message = {}
+    message: Dict[str, Any] = {}
+    query_graph = query_message.get("query_graph")
+    if isinstance(query_graph, dict) and query_graph:
+        message["query_graph"] = copy.deepcopy(query_graph)
+    message["knowledge_graph"] = {"nodes": {}, "edges": {}}
+    message["results"] = []
+    return dict(finalize_response({"message": message}, query))
 
 
 def _child_record(child: Dict[str, Any]) -> Dict[str, Any]:
@@ -67,8 +95,9 @@ async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> Non
     )
     if decision.complete:
         if decision.empty:
-            # Synthesize the empty merged message from the parent's data with
-            # results / kg / aux emptied (signals.py lines 82-104). Built
+            # Synthesize the empty merged message from the parent's query
+            # (signals.py lines 82-104; a TRAPI 2.0 Response here, see
+            # empty_merged_response). Built
             # BEFORE the claim so the parent can go Done with its
             # merged_version already set -- a reader must never catch it 'D'
             # but unmerged. A caller that then loses the claim drops the
@@ -79,13 +108,8 @@ async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> Non
                 code=202,
                 ref=parent_pk,
             )
-            empty_data = await ars_db.load_message_data(parent_pk, task_logger)
-            if not isinstance(empty_data, dict):
-                empty_data = {}
-            message = empty_data.setdefault("message", {})
-            message["results"] = []
-            message["auxiliary_graphs"] = {}
-            message["knowledge_graph"] = {"nodes": {}, "edges": {}}
+            query = await ars_db.load_message_data(parent_pk, task_logger)
+            empty_data = empty_merged_response(query)
             await ars_db.save_message_data(empty["id"], empty_data, task_logger)
             await ars_db.update_message(
                 empty["id"], skip_coercion=True, status="D", code=200

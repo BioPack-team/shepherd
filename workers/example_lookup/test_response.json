@@ -3,33 +3,37 @@
     "query_graph": {
       "nodes": {
         "n0": {
-          "ids": ["MONDO:0005148"],
-          "categories": ["biolink:Disease"],
-          "set_interpretation": "BATCH",
-          "constraints": [],
-          "member_ids": []
+          "ids": [
+            "MONDO:0005148"
+          ],
+          "categories": [
+            "biolink:Disease"
+          ],
+          "set_interpretation": "BATCH"
         },
         "n1": {
-          "categories": ["biolink:PhenotypicFeature"],
-          "set_interpretation": "BATCH",
-          "constraints": [],
-          "member_ids": []
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
+          "set_interpretation": "BATCH"
         }
       },
       "edges": {
         "e01": {
           "subject": "n0",
           "object": "n1",
-          "predicates": ["biolink:has_phenotype"],
-          "attribute_constraints": [],
-          "qualifier_constraints": []
+          "predicates": [
+            "biolink:has_phenotype"
+          ]
         }
       }
     },
     "knowledge_graph": {
       "nodes": {
         "MONDO:0005148": {
-          "categories": ["biolink:Disease"],
+          "categories": [
+            "biolink:Disease"
+          ],
           "name": "type 2 diabetes mellitus",
           "attributes": [
             {
@@ -75,7 +79,9 @@
             },
             {
               "attribute_type_id": "biolink:mesh_terms",
-              "value": ["D003924"],
+              "value": [
+                "D003924"
+              ],
               "original_attribute_name": "mesh_list"
             },
             {
@@ -97,7 +103,9 @@
           ]
         },
         "HP:0025502": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Overweight",
           "attributes": [
             {
@@ -123,7 +131,9 @@
           ]
         },
         "UMLS:C4042861": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Obesity, Metabolically Benign",
           "attributes": [
             {
@@ -149,7 +159,9 @@
           ]
         },
         "HP:0001824": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Weight Loss",
           "attributes": [
             {
@@ -175,7 +187,9 @@
           ]
         },
         "MESH:D000077962": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Body-Weight Trajectory",
           "attributes": [
             {
@@ -201,7 +215,9 @@
           ]
         },
         "UMLS:C3658248": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Hypertriglyceridemic Waist",
           "attributes": [
             {
@@ -227,7 +243,9 @@
           ]
         },
         "HP:0001520": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Fetal Macrosomia",
           "attributes": [
             {
@@ -253,7 +271,9 @@
           ]
         },
         "HP:0012592": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Albuminuria",
           "attributes": [
             {
@@ -279,7 +299,9 @@
           ]
         },
         "MONDO:0024381": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Jet Lag Syndrome",
           "attributes": [
             {
@@ -305,7 +327,9 @@
           ]
         },
         "UMLS:C0795692": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Hyperlactatemia",
           "attributes": [
             {
@@ -331,7 +355,9 @@
           ]
         },
         "HP:0000017": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Nocturia",
           "attributes": [
             {
@@ -357,7 +383,9 @@
           ]
         },
         "HP:0004324": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Weight Gain",
           "attributes": [
             {
@@ -383,7 +411,9 @@
           ]
         },
         "UMLS:C2362324": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Pediatric Obesity",
           "attributes": [
             {
@@ -409,26 +439,38 @@
           ]
         },
         "HP:0031819": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Increased waist to hip ratio",
           "attributes": [
             {
               "attribute_type_id": "biolink:synonym",
-              "value": ["Increased waist to hip ratio"]
+              "value": [
+                "Increased waist to hip ratio"
+              ]
             },
             {
               "attribute_type_id": "biolink:xref",
-              "value": ["HP:0031819", "UMLS:C4703554"]
+              "value": [
+                "HP:0031819",
+                "UMLS:C4703554"
+              ]
             }
           ]
         },
         "HP:0000855": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Insulin resistance",
           "attributes": [
             {
               "attribute_type_id": "biolink:synonym",
-              "value": ["Insulin resistance", "Insulin Resistance"]
+              "value": [
+                "Insulin resistance",
+                "Insulin Resistance"
+              ]
             },
             {
               "attribute_type_id": "biolink:xref",
@@ -445,16 +487,23 @@
           ]
         },
         "HP:0001939": {
-          "categories": ["biolink:PhenotypicFeature"],
+          "categories": [
+            "biolink:PhenotypicFeature"
+          ],
           "name": "Abnormality of metabolism/homeostasis",
           "attributes": [
             {
               "attribute_type_id": "biolink:synonym",
-              "value": ["Abnormality of metabolism/homeostasis"]
+              "value": [
+                "Abnormality of metabolism/homeostasis"
+              ]
             },
             {
               "attribute_type_id": "biolink:xref",
-              "value": ["HP:0001939", "UMLS:C4021768"]
+              "value": [
+                "HP:0001939",
+                "UMLS:C4021768"
+              ]
             }
           ]
         }
@@ -468,12 +517,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -481,11 +534,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 585,
@@ -509,13 +557,10 @@
               "value": 4.2455109347801505e-156,
               "original_attribute_name": "fisher",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "c00e263a1ae3": {
           "subject": "MONDO:0005148",
@@ -525,12 +570,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -539,11 +588,6 @@
           ],
           "attributes": [
             {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
-            {
               "attribute_type_id": "biolink:has_evidence",
               "value": 11,
               "original_attribute_name": "cooccur",
@@ -551,7 +595,7 @@
             },
             {
               "attribute_type_id": "biolink:has_evidence",
-              "value": 7.10693419457017e-5,
+              "value": 7.10693419457017e-05,
               "original_attribute_name": "fisher",
               "attribute_source": "infores:mesh"
             },
@@ -562,17 +606,14 @@
               "attribute_source": "infores:mesh"
             },
             {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
-            },
-            {
               "attribute_type_id": "biolink:has_evidence",
               "value": 4.488906436622872,
               "original_attribute_name": "odds",
               "attribute_source": "infores:mesh"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "991331aa874d": {
           "subject": "MONDO:0005148",
@@ -582,12 +623,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -602,20 +647,10 @@
               "attribute_source": "infores:mesh"
             },
             {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
-            {
               "attribute_type_id": "biolink:has_evidence",
               "value": 4.32160135124125,
               "original_attribute_name": "enrichment",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             },
             {
               "attribute_type_id": "biolink:has_evidence",
@@ -629,7 +664,9 @@
               "original_attribute_name": "fisher",
               "attribute_source": "infores:mesh"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "f088f4fa3e70": {
           "subject": "MONDO:0005148",
@@ -639,12 +676,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -652,11 +693,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 0.044280235150596224,
@@ -680,13 +716,10 @@
               "value": 4.016154764364254,
               "original_attribute_name": "odds",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "39cfd2c8291e": {
           "subject": "MONDO:0005148",
@@ -696,12 +729,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -709,11 +746,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 5,
@@ -737,13 +769,10 @@
               "value": 6.0455952453602935,
               "original_attribute_name": "enrichment",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "ad294653032c": {
           "subject": "MONDO:0005148",
@@ -753,12 +782,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -771,11 +804,6 @@
               "value": 1.1072034746035102e-12,
               "original_attribute_name": "fisher",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
             },
             {
               "attribute_type_id": "biolink:has_evidence",
@@ -794,13 +822,10 @@
               "value": 47,
               "original_attribute_name": "cooccur",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "e3b04dfe114d": {
           "subject": "MONDO:0005148",
@@ -810,12 +835,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -828,11 +857,6 @@
               "value": 27.299558095473188,
               "original_attribute_name": "odds",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
             },
             {
               "attribute_type_id": "biolink:has_evidence",
@@ -851,13 +875,10 @@
               "value": 1790,
               "original_attribute_name": "cooccur",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "fcd02bb8cdd7": {
           "subject": "MONDO:0005148",
@@ -867,12 +888,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -880,11 +905,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 6.810157253512903,
@@ -908,13 +928,10 @@
               "value": 0.012498400731958546,
               "original_attribute_name": "fisher",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "1ef95dc37310": {
           "subject": "MONDO:0005148",
@@ -924,12 +941,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -937,11 +958,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 5,
@@ -965,13 +981,10 @@
               "value": 0.0034524709802413868,
               "original_attribute_name": "fisher",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "5e5184b91caa": {
           "subject": "MONDO:0005148",
@@ -981,12 +994,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -994,11 +1011,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 3.4252026998084677,
@@ -1022,13 +1034,10 @@
               "value": 12,
               "original_attribute_name": "cooccur",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "bb41939f9e35": {
           "subject": "MONDO:0005148",
@@ -1038,12 +1047,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -1051,11 +1064,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 283,
@@ -1075,17 +1083,14 @@
               "attribute_source": "infores:mesh"
             },
             {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
-            },
-            {
               "attribute_type_id": "biolink:has_evidence",
               "value": 8.529741664921051e-72,
               "original_attribute_name": "fisher",
               "attribute_source": "infores:mesh"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "458c5dd6f840": {
           "subject": "MONDO:0005148",
@@ -1095,12 +1100,16 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:spoke"]
+              "upstream_resource_ids": [
+                "infores:spoke"
+              ]
             },
             {
               "resource_id": "infores:spoke",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mesh"]
+              "upstream_resource_ids": [
+                "infores:mesh"
+              ]
             },
             {
               "resource_id": "infores:mesh",
@@ -1108,11 +1117,6 @@
             }
           ],
           "attributes": [
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "computational_model",
-              "attribute_source": "infores:spoke"
-            },
             {
               "attribute_type_id": "biolink:has_evidence",
               "value": 142,
@@ -1136,13 +1140,10 @@
               "value": 4.905257357342205,
               "original_attribute_name": "odds",
               "attribute_source": "infores:mesh"
-            },
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "statistical_association",
-              "attribute_source": "infores:spoke"
             }
-          ]
+          ],
+          "knowledge_level": "statistical_association",
+          "agent_type": "computational_model"
         },
         "e66a6668c645": {
           "subject": "MONDO:0005148",
@@ -1156,34 +1157,34 @@
             {
               "resource_id": "infores:hpo-annotations",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:omim"]
+              "upstream_resource_ids": [
+                "infores:omim"
+              ]
             },
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:service-provider-trapi"]
+              "upstream_resource_ids": [
+                "infores:service-provider-trapi"
+              ]
             },
             {
               "resource_id": "infores:service-provider-trapi",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:monarchinitiative"]
+              "upstream_resource_ids": [
+                "infores:monarchinitiative"
+              ]
             },
             {
               "resource_id": "infores:monarchinitiative",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:hpo-annotations"]
+              "upstream_resource_ids": [
+                "infores:hpo-annotations"
+              ]
             }
           ],
-          "attributes": [
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "knowledge_assertion"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "manual_agent"
-            }
-          ]
+          "knowledge_level": "knowledge_assertion",
+          "agent_type": "manual_agent"
         },
         "d06198affc26": {
           "subject": "MONDO:0005148",
@@ -1193,33 +1194,31 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:service-provider-trapi"]
+              "upstream_resource_ids": [
+                "infores:service-provider-trapi"
+              ]
             },
             {
               "resource_id": "infores:mydisease-info",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:hpo-annotations"]
+              "upstream_resource_ids": [
+                "infores:hpo-annotations"
+              ]
             },
             {
               "resource_id": "infores:service-provider-trapi",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mydisease-info"]
+              "upstream_resource_ids": [
+                "infores:mydisease-info"
+              ]
             },
             {
               "resource_id": "infores:hpo-annotations",
               "resource_role": "primary_knowledge_source"
             }
           ],
-          "attributes": [
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "knowledge_assertion"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "manual_agent"
-            }
-          ]
+          "knowledge_level": "knowledge_assertion",
+          "agent_type": "manual_agent"
         },
         "6492ac44321b": {
           "subject": "MONDO:0005148",
@@ -1233,34 +1232,34 @@
             {
               "resource_id": "infores:hpo-annotations",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:omim"]
+              "upstream_resource_ids": [
+                "infores:omim"
+              ]
             },
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:service-provider-trapi"]
+              "upstream_resource_ids": [
+                "infores:service-provider-trapi"
+              ]
             },
             {
               "resource_id": "infores:service-provider-trapi",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:monarchinitiative"]
+              "upstream_resource_ids": [
+                "infores:monarchinitiative"
+              ]
             },
             {
               "resource_id": "infores:monarchinitiative",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:hpo-annotations"]
+              "upstream_resource_ids": [
+                "infores:hpo-annotations"
+              ]
             }
           ],
-          "attributes": [
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "knowledge_assertion"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "manual_agent"
-            }
-          ]
+          "knowledge_level": "knowledge_assertion",
+          "agent_type": "manual_agent"
         },
         "73b7fe7b01ff": {
           "subject": "MONDO:0005148",
@@ -1270,33 +1269,31 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:service-provider-trapi"]
+              "upstream_resource_ids": [
+                "infores:service-provider-trapi"
+              ]
             },
             {
               "resource_id": "infores:mydisease-info",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:hpo-annotations"]
+              "upstream_resource_ids": [
+                "infores:hpo-annotations"
+              ]
             },
             {
               "resource_id": "infores:service-provider-trapi",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mydisease-info"]
+              "upstream_resource_ids": [
+                "infores:mydisease-info"
+              ]
             },
             {
               "resource_id": "infores:hpo-annotations",
               "resource_role": "primary_knowledge_source"
             }
           ],
-          "attributes": [
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "knowledge_assertion"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "manual_agent"
-            }
-          ]
+          "knowledge_level": "knowledge_assertion",
+          "agent_type": "manual_agent"
         },
         "37e30d3d96b5": {
           "subject": "MONDO:0005148",
@@ -1310,34 +1307,34 @@
             {
               "resource_id": "infores:phenio",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mondo"]
+              "upstream_resource_ids": [
+                "infores:mondo"
+              ]
             },
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:service-provider-trapi"]
+              "upstream_resource_ids": [
+                "infores:service-provider-trapi"
+              ]
             },
             {
               "resource_id": "infores:service-provider-trapi",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:monarchinitiative"]
+              "upstream_resource_ids": [
+                "infores:monarchinitiative"
+              ]
             },
             {
               "resource_id": "infores:monarchinitiative",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:phenio"]
+              "upstream_resource_ids": [
+                "infores:phenio"
+              ]
             }
           ],
-          "attributes": [
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "knowledge_assertion"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "manual_agent"
-            }
-          ]
+          "knowledge_level": "knowledge_assertion",
+          "agent_type": "manual_agent"
         },
         "32fefb06aaaf": {
           "subject": "MONDO:0005148",
@@ -1347,603 +1344,604 @@
             {
               "resource_id": "infores:aragorn",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:service-provider-trapi"]
+              "upstream_resource_ids": [
+                "infores:service-provider-trapi"
+              ]
             },
             {
               "resource_id": "infores:mydisease-info",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:hpo-annotations"]
+              "upstream_resource_ids": [
+                "infores:hpo-annotations"
+              ]
             },
             {
               "resource_id": "infores:service-provider-trapi",
               "resource_role": "aggregator_knowledge_source",
-              "upstream_resource_ids": ["infores:mydisease-info"]
+              "upstream_resource_ids": [
+                "infores:mydisease-info"
+              ]
             },
             {
               "resource_id": "infores:hpo-annotations",
               "resource_role": "primary_knowledge_source"
             }
           ],
-          "attributes": [
-            {
-              "attribute_type_id": "biolink:knowledge_level",
-              "value": "knowledge_assertion"
-            },
-            {
-              "attribute_type_id": "biolink:agent_type",
-              "value": "manual_agent"
-            }
-          ]
+          "knowledge_level": "knowledge_assertion",
+          "agent_type": "manual_agent"
         }
       }
     },
     "results": [
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0025502", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0025502"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "1934f3c461ef", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "1934f3c461ef"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "UMLS:C4042861", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "UMLS:C4042861"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "c00e263a1ae3", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "c00e263a1ae3"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0001824", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0001824"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "991331aa874d", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "991331aa874d"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "MESH:D000077962", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "MESH:D000077962"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "f088f4fa3e70", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "f088f4fa3e70"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "UMLS:C3658248", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "UMLS:C3658248"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "39cfd2c8291e", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "39cfd2c8291e"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0001520", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0001520"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "ad294653032c", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "ad294653032c"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0012592", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0012592"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "e3b04dfe114d", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "e3b04dfe114d"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "MONDO:0024381", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "MONDO:0024381"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "fcd02bb8cdd7", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "fcd02bb8cdd7"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "UMLS:C0795692", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "UMLS:C0795692"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "1ef95dc37310", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "1ef95dc37310"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0000017", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0000017"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "5e5184b91caa", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "5e5184b91caa"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0004324", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0004324"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "bb41939f9e35", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "bb41939f9e35"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "UMLS:C2362324", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "UMLS:C2362324"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "458c5dd6f840", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "458c5dd6f840"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0031819", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0031819"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [
-                { "id": "e66a6668c645", "attributes": [] },
-                { "id": "d06198affc26", "attributes": [] }
-              ]
+              "e01": {
+                "ids": [
+                  "e66a6668c645",
+                  "d06198affc26"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0000855", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0000855"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [
-                { "id": "6492ac44321b", "attributes": [] },
-                { "id": "73b7fe7b01ff", "attributes": [] },
-                { "id": "37e30d3d96b5", "attributes": [] }
-              ]
+              "e01": {
+                "ids": [
+                  "6492ac44321b",
+                  "73b7fe7b01ff",
+                  "37e30d3d96b5"
+                ]
+              }
             }
           }
         ]
       },
       {
         "node_bindings": {
-          "n0": [{ "id": "MONDO:0005148", "attributes": [] }],
-          "n1": [{ "id": "HP:0001939", "attributes": [] }]
+          "n0": {
+            "ids": [
+              "MONDO:0005148"
+            ]
+          },
+          "n1": {
+            "ids": [
+              "HP:0001939"
+            ]
+          }
         },
         "analyses": [
           {
             "resource_id": "infores:aragorn",
             "edge_bindings": {
-              "e01": [{ "id": "32fefb06aaaf", "attributes": [] }]
+              "e01": {
+                "ids": [
+                  "32fefb06aaaf"
+                ]
+              }
             }
           }
         ]
       }
-    ],
-    "auxiliary_graphs": {}
+    ]
   },
-  "log_level": "INFO",
-  "bypass_cache": true,
+  "parameters": {
+    "log_level": "INFO",
+    "bypass_cache": true
+  },
   "logs": [
     {
-      "message": "[b4d5ae77.bd81babe] Finished call stack: infores:service-provider-trapi",
-      "timestamp": "2024-10-31T14:40:52.696939",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:52.696939Z",
+      "level": "INFO",
+      "message": "[b4d5ae77.bd81babe] Finished call stack: infores:service-provider-trapi"
     },
     {
-      "message": "[infores:service-provider-trapi] Received response with 3 results in 1.746 seconds",
-      "timestamp": "2024-10-31T14:40:52.649963",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:52.649963Z",
+      "level": "INFO",
+      "message": "[infores:service-provider-trapi] Received response with 3 results in 1.746 seconds"
     },
     {
-      "message": "[b4d5ae77] Ending call stack with no results: infores:rtx-kg2",
-      "timestamp": "2024-10-31T14:40:51.273488",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:51.273488Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Ending call stack with no results: infores:rtx-kg2"
     },
     {
-      "message": "[infores:rtx-kg2] Received response with 0 results in 0.332 seconds",
-      "timestamp": "2024-10-31T14:40:51.243263",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:51.243263Z",
+      "level": "INFO",
+      "message": "[infores:rtx-kg2] Received response with 0 results in 0.332 seconds"
     },
     {
-      "message": "[b4d5ae77.ff08bee9] Finished call stack: infores:spoke",
-      "timestamp": "2024-10-31T14:40:51.054740",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:51.054740Z",
+      "level": "INFO",
+      "message": "[b4d5ae77.ff08bee9] Finished call stack: infores:spoke"
     },
     {
-      "message": "[infores:spoke] Postprocessing took out 1 results",
-      "timestamp": "2024-10-31T14:40:51.042020",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:51.042020Z",
+      "level": "INFO",
+      "message": "[infores:spoke] Postprocessing took out 1 results"
     },
     {
-      "message": "[infores:spoke] Received response with 13 results in 0.051 seconds",
-      "timestamp": "2024-10-31T14:40:50.973454",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.973454Z",
+      "level": "INFO",
+      "message": "[infores:spoke] Received response with 13 results in 0.051 seconds"
     },
     {
-      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-monarchinitiative",
-      "timestamp": "2024-10-31T14:40:50.960189",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.960189Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-monarchinitiative"
     },
     {
-      "message": "Response Error contacting infores:automat-monarchinitiative",
-      "error": "Server error '500 Internal Server Error' for url 'https://automat.transltr.io/monarch-kg/query'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
-      "request": {
-        "method": "POST",
-        "url": "https://automat.transltr.io/monarch-kg/query",
-        "headers": {
-          "host": "automat.transltr.io",
-          "accept": "*/*",
-          "accept-encoding": "gzip, deflate",
-          "connection": "keep-alive",
-          "user-agent": "python-httpx/0.27.0",
-          "content-length": "505",
-          "content-type": "application/json",
-          "traceparent": "00-4a2454d088f00c26120da088ec6cb340-fce833eca4d4f16a-01"
-        },
-        "data": {
-          "message": {
-            "query_graph": {
-              "nodes": {
-                "n0": {
-                  "ids": ["MONDO:0005148"],
-                  "categories": ["biolink:Disease"],
-                  "set_interpretation": "BATCH",
-                  "constraints": [],
-                  "member_ids": []
-                },
-                "n1": {
-                  "categories": ["biolink:PhenotypicFeature"],
-                  "set_interpretation": "BATCH",
-                  "constraints": [],
-                  "member_ids": []
-                }
-              },
-              "edges": {
-                "e01": {
-                  "subject": "n0",
-                  "object": "n1",
-                  "predicates": ["biolink:has_phenotype"],
-                  "attribute_constraints": [],
-                  "qualifier_constraints": []
-                }
-              }
-            }
-          },
-          "bypass_cache": true,
-          "submitter": "infores:aragorn"
-        }
-      },
-      "response": {
-        "status_code": 500,
-        "headers": {
-          "date": "Thu, 31 Oct 2024 14:40:50 GMT",
-          "content-type": "application/json",
-          "content-length": "12",
-          "connection": "keep-alive",
-          "server": "uvicorn"
-        },
-        "data": "{\"error\":\"\"}"
-      },
-      "timestamp": "2024-10-31T14:40:50.959848",
-      "level": "WARNING"
+      "timestamp": "2024-10-31T14:40:50.959848Z",
+      "level": "WARNING",
+      "message": "Response Error contacting infores:automat-monarchinitiative: Server error '500 Internal Server Error' for url 'https://automat.transltr.io/monarch-kg/query'"
     },
     {
-      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-robokop",
-      "timestamp": "2024-10-31T14:40:50.956218",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.956218Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-robokop"
     },
     {
-      "message": "Response Error contacting infores:automat-robokop",
-      "error": "Server error '500 Internal Server Error' for url 'https://automat.transltr.io/robokopkg/query'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
-      "request": {
-        "method": "POST",
-        "url": "https://automat.transltr.io/robokopkg/query",
-        "headers": {
-          "host": "automat.transltr.io",
-          "accept": "*/*",
-          "accept-encoding": "gzip, deflate",
-          "connection": "keep-alive",
-          "user-agent": "python-httpx/0.27.0",
-          "content-length": "505",
-          "content-type": "application/json",
-          "traceparent": "00-4a2454d088f00c26120da088ec6cb340-9e04fb60ad2456fd-01"
-        },
-        "data": {
-          "message": {
-            "query_graph": {
-              "nodes": {
-                "n0": {
-                  "ids": ["MONDO:0005148"],
-                  "categories": ["biolink:Disease"],
-                  "set_interpretation": "BATCH",
-                  "constraints": [],
-                  "member_ids": []
-                },
-                "n1": {
-                  "categories": ["biolink:PhenotypicFeature"],
-                  "set_interpretation": "BATCH",
-                  "constraints": [],
-                  "member_ids": []
-                }
-              },
-              "edges": {
-                "e01": {
-                  "subject": "n0",
-                  "object": "n1",
-                  "predicates": ["biolink:has_phenotype"],
-                  "attribute_constraints": [],
-                  "qualifier_constraints": []
-                }
-              }
-            }
-          },
-          "bypass_cache": true,
-          "submitter": "infores:aragorn"
-        }
-      },
-      "response": {
-        "status_code": 500,
-        "headers": {
-          "date": "Thu, 31 Oct 2024 14:40:50 GMT",
-          "content-type": "application/json",
-          "content-length": "12",
-          "connection": "keep-alive",
-          "server": "uvicorn"
-        },
-        "data": "{\"error\":\"\"}"
-      },
-      "timestamp": "2024-10-31T14:40:50.955868",
-      "level": "WARNING"
+      "timestamp": "2024-10-31T14:40:50.955868Z",
+      "level": "WARNING",
+      "message": "Response Error contacting infores:automat-robokop: Server error '500 Internal Server Error' for url 'https://automat.transltr.io/robokopkg/query'"
     },
     {
-      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-ubergraph",
-      "timestamp": "2024-10-31T14:40:50.955508",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.955508Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Ending call stack with no results: infores:automat-ubergraph"
     },
     {
-      "message": "Response Error contacting infores:automat-ubergraph",
-      "error": "Server error '500 Internal Server Error' for url 'https://automat.transltr.io/ubergraph/query'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
-      "request": {
-        "method": "POST",
-        "url": "https://automat.transltr.io/ubergraph/query",
-        "headers": {
-          "host": "automat.transltr.io",
-          "accept": "*/*",
-          "accept-encoding": "gzip, deflate",
-          "connection": "keep-alive",
-          "user-agent": "python-httpx/0.27.0",
-          "content-length": "505",
-          "content-type": "application/json",
-          "traceparent": "00-4a2454d088f00c26120da088ec6cb340-75f29656be4f9b5b-01"
-        },
-        "data": {
-          "message": {
-            "query_graph": {
-              "nodes": {
-                "n0": {
-                  "ids": ["MONDO:0005148"],
-                  "categories": ["biolink:Disease"],
-                  "set_interpretation": "BATCH",
-                  "constraints": [],
-                  "member_ids": []
-                },
-                "n1": {
-                  "categories": ["biolink:PhenotypicFeature"],
-                  "set_interpretation": "BATCH",
-                  "constraints": [],
-                  "member_ids": []
-                }
-              },
-              "edges": {
-                "e01": {
-                  "subject": "n0",
-                  "object": "n1",
-                  "predicates": ["biolink:has_phenotype"],
-                  "attribute_constraints": [],
-                  "qualifier_constraints": []
-                }
-              }
-            }
-          },
-          "bypass_cache": true,
-          "submitter": "infores:aragorn"
-        }
-      },
-      "response": {
-        "status_code": 500,
-        "headers": {
-          "date": "Thu, 31 Oct 2024 14:40:50 GMT",
-          "content-type": "application/json",
-          "content-length": "12",
-          "connection": "keep-alive",
-          "server": "uvicorn"
-        },
-        "data": "{\"error\":\"\"}"
-      },
-      "timestamp": "2024-10-31T14:40:50.954684",
-      "level": "WARNING"
+      "timestamp": "2024-10-31T14:40:50.954684Z",
+      "level": "WARNING",
+      "message": "Response Error contacting infores:automat-ubergraph: Server error '500 Internal Server Error' for url 'https://automat.transltr.io/ubergraph/query'"
     },
     {
-      "message": "[infores:automat-monarchinitiative] Sending request made of 1 subrequests (1 x 0 curies)",
-      "timestamp": "2024-10-31T14:40:50.928951",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.928951Z",
+      "level": "INFO",
+      "message": "[infores:automat-monarchinitiative] Sending request made of 1 subrequests (1 x 0 curies)"
     },
     {
-      "message": "[infores:automat-ubergraph] Sending request made of 1 subrequests (1 x 0 curies)",
-      "timestamp": "2024-10-31T14:40:50.922819",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.922819Z",
+      "level": "INFO",
+      "message": "[infores:automat-ubergraph] Sending request made of 1 subrequests (1 x 0 curies)"
     },
     {
-      "message": "[infores:spoke] Sending request made of 1 subrequests (1 x 0 curies)",
-      "timestamp": "2024-10-31T14:40:50.917082",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.917082Z",
+      "level": "INFO",
+      "message": "[infores:spoke] Sending request made of 1 subrequests (1 x 0 curies)"
     },
     {
-      "message": "[infores:automat-robokop] Sending request made of 1 subrequests (1 x 0 curies)",
-      "timestamp": "2024-10-31T14:40:50.911383",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.911383Z",
+      "level": "INFO",
+      "message": "[infores:automat-robokop] Sending request made of 1 subrequests (1 x 0 curies)"
     },
     {
-      "message": "[infores:rtx-kg2] Sending request made of 1 subrequests (1 x 0 curies)",
-      "timestamp": "2024-10-31T14:40:50.906038",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.906038Z",
+      "level": "INFO",
+      "message": "[infores:rtx-kg2] Sending request made of 1 subrequests (1 x 0 curies)"
     },
     {
-      "message": "[infores:service-provider-trapi] Sending request made of 1 subrequests (1 x 0 curies)",
-      "timestamp": "2024-10-31T14:40:50.898632",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.898632Z",
+      "level": "INFO",
+      "message": "[infores:service-provider-trapi] Sending request made of 1 subrequests (1 x 0 curies)"
     },
     {
-      "message": "[infores:automat-monarchinitiative] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
-      "timestamp": "2024-10-31T14:40:50.878007",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.878007Z",
+      "level": "INFO",
+      "message": "[infores:automat-monarchinitiative] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}"
     },
     {
-      "message": "[b4d5ae77] Current call stack: infores:automat-monarchinitiative",
-      "timestamp": "2024-10-31T14:40:50.877648",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.877648Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Current call stack: infores:automat-monarchinitiative"
     },
     {
-      "message": "[infores:automat-ubergraph] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
-      "timestamp": "2024-10-31T14:40:50.874494",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.874494Z",
+      "level": "INFO",
+      "message": "[infores:automat-ubergraph] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}"
     },
     {
-      "message": "[b4d5ae77] Current call stack: infores:automat-ubergraph",
-      "timestamp": "2024-10-31T14:40:50.874137",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.874137Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Current call stack: infores:automat-ubergraph"
     },
     {
-      "message": "[infores:automat-robokop] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
-      "timestamp": "2024-10-31T14:40:50.870878",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.870878Z",
+      "level": "INFO",
+      "message": "[infores:automat-robokop] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}"
     },
     {
-      "message": "[b4d5ae77] Current call stack: infores:automat-robokop",
-      "timestamp": "2024-10-31T14:40:50.870521",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.870521Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Current call stack: infores:automat-robokop"
     },
     {
-      "message": "[infores:rtx-kg2] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
-      "timestamp": "2024-10-31T14:40:50.867665",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.867665Z",
+      "level": "INFO",
+      "message": "[infores:rtx-kg2] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}"
     },
     {
-      "message": "[b4d5ae77] Current call stack: infores:rtx-kg2",
-      "timestamp": "2024-10-31T14:40:50.867306",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.867306Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Current call stack: infores:rtx-kg2"
     },
     {
-      "message": "[infores:service-provider-trapi] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
-      "timestamp": "2024-10-31T14:40:50.864350",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.864350Z",
+      "level": "INFO",
+      "message": "[infores:service-provider-trapi] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}"
     },
     {
-      "message": "[b4d5ae77] Current call stack: infores:service-provider-trapi",
-      "timestamp": "2024-10-31T14:40:50.863980",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.863980Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Current call stack: infores:service-provider-trapi"
     },
     {
-      "message": "[infores:spoke] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
-      "timestamp": "2024-10-31T14:40:50.860490",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.860490Z",
+      "level": "INFO",
+      "message": "[infores:spoke] Need to get results for: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}"
     },
     {
-      "message": "[b4d5ae77] Current call stack: infores:spoke",
-      "timestamp": "2024-10-31T14:40:50.860123",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.860123Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Current call stack: infores:spoke"
     },
     {
-      "message": "[b4d5ae77] Getting results for e01",
-      "timestamp": "2024-10-31T14:40:50.859523",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.859523Z",
+      "level": "INFO",
+      "message": "[b4d5ae77] Getting results for e01"
     },
     {
-      "message": "Generated query plan: {'e01': ['infores:spoke', 'infores:service-provider-trapi', 'infores:rtx-kg2', 'infores:automat-robokop', 'infores:automat-ubergraph', 'infores:automat-monarchinitiative']}",
-      "timestamp": "2024-10-31T14:40:50.857843",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.857843Z",
+      "level": "INFO",
+      "message": "Generated query plan: {'e01': ['infores:spoke', 'infores:service-provider-trapi', 'infores:rtx-kg2', 'infores:automat-robokop', 'infores:automat-ubergraph', 'infores:automat-monarchinitiative']}"
     },
     {
-      "message": "Doing lookup for message: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}",
-      "timestamp": "2024-10-31T14:40:50.537320",
-      "level": "INFO"
+      "timestamp": "2024-10-31T14:40:50.537320Z",
+      "level": "INFO",
+      "message": "Doing lookup for message: {\"query_graph\": {\"nodes\": {\"n0\": {\"ids\": [\"MONDO:0005148\"], \"categories\": [\"biolink:Disease\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}, \"n1\": {\"ids\": null, \"categories\": [\"biolink:PhenotypicFeature\"], \"set_interpretation\": \"BATCH\", \"constraints\": [], \"member_ids\": []}}, \"edges\": {\"e01\": {\"subject\": \"n0\", \"object\": \"n1\", \"knowledge_type\": null, \"predicates\": [\"biolink:has_phenotype\"], \"attribute_constraints\": [], \"qualifier_constraints\": []}}}, \"knowledge_graph\": null, \"results\": null, \"auxiliary_graphs\": null}"
     }
   ]
 }

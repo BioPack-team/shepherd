@@ -15,6 +15,7 @@ from opentelemetry.trace import Status, StatusCode, get_current_span
 from shepherd_utils.ars.handoff import parse_handoff_callback
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.db import (
+    DatabaseUnavailableError,
     ResponseTooLargeError,
     cleanup_callbacks,
     enforce_response_size_limit,
@@ -31,6 +32,11 @@ from shepherd_utils.response_limit import (
     write_too_large_response,
 )
 from shepherd_utils.shared import get_tasks
+from shepherd_utils.trapi import (
+    BIOLINK_VERSION,
+    SCHEMA_VERSION,
+    query_parameters,
+)
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 
@@ -64,6 +70,58 @@ CALLBACK_ERROR_BODY_BYTES = 500
 # note is in the query's own logs either way, so oversized payloads just skip
 # the inline copy.
 RETRY_LOG_SPLICE_MAX_BYTES = 64 * 1024 * 1024
+
+
+# How long finish_query waits out a Postgres outage before giving up on a
+# query, and how often it looks again meanwhile. Everything this worker does
+# needs Postgres, and giving up drops the query on the floor (the task is acked
+# either way), so it waits rather than failing at the first unreachable read.
+DB_WAIT_SEC = 600
+DB_RETRY_SEC = 5
+
+
+async def _wait_for_query_state(query_id: str, logger: logging.Logger):
+    """``get_query_state``, waiting out a Postgres outage.
+
+    A row of None from a reachable database really means "no such query";
+    an unreachable one used to read the same way, and the query was then
+    finished without being delivered or marked complete.
+    """
+    deadline = time.time() + DB_WAIT_SEC
+    while True:
+        try:
+            return await get_query_state(query_id, logger, raise_on_unavailable=True)
+        except DatabaseUnavailableError as e:
+            if time.time() >= deadline:
+                raise
+            logger.warning(
+                f"Postgres unavailable finishing {query_id}; retrying in "
+                f"{DB_RETRY_SEC}s: {e}"
+            )
+            await asyncio.sleep(DB_RETRY_SEC)
+
+
+# ``status`` recorded in ``shepherd_brain`` for a query whose response was lost
+# from the data store before it could be delivered.
+LOST_STATUS = "ERROR"
+LOST_DESCRIPTION = (
+    "Response lost: the query's stored response is gone from the data store "
+    "(most likely the store restarted and lost recent writes)"
+)
+
+
+def build_lost_response(original_query) -> dict:
+    """The empty error response delivered in place of a lost one.
+
+    Carries the original query graph when the query itself survived, so the
+    caller can still tell which query this answers (TRAPI 2.0 forbids an
+    empty one, so it is left out otherwise).
+    """
+    message: dict = {"knowledge_graph": {"nodes": {}, "edges": {}}, "results": []}
+    query_graph = ((original_query or {}).get("message") or {}).get("query_graph")
+    if query_graph:
+        message["query_graph"] = query_graph
+    return {"message": message, "status": "Error", "description": LOST_DESCRIPTION}
 
 
 def _log_entry(message: str, level: str = "ERROR") -> dict:
@@ -126,16 +184,60 @@ def _is_retryable(e: Exception) -> bool:
     return True
 
 
-def _append_log_entry(payload: bytes, entry: dict) -> bytes:
+def delivery_payload(stored: bytes, query: "dict | None", logs: "list[dict]") -> bytes:
+    """The TRAPI 2.0 Response delivered for ``stored``, without decoding it.
+
+    A stored response never carries the delivery envelope (see
+    ``shepherd_utils.trapi.prepare_stored_response``) and its content is
+    already valid 2.0, so the envelope -- ``schema_version``,
+    ``biolink_version``, the query's ``parameters`` (which 2.0 says the server
+    MUST repeat) -- is written in front of the stored members, and the logs
+    after them. ``logs`` are last so ``_append_log_entry`` can extend them,
+    and absent when there are none (``Response.logs`` has a ``minItems`` of
+    1). One allocation of the payload's size; the slices are views. Anything
+    that is not a JSON object is returned untouched.
+    """
+    envelope: dict = {
+        "schema_version": SCHEMA_VERSION,
+        "biolink_version": BIOLINK_VERSION,
+    }
+    parameters = query_parameters(query)
+    if parameters:
+        envelope["parameters"] = parameters
+    head = orjson.dumps(envelope)
+    view = memoryview(stored)
+    # ``stored`` is one JSON object as orjson wrote it: no whitespace, so its
+    # members are everything between the outer braces.
+    if stored[:1] != b"{" or stored[-1:] != b"}":
+        # Not something a worker stored; deliver it untouched rather than
+        # guess at its structure.
+        return stored
+    members = view[1:-1]
+    parts = [memoryview(head)[:-1]]
+    if len(members):
+        parts += [b",", members]
+    if logs:
+        parts += [b',"logs":', orjson.dumps(logs)]
+    parts.append(b"}")
+    return b"".join(parts)
+
+
+def _append_log_entry(payload: bytes, entry: dict, has_logs: bool = True) -> bytes:
     """Return ``payload`` with ``entry`` appended to its trailing logs array.
 
-    Only sound for a payload this worker built, which always ends with the logs
-    array followed by the closing brace. Rebuilding costs a transient second
-    copy of the payload, so callers guard on size; the rebind releases the old
-    buffer immediately. If the payload doesn't have the expected tail, hand it
-    back untouched rather than risk shipping malformed JSON.
+    Only sound for a payload this worker built (``delivery_payload``): with
+    ``has_logs`` it ends with the logs array and the closing brace; without,
+    it has no ``logs`` member at all (an empty one is invalid TRAPI 2.0), so
+    one is added. Rebuilding costs a transient second copy of the payload, so
+    callers guard on size; the rebind releases the old buffer immediately. If
+    the payload doesn't have the expected tail, hand it back untouched rather
+    than risk shipping malformed JSON.
     """
     entry_bytes = orjson.dumps(entry)
+    if not has_logs:
+        if payload.endswith(b"}"):
+            return payload[:-1] + b',"logs":[' + entry_bytes + b"]}"
+        return payload
     if payload.endswith(b"[]}"):
         return payload[:-3] + b"[" + entry_bytes + b"]}"
     if payload.endswith(b"]}"):
@@ -147,6 +249,7 @@ async def send_callback(
     callback_url: str,
     message_bytes: bytes,
     logger: logging.Logger,
+    has_logs: bool = True,
 ) -> bool:
     """POST the finished response to the caller's callback URL.
 
@@ -225,8 +328,9 @@ async def send_callback(
             if attempt < CALLBACK_ATTEMPTS:
                 if len(message_bytes) <= RETRY_LOG_SPLICE_MAX_BYTES:
                     message_bytes = _append_log_entry(
-                        message_bytes, _log_entry(failure)
+                        message_bytes, _log_entry(failure), has_logs
                     )
+                    has_logs = True
                 sleep_for = 1 * (2 ** (attempt - 1))
                 backoff += sleep_for
                 await asyncio.sleep(sleep_for)
@@ -286,7 +390,7 @@ async def finish_query(task, logger: logging.Logger):
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
     status = task[1].get("status", "OK")
-    query_state = await get_query_state(query_id, logger)
+    query_state = await _wait_for_query_state(query_id, logger)
 
     if query_state is None:
         logger.error(f"Query id {query_id} not found in db.")
@@ -341,39 +445,45 @@ async def finish_query(task, logger: logging.Logger):
                 )
         elif callback_url is not None:
             # this was an async query, need to send message back
+            try:
+                original_query = await get_message(query_id, logger)
+            except Exception as e:
+                # The query blob can have expired under a long-running query;
+                # that must not cost the caller their response, only the
+                # parameters echo.
+                logger.warning(
+                    f"Couldn't load query {query_id} to echo its parameters: {e}"
+                )
+                original_query = None
             if too_large is not None:
                 message_bytes = orjson.dumps(too_large_response)
             else:
-                message_bytes = await get_message(response_id, logger, raw=True)
+                try:
+                    message_bytes = await get_message(response_id, logger, raw=True)
+                except KeyError as e:
+                    # The response is gone (e.g. Redis restarted and reloaded
+                    # an older snapshot). Tell the caller instead of crashing
+                    # here, which left the query unfinished and the caller
+                    # waiting until the abandoned-query reaper -- which never
+                    # tells them either.
+                    status = LOST_STATUS
+                    logger.error(
+                        f"Query {query_id} finishing with status {status}: "
+                        f"its response is gone ({e})"
+                    )
+                    message_bytes = orjson.dumps(build_lost_response(original_query))
             logs = await get_logs(response_id, logger)
-            logs_bytes = orjson.dumps(logs)
-            # Splice logs into the raw JSON bytes to avoid deserializing and
-            # re-serializing the (potentially huge) message dict. We rebind
-            # message_bytes to the spliced result so the original buffer is
-            # released as soon as the new one is built -- otherwise both full
-            # copies would stay resident for the entire (up to 120s x retries)
-            # POST below, doubling this worker's peak memory under load.
-            if message_bytes and message_bytes[-1:] == b"}":
-                last_brace = message_bytes.rindex(b"}")
-                message_bytes = (
-                    message_bytes[:last_brace] + b',"logs":' + logs_bytes + b"}"
-                )
-            else:
-                message = orjson.loads(message_bytes)
-                # Re-insert rather than assign in place so "logs" is last in
-                # the serialized payload -- send_callback appends retry notes
-                # by rewriting the payload's tail.
-                message.pop("logs", None)
-                message["logs"] = logs
-                message_bytes = orjson.dumps(message)
-                del message
-            # The logs list and its serialization are a full second copy of
-            # every log line the query produced; they're inside the payload
-            # now, so drop them before the send rather than holding them for
-            # its duration.
-            del logs, logs_bytes
+            # Build the TRAPI 2.0 Response around the stored bytes rather
+            # than decoding them: the decoded tree is several times the size
+            # of its JSON, and this worker holds many responses at once.
+            # Rebinding releases the stored buffer as soon as the payload is
+            # built, so only one full copy stays resident for the (up to
+            # 120s x retries) POST below.
+            message_bytes = delivery_payload(message_bytes, original_query, logs)
+            has_logs = bool(logs)
+            del logs, original_query
 
-            await send_callback(callback_url, message_bytes, logger)
+            await send_callback(callback_url, message_bytes, logger, has_logs)
             # Release the payload before the remaining db round trips.
             del message_bytes
 

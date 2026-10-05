@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 
-from shepherd_utils.db import get_message, save_message
+from shepherd_utils.db import get_message, save_response
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import (
@@ -34,7 +34,7 @@ async def do_filter_kgraph_orphans(task, logger: logging.Logger):
     filter_kgraph_orphans(message, logger)
 
     # save merged message back to db
-    await save_message(response_id, message, logger)
+    await save_response(response_id, message, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):

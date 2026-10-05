@@ -23,10 +23,30 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import shepherd_utils.ars.annotate as annotate_mod
 import shepherd_utils.ars.db as ars_db
+from shepherd_utils.config import settings
 from workers.ars_premerge import worker as pm
 
 LOGGER = logging.getLogger(__name__)
+
+
+ANNOTATIONS = {
+    "MONDO:0005148": {"disease_info": {"mondo": "0005148"}},
+    "CHEBI:6801": [{"notfound": True}],
+    "NCBIGene:5468": {"gene_info": {"symbol": "PPARG"}},
+}
+
+
+def _annotated_curies(payload):
+    return {
+        curie
+        for curie, node in payload["message"]["knowledge_graph"]["nodes"].items()
+        if any(
+            a.get("attribute_type_id") == "biothings_annotations"
+            for a in node.get("attributes") or []
+        )
+    }
 
 
 def load_corpus(name):
@@ -74,7 +94,13 @@ def env(mocker, redis_mock):
 
     mocker.patch.object(pm, "get_message_sync", side_effect=_get_sync)
     mocker.patch.object(pm, "save_message_sync", side_effect=_save_sync)
+    # the in-process biothings_annotator package (ars_annotation_mode
+    # "premerge" runs it here); never the live BioThings APIs
+    annotator = mocker.MagicMock()
+    annotator.annotate_curie_list = AsyncMock(return_value=ANNOTATIONS)
+    mocker.patch.object(annotate_mod.annotator, "Annotator", return_value=annotator)
     return {
+        "annotator": annotator,
         "parent_pk": parent_pk,
         "child_pk": child_pk,
         "child_row": child_row,
@@ -202,6 +228,87 @@ async def test_premerge_validate_false_skips_validation(env, redis_mock):
     assert len(await _merge_tasks()) == 1
 
 
+def _has_null(obj):
+    if isinstance(obj, dict):
+        return any(v is None or _has_null(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_null(v) for v in obj)
+    return False
+
+
+async def test_premerge_reads_explicit_nulls_as_absent(env, redis_mock):
+    """TRAPI 2.0 has no nullable members. A null on an optional member is
+    read as absent -- the response still validates -- and is stripped from
+    the saved payload, so the merge (and everything the ARS serves) never
+    carries one. Nulls inside a free-form attribute value are data."""
+    data = env["data"]
+    data["logs"] = None
+    data["message"]["knowledge_graph"]["nodes"]["CHEBI:6801"]["is_set"] = None
+    data["message"]["knowledge_graph"]["edges"]["e1"]["qualifiers"] = None
+    data["message"]["results"][0]["analyses"][0]["scoring_method"] = None
+    data["message"]["knowledge_graph"]["edges"]["e1"]["attributes"].append(
+        {"attribute_type_id": "biolink:has_evidence", "value": {"x": None}}
+    )
+
+    await pm.ars_premerge(_task(env), LOGGER)
+
+    final = _final_status_update(env)
+    assert (final["status"], final["code"]) == ("D", 200)
+    _, payload = env["saved"][-1]
+    edge = payload["message"]["knowledge_graph"]["edges"]["e1"]
+    assert edge["attributes"][-1]["value"] == {"x": None}
+    edge["attributes"].pop()
+    assert not _has_null(payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # 2.0 required Edge members (1.5 carried these as attributes)
+        lambda d: d["message"]["knowledge_graph"]["edges"]["e1"].pop("knowledge_level"),
+        lambda d: d["message"]["knowledge_graph"]["edges"]["e1"].pop("agent_type"),
+        # a 1.x-shaped node binding
+        lambda d: d["message"]["results"][0]["node_bindings"].update(
+            sn=[{"id": "MONDO:0005148"}]
+        ),
+        # forbidden empties (minItems 1)
+        lambda d: d["message"]["results"][0].update(analyses=[]),
+        lambda d: d["message"]["results"][0]["node_bindings"]["sn"].update(ids=[]),
+        # a null on a REQUIRED member reads as missing
+        lambda d: d["message"]["knowledge_graph"]["edges"]["e1"].update(predicate=None),
+        # Edge is additionalProperties: false
+        lambda d: d["message"]["knowledge_graph"]["edges"]["e1"].update(extra=1),
+    ],
+    ids=[
+        "edge_missing_knowledge_level",
+        "edge_missing_agent_type",
+        "trapi1_node_binding",
+        "empty_analyses",
+        "empty_binding_ids",
+        "null_predicate",
+        "edge_extra_member",
+    ],
+)
+async def test_premerge_non_trapi2_response_is_422(env, redis_mock, mutate):
+    mutate(env["data"])
+    await pm.ars_premerge(_task(env), LOGGER)
+    final = _final_status_update(env)
+    assert (final["status"], final["code"]) == ("E", 422)
+    assert await _merge_tasks() == []
+
+
+async def test_intake_empty_logs_are_omitted(env, intake, redis_mock):
+    """Response.logs has minItems 1 in TRAPI 2.0: a response whose query
+    logged nothing carries no logs member, rather than logs: [] (which
+    would fail validation)."""
+    intake["get_logs"].return_value = []
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+    first_save = env["save_message_data"].await_args_list[0].args[1]
+    assert "logs" not in first_save
+    final = _final_status_update(env)
+    assert (final["status"], final["code"]) == ("D", 200)
+
+
 async def test_premerge_crash_is_500_with_log_entry(env, mocker, redis_mock):
     """A premerge failure reproduces upstream's generic callback handler:
     E/500 and the 'Internal ARS Server Error' log entry in the payload. The
@@ -214,10 +321,14 @@ async def test_premerge_crash_is_500_with_log_entry(env, mocker, redis_mock):
     assert final["status"] == "E"
     assert final["code"] == 500
     saved = env["save_message_data"].await_args_list[-1].args[1]
-    assert any(
-        entry["message"] == "Internal ARS Server Error"
-        for entry in saved.get("logs", [])
-    )
+    (entry,) = [
+        e for e in saved.get("logs", []) if e["message"] == "Internal ARS Server Error"
+    ]
+    # a valid TRAPI 2.0 LogEntry (upstream wrote str(updated_at): "None" here)
+    from translator_tom import LogEntry
+
+    LogEntry.from_dict(entry)
+    assert entry["level"] == "ERROR"
     env["completion"].assert_awaited_once()
     assert await _merge_tasks() == []
     assert await _ready(env) == []
@@ -288,7 +399,13 @@ def _intake_task(env, response_id="resp1"):
 def intake(env, mocker):
     """Arm the blob-store mocks for a broker delivery."""
     env["child_row"]["result_count"] = None
-    logs = [{"message": "ara log line", "level": "INFO"}]
+    logs = [
+        {
+            "message": "ara log line",
+            "level": "INFO",
+            "timestamp": "2026-09-01T12:00:00.123456+00:00",
+        }
+    ]
     return {
         "get_message": mocker.patch.object(
             pm, "get_message", new_callable=AsyncMock, return_value=env["data"]
@@ -395,13 +512,34 @@ async def test_intake_errored_child_skips(env, intake, redis_mock):
     assert await _merge_tasks() == []
 
 
-async def test_intake_missing_blob_leaves_child_running(env, intake, redis_mock):
-    """No stored response = the callback never arrived: the child stays R
-    for the watchdog, and nothing is notified or saved."""
+async def test_intake_missing_blob_fails_the_child(env, intake, redis_mock):
+    """A finished response whose blob is gone (e.g. lost in a Redis restart)
+    will never be re-delivered: the child fails E/500 right away and the
+    parent completion check runs, instead of the child sitting Running until
+    the watchdog times it out."""
     intake["get_message"].side_effect = KeyError("gone")
     await pm.ars_premerge(_intake_task(env), LOGGER)
     env["notify"].assert_not_awaited()
+    final = _final_status_update(env)
+    assert final["status"] == "E"
+    assert final["code"] == 500
+    saved = env["save_message_data"].await_args_list[-1].args[1]
+    assert any(e["message"] == "Internal ARS Server Error" for e in saved["logs"])
+    env["completion"].assert_awaited_once_with(env["parent_pk"], LOGGER)
+    assert await _merge_tasks() == []
+
+
+@pytest.mark.parametrize("status", ["D", "E"])
+async def test_intake_missing_blob_leaves_terminal_child_alone(
+    env, intake, redis_mock, status
+):
+    """A child the watchdog (or an earlier delivery) already finished is not
+    rewritten when its response blob turns out to be missing."""
+    env["child_row"]["status"] = status
+    intake["get_message"].side_effect = KeyError("gone")
+    await pm.ars_premerge(_intake_task(env), LOGGER)
     env["update_message"].assert_not_awaited()
+    env["save_message_data"].assert_not_awaited()
     env["completion"].assert_not_awaited()
 
 
@@ -414,9 +552,72 @@ async def test_intake_crash_is_500_with_log_entry(env, intake, mocker, redis_moc
     assert final["status"] == "E"
     assert final["code"] == 500
     saved = env["save_message_data"].await_args_list[-1].args[1]
-    assert any(
-        entry["message"] == "Internal ARS Server Error"
-        for entry in saved.get("logs", [])
-    )
+    (entry,) = [
+        e for e in saved.get("logs", []) if e["message"] == "Internal ARS Server Error"
+    ]
+    # a valid TRAPI 2.0 LogEntry (upstream wrote str(updated_at): "None" here)
+    from translator_tom import LogEntry
+
+    LogEntry.from_dict(entry)
+    assert entry["level"] == "ERROR"
     env["completion"].assert_awaited_once()
     assert await _merge_tasks() == []
+
+
+# ---------------------------------------------------------------------------
+# ars_annotation_mode: annotation in premerge, off the merge lock
+# ---------------------------------------------------------------------------
+
+
+async def test_premerge_mode_annotates_the_validated_response(
+    env, monkeypatch, redis_mock
+):
+    monkeypatch.setattr(settings, "ars_annotation_mode", "premerge")
+    await pm.ars_premerge(_task(env), LOGGER)
+
+    (curies,) = env["annotator"].annotate_curie_list.await_args.args
+    assert sorted(curies) == ["CHEBI:6801", "MONDO:0005148", "NCBIGene:5468"]
+    # annotations ride the saved response to the merge; notfound stays bare
+    payload = env["saved"][-1][1]
+    assert _annotated_curies(payload) == {"MONDO:0005148", "NCBIGene:5468"}
+    assert _final_status_update(env)["status"] == "D"
+    assert await _ready(env) == [str(env["child_pk"])]
+
+
+@pytest.mark.parametrize("mode", ["merge", "off"])
+async def test_other_modes_do_not_annotate_in_premerge(
+    env, monkeypatch, redis_mock, mode
+):
+    monkeypatch.setattr(settings, "ars_annotation_mode", mode)
+    await pm.ars_premerge(_task(env), LOGGER)
+    env["annotator"].annotate_curie_list.assert_not_awaited()
+    assert _annotated_curies(env["saved"][-1][1]) == set()
+
+
+async def test_premerge_annotation_failure_still_merges(env, monkeypatch, redis_mock):
+    """A failed annotation is noted on the response, which still goes D/200
+    and merge-ready: its nodes just merge unannotated."""
+    monkeypatch.setattr(settings, "ars_annotation_mode", "premerge")
+    env["annotator"].annotate_curie_list.side_effect = RuntimeError("annotator down")
+    await pm.ars_premerge(_task(env), LOGGER)
+
+    payload = env["saved"][-1][1]
+    assert _annotated_curies(payload) == set()
+    assert any(
+        entry["message"].startswith("node annotation internal error")
+        for entry in payload.get("logs", [])
+    )
+    final = _final_status_update(env)
+    assert final["status"] == "D"
+    assert final["code"] == 200
+    assert await _ready(env) == [str(env["child_pk"])]
+
+
+async def test_premerge_mode_skips_invalid_and_non_ara_responses(
+    env, monkeypatch, redis_mock
+):
+    monkeypatch.setattr(settings, "ars_annotation_mode", "premerge")
+    await pm.ars_premerge(_task(env, agent="kp-genetics"), LOGGER)
+    del env["data"]["message"]["results"][0]["node_bindings"]
+    await pm.ars_premerge(_task(env), LOGGER)
+    env["annotator"].annotate_curie_list.assert_not_awaited()

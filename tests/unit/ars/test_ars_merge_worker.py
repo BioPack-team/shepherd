@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import shepherd_utils.ars.annotate as annotate_mod
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.broker as broker_mod
 from workers.ars_merge import worker as merge_worker
@@ -124,6 +125,14 @@ def env(mocker, redis_mock):
         "create_message": _patch("create_message", side_effect=_create),
         "update_message": _patch("update_message", side_effect=_update),
         "persist_data_copy": _patch("persist_data_copy"),
+        # the parent's data is the submitted TRAPI 2.0 query
+        "load_message_data": _patch(
+            "load_message_data",
+            return_value={
+                "message": {"query_graph": {"nodes": {}, "edges": {}}},
+                "parameters": {"log_level": "DEBUG"},
+            },
+        ),
         "notify": mocker.patch.object(
             merge_worker, "notify_subscribers", new_callable=AsyncMock
         ),
@@ -206,6 +215,8 @@ async def test_first_merge(env, redis_mock, caplog):
     # the parent's span context rides along so the child's fold and
     # post-process spans join this trace
     assert isinstance(args[5], dict)
+    # ...and the query's TRAPI 2.0 parameters, for the merged versions to echo
+    assert args[7] == {"log_level": "DEBUG"}
 
     # parent bookkeeping in one update
     pupdate = next(
@@ -408,6 +419,15 @@ def sync_blobs(monkeypatch):
     return shepherd_db
 
 
+async def test_merge_survives_an_unreadable_query(env, redis_mock):
+    """The parameters echo is not worth failing a merge over."""
+    env["load_message_data"].side_effect = RuntimeError("redis down")
+    await _ready(env, env["child_pk"])
+    await merge_worker.ars_merge(_task(env), LOGGER)
+    assert env["run_merge"].await_args.args[7] == {}
+    assert _events(env) == ["merged_version_begun", "merged_version_available"]
+
+
 def test_merge_in_child_folds_messages(sync_blobs):
     """The pool-side merge against real (fake) redis blobs matches the
     golden-tested mergeMessages path."""
@@ -425,7 +445,9 @@ def test_merge_in_child_folds_messages(sync_blobs):
     assert stats["results"] == 2
 
     shepherd_db.save_message_sync(child_pk, arax)
-    stats = merge_worker.merge_in_child(current_pk, child_pk, new_pk)
+    stats = merge_worker.merge_in_child(
+        current_pk, child_pk, new_pk, {"log_level": "DEBUG"}
+    )
     merged = shepherd_db.get_message_sync(new_pk)
     assert stats["results"] == 3
     assert set(merged["message"]["knowledge_graph"]["edges"].keys()) == {
@@ -434,6 +456,77 @@ def test_merge_in_child_folds_messages(sync_blobs):
         "e3",
         "e9",
     }
+    # every saved version is a TRAPI 2.0 Response echoing the query's
+    # parameters
+    _assert_trapi2_response(merged, {"log_level": "DEBUG"})
+    # the shared result's node bindings are unioned per query node (2.0:
+    # one {"ids"} object each)
+    shared = next(
+        r
+        for r in merged["message"]["results"]
+        if r["node_bindings"]["on"] == {"ids": ["CHEBI:6801"]}
+    )
+    assert shared["node_bindings"]["sn"] == {"ids": ["MONDO:0005148"]}
+    assert {a["resource_id"] for a in shared["analyses"]} == {
+        "infores:aragorn",
+        "infores:arax",
+    }
+
+
+def _has_null(obj):
+    if isinstance(obj, dict):
+        return any(v is None or _has_null(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_null(v) for v in obj)
+    return False
+
+
+def _assert_trapi2_response(payload, parameters=None):
+    from translator_tom import Response
+
+    from shepherd_utils.ars.trapi import validate
+    from shepherd_utils.trapi import BIOLINK_VERSION, SCHEMA_VERSION
+
+    Response.from_dict(payload)
+    assert validate(payload)
+    assert payload["schema_version"] == SCHEMA_VERSION
+    assert payload["biolink_version"] == BIOLINK_VERSION
+    if parameters:
+        assert payload["parameters"] == parameters
+    else:
+        assert "parameters" not in payload
+    assert not _has_null(payload)
+    message = payload["message"]
+    assert message.get("auxiliary_graphs", None) != {}
+    assert payload.get("logs", None) != []
+
+
+def test_merge_in_child_resolves_knowledge_level_conflicts(sync_blobs):
+    """Two ARAs return the same edge id with different knowledge levels /
+    agent types: the merged edge keeps ONE valid value per member -- the
+    one already merged (earlier ARA), except that a provided value beats
+    not_provided -- never upstream's [merged, current] list."""
+    shepherd_db = sync_blobs
+    aragorn = load_corpus("response_aragorn.json")
+    arax = load_corpus("response_arax.json")
+    a_e1 = aragorn["message"]["knowledge_graph"]["edges"]["e1"]
+    x_e1 = arax["message"]["knowledge_graph"]["edges"]["e1"]
+    a_e1["knowledge_level"], a_e1["agent_type"] = "knowledge_assertion", "not_provided"
+    x_e1["knowledge_level"], x_e1["agent_type"] = "prediction", "text_mining_agent"
+    current_pk = "22222222-2222-2222-2222-222222222222"
+    child_pk = "11111111-1111-1111-1111-111111111111"
+    new_pk = "33333333-3333-3333-3333-333333333333"
+    shepherd_db.save_message_sync(child_pk, aragorn)
+    merge_worker.merge_in_child(None, child_pk, current_pk)
+    shepherd_db.save_message_sync(child_pk, arax)
+    merge_worker.merge_in_child(current_pk, child_pk, new_pk)
+    merged = shepherd_db.get_message_sync(new_pk)
+    e1 = merged["message"]["knowledge_graph"]["edges"]["e1"]
+    # the value already served by the first merged version stands
+    assert e1["knowledge_level"] == "knowledge_assertion"
+    # but a provided agent type beats aragorn's not_provided
+    assert e1["agent_type"] == "text_mining_agent"
+    _assert_trapi2_response(merged)
 
 
 ANNOTATIONS = {
@@ -449,7 +542,7 @@ def bt_annotator(mocker):
     class (upstream uses the same package; no HTTP is involved)."""
     inst = mocker.MagicMock()
     inst.annotate_curie_list = AsyncMock(return_value=ANNOTATIONS)
-    mocker.patch.object(merge_worker.annotator, "Annotator", return_value=inst)
+    mocker.patch.object(annotate_mod.annotator, "Annotator", return_value=inst)
     # any HTTP during post-process is a regression: the Appraiser and the
     # annotator API transport are both gone
     mocker.patch(
@@ -568,7 +661,7 @@ async def test_postprocess_annotator_failure_is_444(mocker):
     the 444 sticks through the successful later stages, as upstream."""
     inst = mocker.MagicMock()
     inst.annotate_curie_list = AsyncMock(side_effect=RuntimeError("annotator down"))
-    mocker.patch.object(merge_worker.annotator, "Annotator", return_value=inst)
+    mocker.patch.object(annotate_mod.annotator, "Annotator", return_value=inst)
     data = load_corpus("response_aragorn.json")
     outcome = await merge_worker.postprocess_message(
         data, _merged_row(), "ara-shepherd-aragorn", LOGGER
@@ -582,6 +675,31 @@ async def test_postprocess_annotator_failure_is_444(mocker):
     )
 
 
+async def test_postprocess_without_annotation(bt_annotator):
+    """annotate=False (ars_annotation_mode "premerge" or "off") skips the
+    stage; the rest of the post-process still completes D/200."""
+    data = load_corpus("response_aragorn.json")
+    outcome = await merge_worker.postprocess_message(
+        data, _merged_row(), "ara-shepherd-aragorn", LOGGER, annotate=False
+    )
+    bt_annotator.annotate_curie_list.assert_not_awaited()
+    assert outcome["status"] == "D"
+    assert outcome["code"] == 200
+    assert all("ordering_components" in r for r in data["message"]["results"])
+
+
+@pytest.mark.parametrize(
+    "mode,annotate", [("merge", True), ("premerge", False), ("off", False)]
+)
+async def test_merge_annotates_only_in_merge_mode(monkeypatch, mocker, mode, annotate):
+    monkeypatch.setattr(merge_worker.settings, "ars_annotation_mode", mode)
+    child = mocker.patch.object(
+        merge_worker, "merge_and_postprocess_in_child", return_value={}
+    )
+    await merge_worker._run_merge_in_pool(None, "c", "n", "ara-x", None, {}, LOGGER)
+    assert child.call_args.args[-1] is annotate
+
+
 def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):
     """The production pool call end to end against fake redis: the fold is
     saved, then post-processed in place and saved again; the outcome, the
@@ -592,7 +710,13 @@ def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):
     shepherd_db.save_message_sync(child_pk, load_corpus("response_aragorn.json"))
 
     outcome = merge_worker.merge_and_postprocess_in_child(
-        None, child_pk, new_pk, "ara-shepherd-aragorn", TS.isoformat()
+        None,
+        child_pk,
+        new_pk,
+        "ara-shepherd-aragorn",
+        TS.isoformat(),
+        None,
+        {"log_level": "DEBUG", "timeout": 60},
     )
 
     assert outcome["status"] == "D"
@@ -601,6 +725,11 @@ def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):
     assert outcome["stats"]["results"] == 2
     assert any("annotating" in message for _, message in outcome["logs"])
     merged = shepherd_db.get_message_sync(new_pk)
+    # the post-processed payload (annotations, ordering components, the
+    # blocklist's log entries) is still a TRAPI 2.0 Response
+    _assert_trapi2_response(merged, {"log_level": "DEBUG", "timeout": 60})
+    for entry in merged["logs"]:
+        assert entry["timestamp"].endswith("Z")
     assert all("ordering_components" in r for r in merged["message"]["results"])
     nodes = merged["message"]["knowledge_graph"]["nodes"]
     assert any(

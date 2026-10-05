@@ -50,11 +50,11 @@ def test_get_edgeset_collapses_all_edge_bindings():
         "analyses": [
             {
                 "edge_bindings": {
-                    "e0": [{"id": "k1"}, {"id": "k2"}],
-                    "e1": [{"id": "k3"}],
+                    "e0": {"ids": ["k1", "k2"]},
+                    "e1": {"ids": ["k3"]},
                 }
             },
-            {"edge_bindings": {"e2": [{"id": "k4"}]}},
+            {"edge_bindings": {"e2": {"ids": ["k4"]}}},
         ]
     }
     out = get_edgeset(result)
@@ -64,14 +64,15 @@ def test_get_edgeset_collapses_all_edge_bindings():
 def test_create_aux_graph_returns_uuid_and_edge_list():
     analysis = {
         "edge_bindings": {
-            "e0": [{"id": "kedge_a"}, {"id": "kedge_b"}],
-            "e1": [{"id": "kedge_c"}],
+            "e0": {"ids": ["kedge_a", "kedge_b"]},
+            "e1": {"ids": ["kedge_c"]},
         }
     }
     aux_id, aux_graph = create_aux_graph(analysis)
     assert isinstance(aux_id, str) and len(aux_id) > 0
     assert sorted(aux_graph["edges"]) == ["kedge_a", "kedge_b", "kedge_c"]
-    assert aux_graph["attributes"] == []
+    # TRAPI 2.0: an AuxiliaryGraph is {"edges": [...]} only.
+    assert set(aux_graph) == {"edges"}
 
 
 def test_add_knowledge_edge_with_object_pinned_uses_answer_as_subject():
@@ -120,16 +121,9 @@ def test_add_knowledge_edge_with_subject_pinned_uses_answer_as_object():
 
 def test_add_knowledge_edge_passes_through_qualifier_constraints():
     msg = copy.deepcopy(creative_query)
-    msg["message"]["query_graph"]["edges"]["e0"]["qualifier_constraints"] = [
-        {
-            "qualifier_set": [
-                {
-                    "qualifier_type_id": "biolink:object_aspect_qualifier",
-                    "qualifier_value": "activity",
-                }
-            ]
-        }
-    ]
+    msg["message"]["query_graph"]["edges"]["e0"]["constraints"] = {
+        "qualifiers": [{"biolink:object_aspect_qualifier": "activity"}]
+    }
     msg["message"]["knowledge_graph"] = {"nodes": {}, "edges": {}}
     new_edge_id = add_knowledge_edge(
         target="aragorn", result_message=msg, aux_graph_ids=["a"], answer="CHEBI:NEW"
@@ -163,8 +157,7 @@ def test_normalize_query_collapses_optional_and_synonym_predicates():
                 "object": "n",
                 "predicates": ["biolink:treats"],
                 "knowledge_type": "lookup",
-                "attribute_constraints": [],
-                "qualifier_constraints": [],
+                "constraints": {"attributes": [], "qualifiers": []},
             }
         },
     }
@@ -177,7 +170,28 @@ def test_normalize_query_collapses_optional_and_synonym_predicates():
     e = out["edges"]["e"]
     assert e["predicates"] == ["biolink:treats_or_applied_or_studied_to_treat"]
     assert "knowledge_type" not in e
-    assert "attribute_constraints" not in e and "qualifier_constraints" not in e
+    assert "constraints" not in e
+
+
+def test_normalize_query_keeps_non_empty_qualifier_constraints():
+    """TRAPI 2.0 constraints: empty members drop, non-empty ones are kept."""
+    q = {
+        "nodes": {"n": {}},
+        "edges": {
+            "e": {
+                "subject": "n",
+                "object": "n",
+                "constraints": {
+                    "attributes": [],
+                    "qualifiers": [{"biolink:object_direction_qualifier": "increased"}],
+                },
+            }
+        },
+    }
+    e = _normalize_query(q)["edges"]["e"]
+    assert e["constraints"] == {
+        "qualifiers": [{"biolink:object_direction_qualifier": "increased"}]
+    }
 
 
 def test_queries_equivalent_treats_predicate_synonyms_as_same():
@@ -230,8 +244,8 @@ def test_normalize_query_does_not_mutate_input():
 def test_has_unique_nodes_false_when_two_qnodes_share_binding():
     result = {
         "node_bindings": {
-            "n0": [{"id": "A"}],
-            "n1": [{"id": "A"}],  # duplicate
+            "n0": {"ids": ["A"]},
+            "n1": {"ids": ["A"]},  # duplicate
         }
     }
     assert has_unique_nodes(result) is False
@@ -240,8 +254,8 @@ def test_has_unique_nodes_false_when_two_qnodes_share_binding():
 def test_has_unique_nodes_true_for_distinct_bindings():
     result = {
         "node_bindings": {
-            "n0": [{"id": "A"}],
-            "n1": [{"id": "B"}],
+            "n0": {"ids": ["A"]},
+            "n1": {"ids": ["B"]},
         }
     }
     assert has_unique_nodes(result) is True
@@ -255,11 +269,11 @@ def test_filter_repeated_nodes_drops_results_with_repeated_kvalues():
             "auxiliary_graphs": {},
             "results": [
                 {
-                    "node_bindings": {"a": [{"id": "X"}], "b": [{"id": "X"}]},
+                    "node_bindings": {"a": {"ids": ["X"]}, "b": {"ids": ["X"]}},
                     "analyses": [{"edge_bindings": {}}],
                 },
                 {
-                    "node_bindings": {"a": [{"id": "Y"}], "b": [{"id": "Z"}]},
+                    "node_bindings": {"a": {"ids": ["Y"]}, "b": {"ids": ["Z"]}},
                     "analyses": [{"edge_bindings": {}}],
                 },
             ],
@@ -268,7 +282,7 @@ def test_filter_repeated_nodes_drops_results_with_repeated_kvalues():
     filter_repeated_nodes(response, logger)
     remaining = response["message"]["results"]
     assert len(remaining) == 1
-    assert remaining[0]["node_bindings"]["a"][0]["id"] == "Y"
+    assert remaining[0]["node_bindings"]["a"]["ids"][0] == "Y"
 
 
 def test_filter_repeated_nodes_no_results_is_a_noop():
@@ -305,15 +319,15 @@ def test_remove_promiscuous_knode_results_drops_overrepresented_knode():
     """Construct an oversubscribed knode and verify it gets pruned."""
     response = {
         "message": {
-            "results": [{"node_bindings": {"qx": [{"id": "BOZO"}]}} for _ in range(15)]
+            "results": [{"node_bindings": {"qx": {"ids": ["BOZO"]}}} for _ in range(15)]
             + [
-                {"node_bindings": {"qx": [{"id": "GOOD"}]}},
+                {"node_bindings": {"qx": {"ids": ["GOOD"]}}},
             ],
         }
     }
     remove_promiscuous_knode_results(MAX_C=10, qnode="qx", response=response)
     remaining_ids = [
-        r["node_bindings"]["qx"][0]["id"] for r in response["message"]["results"]
+        r["node_bindings"]["qx"]["ids"][0] for r in response["message"]["results"]
     ]
     assert "BOZO" not in remaining_ids
     assert remaining_ids == ["GOOD"]
@@ -343,7 +357,7 @@ def test_group_results_by_qnode_partitions_into_creative_and_lookup():
             "results": [
                 {
                     "node_bindings": {
-                        "qn": [{"id": "X"}],
+                        "qn": {"ids": ["X"]},
                     },
                     "analyses": [{"edge_bindings": {}}],
                 },
@@ -352,11 +366,11 @@ def test_group_results_by_qnode_partitions_into_creative_and_lookup():
     }
     lookup_results = [
         {
-            "node_bindings": {"qn": [{"id": "X"}]},
+            "node_bindings": {"qn": {"ids": ["X"]}},
             "analyses": [{"edge_bindings": {}}],
         },
         {
-            "node_bindings": {"qn": [{"id": "Y"}]},
+            "node_bindings": {"qn": {"ids": ["Y"]}},
             "analyses": [{"edge_bindings": {}}],
         },
     ]
@@ -395,8 +409,8 @@ def test_merge_messages_lookup_only_returns_new_response_directly():
             "results": [
                 {
                     "node_bindings": {
-                        "a": [{"id": "X:1"}],
-                        "b": [{"id": "Y:2"}],
+                        "a": {"ids": ["X:1"]},
+                        "b": {"ids": ["Y:2"]},
                     },
                     "analyses": [{"edge_bindings": {}}],
                 },
@@ -426,13 +440,11 @@ def test_merge_messages_combines_aux_graphs():
     """Aux graphs from both messages should land in the merged auxiliary_graphs."""
     response = generate_response()
     callback = copy.deepcopy(response_2)
-    response["message"]["auxiliary_graphs"]["aux_a"] = {
+    response["message"].setdefault("auxiliary_graphs", {})["aux_a"] = {
         "edges": ["a-edge"],
-        "attributes": [{"foo": "bar"}],
     }
-    callback["message"]["auxiliary_graphs"]["aux_b"] = {
+    callback["message"].setdefault("auxiliary_graphs", {})["aux_b"] = {
         "edges": ["b-edge"],
-        "attributes": [],
     }
     out = merge_messages(
         target="aragorn",
@@ -466,12 +478,12 @@ def test_merge_messages_pathfinder_query_returns_single_result():
             "results": [
                 {
                     "node_bindings": {
-                        "n0": [{"id": "MONDO:0001"}],
-                        "n1": [{"id": "MONDO:0002"}],
+                        "n0": {"ids": ["MONDO:0001"]},
+                        "n1": {"ids": ["MONDO:0002"]},
                     },
                     "analyses": [
                         {
-                            "edge_bindings": {"p1": [{"id": "kedge_pathfinder"}]},
+                            "edge_bindings": {"p1": {"ids": ["kedge_pathfinder"]}},
                         }
                     ],
                     "score": 0.42,
@@ -496,8 +508,8 @@ def test_merge_messages_pathfinder_query_returns_single_result():
     )
     assert len(out["message"]["results"]) == 1
     pf = out["message"]["results"][0]
-    assert pf["node_bindings"]["n0"][0]["id"] == "MONDO:0001"
-    assert pf["node_bindings"]["n1"][0]["id"] == "MONDO:0002"
+    assert pf["node_bindings"]["n0"]["ids"][0] == "MONDO:0001"
+    assert pf["node_bindings"]["n1"]["ids"][0] == "MONDO:0002"
     # An auxiliary graph should have been created and associated with an
     # analysis path binding.
     assert pf["analyses"][0]["score"] == 0.42

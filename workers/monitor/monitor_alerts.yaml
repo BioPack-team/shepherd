@@ -174,3 +174,10 @@ rules:
 # restart transiently zeroes every worker's heartbeats and would otherwise
 # surface as one spurious worker-crash alert per worker type. Tune via the
 # MONITOR_BROKER_DOWN_GRACE_SEC and MONITOR_BROKER_RECOVERY_GRACE_SEC settings.
+#
+# A broker *restart* is spotted the same way, from Redis' run_id changing
+# (workers/monitor/recovery.py), and fires a `redis_restarted` (warning) alert:
+# Redis comes back from its last snapshot, so everything written after it is
+# gone. Once it has loaded, and MONITOR_REDIS_RESTART_GRACE_SEC later, queries
+# that lost their data in it are finished as errors, with one
+# `query_data_lost` (warning) alert per query, batched.

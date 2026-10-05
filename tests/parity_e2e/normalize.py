@@ -59,6 +59,26 @@ def normalize(obj: Any) -> Any:
     return mask_scalars(obj)
 
 
+#: Response members that name the envelope, not the answer: Shepherd's TRAPI
+#: 2.0 ARS stamps them, upstream's 1.5 one has none.
+ENVELOPE_MEMBERS = ("schema_version", "biolink_version", "parameters")
+
+
+def strip_envelope(payload: Any) -> Any:
+    """A merged payload with its envelope members dropped.
+
+    Nothing is converted between TRAPI versions: Relay answers in 1.5 and
+    Shepherd in 2.0, so the merged-message diff also reports every place the
+    two shapes differ (bindings, knowledge_level / agent_type, ...).
+    """
+    if not isinstance(payload, dict):
+        return payload
+    out = json.loads(json.dumps(payload))
+    for member in ENVELOPE_MEMBERS:
+        out.pop(member, None)
+    return out
+
+
 def canonical(obj: Any) -> str:
     return json.dumps(normalize(obj), sort_keys=True, default=str)
 
