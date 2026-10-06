@@ -1,6 +1,7 @@
 """Path scoring module"""
 
 import asyncio
+import functools
 import logging
 import os
 import time
@@ -21,6 +22,8 @@ from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
+from slot_projection import EMBEDDING_DIM, NUM_SLOTS, SlotProjector
+
 STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
@@ -28,16 +31,21 @@ TASK_LIMIT = 6
 EMBEDDING_DIR = settings.pathfinder_embeddings_dir
 MODEL_WEIGHTS = "model_weights/squashbert_direct_3hop.pt"
 # 11 embeddings of 768 dims each (4 node names, 4 categories, 3 hop phrases) --
-# the MLP's input width, and the width of every feature row.
-FEATURE_DIM = 11 * 768
+# the MLP's input width.
+FEATURE_DIM = NUM_SLOTS * EMBEDDING_DIM
 # Analyses scored per forward pass. Peak memory is bounded by this rather than
-# by the message's size: one float32 batch (4096 x 8448 x 4 = 138 MB) plus the
-# float16 rows still pending in the chunk (69 MB), and both are freed at the end
-# of each chunk. Scoring the whole message in one pass instead is what
-# OOM-killed the pod on large messages -- a 387k-analysis message needed the
-# row list, its stacked copy and the float32 cast all live at once, 24 GiB in
-# total. The MLP is row-independent, so chunk size changes only the batching.
+# by the message's size: each chunk holds only 11 cache rows per analysis plus
+# its (4096 x 1536) float32 activations (25 MB), all freed at the end of the
+# chunk. Scoring the whole message in one pass instead is what OOM-killed the
+# pod on large messages -- a 387k-analysis message once needed 24 GiB of feature
+# rows live at once. The MLP is row-independent, so chunk size changes only the
+# batching.
 SCORE_CHUNK_SIZE = 4096
+# Budget for the first-layer projection cache (see slot_projection), in rows of
+# 1536 float32s across all 11 slots: 32768 rows is 192 MB. A message with more
+# distinct keys than that drops the cache between chunks and re-projects only
+# what each later chunk uses, so the budget caps memory, not correctness.
+MAX_CACHED_PROJECTIONS = 32768
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
@@ -248,23 +256,39 @@ def _ensure_scoring_state(logger) -> None:
     logger.debug(f"score_paths child {os.getpid()} loaded its scoring state.")
 
 
-def _score_chunk(rows, index, results):
-    """Score one chunk of feature rows and write the scores onto the analyses.
+def _project_slot(slot, embeddings):
+    """Project one slot's embeddings through its block of the first layer.
 
-    The rows are copied straight into a float32 batch rather than stacked as
-    float16 and cast afterwards, so only one array of the batch exists at a
-    time. float16 converts to float32 exactly, so this is the same input the
-    stack-then-cast path produced.
+    The block is a view into the (memory-mapped) first-layer weight, so this
+    copies nothing; done in torch so it runs on the child's single thread.
+    """
+    start = slot * EMBEDDING_DIM
+    block = mlp[0].weight[:, start : start + EMBEDDING_DIM]
+    with torch.inference_mode():
+        return (torch.from_numpy(embeddings) @ block.T).numpy()
+
+
+def _new_projector():
+    return SlotProjector(
+        _project_slot, mlp[0].bias.detach().numpy(), MAX_CACHED_PROJECTIONS
+    )
+
+
+def _score_chunk(rows, index, results, projector):
+    """Score one chunk of analyses and write the scores onto them.
+
+    ``rows`` holds each analysis's 11 projection-cache rows. The first layer is
+    the sum of those cached projections (see slot_projection) rather than a
+    matmul over the 8448-wide concatenated embeddings; the rest of the network
+    runs as before.
 
     Returns ``(count, minimum, maximum, total)`` for the chunk, letting the
     caller keep running statistics for the summary log line without holding
     every score of a large message in a list.
     """
-    features = np.empty((len(rows), FEATURE_DIM), dtype=np.float32)
-    for i, row in enumerate(rows):
-        features[i] = row
+    hidden = projector.hidden(np.asarray(rows, dtype=np.intp))
     with torch.inference_mode():
-        logits = mlp(torch.from_numpy(features)).squeeze(-1)
+        logits = mlp[1:](torch.from_numpy(hidden)).squeeze(-1)
         scores = torch.sigmoid(logits).numpy()
     for (result_ind, analysis_ind), score in zip(index, scores):
         results[result_ind]["analyses"][analysis_ind]["score"] = float(score)
@@ -305,17 +329,22 @@ def score_paths(response_id, logger):
         score_min = float("inf")
         score_max = float("-inf")
         score_sum = 0.0
+        projector = _new_projector()
+        cache_evictions = 0
 
         def flush_chunk():
             """Score the pending rows, write them back, and free the chunk."""
             nonlocal mlp_time, scored, score_min, score_max, score_sum
+            nonlocal cache_evictions
             if not chunk_rows:
                 return
             started = time.time()
             count, lowest, highest, total = _score_chunk(
-                chunk_rows, chunk_index, results
+                chunk_rows, chunk_index, results, projector
             )
             mlp_time += time.time() - started
+            if projector.evict_if_full():
+                cache_evictions += 1
             scored += count
             score_min = min(score_min, lowest)
             score_max = max(score_max, highest)
@@ -325,6 +354,7 @@ def score_paths(response_id, logger):
 
         t0 = time.time()
         with embedding_env.begin() as txn:
+            lookup = functools.partial(_lookup, txn)
             for result_ind, result in enumerate(results):
                 try:
                     # TRAPI 2.0: one binding {"ids": [...]} per qnode/qpath.
@@ -351,20 +381,22 @@ def score_paths(response_id, logger):
                         continue
                     names, cats, hops = components
                     try:
-                        features = np.concatenate(
+                        # Slot order is the MLP's input order.
+                        slot_rows = projector.index_path(
                             [
-                                _lookup(txn, names[0]),
-                                _lookup(txn, cats[0]),
-                                _lookup(txn, hops[0]),
-                                _lookup(txn, names[1]),
-                                _lookup(txn, cats[1]),
-                                _lookup(txn, hops[1]),
-                                _lookup(txn, names[2]),
-                                _lookup(txn, cats[2]),
-                                _lookup(txn, hops[2]),
-                                _lookup(txn, names[3]),
-                                _lookup(txn, cats[3]),
-                            ]
+                                names[0],
+                                cats[0],
+                                hops[0],
+                                names[1],
+                                cats[1],
+                                hops[1],
+                                names[2],
+                                cats[2],
+                                hops[2],
+                                names[3],
+                                cats[3],
+                            ],
+                            lookup,
                         )
                     except KeyError as e:
                         key = e.args[0]
@@ -373,7 +405,7 @@ def score_paths(response_id, logger):
                         analysis["score"] = 0.0
                         skip_missing_emb += 1
                         continue
-                    chunk_rows.append(features)
+                    chunk_rows.append(slot_rows)
                     chunk_index.append((result_ind, analysis_ind))
                     if len(chunk_rows) >= SCORE_CHUNK_SIZE:
                         flush_chunk()
@@ -395,7 +427,9 @@ def score_paths(response_id, logger):
             logger.info(
                 f"Scored {scored} paths in {mlp_time:.1f}s; "
                 f"scores [{score_min:.3f}, {score_max:.3f}] "
-                f"mean {score_sum / scored:.3f}"
+                f"mean {score_sum / scored:.3f}; "
+                f"{projector.cached_rows} cached projections, "
+                f"{cache_evictions} cache resets"
             )
         else:
             logger.info("No paths to score")
