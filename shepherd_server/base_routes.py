@@ -78,6 +78,9 @@ ABANDONED_STATUS_PREFIX = "abandoned"
 QUERY_ERROR_CODE = 500
 QUERY_TIMEOUT_CODE = 504
 QUERY_UNAVAILABLE_CODE = 503
+# nginx's code for "the client closed the connection before we answered". Never
+# reaches the caller (it is gone); it only labels the request in access logs.
+CLIENT_CLOSED_REQUEST_CODE = 499
 # What a body we refuse to parse answers with. 422 is what FastAPI's own
 # ``query: dict = Body(...)`` validation returned for the same rejections, kept
 # so the parser swap isn't visible to callers.
@@ -462,14 +465,36 @@ def query_timeout(query_dict: dict) -> float:
     return sync_timeout(query_dict)
 
 
+class ClientDisconnected(Exception):
+    """The caller of a sync query went away before it finished."""
+
+
 async def wait_for_query(
-    query_id: str, logger: logging.Logger, timeout: float
+    query_id: str,
+    logger: logging.Logger,
+    timeout: float,
+    request: Optional[Request] = None,
 ) -> Optional[tuple]:
-    """Poll until the query is COMPLETED; its state row, or None on timeout."""
+    """Poll until the query is COMPLETED; its state row, or None on timeout.
+
+    With ``request``, raises ``ClientDisconnected`` as soon as its caller is
+    gone. Each poll takes a pooled connection, and a caller that timed out or
+    went away used to leave this loop running for the rest of the query's
+    timeout -- so a load test whose client gives up early stacked abandoned
+    pollers on top of its live ones (and carried them into whatever ran next)
+    until the pool was exhausted and intake started answering 503. The query
+    itself keeps running; only this wait for it ends.
+    """
     start = time.time()
     now = start
     while now <= start + timeout:
         now = time.time()
+        if request is not None and await request.is_disconnected():
+            logger.info(
+                f"Client disconnected after {now - start:.0f}s; no longer "
+                f"waiting on query {query_id}."
+            )
+            raise ClientDisconnected()
         # poll for completed status
         query_state = await get_query_state(query_id, logger)
         if query_state is not None:
@@ -510,7 +535,10 @@ async def run_sync_query(
         )
     timeout = query_timeout(query_dict)
     logger.info(f"Query running with {timeout} second timeout.")
-    query_state = await wait_for_query(query_id, logger, timeout)
+    try:
+        query_state = await wait_for_query(query_id, logger, timeout, request)
+    except ClientDisconnected:
+        return Response(status_code=CLIENT_CLOSED_REQUEST_CODE)
     if query_state is not None:
         # grab final response
         response_id = query_state[7]

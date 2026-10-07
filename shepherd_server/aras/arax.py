@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, ORJSONResponse, StreamingResponse
 from starlette.responses import HTMLResponse
 
 from shepherd_server.base_routes import (
+    CLIENT_CLOSED_REQUEST_CODE,
     QUERY_BODY_ERROR_CODE,
     QUERY_ERROR_CODE,
     QUERY_INVALID_CODE,
@@ -34,6 +35,7 @@ from shepherd_server.base_routes import (
     QUERY_UNAVAILABLE_CODE,
     TERMINAL_QUERY_STATES,
     ARATargetEnum,
+    ClientDisconnected,
     QueryBodyError,
     QueryIntakeError,
     apply_query_status,
@@ -158,7 +160,7 @@ async def arax_final_response(
     return response, query_status_code(status)
 
 
-async def arax_sync_query(query: dict) -> Response:
+async def arax_sync_query(query: dict, request: Optional[Request] = None) -> Response:
     """ARAX's non-streaming ``/query`` (API-01)."""
     try:
         query_id, _, logger = await run_query(ARATargetEnum.ARAX, query)
@@ -169,7 +171,10 @@ async def arax_sync_query(query: dict) -> Response:
         )
     timeout = query_timeout(query)
     logger.info(f"Query running with {timeout} second timeout.")
-    query_state = await wait_for_query(query_id, logger, timeout)
+    try:
+        query_state = await wait_for_query(query_id, logger, timeout, request)
+    except ClientDisconnected:
+        return Response(status_code=CLIENT_CLOSED_REQUEST_CODE)
     if query_state is None:
         logger.error("Query timed out")
         return ORJSONResponse(
@@ -286,7 +291,7 @@ async def sync_query(request: Request) -> Response:
         )
     if query.get("stream_progress", False):
         return await arax_stream_query(query)
-    return await arax_sync_query(query)
+    return await arax_sync_query(query, request)
 
 
 @ARAX.post("/asyncquery", openapi_extra=query_openapi_extra("AsyncQuery"))

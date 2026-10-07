@@ -9,7 +9,9 @@ Each test patches ``shepherd_utils.db.pool`` with a custom AsyncMock chain so
 the postgres path uses an in-process fake.
 """
 
+import asyncio
 import logging
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -454,3 +456,77 @@ async def test_initialize_db_runs_the_registry_migration_before_the_ddl(mocker):
     )
     assert lock < drop < create
     assert any("idx_ars_message_agent" in sql for sql in executed)
+
+
+# --- statement timeout / slow-call reporting --------------------------------
+
+
+def test_conninfo_caps_statement_time():
+    """Every pooled connection carries the request-path statement cap, so a
+    stalled Postgres can't hold a connection checked out indefinitely."""
+    assert (
+        f"options=-c%20statement_timeout%3D{db.settings.postgres_statement_timeout_ms}"
+        in db.CONNINFO
+    )
+
+
+@pytest.mark.asyncio
+async def test_schema_upgrades_lift_the_statement_cap(mocker):
+    """Waiting on the fleet-wide advisory lock must not be cancelled by the
+    cap, so the upgrade transaction lifts it before taking the lock."""
+    mock_conn, _ = _install_pool_mock(mocker)
+    await db.initialize_db()
+    executed = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    lift = executed.index("SET LOCAL statement_timeout = 0")
+    lock = next(i for i, sql in enumerate(executed) if "pg_advisory_xact_lock" in sql)
+    assert lift < lock
+
+
+@pytest.mark.asyncio
+async def test_purge_old_queries_lifts_the_statement_cap(mocker):
+    mock_conn, _ = _install_pool_mock(mocker)
+    await db.purge_old_queries(30, logger)
+    first = str(mock_conn.execute.call_args_list[0].args[0])
+    assert first == "SET LOCAL statement_timeout = 0"
+
+
+@pytest.mark.asyncio
+async def test_slow_request_path_call_logs_pg_slow(mocker, caplog):
+    """A connection held past ``postgres_slow_ms`` is reported with how long
+    it waited for and held the connection."""
+    mock_conn, mock_pool = _install_pool_mock(mocker, cursor_fetchone=("qid",))
+    mock_pool.get_stats = lambda: {"pool_available": 0}
+    mocker.patch.object(db.settings, "postgres_slow_ms", 5)
+    cursor = mock_conn.execute.return_value
+
+    async def slow_execute(*args, **kwargs):
+        await asyncio.sleep(0.02)
+        return cursor
+
+    mock_conn.execute.side_effect = slow_execute
+    with caplog.at_level(logging.WARNING):
+        await db.get_query_state("qid", logger)
+    assert "PG_SLOW op=get_query_state wait_ms=" in caplog.text
+    assert "pool_available=0" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fast_request_path_call_logs_nothing(mocker, caplog):
+    _install_pool_mock(mocker, cursor_fetchone=("qid",))
+    with caplog.at_level(logging.WARNING):
+        await db.get_query_state("qid", logger)
+    assert "PG_SLOW" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_event_loop_lag_is_reported(mocker, caplog):
+    """A loop held by inline (blocking) work wakes the monitor late, and the
+    overshoot is logged."""
+    mocker.patch.object(db.settings, "event_loop_lag_warn_ms", 100)
+    with caplog.at_level(logging.WARNING):
+        monitor = asyncio.create_task(db.monitor_event_loop_lag(logger))
+        await asyncio.sleep(0)  # let the monitor start its first sleep
+        time.sleep(0.8)  # hold the loop, as inline CPU work would
+        await asyncio.sleep(0.05)
+        monitor.cancel()
+    assert "EVENT_LOOP_LAG lag_ms=" in caplog.text

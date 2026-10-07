@@ -444,6 +444,7 @@ async def purge_old_message_data(retention_days: int) -> int:
     # generations are purged by the watchdog first (ars_cache_stale_grace_sec),
     # after which their sources age out here like any other tree.
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        await shepherd_db.lift_statement_timeout(conn)
         cur = await conn.execute(
             """
             UPDATE ars_message m SET data = NULL

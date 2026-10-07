@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -27,6 +28,7 @@ from shepherd_utils.broker import add_task
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     initialize_db,
+    monitor_event_loop_lag,
     shutdown_db,
 )
 from shepherd_utils.logger import QueryLogger, setup_logging
@@ -40,10 +42,17 @@ tracer = setup_tracer("shepherd-server")
 async def lifespan(app: FastAPI):
     """Handle db connection, and the ARAX API's background work."""
     await initialize_db()
+    # Logs EVENT_LOOP_LAG when inline CPU work stalls this process -- the
+    # counterpart to the PG_SLOW lines when telling a slow database apart from
+    # a busy server during pool exhaustion.
+    lag_monitor = asyncio.create_task(
+        monitor_event_loop_lag(logging.getLogger("shepherd.server"))
+    )
     arax_tasks = None
     if settings.arax_background_tasks:
         arax_tasks = asyncio.create_task(arax_background_tasks())
     yield
+    lag_monitor.cancel()
     if arax_tasks is not None:
         arax_tasks.cancel()
     await shutdown_db()

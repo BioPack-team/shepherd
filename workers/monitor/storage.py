@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from shepherd_utils.db import lift_statement_timeout
 from shepherd_utils.db import pool as pg_pool
 
 logger = logging.getLogger("shepherd.monitor.storage")
@@ -457,6 +458,7 @@ async def purge_older_than(days: int) -> Dict[str, int]:
     deletions: Dict[str, int] = {}
     try:
         async with pg_pool.connection(60) as conn:
+            await lift_statement_timeout(conn)
             for table in ("monitor_metrics", "monitor_events", "monitor_task_latency"):
                 cur = await conn.execute(f"DELETE FROM {table} WHERE ts < {cutoff_sql}")
                 deletions[table] = cur.rowcount or 0

@@ -7,12 +7,14 @@ version of the same problem: it returned the stored response with no hint that
 the query had finished with anything other than OK.
 """
 
+import asyncio
 import json
 import logging
 
 import orjson
 import pytest
 
+from shepherd_server import base_routes
 from shepherd_server.base_routes import (
     ARATargetEnum,
     QueryIntakeError,
@@ -27,13 +29,30 @@ from .test_callback_size_limit import _make_request
 logger = logging.getLogger(__name__)
 
 
-def _query_request(query):
+def _query_request(query, disconnected=False):
     """Wrap a TRAPI query dict in a Request, the way a real POST arrives.
 
     ``run_sync_query`` parses the raw body itself (see ``parse_query_body``),
-    so these tests have to hand it a request rather than a dict.
+    so these tests have to hand it a request rather than a dict. Once the body
+    is read, a connected client's ``receive`` blocks until the client goes away
+    (as under uvicorn), so ``is_disconnected()`` stays False; pass
+    ``disconnected=True`` for a caller that has already hung up.
     """
-    return _make_request(orjson.dumps(query), {})
+    request = _make_request(orjson.dumps(query), {})
+    if disconnected:
+        return request
+    body_receive = request._receive
+    body_read = False
+
+    async def receive():
+        nonlocal body_read
+        if not body_read:
+            body_read = True
+            return await body_receive()
+        await asyncio.Event().wait()
+
+    request._receive = receive
+    return request
 
 
 def _row(state="QUEUED", status="OK", description=None):
@@ -232,6 +251,20 @@ async def test_query_returns_an_error_code_when_it_times_out(mocker):
     )
     assert response.status_code == 504
     assert _body(response)["status"] == "TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_query_stops_polling_once_the_client_disconnects(mocker):
+    """A caller that gave up must not leave the server polling Postgres for
+    the rest of the query's timeout -- under load those abandoned pollers are
+    what exhausted the pool."""
+    _patch_sync_query(mocker, _row(state="QUEUED", status="OK"))
+    response = await run_sync_query(
+        ARATargetEnum.ARAX,
+        _query_request({"message": {}}, disconnected=True),
+    )
+    assert response.status_code == 499
+    base_routes.get_query_state.assert_not_called()
 
 
 @pytest.mark.asyncio
