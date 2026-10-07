@@ -436,8 +436,7 @@ async def test_legacy_query_is_sent_to_the_remote_arax_service(
     assert sources[-1]["resource_id"] == "infores:shepherd-arax"
     assert "logs" not in saved
     assert any(
-        entry["message"] == "from remote ARAX"
-        for entry in store["logs"]["response_id"]
+        entry["message"] == "from remote ARAX" for entry in store["logs"]["response_id"]
     )
     # a streaming client is told there is nothing more to relay
     finish.assert_called_once_with("response_id")
