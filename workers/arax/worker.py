@@ -1,11 +1,15 @@
 """ARAX entry module.
 
-Runs ARAX's query pipeline in-process (DEC-14 in docs/ARAX_PORT_BASELINE.md):
-the ported library in ``shepherd_utils/arax/`` interprets the query graph (or
-the ARAXi operations / TRAPI workflow), runs the resulting plan -- Expand
-against Retriever, overlays, filters, Resultify with ARAX's ranker, Infer,
-Connect -- and applies the ResultTransformer, exactly as ARAX's own ``/query``
-does. The worker used to proxy each query to a remote ARAX service instead.
+A query takes one of two paths:
+
+- By default (legacy), it is POSTed to the remote ARAX service at
+  ``settings.arax_url`` and ARAX's TRAPI response is saved as the answer.
+- With ``parameters.arax_internal`` set to ``true``, it runs through ARAX's
+  query pipeline in-process (DEC-14 in docs/ARAX_PORT_BASELINE.md): the ported
+  library in ``shepherd_utils/arax/`` interprets the query graph (or the ARAXi
+  operations / TRAPI workflow), runs the resulting plan -- Expand against
+  Retriever, overlays, filters, Resultify with ARAX's ranker, Infer, Connect --
+  and applies the ResultTransformer, exactly as ARAX's own ``/query`` does.
 
 TRAPI pathfinder queries (``query_graph.paths``) still go to the
 ``arax.pathfinder`` worker (DEC-7).
@@ -32,6 +36,7 @@ import os
 import time
 import uuid
 
+import httpx
 from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import Status, StatusCode, get_current_span
 
@@ -53,6 +58,7 @@ from shepherd_utils.db import (
     get_message,
     get_message_sync,
     save_logs,
+    save_response,
     save_response_sync,
 )
 from shepherd_utils.inject_shepherd_arax_provenance import (
@@ -62,7 +68,7 @@ from shepherd_utils.logger import get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
-from shepherd_utils.trapi import normalize_query_graph
+from shepherd_utils.trapi import normalize_query_graph, query_parameters
 
 # Queue name
 STREAM = "arax"
@@ -87,6 +93,16 @@ _child_tasks = 0
 # Used when ARAX produced a response that can't be returned at all. ARAX's
 # /query fails the same way (its child process dies serializing it).
 INTERNAL_ERROR = 500
+# The legacy path: how long to wait on the remote ARAX service
+ARAX_TIMEOUT = 300
+# How much of a failing ARAX response body goes into the error. The body of a
+# non-2xx can be an arbitrarily large HTML error page, and this string ends up
+# in the query's logs, so keep only the head of it.
+ERROR_BODY_BYTES = 500
+# Used when the remote ARAX service never answered at all, so there is no status
+# code of its own to pass on: we are a gateway in front of it.
+BAD_GATEWAY = 502
+GATEWAY_TIMEOUT = 504
 
 
 class ARAXServiceError(Exception):
@@ -120,6 +136,20 @@ def is_pathfinder_query(message):
     if (len(qpaths) > 0) and (len(qedges) > 0):
         raise Exception("Mixed mode pathfinder queries are not supported", 400)
     return len(qpaths) == 1
+
+
+def uses_internal_workers(query: dict) -> bool:
+    """Whether the query asked to run on Shepherd's in-process ARAX
+    (``parameters.arax_internal: true``) rather than the remote ARAX service.
+
+    >>> uses_internal_workers({"parameters": {"arax_internal": True}})
+    True
+    >>> uses_internal_workers({"parameters": {"arax_internal": "true"}})
+    False
+    >>> uses_internal_workers({"message": {}})
+    False
+    """
+    return query_parameters(query).get("arax_internal") is True
 
 
 def default_submitter() -> str:
@@ -188,6 +218,106 @@ def run_arax_stream(query: dict, response_id: str) -> tuple[dict, int]:
         return response.envelope.to_dict(), getattr(response, "http_status", 200)
     envelope = json.loads(last)
     return envelope, getattr(araxq.response, "http_status", 200)
+
+
+def body_head(response: httpx.Response) -> str:
+    """The first ``ERROR_BODY_BYTES`` of a response body, for an error message."""
+    try:
+        body = response.content[:ERROR_BODY_BYTES]
+    except Exception:
+        # Body not readable (streamed/closed response) -- the status code is
+        # still worth reporting on its own.
+        return ""
+    if not body:
+        return ""
+    return f": {body.decode('utf-8', 'replace')}"
+
+
+async def call_arax(message: dict, logger: logging.Logger) -> dict:
+    """POST the query to the remote ARAX service and return its TRAPI response.
+
+    Raises ``ARAXServiceError`` -- carrying ARAX's own status code -- for
+    anything that isn't a parseable 2xx, so the code reaches the span, the
+    query's logs and the response instead of being logged and dropped.
+    """
+    # The remote call is always non-streaming: Shepherd relays nothing from it,
+    # and a streamed body is NDJSON rather than a TRAPI response.
+    message = {k: v for k, v in message.items() if k != "stream_progress"}
+    if "submitter" not in message:
+        message["submitter"] = default_submitter()
+    url = settings.arax_url
+    logger.info(f"Sending the query to the ARAX service at {url}")
+    span = get_current_span()
+    try:
+        async with httpx.AsyncClient(timeout=ARAX_TIMEOUT) as client:
+            response = await client.post(url, json=message)
+    except httpx.TimeoutException as e:
+        span.set_attribute("arax.status_code", GATEWAY_TIMEOUT)
+        raise ARAXServiceError(
+            f"ARAX service at {url} did not respond within "
+            f"{ARAX_TIMEOUT}s: {type(e).__name__}",
+            GATEWAY_TIMEOUT,
+        ) from e
+    except Exception as e:
+        # httpx reports connect failures, TLS errors and protocol errors as
+        # distinct classes, several of which stringify to an empty message --
+        # hence the type name alongside the message.
+        span.set_attribute("arax.status_code", BAD_GATEWAY)
+        raise ARAXServiceError(
+            f"Error occurred calling ARAX service at {url}: "
+            f"{type(e).__name__}: {e}",
+            BAD_GATEWAY,
+        ) from e
+
+    status_code = response.status_code
+    span.set_attribute("arax.status_code", status_code)
+    logger.info(f"Status Code from ARAX response: {status_code}")
+    if not response.is_success:
+        raise ARAXServiceError(
+            f"ARAX service at {url} returned HTTP {status_code}{body_head(response)}",
+            status_code,
+        )
+    try:
+        result = response.json()
+    except Exception as e:
+        # A 2xx whose body isn't TRAPI JSON is still a failed lookup, and
+        # ARAX's status code is the most useful thing we know about it.
+        raise ARAXServiceError(
+            f"ARAX service at {url} returned HTTP {status_code} "
+            f"with a body that could not be parsed as JSON: {e}",
+            status_code,
+        ) from e
+    if not isinstance(result, dict):
+        raise ARAXServiceError(
+            f"ARAX service at {url} returned HTTP {status_code} "
+            "with a body that is not a TRAPI response",
+            BAD_GATEWAY,
+        )
+    return result
+
+
+async def run_legacy_arax(
+    message: dict, response_id: str, logger: logging.Logger
+) -> None:
+    """The legacy path: answer the query with the remote ARAX service."""
+    try:
+        try:
+            result = await call_arax(message, logger)
+        except ARAXServiceError as e:
+            # Leave the caller a TRAPI response that says what happened before
+            # letting the failure reach run_task_lifecycle, which routes the
+            # query to finish_query with an ERROR status.
+            await save_response(response_id, error_response(message, e), logger)
+            raise
+        await save_arax_logs(response_id, arax_log_entries(result), logger)
+        await save_response(
+            response_id, add_shepherd_arax_to_edge_sources(result), logger
+        )
+    finally:
+        if message.get("stream_progress"):
+            # Nothing is relayed on this path; end the stream so a streaming
+            # client gets the response as soon as the query finishes.
+            await asyncio.to_thread(finish_progress, response_id)
 
 
 def error_response(message: dict, error: ARAXServiceError) -> dict:
@@ -510,6 +640,12 @@ async def arax(task, logger: logging.Logger, loop=None, pool=None):
         task[1]["workflow"] = json.dumps([{"id": "arax.pathfinder"}])
         return
     response_id = task[1]["response_id"]
+    if not uses_internal_workers(message):
+        span.set_attribute("arax.path", "legacy")
+        await run_legacy_arax(message, response_id, logger)
+        task[1]["workflow"] = json.dumps([{"id": "arax"}])
+        return
+    span.set_attribute("arax.path", "internal")
     loop = loop or asyncio.get_running_loop()
     # The pool child continues this trace under the current task span
     carrier: dict = {}

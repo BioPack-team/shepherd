@@ -128,12 +128,12 @@ port (branch `claude/optimistic-gauss-bjtrzh`), using these values:
 
 The Details columns still describe what upstream ARAX does.
 
-**Current Shepherd state, in one line:** the `arax` worker runs the ported ARAX
-library in-process (DEC-14, §2a) for every non-pathfinder query, TRAPI
-pathfinder queries go to the `arax.pathfinder` worker (DEC-7), and the `/arax`
-API serves everything the ARAX UI calls. Before the port, the worker proxied
-each query to a remote ARAX service (`settings.arax_url`), and only
-`arax.pathfinder` and `arax.rank` were native.
+**Current Shepherd state, in one line:** by default the `arax` worker proxies
+each non-pathfinder query to the remote ARAX service (`settings.arax_url`), as
+it did before the port; a query with `parameters.arax_internal: true` runs on
+the ported ARAX library in-process instead (DEC-14, §2a). TRAPI pathfinder
+queries go to the `arax.pathfinder` worker either way (DEC-7), and the `/arax`
+API serves everything the ARAX UI calls.
 
 ---
 
@@ -232,7 +232,7 @@ The port matches the status, error code, final envelope and INFO-and-above log, 
 
 Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 makes pathfinder parity a non-goal and xCRG runs in the same package on both sides. The stand-ins are checked by `test_ARAX_query_shepherd.py`.
 
-**Worker:** `workers/arax/worker.py` runs each non-pathfinder query in a process-pool child, the way ARAX's non-streaming `/query` does: `ARAXQuery(response_id=...).query_return_message(query)`, then `to_dict()` plus `http_status`. The response is saved under the query's response id, whose URL becomes `envelope.id`. A successful response gets Shepherd's provenance (`infores:shepherd-arax`). ARAX's own error responses are saved as ARAX returns them, with its status, description and log, and the task fails with ARAX's HTTP status. A response ARAX could not serialize (NaN) is a 500, as it is in ARAX. On startup the worker fetches the pathfinder DBs plus curie_to_pmids, ExplainableDTD, FDA drugs and COHD. `arax_url` is no longer used.
+**Worker:** `workers/arax/worker.py` sends a non-pathfinder query to the remote ARAX service at `settings.arax_url` unless the query sets `parameters.arax_internal: true` (the legacy path: ARAX's response, with Shepherd's provenance, is saved as the answer, and ARAX's log goes to the query's log store; a failed call saves an error response and fails the task with ARAX's status, or 502/504 when ARAX never answered; `stream_progress` is not forwarded, and the stream relays only the final response). With `arax_internal: true` it runs the query in a process-pool child, the way ARAX's non-streaming `/query` does: `ARAXQuery(response_id=...).query_return_message(query)`, then `to_dict()` plus `http_status`. The response is saved under the query's response id, whose URL becomes `envelope.id`. A successful response gets Shepherd's provenance (`infores:shepherd-arax`). ARAX's own error responses are saved as ARAX returns them, with its status, description and log, and the task fails with ARAX's HTTP status. A response ARAX could not serialize (NaN) is a 500, as it is in ARAX. On startup the worker fetches the pathfinder DBs plus curie_to_pmids, ExplainableDTD, FDA drugs and COHD.
 
 **API (`shepherd_server/aras/arax.py`, mounted at `/arax`):**
 - `POST /query` returns ARAX's own envelope, with ARAX's log and ARAX's HTTP status (API-01). Shepherd's generic `/query` would replace the log with Shepherd's and answer any failure with 500. A response ARAX did not produce (a pathfinder query, or an error response the worker wrote) is finished the generic way.

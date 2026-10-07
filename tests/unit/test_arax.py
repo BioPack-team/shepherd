@@ -1,4 +1,6 @@
-"""Tests for ``workers.arax.worker``, which runs ARAX in-process (DEC-14).
+"""Tests for ``workers.arax.worker``: the legacy path, which sends a query to
+the remote ARAX service, and (with ``parameters.arax_internal: true``) the one
+that runs ARAX in-process (DEC-14).
 
 The success and ARAX-error cases run the real ported ARAXQuery on ARAXi plans
 that need no KP; whole-query parity with upstream ARAX is covered by
@@ -8,6 +10,7 @@ that need no KP; whole-query parity with upstream ARAX is covered by
 import json
 import logging
 
+import httpx
 import pytest
 from translator_tom import Response
 
@@ -15,7 +18,11 @@ import workers.arax.worker as worker
 from workers.arax.worker import INTERNAL_ERROR, ARAXServiceError, arax
 from shepherd_utils.db import encode_message
 from shepherd_utils.logger import attach_query_handler, get_query_handler
-from shepherd_utils.trapi import ENVELOPE_MEMBERS, finalize_response
+from shepherd_utils.trapi import (
+    ENVELOPE_MEMBERS,
+    finalize_response,
+    prepare_stored_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +82,16 @@ def db(mocker):
     """
     store = {}
 
-    def _setup(message):
+    def _setup(message, internal=True):
+        # Most tests here are of the in-process path, which a query opts into
+        if internal:
+            message = {
+                **message,
+                "parameters": {
+                    **(message.get("parameters") or {}),
+                    "arax_internal": True,
+                },
+            }
         mocker.patch(
             "workers.arax.worker.get_message",
             new_callable=mocker.AsyncMock,
@@ -91,6 +107,13 @@ def db(mocker):
                 response_id, json.loads(json.dumps(msg))
             ),
         )
+
+        async def save_response(response_id, response, task_logger):
+            store[response_id] = json.loads(
+                json.dumps(prepare_stored_response(response))
+            )
+
+        mocker.patch("workers.arax.worker.save_response", side_effect=save_response)
 
         async def save_logs(response_id, task_logger):
             store.setdefault("logs", {}).setdefault(response_id, []).extend(
@@ -322,6 +345,150 @@ async def test_pathfinder_query_is_routed_without_running_arax(db, mocker):
     await arax(task, logger)
 
     assert not run.called
+    assert store == {}
+    assert json.loads(task[1]["workflow"]) == [{"id": "arax.pathfinder"}]
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [None, {}, {"arax_internal": False}, {"arax_internal": "true"}],
+)
+def test_queries_use_the_remote_arax_service_by_default(parameters):
+    query = {"message": {}}
+    if parameters is not None:
+        query["parameters"] = parameters
+    assert not worker.uses_internal_workers(query)
+
+
+def test_arax_internal_opts_into_shepherds_workers():
+    assert worker.uses_internal_workers({"parameters": {"arax_internal": True}})
+
+
+LEGACY_RESPONSE = {
+    "status": "Success",
+    "description": "ok",
+    "message": {
+        "knowledge_graph": {
+            "nodes": {},
+            "edges": {
+                "e0": {
+                    "subject": "a",
+                    "object": "b",
+                    "predicate": "biolink:related_to",
+                    "knowledge_level": "not_provided",
+                    "agent_type": "not_provided",
+                    "sources": [
+                        {
+                            "resource_id": "infores:arax",
+                            "resource_role": "primary_knowledge_source",
+                        }
+                    ],
+                }
+            },
+        },
+        "results": [],
+    },
+    "logs": [{"level": "INFO", "message": "from remote ARAX", "code": None}],
+}
+
+
+@pytest.fixture
+def remote_arax(mocker):
+    """Stub the remote ARAX service; returns the list of bodies it was sent."""
+    sent = []
+
+    def _setup(handler):
+        def _handle(request):
+            sent.append(json.loads(request.content))
+            return handler(request)
+
+        transport = httpx.MockTransport(_handle)
+        real_client = httpx.AsyncClient
+        mocker.patch(
+            "workers.arax.worker.httpx.AsyncClient",
+            side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
+        )
+        mocker.patch.object(worker.settings, "arax_url", "http://arax.test/query")
+        return sent
+
+    return _setup
+
+
+@pytest.mark.asyncio
+async def test_legacy_query_is_sent_to_the_remote_arax_service(
+    db, span, mocker, remote_arax, query_logger
+):
+    query = {"message": {}, "stream_progress": True}
+    store = db(query, internal=False)
+    sent = remote_arax(lambda request: httpx.Response(200, json=LEGACY_RESPONSE))
+    run = mocker.patch("workers.arax.worker.run_arax")
+    finish = mocker.patch("workers.arax.worker.finish_progress")
+    task = _task()
+
+    await arax(task, query_logger)
+
+    assert not run.called
+    # sent non-streaming, with Shepherd's submitter
+    assert "stream_progress" not in sent[0]
+    assert sent[0]["submitter"].startswith("infores:shepherd-arax:")
+    saved = store["response_id"]
+    sources = saved["message"]["knowledge_graph"]["edges"]["e0"]["sources"]
+    assert sources[-1]["resource_id"] == "infores:shepherd-arax"
+    assert "logs" not in saved
+    assert any(
+        entry["message"] == "from remote ARAX" for entry in store["logs"]["response_id"]
+    )
+    # a streaming client is told there is nothing more to relay
+    finish.assert_called_once_with("response_id")
+    span.set_attribute.assert_any_call("arax.path", "legacy")
+    span.set_attribute.assert_any_call("arax.status_code", 200)
+    assert json.loads(task[1]["workflow"]) == [{"id": "arax"}]
+
+
+@pytest.mark.asyncio
+async def test_legacy_arax_error_saves_an_error_response_and_raises_its_status(
+    db, span, remote_arax
+):
+    query = {"message": {"query_graph": {"nodes": {"n0": {"ids": ["CHEBI:1"]}}}}}
+    store = db(query, internal=False)
+    remote_arax(lambda request: httpx.Response(503, text="down for maintenance"))
+
+    with pytest.raises(ARAXServiceError) as excinfo:
+        await arax(_task(), logger)
+
+    assert excinfo.value.status_code == 503
+    assert "down for maintenance" in str(excinfo.value)
+    saved = store["response_id"]
+    assert saved["status"] == "Error"
+    assert "[HTTP 503]" in saved["description"]
+    assert saved["message"]["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_unreachable_remote_arax_is_a_bad_gateway(db, span, remote_arax):
+    store = db({"message": {}}, internal=False)
+
+    def refuse(request):
+        raise httpx.ConnectError("connection refused")
+
+    remote_arax(refuse)
+
+    with pytest.raises(ARAXServiceError) as excinfo:
+        await arax(_task(), logger)
+
+    assert excinfo.value.status_code == worker.BAD_GATEWAY
+    assert store["response_id"]["status"] == "Error"
+
+
+@pytest.mark.asyncio
+async def test_legacy_pathfinder_query_is_still_routed(db, mocker, remote_arax):
+    store = db(dict(PATHFINDER_QUERY), internal=False)
+    sent = remote_arax(lambda request: httpx.Response(200, json=LEGACY_RESPONSE))
+    task = _task()
+
+    await arax(task, logger)
+
+    assert sent == []
     assert store == {}
     assert json.loads(task[1]["workflow"]) == [{"id": "arax.pathfinder"}]
 
