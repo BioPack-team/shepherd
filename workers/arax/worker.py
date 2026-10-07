@@ -1,11 +1,12 @@
 """ARAX entry module.
 
-A query takes one of two paths:
+A query takes one of two paths, picked by its ``parameters.arax_internal``
+(``true`` or ``false``), or by ``settings.arax_internal_default``
+(``ARAX_INTERNAL_DEFAULT``, false unless set) when it doesn't say:
 
-- By default (legacy), it is POSTed to the remote ARAX service at
+- Legacy (``false``): it is POSTed to the remote ARAX service at
   ``settings.arax_url`` and ARAX's TRAPI response is saved as the answer.
-- With ``parameters.arax_internal`` set to ``true``, it runs through ARAX's
-  query pipeline in-process (DEC-14 in docs/ARAX_PORT_BASELINE.md): the ported
+- Internal (``true``): it runs through ARAX's query pipeline in-process (DEC-14 in docs/ARAX_PORT_BASELINE.md): the ported
   library in ``shepherd_utils/arax/`` interprets the query graph (or the ARAXi
   operations / TRAPI workflow), runs the resulting plan -- Expand against
   Retriever, overlays, filters, Resultify with ARAX's ranker, Infer, Connect --
@@ -139,17 +140,16 @@ def is_pathfinder_query(message):
 
 
 def uses_internal_workers(query: dict) -> bool:
-    """Whether the query asked to run on Shepherd's in-process ARAX
-    (``parameters.arax_internal: true``) rather than the remote ARAX service.
+    """Whether the query runs on Shepherd's in-process ARAX rather than the
+    remote ARAX service.
 
-    >>> uses_internal_workers({"parameters": {"arax_internal": True}})
-    True
-    >>> uses_internal_workers({"parameters": {"arax_internal": "true"}})
-    False
-    >>> uses_internal_workers({"message": {}})
-    False
+    The query's own ``parameters.arax_internal`` decides when it is a boolean;
+    otherwise ``settings.arax_internal_default`` does.
     """
-    return query_parameters(query).get("arax_internal") is True
+    requested = query_parameters(query).get("arax_internal")
+    if isinstance(requested, bool):
+        return requested
+    return settings.arax_internal_default
 
 
 def default_submitter() -> str:

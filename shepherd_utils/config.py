@@ -128,10 +128,13 @@ class Settings(BaseSettings):
     # The server's ARAX API: fetch the autocomplete database at startup and
     # refresh the meta-KG hourly (off in tests)
     arax_background_tasks: bool = True
-    # The remote ARAX service the arax worker sends queries to by default. A
-    # query with parameters.arax_internal: true runs ARAX in-process instead
-    # (DEC-14).
+    # The remote ARAX service the arax worker sends queries to on the legacy
+    # path. The other path runs ARAX in-process (DEC-14).
     arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
+    # Which path an ARAX query takes when it doesn't set
+    # parameters.arax_internal itself: false sends it to arax_url, true runs it
+    # in-process.
+    arax_internal_default: bool = False
     arax_biolink_version: str = "v4.2.5"
     # Where the ARAX port's BiolinkHelper caches the Biolink model and its
     # lookup map (must be writable; upstream writes next to its own source

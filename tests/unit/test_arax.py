@@ -1,6 +1,7 @@
 """Tests for ``workers.arax.worker``: the legacy path, which sends a query to
-the remote ARAX service, and (with ``parameters.arax_internal: true``) the one
-that runs ARAX in-process (DEC-14).
+the remote ARAX service, and the internal one, which runs ARAX in-process
+(DEC-14). ``parameters.arax_internal`` picks one, or else
+``settings.arax_internal_default``.
 
 The success and ARAX-error cases run the real ported ARAXQuery on ARAXi plans
 that need no KP; whole-query parity with upstream ARAX is covered by
@@ -16,6 +17,7 @@ from translator_tom import Response
 
 import workers.arax.worker as worker
 from workers.arax.worker import INTERNAL_ERROR, ARAXServiceError, arax
+from shepherd_utils.config import Settings
 from shepherd_utils.db import encode_message
 from shepherd_utils.logger import attach_query_handler, get_query_handler
 from shepherd_utils.trapi import (
@@ -83,13 +85,14 @@ def db(mocker):
     store = {}
 
     def _setup(message, internal=True):
-        # Most tests here are of the in-process path, which a query opts into
-        if internal:
+        # The query's parameters.arax_internal (None: left unset). Most tests
+        # here are of the in-process path.
+        if internal is not None:
             message = {
                 **message,
                 "parameters": {
                     **(message.get("parameters") or {}),
-                    "arax_internal": True,
+                    "arax_internal": internal,
                 },
             }
         mocker.patch(
@@ -349,19 +352,48 @@ async def test_pathfinder_query_is_routed_without_running_arax(db, mocker):
     assert json.loads(task[1]["workflow"]) == [{"id": "arax.pathfinder"}]
 
 
+@pytest.mark.parametrize("default", [False, True])
 @pytest.mark.parametrize(
     "parameters",
-    [None, {}, {"arax_internal": False}, {"arax_internal": "true"}],
+    [None, {}, {"arax_internal": None}, {"arax_internal": "true"}],
 )
-def test_queries_use_the_remote_arax_service_by_default(parameters):
+def test_queries_that_dont_choose_take_the_default_path(mocker, default, parameters):
+    mocker.patch.object(worker.settings, "arax_internal_default", default)
     query = {"message": {}}
     if parameters is not None:
         query["parameters"] = parameters
-    assert not worker.uses_internal_workers(query)
+    assert worker.uses_internal_workers(query) is default
 
 
-def test_arax_internal_opts_into_shepherds_workers():
-    assert worker.uses_internal_workers({"parameters": {"arax_internal": True}})
+def test_the_default_path_is_the_remote_arax_service():
+    assert Settings.model_fields["arax_internal_default"].default is False
+
+
+@pytest.mark.parametrize("default", [False, True])
+@pytest.mark.asyncio
+async def test_the_default_setting_picks_the_path(db, span, mocker, default):
+    """ARAX_INTERNAL_DEFAULT picks the path of a query that doesn't choose."""
+    mocker.patch.object(worker.settings, "arax_internal_default", default)
+    db({"message": {}}, internal=None)
+    run_internal = mocker.patch(
+        "workers.arax.worker.run_arax",
+        return_value=({"status": "Success", "message": {}}, 200),
+    )
+    run_legacy = mocker.patch("workers.arax.worker.run_legacy_arax")
+
+    await arax(_task(), logger)
+
+    assert run_internal.called is default
+    assert run_legacy.called is not default
+    span.set_attribute.assert_any_call("arax.path", "internal" if default else "legacy")
+
+
+@pytest.mark.parametrize("default", [False, True])
+@pytest.mark.parametrize("internal", [False, True])
+def test_arax_internal_overrides_the_default(mocker, default, internal):
+    mocker.patch.object(worker.settings, "arax_internal_default", default)
+    query = {"message": {}, "parameters": {"arax_internal": internal}}
+    assert worker.uses_internal_workers(query) is internal
 
 
 LEGACY_RESPONSE = {
