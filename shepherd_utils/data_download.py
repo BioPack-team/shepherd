@@ -474,12 +474,18 @@ def arax_db_path(name: str) -> str:
     return os.path.join(settings.arax_dbs_dir, arax_db_filename(name))
 
 
+def arax_cache_path() -> str:
+    """The writable directory for the files the ARAX port creates at runtime
+    (Biolink cache, meta-KG backups, autocomplete fragment cache):
+    ``arax_cache_dir`` when set, else ``arax_dbs_dir``. Kept apart from the
+    databases so ``arax_dbs_dir`` can be a read-only volume shared by pods."""
+    return settings.arax_cache_dir or settings.arax_dbs_dir
+
+
 def arax_biolink_cache_path() -> str:
     """Where ARAX's BiolinkHelper caches the Biolink model and lookup map:
-    ``arax_biolink_cache_dir`` when set, else ``{arax_dbs_dir}/biolink``."""
-    return settings.arax_biolink_cache_dir or os.path.join(
-        settings.arax_dbs_dir, "biolink"
-    )
+    ``arax_biolink_cache_dir`` when set, else ``{arax_cache_path()}/biolink``."""
+    return settings.arax_biolink_cache_dir or os.path.join(arax_cache_path(), "biolink")
 
 
 def arax_db_url(name: str) -> str:

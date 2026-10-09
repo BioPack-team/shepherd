@@ -8,6 +8,7 @@
 #     ARAX data dir) instead of code/ARAX/KnowledgeSources/Prediction
 #   - no ARAXDatabaseManager: a missing database raises FileNotFoundError instead of
 #     being fetched here (the ARAX worker downloads it at startup, ensure_arax_dbs)
+#   - the database is opened read-only with util.connect_to_sqlite_read_only, so a WAL-mode file on a volume the worker can't write to still opens
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """
 xDTD (Explainable Drug-Treat-Disease) Prediction Database Interface
@@ -35,6 +36,7 @@ import numpy as np
 
 # import internal modules
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration #noqa: E402
+from shepherd_utils.arax.util import connect_to_sqlite_read_only
 RTXConfig = RTXConfiguration()
 
 # Default output directory for the database
@@ -106,7 +108,7 @@ class ExplainableDTD:
             # Shepherd's ARAX worker downloads the database at startup (ensure_arax_dbs)
             raise FileNotFoundError(f"Database '{db_path}' not found")
 
-        self.conn = sqlite3.connect(db_path)
+        self.conn = connect_to_sqlite_read_only(db_path)
         self.is_connected = True
         print(f"INFO: Connected to database: {db_path}", flush=True)
         return True

@@ -12,6 +12,8 @@
 #   - the block list is the vendored KnowledgeSources/general_concepts.json (ARAX's own)
 #   - the RTXKG2-mode check around original_query_graph is dropped (E-5)
 #   - main() is dropped
+#   - pathfinder's and xcrg's sqlite reads go through util.use_read_only_sqlite, so the databases open on a
+#     read-only volume shared between pods
 #   - TRAPI 2.0: convert_to_trapi builds one NodeBinding per qnode and one PathBinding per path (ids) in a plain
 #     Analysis (no PathfinderAnalysis), and AuxiliaryGraph(edges) without attributes; an aux graph without edges is
 #     left out, with its path-binding ids and any analysis/result left empty. The cached-result path no longer
@@ -26,6 +28,9 @@ from shepherd_utils.config import settings
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from pathfinder.Pathfinder import Pathfinder
 from xcrg import XCRGConfig, run_xcrg
+from shepherd_utils.arax.util import THIRD_PARTY_SQLITE_READERS, use_read_only_sqlite
+
+use_read_only_sqlite(*THIRD_PARTY_SQLITE_READERS)
 
 
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)

@@ -52,6 +52,7 @@ from shepherd_server.aras import arax_status
 from shepherd_server.openapi import set_open_api_schema
 from shepherd_utils.arax_progress import is_done, read_progress
 from shepherd_utils.config import settings
+from shepherd_utils.data_download import arax_cache_path
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.db import get_logs, get_message, get_query_state
 from shepherd_utils.trapi import TRAPIRequestError, finalize_response, validate_query
@@ -558,7 +559,7 @@ def _nodes_like(word, limit, callback) -> str:
             # which the startup download would then take for the real thing
             if not os.path.exists(rtxcomplete.RTXConfig.autocomplete_path):
                 raise FileNotFoundError(rtxcomplete.RTXConfig.autocomplete_path)
-            os.makedirs(settings.arax_dbs_dir, exist_ok=True)
+            os.makedirs(arax_cache_path(), exist_ok=True)
             rtxcomplete.load()
             _autocomplete_loaded = True
         result = rtxcomplete.get_nodes_like(word, limit)

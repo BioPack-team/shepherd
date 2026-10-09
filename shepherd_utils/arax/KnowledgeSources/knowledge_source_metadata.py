@@ -7,8 +7,8 @@
 #     goes to Retriever (DEC-4). The rest -- the knowledge_types / attributes
 #     fill-in, the standard attribute constraints, the simple format, the 1 h cache
 #     and the backups -- is upstream's
-#   - the JSON backups are kept in settings.arax_dbs_dir (Shepherd's writable ARAX data
-#     volume) instead of next to this file
+#   - the JSON backups are kept in arax_cache_path() (Shepherd's writable ARAX directory;
+#     settings.arax_dbs_dir by default) instead of next to this file
 #   - get_kg_predicates (no callers; it read KG2C_allowed_predicate_triples.csv) and
 #     main() are removed (dead code, DEC-5)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
@@ -29,11 +29,13 @@ from typing import Optional, Dict, Any
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from shepherd_utils.config import settings
+from shepherd_utils.data_download import arax_cache_path
 
 
 def _backup_dir() -> str:
-    os.makedirs(settings.arax_dbs_dir, exist_ok=True)
-    return settings.arax_dbs_dir
+    backup_dir = arax_cache_path()
+    os.makedirs(backup_dir, exist_ok=True)
+    return backup_dir
 
 
 def _retriever_meta_kg_url() -> str:

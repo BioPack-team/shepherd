@@ -5,6 +5,7 @@
 #   - the rel_edge_key background-count query goes to infores:retriever instead of infores:gandalf (DEC-4: Retriever queries Gandalf)
 #   - the virtual edges are bound to the results in one pass after the loop, not one call per edge (D-28)
 #   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type; upstream sets none, so they take compute_ngd's values for ARAX's virtual edges (statistical_association / automated_agent)
+#   - the tier0 sqlite is opened read-only with util.connect_to_sqlite_read_only, so a WAL-mode file on a volume the worker can't write to still opens
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # ruff: noqa: E402
 # This class will perform fisher's exact test to evalutate the significance of connection between
@@ -14,7 +15,6 @@ import json
 import os
 import re
 import scipy.stats as stats
-import sqlite3
 import sys
 import traceback
 from datetime import datetime
@@ -469,7 +469,7 @@ class ComputeFTEST:
 
             query_nodes = list(set(mapping.values()))
             # Get connected to kg2c sqlite
-            connection = sqlite3.connect(self.sqlite_file_path)
+            connection = util.connect_to_sqlite_read_only(self.sqlite_file_path)
             cursor = connection.cursor()
             # Extract the neighbor count data
             placeholders = ",".join("?" for _ in query_nodes)
@@ -572,7 +572,7 @@ class ComputeFTEST:
         node_type = ComputeFTEST.convert_string_biolinkformat(node_type)
 
         # Get connected to kg2c sqlite
-        connection = sqlite3.connect(self.sqlite_file_path)
+        connection = util.connect_to_sqlite_read_only(self.sqlite_file_path)
         cursor = connection.cursor()
 
         # Extract total count of nodes with certain type in kg2c

@@ -3,7 +3,7 @@
 #   - import paths / sys.path hacks only (including class-name strings)
 #   - function mode only: signal_handler and the standalone main() loop are removed;
 #     Shepherd's server runs refresh_meta_kg() hourly (the ARAX background tasker's job)
-#   - the backup check looks in the backup dir (settings.arax_dbs_dir). It still looks
+#   - the backup check looks in the backup dir (arax_cache_path()). It still looks
 #     for upstream's "meta_kg_backup_" prefix, which the backups never have (DEC-1)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """

@@ -1,6 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Infer/scripts/build_mapping_db.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - the database is opened read-only with util.connect_to_sqlite_read_only, so a WAL-mode file on a volume the worker can't write to still opens
 #   - run mode only: the build mode (JSONL loading, table/index creation), the argparse CLI
 #     and main() are removed; they build the database, which Shepherd downloads (E-10,
 #     DEC-5, DEC-6), so tqdm and argparse are no longer imported. The constructor keeps
@@ -29,8 +30,9 @@ import os
 import sys
 import json
 import collections
-import sqlite3
 from typing import Optional, List
+
+from shepherd_utils.arax.util import connect_to_sqlite_read_only
 
 
 # Named tuples returned by get_node_info / get_edge_info
@@ -74,7 +76,7 @@ class xDTDMappingDB:
         else:
             raise ValueError(f"Unknown mode '{mode}'. Only 'run' is supported.")
 
-        self.conn = sqlite3.connect(db_path)
+        self.conn = connect_to_sqlite_read_only(db_path)
         print(f"INFO: Connected to database: {db_path}", flush=True)
 
     def __del__(self):

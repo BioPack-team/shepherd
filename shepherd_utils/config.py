@@ -136,10 +136,17 @@ class Settings(BaseSettings):
     # in-process.
     arax_internal_default: bool = False
     arax_biolink_version: str = "v4.2.5"
+    # Where the ARAX port writes the files it creates at runtime: the Biolink
+    # cache (unless arax_biolink_cache_dir is set), the meta-KG JSON backups and
+    # the autocomplete fragment cache. Must be writable by the worker. Empty
+    # means arax_dbs_dir, so a compose volume keeps them across restarts; set it
+    # to a pod-local path (e.g. an emptyDir) when arax_dbs_dir is a read-only
+    # volume shared between pods. See arax_cache_path().
+    arax_cache_dir: str = ""
     # Where the ARAX port's BiolinkHelper caches the Biolink model and its
     # lookup map (must be writable; upstream writes next to its own source
-    # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so
-    # the cache survives restarts; see arax_biolink_cache_path().
+    # file). Empty means {arax_cache_path()}/biolink; see
+    # arax_biolink_cache_path().
     arax_biolink_cache_dir: str = ""
     # ARAX's KP response cache (DEC-18): Expand's KP queries and Connect's results,
     # kept in the data store and shared by every arax worker and the server. An

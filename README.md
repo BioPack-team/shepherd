@@ -69,7 +69,7 @@ commit to git (they're gitignored and volume-mounted from the host):
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
 - **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`, `general_concepts.json`)
-- **arax** (the in-process ARAX port) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0_<tier-version>-all_with_paths.db`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`), plus the arax_pathfinder sqlite dbs in `./arax_pathfinder_dbs/`. The server's ARAX API fetches `autocomplete_v1.0_<tier-version>.sqlite` into the same `./arax_dbs/` (and keeps its meta-KG backups there). The arax worker also caches the Biolink model and ARAX's Biolink lookup map in `./arax_dbs/biolink/`, built at startup so it survives restarts (`ARAX_BIOLINK_CACHE_DIR` moves it).
+- **arax** (the in-process ARAX port) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0_<tier-version>-all_with_paths.db`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`), plus the arax_pathfinder sqlite dbs in `./arax_pathfinder_dbs/`. The server's ARAX API fetches `autocomplete_v1.0_<tier-version>.sqlite` into the same `./arax_dbs/` (and keeps its meta-KG backups and autocomplete cache there). The arax worker also caches the Biolink model and ARAX's Biolink lookup map in `./arax_dbs/biolink/`, built at startup so it survives restarts. `ARAX_CACHE_DIR` moves those runtime-written files out of `./arax_dbs/` (`ARAX_BIOLINK_CACHE_DIR` moves just the Biolink cache); see "Sharing one read-only volume between pods" below.
 
 So a new developer doesn't have to source these by hand, each worker can fetch its dataset on first
 startup. Two download mechanisms are supported, depending on where the dataset lives:
@@ -199,6 +199,19 @@ Because `general_concepts.json` now shares that directory, the volume needs to b
 first startup that fetches it — or the file can be preloaded alongside the sqlite databases, after
 which the worker only ever reads it. A read-only mount with no preloaded copy fails at startup with a
 permission error rather than silently continuing.
+
+**Sharing one read-only volume between pods.** Every database is opened read-only (sqlite
+`mode=ro&immutable=1`, via `shepherd_utils/arax/util.py:connect_to_sqlite_read_only`; catrax-pathfinder's
+and xcrg's own sqlite reads are routed through it too), so the data directories can be a read-only
+PVC shared by any number of arax / arax_pathfinder pods, even with the databases in WAL mode. Preload
+every file (the startup downloads, `general_concepts.json`) so nothing is fetched, and give the few
+files ARAX writes at runtime — the Biolink cache, the meta-KG backups and the autocomplete fragment
+cache — a pod-local writable directory, since they otherwise default to `ARAX_DBS_DIR`:
+
+```dotenv
+ARAX_DBS_DIR=/data/arax_dbs
+ARAX_CACHE_DIR=/tmp/arax_cache   # or an emptyDir mount; the Biolink cache goes in its biolink/ subdirectory
+```
 
 ### Translator ARS
 

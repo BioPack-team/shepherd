@@ -3,6 +3,7 @@
 #   - import paths / sys.path hacks only
 #   - the database is RTXConfiguration.cohd_database_path (DEC-6 download) instead of RTX/code/ARAX/KnowledgeSources/COHD_local/data/
 #   - no scp of a missing database from ARAX's servers (the file is provisioned by DEC-6; a missing file behaves as a failed scp did)
+#   - the database is opened read-only with util.connect_to_sqlite_read_only, so a WAL-mode file on a volume the worker can't write to still opens
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """This script will build a database and query an index of records for KG and COHD.
 
@@ -21,6 +22,7 @@ import requests
 import json
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
+from shepherd_utils.arax.util import connect_to_sqlite_read_only
 RTXConfig = RTXConfiguration()
 
 # import internal modules
@@ -52,7 +54,7 @@ class COHDIndex:
         database = f"{self.databaseLocation}/{self.databaseName}"
 
         if os.path.exists(database):
-            self.connection = sqlite3.connect(database)
+            self.connection = connect_to_sqlite_read_only(database)
             print("INFO: Connecting to database", flush=True)
             return True
         else:

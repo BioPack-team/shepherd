@@ -2,7 +2,7 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - the Biolink version is ARAX's pinned 4.2.5 (RTXConfiguration.BIOLINK_VERSION) instead of being read from ARAX's OpenAPI YAML/JSON
-#   - the lookup-map cache lives in arax_biolink_cache_path() (writable; on the ARAX data volume by default) instead of beside this file
+#   - the lookup-map cache lives in arax_biolink_cache_path() (writable; {arax_cache_path()}/biolink by default) instead of beside this file
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """
 Usage:  python biolink_helper.py [biolink version number, e.g. 3.0.3]

@@ -2,8 +2,10 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only (including class-name strings)
 #   - the terms database is RTXConfig.autocomplete_path (Shepherd's download, DEC-6)
-#     instead of code/autocomplete/, and the fragment cache sits beside it in
-#     settings.arax_dbs_dir instead of next to this file
+#     instead of code/autocomplete/, and the fragment cache is in arax_cache_path()
+#     (writable; settings.arax_dbs_dir by default) instead of next to this file
+#   - the terms database is opened read-only with util.connect_to_sqlite_read_only, so a
+#     WAL-mode file on a volume the server can't write to still opens
 #   - both connections are opened with check_same_thread=False: the server calls
 #     get_nodes_like from worker threads, one at a time (a lock in the caller)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
@@ -15,7 +17,8 @@ import os
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
-from shepherd_utils.config import settings
+from shepherd_utils.arax.util import connect_to_sqlite_read_only
+from shepherd_utils.data_download import arax_cache_path
 
 RTXConfig = RTXConfiguration()
 
@@ -32,7 +35,7 @@ def load():
     global cache_conn
     global cache_cursor
     database_name = RTXConfig.autocomplete_path
-    conn = sqlite3.connect(database_name, check_same_thread=False)
+    conn = connect_to_sqlite_read_only(database_name, check_same_thread=False)
     cursor = conn.cursor()
     try:
         conn.execute(f"SELECT term FROM terms LIMIT 1")
@@ -40,7 +43,7 @@ def load():
     except:
         print(f"WARN: Could NOT connect to {database_name}. Please check that file and database exist!",file=sys.stderr)
 
-    cache_database_name = os.path.join(settings.arax_dbs_dir, 'rtxcomplete_cache.sqlite')
+    cache_database_name = os.path.join(arax_cache_path(), 'rtxcomplete_cache.sqlite')
     cache_conn = sqlite3.connect(cache_database_name, check_same_thread=False)
     cache_cursor = cache_conn.cursor()
     print(f"INFO: Connected to {cache_database_name}",file=sys.stderr)

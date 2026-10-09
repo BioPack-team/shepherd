@@ -1,12 +1,15 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/util.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - use_read_only_sqlite (Shepherd's): third-party readers of the databases open them read-only too
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import heapq
+import importlib
 import os
 import pathlib
 import sqlite3
 import sys
+import urllib.parse
 from typing import Iterable
 
 from shepherd_utils.arax.openapi_server.models.edge import Edge
@@ -54,7 +57,8 @@ def get_arax_edge_key(edge: Edge) -> str:
 
 def connect_to_sqlite_read_only(sqlite_file_path: str,
                                 cache_size_mib: int = 64,
-                                mmap_size_mib: int = 1024) -> sqlite3.Connection:
+                                mmap_size_mib: int = 1024,
+                                check_same_thread: bool = True) -> sqlite3.Connection:
     """
     Open one of ARAX's never-written sqlite databases for reading, as cheaply as the file allows.
 
@@ -79,6 +83,7 @@ def connect_to_sqlite_read_only(sqlite_file_path: str,
     :param cache_size_mib: per-connection page cache, in MiB
     :param mmap_size_mib: how much of the file sqlite may memory-map, in MiB; keep this well
         under the per-query address-space limit, since it is charged against it
+    :param check_same_thread: passed to `sqlite3.connect`
     :return: an open connection
     """
     try:
@@ -86,9 +91,9 @@ def connect_to_sqlite_read_only(sqlite_file_path: str,
         wal_path = resolved_path.with_name(resolved_path.name + "-wal")
         has_pending_wal = wal_path.is_file() and wal_path.stat().st_size > 0
         uri = resolved_path.as_uri() + ("?mode=ro" if has_pending_wal else "?mode=ro&immutable=1")
-        connection = sqlite3.connect(uri, uri=True)
+        connection = sqlite3.connect(uri, uri=True, check_same_thread=check_same_thread)
     except Exception:
-        connection = sqlite3.connect(sqlite_file_path)
+        connection = sqlite3.connect(sqlite_file_path, check_same_thread=check_same_thread)
 
     # sqlite's default page cache is 2 MB, which is nothing next to these files; a real cache
     # and a memory-mapped window keep repeated lookups within one query off the syscall path.
@@ -102,3 +107,44 @@ def connect_to_sqlite_read_only(sqlite_file_path: str,
         pass  # pragmas are an optimization; a database that opened is still perfectly usable
 
     return connection
+
+
+class _ReadOnlySqlite3:
+    """Stands in for the `sqlite3` module inside a third-party module whose `connect()` calls
+    open one of these read-only databases (see `use_read_only_sqlite`). Everything but
+    `connect` is the real module's."""
+
+    def __getattr__(self, name):
+        return getattr(sqlite3, name)
+
+    @staticmethod
+    def connect(database, *args, uri: bool = False, check_same_thread: bool = True, **kwargs):
+        path = str(database)
+        if uri and path.startswith("file:"):
+            path = urllib.parse.unquote(urllib.parse.urlsplit(path).path)
+        return connect_to_sqlite_read_only(path, check_same_thread=check_same_thread)
+
+
+def use_read_only_sqlite(*module_names: str) -> None:
+    """
+    Make the named modules open their sqlite databases with `connect_to_sqlite_read_only`.
+
+    For the packages that open the downloaded databases themselves (catrax-pathfinder's
+    NGDRepository / NodeDegreeRepo, xcrg's runner): they call plain `sqlite3.connect()` or
+    `mode=ro` without `immutable=1`, and either one fails with "unable to open database file"
+    on a write-ahead-log database in a directory the worker can't write to -- which is what a
+    read-only volume shared between pods is. Each module's `sqlite3` global is swapped for a
+    stand-in whose `connect` goes through the read-only helper. Idempotent.
+    """
+    for module_name in module_names:
+        importlib.import_module(module_name).sqlite3 = _READ_ONLY_SQLITE3
+
+
+_READ_ONLY_SQLITE3 = _ReadOnlySqlite3()
+
+# The third-party modules that open the ARAX databases themselves
+THIRD_PARTY_SQLITE_READERS = (
+    "pathfinder.core.repo.NGDRepository",
+    "pathfinder.core.repo.NodeDegreeRepo",
+    "xcrg.runner",
+)

@@ -14,6 +14,7 @@ from opentelemetry import context as otel_context
 from pathfinder.Pathfinder import Pathfinder
 from pathfinder.telemetry import child_bootstrap, flush_child, inject_context
 
+from shepherd_utils.arax.util import THIRD_PARTY_SQLITE_READERS, use_read_only_sqlite
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import (
@@ -42,6 +43,12 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
+
+# The sqlite databases may sit on a read-only volume shared between pods, which
+# pathfinder's own sqlite3.connect() can't open when they're in WAL mode. Module
+# level, so every spawned pool child (which imports this module) gets it too, and
+# pathfinder's nested BFS pool inherits it by fork.
+use_read_only_sqlite(*THIRD_PARTY_SQLITE_READERS)
 
 # pathfinder.telemetry.child_bootstrap() (run inside the process-pool child, and
 # again inside pathfinder's own nested BFS-leg pool) reads this raw env var

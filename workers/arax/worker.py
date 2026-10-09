@@ -689,8 +689,9 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter, loop, 
 def warm_biolink_cache(logger: logging.Logger) -> None:
     """Build ARAX's Biolink lookup map before the first query does.
 
-    BiolinkHelper caches the map in ``arax_biolink_cache_path()`` (on the
-    mounted ``arax_dbs`` volume by default, so it survives restarts)
+    BiolinkHelper caches the map in ``arax_biolink_cache_path()`` (under
+    ``arax_cache_path()``: the mounted ``arax_dbs`` volume unless
+    ``ARAX_CACHE_DIR`` is set, so by default it survives restarts)
     (downloading the Biolink model YAML on a cold cache) and builds it on first
     use, which otherwise lands on the first query after each container start.
     The pool children read the same cached files. A failure only logs: the
