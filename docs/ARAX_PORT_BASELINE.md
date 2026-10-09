@@ -247,7 +247,7 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
   - the component cache is in Shepherd's data store (7-day TTL) rather than a per-process directory;
   - the actor lookup also knows Shepherd's `ara-shepherd-*` agent names.
 
-  Validation (`reasoner-validator==6.0.2`, ARAX's pin, installed through the `arax-api` extra in the server image) runs in a small process pool, as ARAX forks a child for it. The body is `json.dumps`, as Flask serializes a dict (nulls and NaN kept).
+  Validation (TRAPI 2.0 with `translator_tom`, through a stand-in with reasoner-validator's interface; ARAX's `reasoner-validator==6.0.2` only knows TRAPI <= 1.6 and is not installed) runs in a small process pool, as ARAX forks a child for it. The body is `json.dumps`, as Flask serializes a dict (nulls and NaN kept).
 - `POST /response` (API-08) keeps the body in the data store, capped at 5000 like upstream's files, and answers `"received!"`.
 - Parity: `tests/unit/arax/test_response_parity.py` runs 28 lookups through the port and through upstream's `get_response`, with storage, URLs and the ARS fed the same data, and matches all of them. The cases cover local, URL, ARS parent and child, `X` then `Z` then cached, and every error path. Both sides use a deterministic stand-in for reasoner-validator, which is the same package on both and needs the network. The one intended difference, labelling results from Shepherd's agent names, is asserted separately.
 
@@ -259,7 +259,7 @@ Connect is checked by port-only tests (`test_ARAX_connect.py`), because DEC-7 ma
   - `authorization=smartapi` is ARAX's SmartAPI client;
   - `mode=kp_cache` is ARAX's listing of the KP cache in Shepherd's data store (DEC-18), and `mode=system_load` is `[]` (OPS-04 is infrastructure).
 - `terminate_pid` (OPS-02): Shepherd can't signal a worker's pool child in another container, and killing it would break the pool. So the server replaces ARAX's `{pid, authorization}` stream line with a deployment-unique token, and `terminate_pid` ends that query's stream, which is all an ARAX client sees when ARAX kills its child. The query itself still runs to completion in the worker.
-- The server image installs the `arax-api` extra: `reasoner-validator`, ARAX's `bmt` and `requests-cache` pins, `aiohttp`, `pandas` and `requests`.
+- The server image installs the `arax-api` extra: ARAX's `bmt` and `requests-cache` pins, `aiohttp`, `pandas` and `requests`.
 
 - `GET/POST /entity` (API-06) goes to ARAX's `NodeSynonymizer.get_normalizer_results`, as upstream does.
 - `GET /meta_knowledge_graph` (API-05 / AUX-01) is ARAX's `KnowledgeSourceMetadata`, ported with only DEC-11's changes. The base comes from Retriever's `/meta_knowledge_graph`, and the KPInfoCacher merge is dropped. The fill-ins, standard attribute constraints, `format=simple`, the 1 h cache and the 3 JSON backups with fallback (in `ARAX_DBS_DIR`) are upstream's. The server runs ARAX's hourly `refresh_meta_kg` in the background.
