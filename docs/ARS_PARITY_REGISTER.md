@@ -471,7 +471,7 @@ Behavioral deviations:
       (`timeout` can only lengthen the budget); `CACHE_KEY_VERSION` is `3`,
       orphaning every 1.x-era entry. A hit serves the source tree's merged
       message, whose `parameters` echo is the leader's.
-    - **Tooling**: `scripts/test_ars.py` builds 2.0 queries
+    - **Tooling**: `scripts/run_query.py` builds 2.0 queries
       (`constraints.qualifiers` for MVP2); `scripts/ars_compare.py` /
       `ars_inject.py` need a 2.0 source stack, as nothing converts between
       TRAPI versions at runtime or in the tooling; the layer-4 harness
