@@ -32,7 +32,7 @@ BioThings backend data movement between the capture and the injection
 
 TRAPI 2.0: the local ARS speaks only 2.0, and captured payloads are
 delivered as they are (there is no 1.x -> 2.0 conversion), so the source ARS
-must be a 2.0 stack too. The query templates (scripts/test_ars.py) are 2.0
+must be a 2.0 stack too. The query templates (scripts/run_query.py) are 2.0
 queries.
 
 Local stack prerequisites:
@@ -80,7 +80,7 @@ def _load(name: str, path: Path):
     return module
 
 
-test_ars = _load("test_ars", SCRIPTS_DIR / "test_ars.py")
+run_query = _load("run_query", SCRIPTS_DIR / "run_query.py")
 ars_compare = _load("ars_compare", SCRIPTS_DIR / "ars_compare.py")
 normalize_mod = _load("ars_normalize", REPO / "tests/parity_e2e/normalize.py")
 
@@ -222,16 +222,16 @@ def strip_alien_self_sources(merged: dict, alien_inforesids: set) -> dict:
 
 
 async def run_injection(curie: str, args) -> str:
-    query = test_ars.build_query(args.query_type, curie)
+    query = run_query.build_query(args.query_type, curie)
     dir_name = curie.replace(":", "_").replace("~", "__")
-    if args.query_type != "treats":
+    if args.query_type != "mvp1":
         dir_name = f"{args.query_type}_{dir_name}"
     out_dir = Path(OUT_DIR) / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- capture from the live ARS
     print(f"\n>>> {curie}: capturing from {args.source}")
-    timeout = httpx.Timeout(test_ars.REQUEST_TIMEOUT_SECONDS)
+    timeout = httpx.Timeout(run_query.REQUEST_TIMEOUT_SECONDS)
     async with httpx.AsyncClient(timeout=timeout) as client:
         captured = await ars_compare.run_side(client, args.source, query)
     if captured["error"]:
@@ -269,7 +269,7 @@ async def run_injection(curie: str, args) -> str:
     )
 
     # ---- inject into the local ARS
-    base = test_ars.target_urls[args.local]
+    base = run_query.ARS_TARGETS[args.local]
     print(f"  injecting into {args.local}")
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{base}/api/submit", json=query)
@@ -338,16 +338,16 @@ async def run_injection(curie: str, args) -> str:
                 await deliver(agent, error=True)
 
         # ---- wait for the parent, fetch the local merged answer
-        deadline = time.perf_counter() + test_ars.COMPLETION_TIMEOUT_SECONDS
+        deadline = time.perf_counter() + run_query.COMPLETION_TIMEOUT_SECONDS
         while True:
             tr = await client.get(f"{base}/api/messages/{parent_pk}?trace=y")
             tr.raise_for_status()
             trace = tr.json()
-            if trace.get("status") in test_ars.TERMINAL_STATUSES:
+            if trace.get("status") in run_query.TERMINAL_STATUSES:
                 break
             if time.perf_counter() > deadline:
                 raise TimeoutError(f"local parent {parent_pk} never completed")
-            await asyncio.sleep(test_ars.POLL_INTERVAL_SECONDS)
+            await asyncio.sleep(run_query.POLL_INTERVAL_SECONDS)
         (out_dir / "local_trace.json").write_text(
             json.dumps(trace, indent=2, default=str)
         )
@@ -403,13 +403,14 @@ async def run_injection(curie: str, args) -> str:
 
 async def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--source", default="ars-ci", choices=test_ars.target_urls)
-    parser.add_argument("--local", default="ars-local", choices=test_ars.target_urls)
+    parser.add_argument("--source", default="ars-ci", choices=run_query.ARS_TARGETS)
+    parser.add_argument("--local", default="ars-local", choices=run_query.ARS_TARGETS)
     parser.add_argument(
         "--query-type",
-        default="treats",
-        choices=test_ars.QUERY_TYPES,
-        help="TRAPI template: treats (default); mvp2-increased/mvp2-decreased "
+        default="mvp1",
+        choices=run_query.QUERY_TYPES,
+        help="TRAPI template: mvp1 (default; what chemicals treat a disease); "
+        "mvp2-increased/mvp2-decreased "
         "(chemicals that increased/decreased activity or abundance of a "
         "gene; curies are gene ids); mvp2-chem-increased/mvp2-chem-decreased "
         "(flipped input: pin the chemical, genes are the answers; curies are "
@@ -418,9 +419,8 @@ async def main():
     parser.add_argument(
         "--curies",
         default=None,
-        help="comma-separated curie specs (default for treats: the full "
-        "test_ars sweep; required for mvp2/pathfinder). Pathfinder specs "
-        "are SUBJECT~OBJECT pairs",
+        help="comma-separated curie specs (default: the query type's sweep "
+        "in run_query.py). Pathfinder specs are SUBJECT~OBJECT pairs",
     )
     parser.add_argument(
         "--sink-port",
@@ -447,14 +447,8 @@ async def main():
 
     if args.curies:
         curies = args.curies.split(",")
-    elif args.query_type == "treats":
-        curies = test_ars.curie_list
     else:
-        print(
-            f"--curies is required for --query-type {args.query_type} "
-            "(the default sweep is disease curies for treats queries)"
-        )
-        return
+        curies = run_query.DEFAULT_SPECS[args.query_type]
     verdicts = {}
     for curie in curies:
         try:

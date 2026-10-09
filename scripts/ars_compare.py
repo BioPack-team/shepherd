@@ -68,8 +68,8 @@ def _load(name: str, path: Path):
 
 
 # Reuse the submit/poll target map + query builder + curie sweep from the
-# single-ARS driver, and the masking/diff rules from the layer-4 harness.
-test_ars = _load("test_ars", SCRIPTS_DIR / "test_ars.py")
+# run_query.py driver, and the masking/diff rules from the layer-4 harness.
+run_query = _load("run_query", SCRIPTS_DIR / "run_query.py")
 normalize_mod = _load("ars_normalize", REPO / "tests/parity_e2e/normalize.py")
 
 # The ported pipeline itself, for the replay layer. Needs the repo's deps
@@ -202,7 +202,7 @@ def replay_side(side: dict) -> tuple:
 async def run_side(client: httpx.AsyncClient, target: str, query: dict) -> dict:
     """Submit + poll + fetch on one ARS. Returns trace, merged payload, and
     each ARA child's stored payload keyed by canonical agent."""
-    base = test_ars.target_urls[target]
+    base = run_query.ARS_TARGETS[target]
     side = {
         "target": target,
         "parent_pk": None,
@@ -219,13 +219,13 @@ async def run_side(client: httpx.AsyncClient, target: str, query: dict) -> dict:
         side["parent_pk"] = parent_pk
         print(f"  [{target}] submitted, parent {parent_pk}")
 
-        deadline = start + test_ars.COMPLETION_TIMEOUT_SECONDS
+        deadline = start + run_query.COMPLETION_TIMEOUT_SECONDS
         while True:
-            await asyncio.sleep(test_ars.POLL_INTERVAL_SECONDS)
+            await asyncio.sleep(run_query.POLL_INTERVAL_SECONDS)
             tr = await client.get(f"{base}/api/messages/{parent_pk}?trace=y")
             tr.raise_for_status()
             trace = tr.json()
-            if trace.get("status") in test_ars.TERMINAL_STATUSES:
+            if trace.get("status") in run_query.TERMINAL_STATUSES:
                 break
             if time.perf_counter() > deadline:
                 raise TimeoutError(f"parent {parent_pk} never left Running")
@@ -402,9 +402,9 @@ def print_report(curie: str, report: dict) -> None:
 
 
 async def compare_curie(curie: str, args) -> dict:
-    query = test_ars.generate_query(curie)
+    query = run_query.build_query("mvp1", curie)
     print(f"\n>>> {curie}: {args.left} vs {args.right}")
-    timeout = httpx.Timeout(test_ars.REQUEST_TIMEOUT_SECONDS)
+    timeout = httpx.Timeout(run_query.REQUEST_TIMEOUT_SECONDS)
     async with httpx.AsyncClient(timeout=timeout) as client:
         left, right = await asyncio.gather(
             run_side(client, args.left, query),
@@ -441,12 +441,12 @@ async def compare_curie(curie: str, args) -> dict:
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--left", default="ars-local", choices=test_ars.target_urls)
-    parser.add_argument("--right", default="ars-ci", choices=test_ars.target_urls)
+    parser.add_argument("--left", default="ars-local", choices=run_query.ARS_TARGETS)
+    parser.add_argument("--right", default="ars-ci", choices=run_query.ARS_TARGETS)
     parser.add_argument(
         "--curies",
         default=None,
-        help="comma-separated curie subset (default: the full test_ars sweep)",
+        help="comma-separated curie subset (default: the full run_query.py MVP1 sweep)",
     )
     parser.add_argument(
         "--ignore-annotations",
@@ -471,7 +471,7 @@ def parse_args():
 
 async def main():
     args = parse_args()
-    curies = args.curies.split(",") if args.curies else test_ars.curie_list
+    curies = args.curies.split(",") if args.curies else run_query.MVP1_DISEASES
 
     verdicts = {}
     start = time.time()

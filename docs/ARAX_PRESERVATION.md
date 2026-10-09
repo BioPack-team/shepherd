@@ -186,7 +186,7 @@ data files.
    failure lists. See `tests/unit/arax/upstream_suite/README.md`.
 2. **Side by side with production ARAX.** Send the same queries to
    arax.ncats.io and to Shepherd's `/arax`, and compare the answers.
-   `scripts/test_shepherd.py` and `scripts/test_async.py` run queries against
-   Shepherd.
+   `scripts/run_query.py` runs queries against Shepherd (`/query`, or
+   `/asyncquery` with `--async`).
 3. **The UI against a deployed Shepherd.** Point the UI's `config.js` at
    `https://<shepherd>/arax` and route `/rtxcomplete/nodeslike` there.
