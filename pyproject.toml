@@ -69,6 +69,8 @@ shepherd_utils = ["*.yml"]
 # The ARAX port bundles data files vendored from RTX at its pinned commit
 # (general_concepts.json, the QG interpreter templates, ...).
 "shepherd_utils.arax" = ["KnowledgeSources/*.json", "*.yaml"]
+# The vendored xCRG package bundles its transcription-factor list.
+"shepherd_utils.arax.xcrg.resources" = ["*.json"]
 
 [tool.black]
 # Match requires-python, so black parses and checks with the running 3.12.
@@ -76,6 +78,7 @@ target-version = ["py312"]
 # The ARAX port mirrors upstream RTX module-for-module (and vendors ARAX's
 # generated TRAPI models); it is kept unformatted so it stays diffable against
 # upstream. Shepherd-specific glue lives outside it. See shepherd_utils/arax/README.md.
-# Upstream ARAX's own test files (tests/unit/arax/upstream_suite/test_*.py) are
-# vendored verbatim for the same reason.
-extend-exclude = "(shepherd_utils/arax/|tests/unit/arax/upstream_suite/test_)"
+# Upstream ARAX's own test files (tests/unit/arax/upstream_suite/test_*.py) and
+# upstream xCRG's (tests/unit/arax/xcrg_suite/test_*.py) are vendored verbatim
+# for the same reason.
+extend-exclude = "(shepherd_utils/arax/|tests/unit/arax/upstream_suite/test_|tests/unit/arax/xcrg_suite/test_)"

@@ -12,6 +12,7 @@
 #   - the block list is the vendored KnowledgeSources/general_concepts.json (ARAX's own)
 #   - the RTXKG2-mode check around original_query_graph is dropped (E-5)
 #   - main() is dropped
+#   - xcrg runs the vendored xCRG package (shepherd_utils/arax/xcrg/, DEC-21) instead of catrax-xcrg
 #   - TRAPI 2.0: convert_to_trapi builds one NodeBinding per qnode and one PathBinding per path (ids) in a plain
 #     Analysis (no PathfinderAnalysis), and AuxiliaryGraph(edges) without attributes; an aux graph without edges is
 #     left out, with its path-binding ids and any analysis/result left empty. The cached-result path no longer
@@ -25,7 +26,7 @@ import requests
 from shepherd_utils.config import settings
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from pathfinder.Pathfinder import Pathfinder
-from xcrg import XCRGConfig, run_xcrg
+from shepherd_utils.arax.xcrg import XCRGConfig, run_xcrg
 
 
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)

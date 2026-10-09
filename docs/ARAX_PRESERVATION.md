@@ -109,21 +109,31 @@ upstream suite's `test_ARAX_infer.py` covers the rest with `--arax-live`.
 ## 4. xCRG / MVP2
 
 **What the port does.**
-- **Routing:** the query graph interpreter recognizes an MVP2 query
-  (`is_xcrg_mvp2_query`) and runs `connect(action=xcrg)`, which calls the
-  catrax-xcrg package with Shepherd's Retriever.
+- **Routing:** the query graph interpreter recognizes an inferred MVP2 query
+  (`is_xcrg_mvp2_query`, inferred only) and runs `connect(action=xcrg)`, which
+  calls xCRG with Shepherd's Retriever.
+- **Package:** xCRG is vendored at `shepherd_utils/arax/xcrg/` from
+  Translator-CATRAX/xCRG @ `e67f2c0` and speaks TRAPI 2.0 (DEC-21); see its
+  README for the changes.
 - **Artifacts:** its database artifacts are `curie_ngd` (from the pathfinder
   data) and `curie_to_pmids` (from `ARAX_DBS_DIR`). The transcription-factor
   list ships inside the package.
 - **Cache:** results are cached as in ARAX.
 
 **Tests.**
-- **`mvp2_xcrg_route` (query parity):** a TRAPI MVP2 query runs the real xCRG
-  package against the mock Retriever, with both database artifacts present on
-  both sides (487 transcription factors in 3 batches, 5 results), and matches
-  upstream.
+- **`mvp2_xcrg_route` (query parity):** a TRAPI MVP2 query runs xCRG against
+  the mock Retriever, with both database artifacts present (487 transcription
+  factors in 3 batches, 5 results). It finds upstream's answers with the same
+  bindings, knowledge graph, support graphs and Retriever lookups; the order
+  and scores (xCRG's newer ranker) and the log differ
+  (`test_xcrg_answers_are_upstreams_reranked`).
 - **Upstream's `test_ARAX_xcrg_connect.py`:** 6 tests pass; 2 are xfails for
   DEC-4 (Shepherd's Retriever instead of a per-maturity URL).
+- **`test_xcrg.py`:** Shepherd's changes to the package (query parsing, the
+  Retriever lookups' parameters, both artifact formats, ranking on 2.0's
+  knowledge level and agent type, NaN values, routing), and a run against a
+  fake TRAPI 2.0 Retriever.
+- **`xcrg_suite/`:** xCRG's own unit tests, adapted to TRAPI 2.0.
 - **`test_ARAX_connect.py`:** Shepherd's wiring, the cache and `bypass_cache`.
 - **`test_mock_data.py`:** xCRG reads both mock artifacts.
 

@@ -96,13 +96,13 @@ EXPECTED_DIFFERENCES["val_no_edges_or_paths"] = {
     "logs",
     "requests",
 }
+# DEC-21: connect(action=xcrg) runs the vendored xCRG at catrax-xcrg's latest
+# commit, not the one upstream's goldens were recorded with: it ranks the same
+# answers with its new ranker, sends its TF batches concurrently and logs
+# differently; see test_xcrg_answers_are_upstreams_reranked
+EXPECTED_DIFFERENCES["mvp2_xcrg_route"] = {"envelope", "logs", "requests"}
 # Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
-XFAIL = {
-    # connect(action=xcrg) runs the catrax-xcrg package, which speaks TRAPI
-    # 1.x internally and has no 2.0 release; converting at its boundary would
-    # be a runtime 1.x<->2.0 conversion, which Shepherd does not do
-    "mvp2_xcrg_route": "catrax-xcrg has no TRAPI 2.0 release",
-}
+XFAIL = {}
 
 
 def _upstream_view(field, value):
@@ -195,6 +195,49 @@ def test_set_interpretation_differs_only_by_the_curie_conversion_warning(outputs
     ]
     assert got == want
     assert port[case]["requests"] == upstream[case]["requests"]
+
+
+def _xcrg_answers(envelope):
+    """The envelope with its results keyed by answer and without their
+    (rank-derived) scores."""
+    envelope = json.loads(json.dumps(envelope))
+    message = envelope["message"]
+    results = {}
+    for result in message.pop("results"):
+        for analysis in result["analyses"]:
+            assert analysis.pop("scoring_method") == "xcrg-result-filtering-v2"
+            analysis.pop("score")
+        results[json.dumps(result["node_bindings"], sort_keys=True)] = result
+    return envelope, results
+
+
+def _xcrg_requests(requests):
+    """Retriever requests in a stable order, timeout as a number (TOM's is a float)."""
+    for request in requests:
+        parameters = request["body"]["parameters"]
+        parameters["timeout"] = float(parameters["timeout"])
+    return sorted(_sort_ids(requests), key=lambda r: json.dumps(r, sort_keys=True))
+
+
+def test_xcrg_answers_are_upstreams_reranked(outputs):
+    """DEC-21: the latest xCRG finds upstream's answers, with the same evidence,
+    support graphs and Retriever lookups; only its ranking (and so the result
+    order and scores) and its logs differ."""
+    upstream, port = outputs
+    want, got = upstream["mvp2_xcrg_route"], port["mvp2_xcrg_route"]
+    want_envelope, want_results = _xcrg_answers(_sort_ids(want["envelope"]))
+    got_envelope, got_results = _xcrg_answers(_sort_ids(got["envelope"]))
+    assert _first_diff(want_envelope, got_envelope, "envelope") is None
+    assert _first_diff(want_results, got_results, "results") is None
+    scores = [r["analyses"][0]["score"] for r in got["envelope"]["message"]["results"]]
+    assert scores == [1.0, 0.8, 0.6, 0.4, 0.2]
+    assert _xcrg_requests(got["requests"]) == _xcrg_requests(want["requests"])
+    assert [
+        "WARNING",
+        "",
+        "xCRG Retriever returned non-complete status None: None",
+    ] in got["logs"]
+    assert not [log for log in got["logs"] if log[0] == "ERROR"]
 
 
 def test_fill_allowlist_is_forwarded_to_retriever(outputs):

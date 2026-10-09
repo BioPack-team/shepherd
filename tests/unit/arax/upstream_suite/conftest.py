@@ -54,13 +54,7 @@ EXPECTED_DEVIATIONS = {
     ),
 }
 # Live tests that cannot pass on TRAPI 2.0 yet (strict xfails with --arax-live)
-EXPECTED_LIVE_FAILURES = {
-    "test_ARAX_xcrg_connect.py::test_gene_object_xcrg_full_trapi_integration": (
-        "TRAPI 2.0: connect(action=xcrg) runs the catrax-xcrg package, which "
-        "speaks TRAPI 1.x and has no 2.0 release (Shepherd does no 1.x<->2.0 "
-        "conversion)"
-    ),
-}
+EXPECTED_LIVE_FAILURES: dict[str, str] = {}
 
 
 def pytest_addoption(parser):

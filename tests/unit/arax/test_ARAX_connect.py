@@ -1,7 +1,7 @@
 """Shepherd-specific behavior of the ported ARAX Connect (DEC-4, DEC-7, DEC-18).
 
-Upstream parity for the pathfinder is not a target (DEC-7), and xCRG runs in
-the catrax-xcrg package on both sides, so these check the port's wiring: which
+Upstream parity for the pathfinder is not a target (DEC-7), and xCRG is the
+vendored package (DEC-21, tested in test_xcrg.py), so these check the port's wiring: which
 Retriever, data files and limits it uses, and how the results land in the
 envelope.
 """
@@ -320,8 +320,7 @@ def xcrg(monkeypatch):
     calls = []
 
     def fake_run_xcrg(query, config, logger):
-        # A TRAPI 2.0 answer, as a 2.0 catrax-xcrg would give (0.1.0 is 1.x
-        # throughout: it reads qualifier_constraints and emits binding lists)
+        # A TRAPI 2.0 answer, as the vendored xCRG gives
         calls.append((query, config))
         logger.info("xcrg ran with %s TFs", 3)
         return {
