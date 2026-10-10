@@ -671,7 +671,8 @@ case(
         },
         {"e0": {"subject": "n0", "object": "n1"}},
     ),
-    note="member_ids are not forwarded to the KP, as in ARAX (D-25)",
+    note="forwarded to the KP with member_ids, as in ARAX, which does no set logic itself; "
+    "Retriever does not support set queries, so 0 results is its answer (D-25)",
 )
 case(
     "attribute_constraint_fda_approved",
@@ -704,9 +705,10 @@ case(
         },
         {"e0": {"subject": "n1", "object": "n0"}},
     ),
-    http=400,
-    status="QueryGraphNoIds",
-    note="ARAX does not resolve a TRAPI qnode name (D-25)",
+    min_results=1,
+    checks=[log_contains("Resolved QueryGraph node 'n0' name")],
+    note="a TRAPI qnode name is resolved through Name Resolver, as ARAXi's "
+    "add_qnode(name=...) is (Shepherd's D-25 fix; upstream ignores the name)",
 )
 
 # --- araxi: the DSL ---

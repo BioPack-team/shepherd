@@ -101,6 +101,9 @@ EXPECTED_DIFFERENCES["val_no_edges_or_paths"] = {
 # answers with its new ranker, sends its TF batches concurrently and logs
 # differently; see test_xcrg_answers_are_upstreams_reranked
 EXPECTED_DIFFERENCES["mvp2_xcrg_route"] = {"envelope", "logs", "requests"}
+# D-25 fix: a TRAPI qnode's name is resolved to ids, so the query runs instead of
+# failing with QueryGraphNoIds; see test_trapi_qnode_name_runs_as_araxi_name_does
+EXPECTED_DIFFERENCES["trapi_qnode_name"] = set(FIELDS)
 # Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
 XFAIL = {}
 
@@ -238,6 +241,29 @@ def test_xcrg_answers_are_upstreams_reranked(outputs):
         "xCRG Retriever returned non-complete status None: None",
     ] in got["logs"]
     assert not [log for log in got["logs"] if log[0] == "ERROR"]
+
+
+def test_trapi_qnode_name_runs_as_araxi_name_does(outputs):
+    """D-25 fix: upstream ignores a TRAPI qnode's name (QueryGraphNoIds); the port
+    resolves it as ARAXi's add_qnode(name=...) does (araxi_create_envelope_and_name),
+    and queries the KP with the ids the name resolved to."""
+    upstream, port = outputs
+    assert upstream["trapi_qnode_name"]["error_code"] == "QueryGraphNoIds"
+    rec = port["trapi_qnode_name"]
+    assert rec["status"] == "OK"
+    assert [
+        "INFO",
+        "",
+        "Resolved QueryGraph node 'n0' name 'MONDO thing 2' to ids ['MONDO:2']",
+    ] in rec["logs"]
+    (request,) = rec["requests"]
+    assert request["body"]["message"]["query_graph"]["nodes"] == {
+        "n0": {"ids": ["MONDO:2"], "is_set": False},
+        "n1": {"categories": ["biolink:ChemicalEntity"], "is_set": True},
+    }
+    assert rec["envelope"]["message"]["query_graph"]["nodes"]["n0"]["ids"] == [
+        "MONDO:2"
+    ]
 
 
 def test_fill_allowlist_is_forwarded_to_retriever(outputs):
