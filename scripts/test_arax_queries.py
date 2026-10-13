@@ -1665,16 +1665,15 @@ def read_stream(resp, trace: Optional[str] = None) -> tuple[dict, list]:
 
 
 def problem_log_lines(body: dict, limit: int = 12) -> list:
-    """The WARNING and ERROR lines of a response's log, shortened."""
+    """The ERROR, then WARNING, lines of a response's log, shortened (the errors
+    first: thousands of warnings can come before the one error that matters)."""
     lines = []
-    for entry in body.get("logs") or []:
-        if not isinstance(entry, dict) or entry.get("level") not in (
-            "WARNING",
-            "ERROR",
-        ):
-            continue
-        text = " ".join(str(entry.get("message") or "").split())
-        lines.append(f"{entry['level']}: {text[:400]}")
+    for level in ("ERROR", "WARNING"):
+        for entry in body.get("logs") or []:
+            if not isinstance(entry, dict) or entry.get("level") != level:
+                continue
+            text = " ".join(str(entry.get("message") or "").split())
+            lines.append(f"{level}: {text[:400]}")
     if len(lines) > limit:
         lines = lines[:limit] + [f"... {len(lines) - limit} more in the saved response"]
     return lines
