@@ -7,6 +7,7 @@
     python test_arax_queries.py --base http://localhost:5439/arax --workers 4
     python test_arax_queries.py --from-saved --only lookup_two_hop   # re-read saved responses' logs
     python test_arax_queries.py --trace --only wf_overlays           # print each step as it runs
+    python test_arax_queries.py --arax-internal                       # run Shepherd's in-process ARAX
     python test_arax_queries.py --target arax --base https://arax.ci.transltr.io/api/arax/v1.4
                                                      # the same cases against a live (TRAPI 1.6) ARAX
 
@@ -40,6 +41,11 @@ the seed of shepherd_utils.arax_mock_data, so overlays, Infer and xCRG have data
 with the mock files too. Result counts come from the live Retriever, so a
 "0 results" failure on a lookup can be the KG's answer rather than the port's;
 the saved response (--out) shows which.
+
+--arax-internal sets parameters.arax_internal: true on every query, so Shepherd's
+arax worker runs it in-process (its ARAX port) whatever ARAX_INTERNAL_DEFAULT says;
+without it, a worker on the default legacy path proxies to the remote ARAX
+service, whose TRAPI 1.6 answers fail the 2.0 checks.
 
 --target arax runs the cases against a live ARAX, which still speaks TRAPI
 1.6, to compare it with Shepherd. Each query is sent in its 1.6 form
@@ -1689,11 +1695,14 @@ def for_target(c: Case, target: str) -> Case:
 
 
 class Runner:
-    def __init__(self, base, out_dir, trace=False, target="shepherd"):
+    def __init__(
+        self, base, out_dir, trace=False, target="shepherd", arax_internal=False
+    ):
         self.base = base.rstrip("/")
         parts = urlsplit(self.base)
         self.origin = f"{parts.scheme}://{parts.netloc}"
         self.target = target  # shepherd (TRAPI 2.0) or arax (a live ARAX, TRAPI 1.6)
+        self.arax_internal = arax_internal  # ask Shepherd for its in-process ARAX
         self.out_dir = out_dir
         self.trace = trace  # stream every query, printing its steps as they run
         self.bodies = {}  # case name -> response body
@@ -1732,6 +1741,8 @@ class Runner:
             # client waits a minute longer
             parameters = dict(body.get("parameters") or {})
             parameters.setdefault("timeout", c.timeout)
+            if self.arax_internal:
+                parameters["arax_internal"] = True
             body = sent = dict(body, parameters=parameters)
         start = time.perf_counter()
         problems = []
@@ -1869,7 +1880,17 @@ def main():
         action="store_true",
         help="print the WARNING/ERROR log lines of responses saved in --out, without querying",
     )
+    parser.add_argument(
+        "--arax-internal",
+        action="store_true",
+        help="set parameters.arax_internal: true on every query, so Shepherd runs it "
+        "in-process (its ARAX port) instead of proxying to the remote ARAX service",
+    )
     args = parser.parse_args()
+    if args.arax_internal and args.target == "arax":
+        parser.error(
+            "--arax-internal is a Shepherd option; it means nothing to a live ARAX"
+        )
     if args.base is None:
         if args.target == "arax" and not args.list:
             parser.error(
@@ -1906,11 +1927,18 @@ def main():
     if args.from_saved:
         return print_saved_logs(out_dir, selected)
     out_dir.mkdir(parents=True, exist_ok=True)
-    runner = Runner(args.base, out_dir, trace=args.trace, target=args.target)
+    runner = Runner(
+        args.base,
+        out_dir,
+        trace=args.trace,
+        target=args.target,
+        arax_internal=args.arax_internal,
+    )
     first = [c for c in selected if not c.after]
     later = [c for c in selected if c.after]
     print(
-        f"Running {len(selected)} cases against {args.base} ({args.target}, "
+        f"Running {len(selected)} cases against {args.base} ({args.target}"
+        f"{', in-process ARAX' if args.arax_internal else ''}, "
         f"{args.workers} at a time)\n"
     )
     start = time.time()
