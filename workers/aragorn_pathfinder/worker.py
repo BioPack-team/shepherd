@@ -23,6 +23,7 @@ from shepherd_utils.shared import (
     get_tasks,
     run_task_lifecycle,
 )
+from shepherd_utils.task_deadline import lookup_wait
 
 # Queue name
 STREAM = "aragorn.pathfinder"
@@ -260,7 +261,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
-    MAX_QUERY_TIME = message["parameters"]["timeout"]
+    MAX_QUERY_TIME = lookup_wait(task[1], message["parameters"]["timeout"])
     start_time = time.time()
     running_callback_ids = [""]
     try:

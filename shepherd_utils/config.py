@@ -282,6 +282,11 @@ class Settings(BaseSettings):
     # however old they are, and only the monitor's abandoned-query reaper --
     # monitor_abandoned_query_sec -- eventually settles the row).
     query_timeout_sec: float = 300.0
+    # How long before that deadline a lookup worker stops waiting for its
+    # callbacks, so the operations after the lookup (omnicorp, scoring, ...)
+    # still have time to run and the caller gets the partial results rather
+    # than a timeout. See shepherd_utils.task_deadline.lookup_wait.
+    lookup_deadline_headroom_sec: float = 20.0
 
     # Poison-pill circuit breaker. A task that keeps killing its worker before it
     # can ack (e.g. a payload so large that decoding/sorting it trips the cgroup

@@ -126,3 +126,30 @@ def seconds_overdue(fields: Any, now: Optional[float] = None) -> float:
 def is_expired(fields: Any, now: Optional[float] = None) -> bool:
     """Whether this task's query has outlived its budget."""
     return seconds_overdue(fields, now) > 0.0
+
+
+def lookup_wait(fields: Any, timeout: Any, now: Optional[float] = None) -> float:
+    """How long a lookup worker waits for its callbacks, in seconds.
+
+    The lookup's own ``timeout`` (``parameters.timeout``, defaulting to
+    ``settings.lookup_timeout``) used to be the whole story, measured from
+    after the lookups were submitted -- and submitting can itself take up to
+    ``kg_retrieval_submit_timeout`` when the retrieval service is slow to ACK.
+    100s of submit plus 210s of waiting overran the 300s query budget, so a
+    slow retrieval handed the next operation a query that was already
+    expired and the caller got a 504 instead of whatever had been gathered.
+
+    So the wait also stops ``settings.lookup_deadline_headroom_sec`` before the
+    query's deadline, leaving the operations after the lookup time to finish.
+    Never less than a second, so the worker still checks its callbacks once
+    (and cleans up the ones still running) when the budget is already spent.
+    """
+    try:
+        wait = float(timeout)
+    except (TypeError, ValueError):
+        wait = float(settings.lookup_timeout)
+    deadline = get_deadline(fields)
+    if deadline is not None:
+        now = time.time() if now is None else now
+        wait = min(wait, deadline - settings.lookup_deadline_headroom_sec - now)
+    return max(wait, 1.0)

@@ -24,6 +24,7 @@ from shepherd_utils.task_deadline import (
     deadline_field,
     get_deadline,
     is_expired,
+    lookup_wait,
     query_budget,
     query_deadline,
     seconds_overdue,
@@ -539,3 +540,38 @@ async def test_expired_task_does_not_leak_a_concurrency_slot(monkeypatch, wrap_u
 
     assert len(seen) == 3
     assert len(wrap_up_spy["added"]) == 3
+
+
+# --- lookup callback wait ----------------------------------------------------
+#
+# A lookup used to wait its full timeout for callbacks, measured from after a
+# submit that could itself take 100s, so a slow retrieval handed the next
+# operation an already-expired query and the caller got a 504.
+
+
+def test_lookup_wait_is_its_timeout_with_time_to_spare(monkeypatch):
+    monkeypatch.setattr(settings, "lookup_deadline_headroom_sec", 20.0)
+    fields = deadline_field(1000.0 + 300)
+    assert lookup_wait(fields, 210, now=1000.0) == 210.0
+
+
+def test_lookup_wait_stops_short_of_the_deadline(monkeypatch):
+    """The stress-test case: 100s spent waiting for the submit ACK."""
+    monkeypatch.setattr(settings, "lookup_deadline_headroom_sec", 20.0)
+    fields = deadline_field(1000.0 + 200)
+    assert lookup_wait(fields, 210, now=1000.0) == 180.0
+
+
+def test_lookup_wait_still_checks_once_when_the_budget_is_spent(monkeypatch):
+    monkeypatch.setattr(settings, "lookup_deadline_headroom_sec", 20.0)
+    fields = deadline_field(1000.0 - 5)
+    assert lookup_wait(fields, 210, now=1000.0) == 1.0
+
+
+def test_lookup_wait_without_a_deadline_is_its_timeout():
+    assert lookup_wait({}, 210, now=1000.0) == 210.0
+
+
+def test_lookup_wait_falls_back_on_an_unusable_timeout(monkeypatch):
+    monkeypatch.setattr(settings, "lookup_timeout", 210)
+    assert lookup_wait({}, "soon", now=1000.0) == 210.0
