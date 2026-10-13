@@ -494,7 +494,10 @@ case(
             "e2": {"subject": "n2", "object": "n3"},
         },
     ),
+    known_defect="D-30",
     timeout=900,
+    note="a large answer leaves support-graph edges to pruned nodes in the KG, and "
+    "the template's Fisher's exact test fails on them (D-30)",
 )
 case(
     "lookup_single_node",

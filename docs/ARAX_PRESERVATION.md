@@ -171,6 +171,10 @@ them (DEC-1):
   bind in one pass, as upstream's NGD does, with the same bindings.
 - **D-29:** clinical info needs cohd.io at query time (curie to OMOP id
   mapping), with no timeout; when cohd.io is down, those overlays fail.
+- **D-30:** a large multi-hop answer with support graphs can leave edges in
+  the KG whose endpoint node Expand pruned, and the next action that reads
+  every edge's endpoints fails (on a three-hop lookup, the Fisher's exact test
+  in its template).
 - **D-26:** `overlay_connect_knodes` fails in Jaccard. The port's E-4 change
   removes the disabled overlay action that made it fail sooner upstream.
 
