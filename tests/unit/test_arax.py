@@ -69,6 +69,8 @@ def _task():
 def query_logger():
     """A task logger with a query log handler, as the worker's tasks have."""
     task_logger = logging.getLogger(f"{__name__}.query")
+    # run_task_lifecycle sets the task's log_level ("20" in task() above)
+    task_logger.setLevel(logging.INFO)
     attach_query_handler(task_logger)
     get_query_handler(task_logger).drain()
     return task_logger
@@ -725,3 +727,29 @@ def test_prewarmed_child_has_no_startup_span(db, child_spans):
     (query,) = spans["arax.query"]
     assert query.attributes["arax.pool.child_cold"] is False
     assert query.attributes["arax.pool.child_prewarmed"] is True
+
+
+async def test_arax_log_entries_honour_the_query_log_level(mocker, query_logger):
+    """parameters.log_level is the task logger's level; ARAX's own log entries
+    are filtered by it, as Shepherd's records are."""
+    saved = []
+
+    async def save_logs(response_id, task_logger):
+        saved.extend(get_query_handler(task_logger).drain())
+
+    mocker.patch("workers.arax.worker.save_logs", side_effect=save_logs)
+    query_logger.setLevel(logging.WARNING)
+    try:
+        await worker.save_arax_logs(
+            "r1",
+            [
+                {"level": "DEBUG", "message": "d"},
+                {"level": "INFO", "message": "i"},
+                {"level": "WARNING", "message": "w"},
+                {"level": "ERROR", "message": "e"},
+            ],
+            query_logger,
+        )
+    finally:
+        query_logger.setLevel(logging.INFO)
+    assert [entry["message"] for entry in saved] == ["w", "e"]

@@ -18,6 +18,11 @@
 #     qualifier_constraints); a QG with neither edges nor paths is the 2.0 form of an
 #     edgeless QG (1.x `edges: {}`), no longer a MissingQEdgeAndQPath error; stream
 #     heartbeats carry an RFC 3339 timestamp with offset
+#   - a TRAPI qnode with a name and no ids is resolved to ids (resolve_qnode_names), as ARAXi's
+#     add_qnode(name=...) resolves a name; upstream accepts the name but ignores it (D-25)
+#   - TRAPI 2.0: a message the plan starts from (the query's own, or one loaded by message_uris)
+#     gets back the empty auxiliary_graphs / knowledge_graph.edges 2.0 omits
+#     (restore_empty_containers), which the actions (e.g. filter_results' prune_kg) expect
 #   - removed as dead code (DEC-5): the RTXKG2 mode (E-5), the ARAXFilter import and the
 #     filter and fetch_message DSL commands (E-4, E-6), the `if False:` block,
 #     query_tracker_reset(), limit_message() and stringify_dict() (no callers)
@@ -99,6 +104,15 @@ def _finalizing_trapi2_envelope(query_method):
                 parameters = query.get('parameters') if isinstance(query, dict) else None
                 finalize_trapi2_envelope(response.envelope, parameters)
     return query
+
+
+def restore_empty_containers(message):
+    """The empty containers TRAPI 2.0 omits, as upstream's in-memory messages carry them."""
+    if message.auxiliary_graphs is None:
+        message.auxiliary_graphs = {}
+    if message.knowledge_graph is not None and message.knowledge_graph.edges is None:
+        message.knowledge_graph.edges = {}
+    return message
 
 
 def finalize_trapi2_envelope(envelope, parameters=None):
@@ -546,6 +560,8 @@ class ARAXQuery:
             if "query_graph" in query["message"] and query["message"]["query_graph"] is not None:
                 response.data["have_query_graph"] = 1
                 self.validate_incoming_query_graph(query["message"])
+                if response.status == 'OK':
+                    self.resolve_qnode_names(query["message"])
 
         #### Check to see if there is at least a message or a operations
         if "have_message" not in response.data and "have_operations" not in response.data:
@@ -621,6 +637,32 @@ class ARAXQuery:
                             response.error(f"QueryGraph edge '{id}' has an unexpected property '{attr}'. This property is not understood and therefore processing is halted, rather than answer an incompletely understood query", error_code="UnknownQEdgeProperty")
                         return response
 
+        return response
+
+
+    ############################################################################################
+    #### Shepherd (D-25 fix): a TRAPI qnode given only by name gets the ids its name resolves to,
+    #### as ARAXi's add_qnode(name=...) does (Name Resolver, then the Node Normalizer)
+    def resolve_qnode_names(self, message):
+
+        response = self.response
+        qnodes = {key: qnode for key, qnode in message['query_graph']['nodes'].items()
+                  if isinstance(qnode.get('name'), str) and qnode['name'].strip() and not qnode.get('ids')}
+        if not qnodes:
+            return response
+
+        names = sorted({qnode['name'] for qnode in qnodes.values()})
+        response.debug(f"Looking up ids for names {names} in NodeSynonymizer")
+        # the call ARAXi's add_qnode makes: a name is tried as a curie, then through Name Resolver
+        synonymizer_results = NodeSynonymizer().get_canonical_curies(curies=names, names=names)
+        for key, qnode in qnodes.items():
+            name = qnode['name']
+            resolved = synonymizer_results.get(name)
+            if resolved is None:
+                response.error(f"A node with name '{name}' is not in our knowledge graph", error_code="UnresolvableNodeName")
+                return response
+            qnode['ids'] = [ resolved['preferred_curie'] ]
+            response.info(f"Resolved QueryGraph node '{key}' name '{name}' to ids {qnode['ids']}")
         return response
 
 
@@ -727,6 +769,13 @@ class ARAXQuery:
         else:
             response.warning("Multiple Messages were uploaded or imported by reference. However, proper merging code has not been implemented yet! Will use just the first Message for now.")
             message = messages[0]
+
+        #### TRAPI 2.0 (Shepherd change): a 2.0 message omits the containers it may not send empty
+        #### (auxiliary_graphs, knowledge_graph.edges), e.g. a stored response loaded by message_uris;
+        #### give the actions the empty ones upstream's messages carry (finalize_trapi2_envelope
+        #### drops them again on the way out)
+        if n_messages > 0:
+            restore_empty_containers(message)
 
         #### Examine the options that were provided and act accordingly
         optionsDict = {}
