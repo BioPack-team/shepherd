@@ -20,6 +20,9 @@
 #     heartbeats carry an RFC 3339 timestamp with offset
 #   - a TRAPI qnode with a name and no ids is resolved to ids (resolve_qnode_names), as ARAXi's
 #     add_qnode(name=...) resolves a name; upstream accepts the name but ignores it (D-25)
+#   - TRAPI 2.0: a message the plan starts from (the query's own, or one loaded by message_uris)
+#     gets back the empty auxiliary_graphs / knowledge_graph.edges 2.0 omits
+#     (restore_empty_containers), which the actions (e.g. filter_results' prune_kg) expect
 #   - removed as dead code (DEC-5): the RTXKG2 mode (E-5), the ARAXFilter import and the
 #     filter and fetch_message DSL commands (E-4, E-6), the `if False:` block,
 #     query_tracker_reset(), limit_message() and stringify_dict() (no callers)
@@ -101,6 +104,15 @@ def _finalizing_trapi2_envelope(query_method):
                 parameters = query.get('parameters') if isinstance(query, dict) else None
                 finalize_trapi2_envelope(response.envelope, parameters)
     return query
+
+
+def restore_empty_containers(message):
+    """The empty containers TRAPI 2.0 omits, as upstream's in-memory messages carry them."""
+    if message.auxiliary_graphs is None:
+        message.auxiliary_graphs = {}
+    if message.knowledge_graph is not None and message.knowledge_graph.edges is None:
+        message.knowledge_graph.edges = {}
+    return message
 
 
 def finalize_trapi2_envelope(envelope, parameters=None):
@@ -757,6 +769,13 @@ class ARAXQuery:
         else:
             response.warning("Multiple Messages were uploaded or imported by reference. However, proper merging code has not been implemented yet! Will use just the first Message for now.")
             message = messages[0]
+
+        #### TRAPI 2.0 (Shepherd change): a 2.0 message omits the containers it may not send empty
+        #### (auxiliary_graphs, knowledge_graph.edges), e.g. a stored response loaded by message_uris;
+        #### give the actions the empty ones upstream's messages carry (finalize_trapi2_envelope
+        #### drops them again on the way out)
+        if n_messages > 0:
+            restore_empty_containers(message)
 
         #### Examine the options that were provided and act accordingly
         optionsDict = {}

@@ -36,6 +36,9 @@ docs/ARAX_PORT_BASELINE.md, reproduced by the port on purpose) are expected to
 fail: XFAIL when they do, XPASS when they don't (D-23 only fires when the KP's
 answer includes support-graph edges, so it can XPASS on a small answer).
 
+A local Retriever answers hops fed by more than 300 ids with a 422 unless its
+OPENAPI__X_TRAPI__BATCH_SIZE_LIMIT is raised; the run says so when it sees one.
+
 The curies are real (type 2 diabetes, metformin, PPARG, ...) and are also in
 the seed of shepherd_utils.arax_mock_data, so overlays, Infer and xCRG have data
 with the mock files too. Result counts come from the live Retriever, so a
@@ -230,6 +233,12 @@ def to_trapi_1_6(body: dict) -> dict:
     if parameters:
         body["parameters"] = parameters
     query_graph = (body.get("message") or {}).get("query_graph") or {}
+    if (
+        query_graph.get("nodes")
+        and "edges" not in query_graph
+        and "paths" not in query_graph
+    ):
+        query_graph["edges"] = {}  # 1.6's one-node query graph
     for qnode in (query_graph.get("nodes") or {}).values():
         if qnode.get("set_interpretation") == "COLLATE":  # 2.0's form of 1.x is_set
             del qnode["set_interpretation"]
@@ -490,10 +499,10 @@ case(
 case(
     "lookup_single_node",
     "lookup",
-    trapi({"n0": {"ids": [METFORMIN]}}, {}),
-    checks=[log_contains("422")],
-    note="Retriever refuses a query with no edges (422); upstream sends these to rtx-kg2 (DEC-4)",
-    arax={"checks": [], "min_results": 1, "note": "ARAX answers it from rtx-kg2"},
+    trapi({"n0": {"ids": [METFORMIN]}}),
+    note="TRAPI 2.0's one-node query graph (no edges); it goes to Retriever, where "
+    "upstream sends it to rtx-kg2 (DEC-4)",
+    arax={"min_results": 1, "note": "ARAX answers it from rtx-kg2"},
 )
 case(
     "lookup_kp_list_forwarded",
@@ -917,7 +926,9 @@ case(
         ]
     ),
     min_results=1,
-    note="COHD values need cohd.io's OMOP ids to be in the COHD file",
+    known_defect="D-29",
+    note="maps curies to OMOP ids with a live call to cohd.io (D-29), so it fails "
+    "where cohd.io is unreachable; the COHD values also need those ids in the COHD file",
 )
 case(
     "dsl_overlay_add_node_pmids",
@@ -1230,14 +1241,15 @@ case(
     status="UnknownQEdgeProperty",
 )
 case(
-    "val_no_edges_or_paths",
+    "val_empty_edges",
     "validation",
-    trapi({"n0": {"ids": [METFORMIN]}}),
+    trapi({"n0": {"ids": [METFORMIN]}}, {}),
     http=400,
     status="ERROR",
-    note="TRAPI 2.0 requires edges or paths: Shepherd's 400, before ARAX's "
-    "MissingQEdgeAndQPath",
-    arax={"status": "MissingQEdgeAndQPath", "note": "ARAX's own error"},
+    note="TRAPI 2.0 forbids an empty edges map (a one-node query omits it): Shepherd's 400",
+    arax={
+        "skip": "1.6's form of a one-node query graph (lookup_single_node), not an error"
+    },
 )
 # TRAPI 1.x spellings are rejected by Shepherd with a 400 naming the 2.0 one
 case(
@@ -1776,6 +1788,12 @@ class Runner:
         out.status, out.http = result.get("status"), http_status
         if problems:
             out.log_lines = problem_log_lines(result)
+            if any("ClientResponseError: 422" in line for line in out.log_lines):
+                out.problems.append(
+                    "Retriever refused a hop (HTTP 422): a local Retriever needs "
+                    "OPENAPI__X_TRAPI__BATCH_SIZE_LIMIT above its default of 300 ids per "
+                    "qnode, or every hop fed by a larger first hop is refused"
+                )
         return out
 
     def run_endpoint(self, c: Case) -> Outcome:
