@@ -234,6 +234,28 @@ async def test_query_returns_the_code_for_how_it_failed(mocker, status, code):
 
 
 @pytest.mark.asyncio
+async def test_query_failure_is_logged_by_the_server(mocker, caplog):
+    """A query a worker cut short used to come back as a bare 504 in the
+    server's logs: the explanation lived only in the worker's pod."""
+    _patch_sync_query(
+        mocker, _row(state="COMPLETED", status="TIMEOUT"), response={"message": {}}
+    )
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
+    assert "Query qid finished with status TIMEOUT; answering 504." in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_healthy_query_logs_no_warning(mocker, caplog):
+    _patch_sync_query(
+        mocker, _row(state="COMPLETED", status="OK"), response={"message": {}}
+    )
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
+    assert "finished with status" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_query_returns_an_error_code_when_the_response_is_missing(mocker):
     _patch_sync_query(mocker, _row(state="COMPLETED", status="OK"), response=None)
     response = await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))

@@ -563,7 +563,16 @@ async def run_sync_query(
         # went in, but the HTTP code said 200 -- so a caller that
         # checks the code (rather than parsing the payload for a status
         # field) saw every failed query as a successful one.
-        return ORJSONResponse(content=response, status_code=query_status_code(status))
+        status_code = query_status_code(status)
+        if status_code != 200:
+            # Whatever ended the query was logged by the worker that hit it,
+            # in that worker's pod. Without this the server's access log shows
+            # a bare 504/500 with nothing here to say which query or why.
+            logger.warning(
+                f"Query {query_id} finished with status {status}; "
+                f"answering {status_code}."
+            )
+        return ORJSONResponse(content=response, status_code=status_code)
 
     logger.error("Query timed out")
     return ORJSONResponse(
