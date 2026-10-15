@@ -529,6 +529,85 @@ def test_merge_messages_pathfinder_query_only_accumulates_the_kgraph():
     assert len(out["message"]["knowledge_graph"]["edges"]) == 1
 
 
+def test_merge_messages_pathfinder_callbacks_accumulate_under_its_query_graph():
+    """Every edge lookup's callback adds to the same knowledge graph, and the
+    response keeps the pathfinder's own query graph (its path), not a
+    lookup's one-hop one."""
+    pathfinder_qg = {
+        "nodes": {
+            "n0": {"ids": ["MONDO:0001"]},
+            "n1": {"ids": ["MONDO:0002"]},
+        },
+        "paths": {
+            "p0": {"subject": "n0", "object": "n1"},
+        },
+    }
+
+    def lookup_callback(edge_id, subject, obj):
+        return {
+            "message": {
+                "query_graph": {
+                    "nodes": {"n0": {"ids": [subject]}, "n1": {"ids": [obj]}},
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:related_to"],
+                        }
+                    },
+                },
+                "knowledge_graph": {
+                    "nodes": {
+                        subject: {"categories": ["biolink:Gene"]},
+                        obj: {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        edge_id: {
+                            "subject": subject,
+                            "predicate": "biolink:affects",
+                            "object": obj,
+                            "sources": [],
+                        }
+                    },
+                },
+                "results": [
+                    {
+                        "node_bindings": {
+                            "n0": {"ids": [subject]},
+                            "n1": {"ids": [obj]},
+                        },
+                        "analyses": [{"edge_bindings": {"e0": {"ids": [edge_id]}}}],
+                    }
+                ],
+            }
+        }
+
+    response = {
+        "message": {
+            "query_graph": pathfinder_qg,
+            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "results": [],
+        }
+    }
+    for callback in (
+        lookup_callback("kedge_1", "MONDO:0001", "NCBIGene:1"),
+        lookup_callback("kedge_2", "NCBIGene:1", "MONDO:0002"),
+    ):
+        response = merge_messages(
+            target="aragorn",
+            original_query_graph=pathfinder_qg,
+            response=response,
+            new_response=callback,
+            logger=logger,
+        )
+
+    kgraph = response["message"]["knowledge_graph"]
+    assert set(kgraph["edges"]) == {"kedge_1", "kedge_2"}
+    assert set(kgraph["nodes"]) == {"MONDO:0001", "NCBIGene:1", "MONDO:0002"}
+    assert response["message"]["results"] == []
+    assert response["message"]["query_graph"] == pathfinder_qg
+
+
 def test_merge_messages_pathfinder_missing_endpoint_raises():
     """A pathfinder query with no subject/object should raise KeyError."""
     bad_qg = {"nodes": {}, "paths": {"p1": {"subject": None, "object": "n1"}}}

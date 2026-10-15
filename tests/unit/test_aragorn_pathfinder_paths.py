@@ -14,8 +14,10 @@ from math import inf, isclose
 
 import numpy as np
 import pytest
+from translator_tom.v2_0 import AsyncQuery
 
 from shepherd_utils import data_download
+from shepherd_utils.config import settings
 from shepherd_utils.data_download import ensure_pathfinder_search_graph
 from workers.aragorn_pathfinder import worker
 from workers.aragorn_pathfinder.worker import (
@@ -445,35 +447,94 @@ def test_build_paths_task_saves_the_paths_without_orphans(mocker):
     assert any("Built 2 paths" in json.dumps(entry) for entry in entries)
 
 
+def test_build_paths_takes_an_inferred_endpoint_edge_and_keeps_its_support(mocker):
+    """Gandalf expands an endpoint to its subclass children and returns a
+    child's edge as an inferred edge on the endpoint, supported by the child's
+    own edge and its subclass_of edge. The inferred edge is the hop; the
+    child's edge is not, and the support survives the orphan filter."""
+    message = {
+        "knowledge_graph": {
+            "nodes": {
+                "S": node("biolink:Disease"),
+                "C": node("biolink:Disease"),
+                "M": node("biolink:Gene"),
+                "T": node("biolink:Disease"),
+            },
+            "edges": {
+                "cm": edge("C", "M", "biolink:affects"),
+                "cs": edge("C", "S", "biolink:subclass_of"),
+                "cm_cs": {
+                    **edge("S", "M", "biolink:affects"),
+                    "attributes": [
+                        {
+                            "attribute_type_id": "biolink:support_graphs",
+                            "value": ["support_cm_cs"],
+                        }
+                    ],
+                },
+                "mt": edge("M", "T"),
+            },
+        },
+        "auxiliary_graphs": {"support_cm_cs": {"edges": ["cm", "cs"]}},
+        "results": [],
+    }
+    mocker.patch.object(worker, "get_message_sync", return_value={"message": message})
+    save = mocker.patch.object(worker, "save_response_sync")
+
+    build_paths_task("rid", make_plan([("S", "M", "T")]), logging.INFO)
+
+    saved = save.call_args.args[1]["message"]
+    assert bound_paths(saved) == {"p_1": ["cm_cs", "mt"]}
+    assert saved["auxiliary_graphs"]["support_cm_cs"] == {"edges": ["cm", "cs"]}
+    assert set(saved["knowledge_graph"]["edges"]) == {"cm_cs", "mt", "cm", "cs"}
+    assert set(saved["knowledge_graph"]["nodes"]) == {"S", "C", "M", "T"}
+
+
+def test_build_paths_says_where_the_dropped_paths_lack_a_hop(caplog):
+    """A path whose hop came back with no edges is dropped, counted by where
+    the hop is, and the first such hop is named with whether its nodes came
+    back at all."""
+    message = make_message()
+    plan = make_plan(
+        [
+            ("S", "X", "T"),  # no S - X edge: at the source
+            ("S", "A", "X", "T"),  # no A - X edge: between intermediates
+            ("S", "M", "T"),  # M - T only subclass_of: at the target
+        ]
+    )
+
+    with caplog.at_level(logging.INFO):
+        build_paths(message, plan, logger)
+
+    assert bound_paths(message) == {"p_0": ["st"]}
+    assert (
+        "dropped 3 with a hop that has no edges {'at the source': 1, "
+        "'between intermediates': 1, 'at the target': 1}"
+    ) in caplog.text
+    assert "First hop with no edges: S (in the edges) - X (not in the edges)" in (
+        caplog.text
+    )
+
+
 # --- shadowfax over the backbone ---------------------------------------------
 
 
 class InlinePool:
-    """Runs the search for real and records the path build it is handed."""
+    """Runs the search for real and records the path build it is handed,
+    running that too when asked."""
 
-    def __init__(self):
+    def __init__(self, build=False):
+        self.build = build
         self.builds = []
 
     async def run(self, loop, fn, *args):
         if fn is search_paths:
             return fn(*args)
         self.builds.append(args)
-        return []
+        return fn(*args) if self.build else []
 
 
-async def test_shadowfax_searches_the_backbone(redis_mock, mocker, graph_dir):
-    #   S - A - B - T, S - M - T
-    write_graph(
-        graph_dir,
-        5,
-        [(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 4, 1), (4, 3, 1)],
-    )
-    curies = ["X:S", "X:A", "X:B", "X:T", "X:M"]
-    mocker.patch.object(worker, "SEARCH_GRAPH_DIR", str(graph_dir))
-    mocker.patch.object(worker, "NODE_CURIES", curies)
-    mocker.patch.object(worker, "NODE_INDEX", {c: i for i, c in enumerate(curies)})
-    pool = InlinePool()
-    mocker.patch.object(worker, "POOL", pool)
+def backbone_query(constraints=None):
     query = {
         "message": {
             "query_graph": {
@@ -483,16 +544,68 @@ async def test_shadowfax_searches_the_backbone(redis_mock, mocker, graph_dir):
         },
         "parameters": {"timeout": 5},
     }
+    if constraints is not None:
+        query["message"]["query_graph"]["paths"]["p0"]["constraints"] = constraints
+    return query
+
+
+def backbone_merged_message():
+    """The response once every lookup over the backbone is merged: A is the
+    only gene, and there is no direct edge."""
+    return {
+        "knowledge_graph": {
+            "nodes": {
+                "X:S": node("biolink:Disease"),
+                "X:A": node("biolink:Gene"),
+                "X:B": node("biolink:ChemicalEntity"),
+                "X:M": node("biolink:Disease"),
+                "X:T": node("biolink:Disease"),
+            },
+            "edges": {
+                "sa": edge("X:S", "X:A", "biolink:affects"),
+                "ab": edge("X:A", "X:B"),
+                "bt": edge("X:B", "X:T"),
+                "sm": edge("X:S", "X:M"),
+                "mt": edge("X:M", "X:T"),
+            },
+        },
+        "results": [],
+    }
+
+
+async def run_on_backbone(mocker, graph_dir, query, pool):
+    """``shadowfax`` on ``query`` over the backbone S - A - B - T, S - M - T,
+    with Redis and the outbound calls mocked. Returns its metadata, the
+    lookups it sent, the callback registrations and the response it saved
+    (None unless the pool runs the build)."""
+    write_graph(
+        graph_dir,
+        5,
+        [(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 4, 1), (4, 3, 1)],
+    )
+    curies = ["X:S", "X:A", "X:B", "X:T", "X:M"]
+    mocker.patch.object(worker, "SEARCH_GRAPH_DIR", str(graph_dir))
+    mocker.patch.object(worker, "NODE_CURIES", curies)
+    mocker.patch.object(worker, "NODE_INDEX", {c: i for i, c in enumerate(curies)})
+    mocker.patch.object(worker, "POOL", pool)
     mocker.patch.object(
         worker, "get_message", new_callable=mocker.AsyncMock, return_value=query
     )
-    mocker.patch.object(worker, "add_callback_id", new_callable=mocker.AsyncMock)
+    add_callback = mocker.patch.object(
+        worker, "add_callback_id", new_callable=mocker.AsyncMock
+    )
     mocker.patch.object(
         worker,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
+    mocker.patch.object(
+        worker,
+        "get_message_sync",
+        return_value={"message": backbone_merged_message()},
+    )
+    save = mocker.patch.object(worker, "save_response_sync")
     post = mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
@@ -512,8 +625,20 @@ async def test_shadowfax_searches_the_backbone(redis_mock, mocker, graph_dir):
 
     metadata = await shadowfax(task, logger)
 
+    lookups = [call.kwargs["json"] for call in post.call_args_list]
+    saved = save.call_args.args[1]["message"] if save.called else None
+    return metadata, lookups, add_callback, saved
+
+
+async def test_shadowfax_searches_the_backbone(redis_mock, mocker, graph_dir):
+    pool = InlinePool()
+
+    metadata, lookups, _, _ = await run_on_backbone(
+        mocker, graph_dir, backbone_query(), pool
+    )
+
     assert json.loads(metadata) == {"rehydrate": True}
-    sent = [query_ids(call.kwargs["json"]) for call in post.call_args_list]
+    sent = [query_ids(lookup) for lookup in lookups]
     assert sorted(sent, key=str) == sorted(
         [
             (["X:S"], ["X:T"]),
@@ -531,6 +656,58 @@ async def test_shadowfax_searches_the_backbone(redis_mock, mocker, graph_dir):
         ["X:S", "X:M", "X:T"],
     ]
     assert plan["source"] == "X:S" and plan["target"] == "X:T"
+
+
+async def test_shadowfax_on_the_backbone_sends_valid_lookups_and_builds_the_paths(
+    redis_mock, mocker, graph_dir
+):
+    """Every lookup a query on the backbone sends -- the open endpoint lookups
+    and the interior one pinning many ids -- is a valid TRAPI 2.0 query with
+    the worker's parameters and its own callback, and once they are merged
+    the paths are built and saved."""
+    metadata, lookups, add_callback, saved = await run_on_backbone(
+        mocker, graph_dir, backbone_query(), InlinePool(build=True)
+    )
+
+    assert json.loads(metadata) == {"rehydrate": True}
+    assert len(lookups) == 4
+    for lookup in lookups:
+        AsyncQuery.from_dict(lookup)
+        assert "log_level" not in lookup
+        parameters = {k: v for k, v in lookup["parameters"].items() if k != "subclass"}
+        assert parameters == {
+            "timeout": 5,
+            "tiers": [settings.default_data_tier],
+            "tier_fallback": False,
+            "dehydrated": True,
+        }
+    assert add_callback.await_count == len(lookups)
+    callbacks = {lookup["callback"] for lookup in lookups}
+    assert len(callbacks) == len(lookups)
+    assert sorted(bound_paths(saved).values()) == [
+        ["ab", "bt", "sa"],
+        ["mt", "sm"],
+    ]
+
+
+async def test_shadowfax_keeps_to_the_intermediate_category(
+    redis_mock, mocker, graph_dir
+):
+    """A required_intermediate_categories constraint reaches the path build,
+    and only paths through a node of that category are kept."""
+    pool = InlinePool(build=True)
+    query = backbone_query(
+        constraints=[{"required_intermediate_categories": ["biolink:Gene"]}]
+    )
+
+    _, lookups, _, saved = await run_on_backbone(mocker, graph_dir, query, pool)
+
+    for lookup in lookups:
+        AsyncQuery.from_dict(lookup)
+    (build,) = pool.builds
+    assert build[1]["intermediate_category"] == "biolink:Gene"
+    # the path through A, the gene; not the one through M
+    assert list(bound_paths(saved).values()) == [["ab", "bt", "sa"]]
 
 
 # --- the search graph download ----------------------------------------------
