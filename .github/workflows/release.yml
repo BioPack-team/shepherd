@@ -6,7 +6,7 @@ on:
 
 jobs:
   push_server_to_registry:
-    name: Push Docker image to GitHub Packages tagged with "latest" and version number.
+    name: Push Docker image to GitHub Packages tagged with "latest-trapi-1.6" and version number (the trapi_1.6 branch; "latest" is TRAPI 2.0).
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
@@ -34,11 +34,11 @@ jobs:
           file: ./shepherd_server/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ steps.lower_repo.outputs.REPO }}/shepherd_server:latest
+            ghcr.io/${{ steps.lower_repo.outputs.REPO }}/shepherd_server:latest-trapi-1.6
             ghcr.io/${{ steps.lower_repo.outputs.REPO }}/shepherd_server:${{ steps.get_version.outputs.VERSION }}
 
   push_workers_to_registry:
-    name: Push Docker image to GitHub Packages tagged with "latest" and version number.
+    name: Push Docker image to GitHub Packages tagged with "latest-trapi-1.6" and version number (the trapi_1.6 branch; "latest" is TRAPI 2.0).
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -93,5 +93,5 @@ jobs:
           file: ./workers/${{ matrix.worker }}/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ steps.lower_repo.outputs.REPO }}/${{ matrix.worker }}:latest
+            ghcr.io/${{ steps.lower_repo.outputs.REPO }}/${{ matrix.worker }}:latest-trapi-1.6
             ghcr.io/${{ steps.lower_repo.outputs.REPO }}/${{ matrix.worker }}:${{ steps.get_version.outputs.VERSION }}

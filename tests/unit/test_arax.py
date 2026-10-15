@@ -379,7 +379,7 @@ def remote_arax(mocker):
 
 @pytest.mark.asyncio
 async def test_legacy_query_is_sent_to_the_remote_arax_service(
-    db, span, mocker, remote_arax, query_logger
+    db, span, mocker, remote_arax
 ):
     query = {"message": {}, "stream_progress": True}
     store = db(query, internal=False)
@@ -388,7 +388,7 @@ async def test_legacy_query_is_sent_to_the_remote_arax_service(
     finish = mocker.patch("workers.arax.worker.finish_progress")
     task = _task()
 
-    await arax(task, query_logger)
+    await arax(task, logger)
 
     assert not run.called
     # sent non-streaming, with Shepherd's submitter
@@ -397,10 +397,8 @@ async def test_legacy_query_is_sent_to_the_remote_arax_service(
     saved = store["response_id"]
     sources = saved["message"]["knowledge_graph"]["edges"]["e0"]["sources"]
     assert sources[-1]["resource_id"] == "infores:shepherd-arax"
-    assert "logs" not in saved
-    assert any(
-        entry["message"] == "from remote ARAX" for entry in store["logs"]["response_id"]
-    )
+    # ARAX's log stays in its response
+    assert saved["logs"] == LEGACY_RESPONSE["logs"]
     # a streaming client is told there is nothing more to relay
     finish.assert_called_once_with("response_id")
     span.set_attribute.assert_any_call("arax.path", "legacy")
@@ -656,29 +654,3 @@ def test_prewarmed_child_has_no_startup_span(db, child_spans):
     (query,) = spans["arax.query"]
     assert query.attributes["arax.pool.child_cold"] is False
     assert query.attributes["arax.pool.child_prewarmed"] is True
-
-
-async def test_arax_log_entries_honour_the_query_log_level(mocker, query_logger):
-    """parameters.log_level is the task logger's level; ARAX's own log entries
-    are filtered by it, as Shepherd's records are."""
-    saved = []
-
-    async def save_logs(response_id, task_logger):
-        saved.extend(get_query_handler(task_logger).drain())
-
-    mocker.patch("workers.arax.worker.save_logs", side_effect=save_logs)
-    query_logger.setLevel(logging.WARNING)
-    try:
-        await worker.save_arax_logs(
-            "r1",
-            [
-                {"level": "DEBUG", "message": "d"},
-                {"level": "INFO", "message": "i"},
-                {"level": "WARNING", "message": "w"},
-                {"level": "ERROR", "message": "e"},
-            ],
-            query_logger,
-        )
-    finally:
-        query_logger.setLevel(logging.INFO)
-    assert [entry["message"] for entry in saved] == ["w", "e"]

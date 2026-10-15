@@ -7,6 +7,7 @@
     python test_arax_queries.py --base http://localhost:5439/arax --workers 4
     python test_arax_queries.py --from-saved --only lookup_two_hop   # re-read saved responses' logs
     python test_arax_queries.py --trace --only wf_overlays           # print each step as it runs
+    python test_arax_queries.py --arax-internal                       # run Shepherd's in-process ARAX
 
 Groups: lookup (TRAPI one-hop to three-hop), creative (MVP1 xDTD, MVP2 xCRG,
 pathfinder), flexible (not / any / all / optional groups / constraints),
@@ -354,7 +355,10 @@ case(
             "e2": {"subject": "n2", "object": "n3"},
         },
     ),
+    known_defect="D-30",
     timeout=900,
+    note="a large answer leaves support-graph edges to pruned nodes in the KG, and "
+    "the template's Fisher's exact test fails on them (D-30)",
 )
 case(
     "lookup_single_node",
@@ -636,7 +640,8 @@ case(
         },
         {"e0": {"subject": "n0", "object": "n1"}},
     ),
-    note="member_ids are not forwarded to the KP, as in ARAX (D-25)",
+    note="forwarded to the KP with member_ids, as in ARAX, which does no set logic itself; "
+    "Retriever does not support set queries, so 0 results is its answer (D-25)",
 )
 case(
     "attribute_constraint_fda_approved",
@@ -669,9 +674,10 @@ case(
         },
         {"e0": {"subject": "n1", "object": "n0"}},
     ),
-    http=400,
-    status="QueryGraphNoIds",
-    note="ARAX does not resolve a TRAPI qnode name (D-25)",
+    min_results=1,
+    checks=[log_contains("Resolved QueryGraph node 'n0' name")],
+    note="a TRAPI qnode name is resolved through Name Resolver, as ARAXi's "
+    "add_qnode(name=...) is (Shepherd's D-25 fix; upstream ignores the name)",
 )
 
 # --- araxi: the DSL ---
@@ -1412,16 +1418,15 @@ def read_stream(resp, trace: Optional[str] = None) -> tuple[dict, list]:
 
 
 def problem_log_lines(body: dict, limit: int = 12) -> list:
-    """The WARNING and ERROR lines of a response's log, shortened."""
+    """The ERROR, then WARNING, lines of a response's log, shortened (the errors
+    first: thousands of warnings can come before the one error that matters)."""
     lines = []
-    for entry in body.get("logs") or []:
-        if not isinstance(entry, dict) or entry.get("level") not in (
-            "WARNING",
-            "ERROR",
-        ):
-            continue
-        text = " ".join(str(entry.get("message") or "").split())
-        lines.append(f"{entry['level']}: {text[:400]}")
+    for level in ("ERROR", "WARNING"):
+        for entry in body.get("logs") or []:
+            if not isinstance(entry, dict) or entry.get("level") != level:
+                continue
+            text = " ".join(str(entry.get("message") or "").split())
+            lines.append(f"{level}: {text[:400]}")
     if len(lines) > limit:
         lines = lines[:limit] + [f"... {len(lines) - limit} more in the saved response"]
     return lines
@@ -1446,8 +1451,9 @@ def print_saved_logs(out_dir: Path, cases: list) -> int:
 
 
 class Runner:
-    def __init__(self, base, out_dir, trace=False):
+    def __init__(self, base, out_dir, trace=False, arax_internal=False):
         self.base = base.rstrip("/")
+        self.arax_internal = arax_internal  # ask Shepherd for its in-process ARAX
         self.out_dir = out_dir
         self.trace = trace  # stream every query, printing its steps as they run
         self.bodies = {}  # case name -> response body
@@ -1482,6 +1488,8 @@ class Runner:
         # client waits a minute longer
         parameters = dict(body.get("parameters") or {})
         parameters.setdefault("timeout", c.timeout)
+        if self.arax_internal:
+            parameters["arax_internal"] = True
         body = dict(body, parameters=parameters)
         start = time.perf_counter()
         problems = []
@@ -1605,6 +1613,12 @@ def main():
         action="store_true",
         help="print the WARNING/ERROR log lines of responses saved in --out, without querying",
     )
+    parser.add_argument(
+        "--arax-internal",
+        action="store_true",
+        help="set parameters.arax_internal: true on every query, so Shepherd runs it "
+        "in-process (its ARAX port) instead of proxying to the remote ARAX service",
+    )
     args = parser.parse_args()
 
     selected = [
@@ -1626,11 +1640,14 @@ def main():
     if args.from_saved:
         return print_saved_logs(out_dir, selected)
     out_dir.mkdir(parents=True, exist_ok=True)
-    runner = Runner(args.base, out_dir, trace=args.trace)
+    runner = Runner(
+        args.base, out_dir, trace=args.trace, arax_internal=args.arax_internal
+    )
     first = [c for c in selected if not c.after]
     later = [c for c in selected if c.after]
     print(
-        f"Running {len(selected)} cases against {args.base} ({args.workers} at a time)\n"
+        f"Running {len(selected)} cases against {args.base} "
+        f"({'in-process ARAX, ' if args.arax_internal else ''}{args.workers} at a time)\n"
     )
     start = time.time()
     outcomes = []

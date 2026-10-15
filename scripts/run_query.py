@@ -21,7 +21,7 @@ sent depends on the target:
       A response streamed with --stream (NDJSON progress lines, the response
       last) is parsed too. With --async: POST {base}/asyncquery with a
       callback served by this script, poll {base}/asyncquery_status/{job_id},
-      and check the callback body is a TRAPI 2.0 Response to the query.
+      and check the callback body is a TRAPI response.
       Shepherd runs in Docker, so the callback has to reach this machine from
       a container: host.docker.internal works on Docker Desktop; on Linux pass
       --callback-host (e.g. the docker0 bridge IP, often 172.17.0.1).
@@ -176,16 +176,20 @@ def mvp2_query(curie: str, direction: str, pinned: str = "gene") -> dict:
                         "object": "ON",
                         "predicates": ["biolink:affects"],
                         "knowledge_type": "inferred",
-                        # TRAPI 2.0: one qualifier set is a
-                        # {qualifier_type_id: qualifier_value} mapping
-                        "constraints": {
-                            "qualifiers": [
-                                {
-                                    "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                    "biolink:object_direction_qualifier": direction,
-                                }
-                            ]
-                        },
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": "activity_or_abundance",
+                                    },
+                                    {
+                                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                                        "qualifier_value": direction,
+                                    },
+                                ]
+                            }
+                        ],
                     }
                 },
             },
@@ -323,16 +327,17 @@ DEFAULT_SPECS = {
 
 
 def finalize_query(query: dict, kind: str, args) -> dict:
-    """Add the run's parameters to a bare query. ARA queries default to
-    log_level DEBUG and carry a submitter; ARS queries are sent bare unless a
-    parameter is asked for."""
+    """Add the run's options to a bare query. ARA queries default to
+    log_level DEBUG and carry a submitter; ARS queries are sent bare unless an
+    option is asked for. TRAPI 1.x: log_level and bypass_cache are top-level;
+    timeout is Shepherd's parameters.timeout."""
     query = json.loads(json.dumps(query))
     parameters = dict(query.get("parameters") or {})
     log_level = args.log_level or ("DEBUG" if kind == "ara" else None)
     if log_level and log_level.lower() != "none":
-        parameters["log_level"] = log_level
+        query["log_level"] = log_level
     if args.bypass_cache:
-        parameters["bypass_cache"] = True
+        query["bypass_cache"] = True
     if args.timeout_param is not None:
         parameters["timeout"] = args.timeout_param
     if parameters:
@@ -381,14 +386,10 @@ def empty_stats() -> dict:
     return {key: 0 for key in extract_response_stats({})}
 
 
-def trapi_2_problem(response: dict, query: dict) -> "str | None":
-    """Why ``response`` is not a TRAPI 2.0 Response to ``query``, if it isn't."""
-    if response.get("schema_version") != "2.0.0":
-        return f"schema_version {response.get('schema_version')!r}, not 2.0.0"
-    if (response.get("parameters") or {}) != (query.get("parameters") or {}):
-        return "the response does not repeat the query's parameters"
-    if "logs" in response and not response["logs"]:
-        return "empty logs (TRAPI 2.0: omit them)"
+def trapi_problem(response: dict) -> "str | None":
+    """Why ``response`` is not a TRAPI response, if it isn't."""
+    if not isinstance(response.get("message"), dict):
+        return "the response has no message"
     return None
 
 
@@ -602,7 +603,7 @@ async def send_async(
                 f"response status {response_json.get('status')}: "
                 f"{response_json.get('description')}"
             )
-        elif problem := trapi_2_problem(response_json, query):
+        elif problem := trapi_problem(response_json):
             metrics["error"] = problem
     except Exception as e:
         metrics["error"] = f"{type(e).__name__}: {e}"
@@ -840,11 +841,11 @@ def parse_args(argv=None):
     )
     query.add_argument(
         "--log-level",
-        help="parameters.log_level (default DEBUG for ARAs, unset for the "
+        help="log_level (default DEBUG for ARAs, unset for the "
         "ARS; 'none' to omit)",
     )
     query.add_argument(
-        "--bypass-cache", action="store_true", help="set parameters.bypass_cache"
+        "--bypass-cache", action="store_true", help="set bypass_cache"
     )
     query.add_argument(
         "--timeout-param",

@@ -4,6 +4,19 @@
 
 Shepherd is a shared platform for ARA implementation. Incorporated ARAs have access to a plethora of shared ARA functionality while retaining the ability to implement their own custom operations.
 
+## TRAPI version: the `trapi_1.6` branch
+
+This is the `trapi_1.6` branch: `devel` with the TRAPI 2.0 migration (PR #166)
+reverted, so Shepherd takes and returns TRAPI 1.x. It is released as 1.x
+versions (`v1.3.0` on); `devel`/`main` are TRAPI 2.0 and are released as 2.x.
+
+To bring in newer `devel` work, merge `devel` into this branch (never rebase:
+the revert commits are what keep 2.0 out). Git already knows the 2.0 migration
+is reverted, so only new code written for 2.0 needs porting by hand: query
+`parameters.log_level` / `parameters.bypass_cache` are top-level here,
+`constraints.qualifiers` is `qualifier_constraints`, bindings are lists of
+`{id}`, and stored responses carry their own `logs` (no `translator_tom`).
+
 ## Local Development
 
 All Shepherd services are set up as docker containers. You can learn about docker and install here: https://www.docker.com/
