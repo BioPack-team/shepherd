@@ -53,7 +53,7 @@ LOGGER = get_worker_logger(STREAM)
 # The backbone's pair graph as a CSR (offsets, neighbors, weights) plus its node
 # CURIEs in index order, written by squashbert's scripts/export_search_graph.py.
 SEARCH_GRAPH_DIR = settings.pathfinder_search_graph_dir
-MAX_PATHS = 15000
+MAX_PATHS = 12000
 SEARCH_BUDGET_SEC = 5.0
 MIDDLE_CHUNK = 4096
 # Retriever's x_trapi batch_size_limit: the most ids one query node may carry.
