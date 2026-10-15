@@ -458,9 +458,11 @@ def test_merge_messages_combines_aux_graphs():
     assert "aux_b" in aux
 
 
-def test_merge_messages_pathfinder_query_returns_single_result():
-    """A pathfinder query (paths instead of edges) should return a single
-    pathfinder result with the start/end node IDs threaded through."""
+def test_merge_messages_pathfinder_query_only_accumulates_the_kgraph():
+    """A pathfinder query's callbacks are aragorn.pathfinder's edge lookups:
+    their edges are merged into the knowledge graph, but their results are
+    not turned into paths here (the pathfinder worker builds those once every
+    lookup is in), so the response keeps the results it already had."""
     pathfinder_qg = {
         "nodes": {
             "n0": {"ids": ["MONDO:0001"]},
@@ -473,7 +475,20 @@ def test_merge_messages_pathfinder_query_returns_single_result():
     new_response = {
         "message": {
             "query_graph": pathfinder_qg,
-            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "knowledge_graph": {
+                "nodes": {
+                    "MONDO:0001": {"categories": ["biolink:Disease"]},
+                    "MONDO:0002": {"categories": ["biolink:Disease"]},
+                },
+                "edges": {
+                    "kedge_lookup": {
+                        "subject": "MONDO:0001",
+                        "predicate": "biolink:related_to",
+                        "object": "MONDO:0002",
+                        "sources": [],
+                    }
+                },
+            },
             "auxiliary_graphs": {},
             "results": [
                 {
@@ -483,7 +498,7 @@ def test_merge_messages_pathfinder_query_returns_single_result():
                     },
                     "analyses": [
                         {
-                            "edge_bindings": {"p1": {"ids": ["kedge_pathfinder"]}},
+                            "edge_bindings": {"e0": {"ids": ["kedge_lookup"]}},
                         }
                     ],
                     "score": 0.42,
@@ -506,14 +521,12 @@ def test_merge_messages_pathfinder_query_returns_single_result():
         new_response=new_response,
         logger=logger,
     )
-    assert len(out["message"]["results"]) == 1
-    pf = out["message"]["results"][0]
-    assert pf["node_bindings"]["n0"]["ids"][0] == "MONDO:0001"
-    assert pf["node_bindings"]["n1"]["ids"][0] == "MONDO:0002"
-    # An auxiliary graph should have been created and associated with an
-    # analysis path binding.
-    assert pf["analyses"][0]["score"] == 0.42
-    assert "p1" in pf["analyses"][0]["path_bindings"]
+    assert out["message"]["results"] == []
+    assert set(out["message"]["knowledge_graph"]["nodes"]) == {
+        "MONDO:0001",
+        "MONDO:0002",
+    }
+    assert len(out["message"]["knowledge_graph"]["edges"]) == 1
 
 
 def test_merge_messages_pathfinder_missing_endpoint_raises():

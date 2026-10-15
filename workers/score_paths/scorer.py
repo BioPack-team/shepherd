@@ -364,12 +364,16 @@ def path_features(txn, config, nodes, categories, phrases, kept=None):
     scalars = path_scalars(
         config["scalar_names"],
         nodes,
-        (lambda c: context(lmdb_key(NODE_CONTEXT, c), NODE_CONTEXT_DIM))
-        if config["node_context"]
-        else None,
-        (lambda a, b: context(edge_context_key(a, b), len(_EDGE_BASES)))
-        if config["edge_context"]
-        else None,
+        (
+            (lambda c: context(lmdb_key(NODE_CONTEXT, c), NODE_CONTEXT_DIM))
+            if config["node_context"]
+            else None
+        ),
+        (
+            (lambda a, b: context(edge_context_key(a, b), len(_EDGE_BASES)))
+            if config["edge_context"]
+            else None
+        ),
     )
     return node_x, edge_x, scalars
 
