@@ -176,27 +176,22 @@ def test_fisher_exact_test_has_every_category(paths):
 
 
 def test_xcrg_lookups(paths):
-    from pathlib import Path
-
-    from shepherd_utils.arax.xcrg import ngd, pmid
-    from shepherd_utils.arax.xcrg.reporting import LogReporter
+    import xcrg.runner as runner
+    from xcrg import XCRGConfig
 
     curie_ngd, _ = arax_pathfinder_sqlite_paths()
-    reporter = LogReporter(logging.getLogger("test"))
+    config = XCRGConfig(
+        retriever_url="http://retriever.test",
+        ngd_db_path=curie_ngd,
+        curie_to_pmids_db_path=arax_db_path(ARAX_CURIE_TO_PMIDS),
+    )
+    logger = logging.getLogger("test")
     try:
-        assert "NCBIGene:5468" in ngd.get_ngd_neighbors(
-            Path(curie_ngd), reporter, "CHEBI:6801"
-        )
-        assert pmid.get_curie_pmids(
-            Path(arax_db_path(ARAX_CURIE_TO_PMIDS)), reporter, "CHEBI:6801"
-        )
+        assert "NCBIGene:5468" in runner.get_ngd_neighbors("CHEBI:6801", config, logger)
+        assert runner.get_curie_pmids("CHEBI:6801", config, logger)
     finally:
-        for module, caches in (
-            (ngd, ("_NGD_CONNECTIONS", "_NGD_NEIGHBOR_CACHE")),
-            (pmid, ("_PMID_CONNECTIONS", "_PMID_CACHE")),
-        ):
-            for cache in caches:
-                getattr(module, cache).clear()
+        for cache in ("_NGD_CONNECTIONS", "_NGD_NEIGHBOR_CACHE", "_PMID_CACHE"):
+            getattr(runner, cache, {}).clear()
 
 
 def test_from_trapi_adds_the_response_graph(tmp_path, monkeypatch):
