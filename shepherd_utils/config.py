@@ -201,6 +201,7 @@ class Settings(BaseSettings):
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
 
     pathfinder_embeddings_dir: str = "pathfinder_embeddings"
+    pathfinder_search_graph_dir: str = "pathfinder_search_graph"
 
     # First-run data downloads for local docker compose development. When set,
     # the worker fetches a ``.tar.gz`` from this URL on startup (if the LMDB
@@ -210,6 +211,7 @@ class Settings(BaseSettings):
     # download is skipped there. See shepherd_utils/data_download.py.
     omnicorp_lmdb_url: str = ""
     pathfinder_embeddings_url: str = ""
+    pathfinder_search_graph_url: str = ""
 
     # Socket timeout (seconds) for those startup dataset downloads. This bounds
     # each individual blocking socket operation -- the connect and every

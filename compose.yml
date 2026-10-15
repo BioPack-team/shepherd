@@ -343,6 +343,10 @@ services:
       - ./workers/aragorn_pathfinder/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
+      # First run? Set PATHFINDER_SEARCH_GRAPH_URL in your .env to a .tar.gz and
+      # the worker downloads + extracts the search graph into this mount on
+      # startup (see README "Worker data (LMDB / sqlite) downloads").
+      - ./pathfinder_search_graph:/app/pathfinder_search_graph
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
     platform: linux/amd64
