@@ -20,7 +20,7 @@ x-translator:
   - DOGSLED
   infores: infores:shepherd
 x-trapi:
-  version: 1.5.0
+  version: 1.6.0
   operations:
   - lookup
   - score
