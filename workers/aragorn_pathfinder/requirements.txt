@@ -1,2 +1,2 @@
 httpx
-networkx
+numpy
