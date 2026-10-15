@@ -56,10 +56,6 @@ SEARCH_GRAPH_DIR = settings.pathfinder_search_graph_dir
 MAX_PATHS = 12000
 SEARCH_BUDGET_SEC = 5.0
 MIDDLE_CHUNK = 4096
-# Retriever's x_trapi batch_size_limit: the most ids one query node may carry.
-# It also sizes the interior blocks, so a higher limit means fewer lookups but
-# more edges each that no path uses.
-MAX_IDS_PER_NODE = 300
 # Each lookup holds a Postgres connection while it registers its callback; half
 # the pool leaves the rest for the callback wait and the other queries.
 MAX_LOOKUPS_IN_FLIGHT = max(1, settings.postgres_pool_max_size // 2)
@@ -235,11 +231,11 @@ def edge_lookups(node_paths, source, target, parameters):
 
     Gandalf expands the endpoints to their subclass children: the direct edge,
     and each endpoint against anything, since pinning the other side would
-    expand that too. The hops between intermediates are exact, pinned in
-    blocks of at most ``MAX_IDS_PER_NODE`` ids a side: one lookup per hop
-    would be thousands of lookups, each with its callback to register and
-    merge. A block also returns the edges between its other pairs, which no
-    path uses and the orphan filter drops.
+    expand that too. The hops between intermediates are exact, pinned in one
+    lookup with every near node on one side and every far node on the other:
+    one lookup per hop would be thousands of lookups, each with its callback
+    to register and merge. It also returns the edges between the other pairs,
+    which no path uses and the orphan filter drops.
     """
     lookups = [one_hop([source], [target], parameters, True)]
     if node_paths:
@@ -251,21 +247,10 @@ def edge_lookups(node_paths, source, target, parameters):
             hops.add((path[1], path[2]))
         if len(path) > 4:
             hops.add((path[-2], path[-3]))
-    # Sorted by the node beside an endpoint, so a block keeps each one's hops
-    # together and pins few nodes it does not need.
-    near, far = [], set()
-    for u, v in sorted(hops):
-        new_near = not near or near[-1] != u
-        if (new_near and len(near) == MAX_IDS_PER_NODE) or (
-            v not in far and len(far) == MAX_IDS_PER_NODE
-        ):
-            lookups.append(one_hop(near, sorted(far), parameters, False))
-            near, far, new_near = [], set(), True
-        if new_near:
-            near.append(u)
-        far.add(v)
-    if near:
-        lookups.append(one_hop(near, sorted(far), parameters, False))
+    if hops:
+        near = sorted({u for u, _ in hops})
+        far = sorted({v for _, v in hops})
+        lookups.append(one_hop(near, far, parameters, False))
     return lookups
 
 
