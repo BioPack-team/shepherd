@@ -347,30 +347,32 @@
     "name": "node_bindings",
     "dcurrent": {
       "node_bindings": {
-        "n0": {
-          "ids": [
-            "A"
-          ]
-        },
-        "n1": {
-          "ids": [
-            "B"
-          ]
-        }
+        "n0": [
+          {
+            "id": "A",
+            "attributes": []
+          }
+        ],
+        "n1": [
+          {
+            "id": "B"
+          }
+        ]
       }
     },
     "dmerged": {
       "node_bindings": {
-        "n0": {
-          "ids": [
-            "A"
-          ]
-        },
-        "n1": {
-          "ids": [
-            "C"
-          ]
-        }
+        "n0": [
+          {
+            "id": "A",
+            "attributes": []
+          }
+        ],
+        "n1": [
+          {
+            "id": "C"
+          }
+        ]
       }
     }
   },

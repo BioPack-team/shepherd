@@ -221,13 +221,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -302,14 +305,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "secretion",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "secretion"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -430,14 +439,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -498,14 +513,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -689,14 +710,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "i",
@@ -704,14 +731,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -770,14 +803,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "i",
@@ -785,14 +824,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -851,14 +896,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "i",
@@ -866,14 +917,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -985,14 +1042,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "i",
@@ -1000,14 +1063,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -1066,14 +1135,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "secretion",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "secretion"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "i",
@@ -1081,14 +1156,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "secretion",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "secretion"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -1147,14 +1228,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "i",
@@ -1162,14 +1249,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -1228,14 +1321,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "i",
@@ -1243,14 +1342,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -2188,14 +2293,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -2321,13 +2432,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "synthesis"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "synthesis"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -2634,13 +2748,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "e",
@@ -2648,13 +2765,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_2": {
                           "subject": "e",
@@ -2722,14 +2842,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3383,14 +3509,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -3398,14 +3530,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3447,14 +3585,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -3462,14 +3606,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3523,14 +3673,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3572,14 +3728,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -3587,14 +3749,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3636,13 +3804,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -3650,14 +3821,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3711,14 +3888,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3760,14 +3943,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3809,13 +3998,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -3823,14 +4015,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3879,14 +4077,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -3935,14 +4139,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -4080,13 +4290,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -4147,14 +4360,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -4196,13 +4415,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -4263,14 +4485,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -4319,14 +4547,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -4474,14 +4708,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "e",
@@ -4537,14 +4777,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -4586,13 +4832,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -4653,14 +4902,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "degradation",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "degradation"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -4767,14 +5022,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -4934,14 +5195,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5024,14 +5291,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5085,14 +5358,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "uptake",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "uptake"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5136,14 +5415,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -5151,14 +5436,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5200,14 +5491,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -5215,14 +5512,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5264,14 +5567,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -5279,14 +5588,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5335,14 +5650,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5396,14 +5717,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5445,14 +5772,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -5460,14 +5793,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5521,14 +5860,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5570,14 +5915,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5619,14 +5970,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -5634,14 +5991,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5731,13 +6094,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -5745,14 +6111,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5794,13 +6166,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -5856,14 +6231,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -5953,13 +6334,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -6020,14 +6404,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6069,13 +6459,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -6179,14 +6572,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6269,14 +6668,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -6284,13 +6689,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6339,14 +6747,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6388,14 +6802,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6548,14 +6968,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "e",
@@ -6616,14 +7042,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6679,14 +7111,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6740,14 +7178,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6801,14 +7245,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6850,13 +7300,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -6864,14 +7317,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -6920,14 +7379,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7065,13 +7530,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -7132,14 +7600,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7181,13 +7655,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -7243,14 +7720,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7347,14 +7830,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7454,14 +7943,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "e",
@@ -7517,14 +8012,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7566,13 +8067,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -7621,14 +8125,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7682,14 +8192,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "degradation",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "degradation"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7731,14 +8247,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -7746,14 +8268,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -7901,14 +8429,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8068,14 +8602,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8129,14 +8669,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "localization",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "localization"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8178,14 +8724,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8241,14 +8793,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8302,14 +8860,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8358,14 +8922,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8462,14 +9032,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8511,13 +9087,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -8525,14 +9104,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "molecular_interaction",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "molecular_interaction"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8574,13 +9159,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -8629,13 +9217,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -8739,14 +9330,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8800,14 +9397,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -8849,13 +9452,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$source",
@@ -8911,14 +9517,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -9015,14 +9627,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -9105,14 +9723,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "transport",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "transport"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "$target",
@@ -9120,13 +9744,16 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -9175,14 +9802,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "increased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "increased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -9224,14 +9857,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "metabolic_processing",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "metabolic_processing"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }
@@ -9384,14 +10023,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "activity_or_abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       },
                       "edge_1": {
                           "subject": "e",
@@ -9452,14 +10097,20 @@
                           "predicates": [
                               "biolink:affects"
                           ],
-                          "constraints": {
-                              "qualifiers": [
-                                  {
-                                      "biolink:object_aspect_qualifier": "abundance",
-                                      "biolink:object_direction_qualifier": "decreased"
-                                  }
-                              ]
-                          }
+                          "qualifier_constraints": [
+                              {
+                                  "qualifier_set": [
+                                      {
+                                          "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                          "qualifier_value": "abundance"
+                                      },
+                                      {
+                                          "qualifier_type_id": "biolink:object_direction_qualifier",
+                                          "qualifier_value": "decreased"
+                                      }
+                                  ]
+                              }
+                          ]
                       }
                   }
               }

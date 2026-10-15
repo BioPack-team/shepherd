@@ -4,9 +4,7 @@ Receives an ARA's response off the broker and runs the per-response pipeline
 that upstream executes inline in its Django result-callback view: the intake
 state machine (guards, counts, the ara_response_complete notification), then
 pre_merge_process (decorate edge sources with the agent's infores,
-normalize scores), phantom support-graph removal, and TRAPI validation --
-TRAPI 2.0, against translator_tom's models (shepherd_utils.ars.trapi), with
-explicit nulls read as absent and stripped first.
+normalize scores), phantom support-graph removal, and TRAPI validation.
 Moved off the server because this is the CPU-heavy stretch of the callback
 path and it saturated the server under concurrent load
 (documented deviation in the parity register; the outcome contract below is
@@ -46,7 +44,6 @@ fields the premerge stage reads.
 """
 
 import asyncio
-import datetime
 import logging
 import uuid
 from typing import Dict
@@ -62,12 +59,12 @@ from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
     add_log_entry,
     get_safe,
-    log_timestamp,
     pre_merge_process,
     remove_phantom_support_graphs,
+    timestamp_hms,
 )
 from shepherd_utils.ars.statuses import coerce_status
-from shepherd_utils.ars.trapi import strip_nulls, validate
+from shepherd_utils.ars.trapi import validate
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
@@ -113,7 +110,7 @@ def _annotate_in_child(data, agent_name, child_pk) -> None:
             data,
             [
                 f"node annotation internal error: {str(e)}",
-                log_timestamp(),
+                timestamp_hms(),
                 "DEBUG",
             ],
         )
@@ -140,10 +137,6 @@ def premerge_in_child(
         span.set_attribute("premerge.child_pk", str(child_pk))
         span.set_attribute("premerge.validate", bool(do_validate))
         data = get_message_sync(str(child_pk))
-        # TRAPI 2.0 has no nullable members: a null is read as an absent
-        # member (and so never reaches the merged message). Validated or
-        # not -- see shepherd_utils.ars.trapi.
-        strip_nulls(data)
         pre_merge_process(data, str(child_pk), agent_name, inforesid)
         if do_validate:
             remove_phantom_support_graphs(data)
@@ -172,22 +165,6 @@ async def _run_premerge_in_pool(
     return await asyncio.to_thread(premerge_in_child, *args)
 
 
-def _row_timestamp(updated_at) -> str:
-    """The row's updated_at as an RFC 3339 log timestamp (TRAPI 2.0).
-
-    Upstream wrote ``str(updated_at)`` -- a space-separated datetime, or
-    ``"None"`` for a row without one -- neither a valid 2.0 LogEntry
-    timestamp. Falls back to now."""
-    if isinstance(updated_at, datetime.datetime):
-        return log_timestamp(updated_at)
-    if isinstance(updated_at, str) and updated_at:
-        try:
-            return log_timestamp(datetime.datetime.fromisoformat(updated_at))
-        except ValueError:
-            pass
-    return log_timestamp()
-
-
 async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
     """Upstream's generic callback handler: E/500 + the log entry.
 
@@ -201,10 +178,10 @@ async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
         data = {}
     log_entry = {
         "message": "Internal ARS Server Error",
-        "timestamp": _row_timestamp(mesg.get("updated_at")),
+        "timestamp": str(mesg.get("updated_at")),
         "level": "ERROR",
     }
-    if isinstance(data.get("logs"), list):
+    if "logs" in data.keys():
         data["logs"].append(log_entry)
     else:
         data["logs"] = [log_entry]
@@ -256,9 +233,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
         try:
             logs = await get_logs(response_id, logger)
             data.pop("logs", None)
-            if logs:
-                # Response.logs has minItems 1 in TRAPI 2.0: absent when empty
-                data["logs"] = logs
+            data["logs"] = logs
         except Exception as e:
             logger.warning(f"Intake: proceeding without logs for {response_id}: {e}")
 

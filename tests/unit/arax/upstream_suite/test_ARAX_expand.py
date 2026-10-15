@@ -763,29 +763,27 @@ def test_qualified_regulates_query():
             "e0": {
                 "subject": "n0",
                 "object": "n1",
-                # TRAPI 2.0: was "qualifier_constraints": [...] and "attribute_constraints": [...]
-                "constraints": {
-                    "qualifiers": [
-                        {
-                            "biolink:qualified_predicate": "biolink:causes",
-                            # "biolink:object_direction_qualifier": "decreased",  # for RTX issue 2068
-                            #                                   # see also RTX-KG2 issue 339
-                            #                                   # Uncomment to test in KG2.8.5
-                            "biolink:object_aspect_qualifier": "activity"
-                        }
-                    ],
-                    "attributes": [
-                        {
-                            "id": "knowledge_source",
-                            "name": "knowledge source",
-                            "value": [
-                                "infores:retriever"
-                            ],
-                            "operator": "==",
-                            "not": False
-                        }
-                    ]
-                }
+                "qualifier_constraints": [
+                    {"qualifier_set": [
+                        {"qualifier_type_id": "biolink:qualified_predicate",
+                         "qualifier_value": "biolink:causes"},
+                        # {"qualifier_type_id": "biolink:object_direction_qualifier",
+                        #  "qualifier_value": "decreased"}, # for RTX issue 2068
+                        #                                   # see also RTX-KG2 issue 339
+                        #                                   # Uncomment to test in KG2.8.5
+                        {"qualifier_type_id": "biolink:object_aspect_qualifier",
+                         "qualifier_value": "activity"}
+                    ]}
+                ],
+                "attribute_constraints": [
+                    {
+                        "id": "knowledge_source",
+                        "name": "knowledge source",
+                        "value": ["infores:retriever"],
+                        "operator": "==",
+                        "not": False
+                    }
+                ]
             }
         }
     }
@@ -822,9 +820,8 @@ def test_constraint_validation():
           "object": "n01",
           "predicates": ["biolink:physically_interacts_with"],
           "subject": "n00",
-          # TRAPI 2.0: was "attribute_constraints": [...]
-          "constraints": {"attributes": [{"id": "test_edge_constraint_1", "name": "test name edge", "operator": "<", "value": 1.0},
-                                         {"id": "test_edge_constraint_2", "name": "test name edge", "operator": ">", "value": 0.5}]}
+          "attribute_constraints": [{"id": "test_edge_constraint_1", "name": "test name edge", "operator": "<", "value": 1.0},
+                                    {"id": "test_edge_constraint_2", "name": "test name edge", "operator": ">", "value": 0.5}]
         }
       },
       "nodes": {
@@ -856,22 +853,15 @@ def test_edge_constraints():
                 "e00": {
                     "object": "n00",
                     "subject": "n01",
-                    # TRAPI 2.0: was "attribute_constraints": [...]
-                    "constraints": {
-                        "attributes": [
-                            {
-                                "id": "knowledge_source",
-                                "name": "knowledge source",
-                                "value": [
-                                    "infores:retriever",
-                                    "infores:arax",
-                                    "infores:drugbank"
-                                ],
-                                "operator": "==",
-                                "not": False
-                            }
-                        ]
-                    }
+                    "attribute_constraints": [
+                        {
+                            "id": "knowledge_source",
+                            "name": "knowledge source",
+                            "value": ["infores:retriever","infores:arax","infores:drugbank"],
+                            "operator": "==",
+                            "not": False
+                        }
+                    ]
                 }
             }
         }
@@ -1334,20 +1324,15 @@ def test_no_query_ids_issue():
                 "predicates": [
                     "biolink:expresses"
                 ],
-                # TRAPI 2.0: was "attribute_constraints": [...]
-                "constraints": {
-                    "attributes": [
-                        {
-                            "id": "knowledge_source",
-                            "name": "knowledge source",
-                            "value": [
-                                "infores:connections-hypothesis"
-                            ],
-                            "operator": "==",
-                            "not": False
-                        }
-                    ]
-                }
+                "attribute_constraints": [
+                    {
+                        "id": "knowledge_source",
+                        "name": "knowledge source",
+                        "value": ["infores:connections-hypothesis"],
+                        "operator": "==",
+                        "not": False
+                    }
+                ]
             }
         }
     }
@@ -1452,9 +1437,10 @@ def test_klat_attributes():
     ]
     nodes_by_qg_id, edges_by_qg_id = _run_query_and_do_standard_testing(actions_list)
     for edge_key, edge in edges_by_qg_id["e0"].items():
-        # TRAPI 2.0: knowledge_level / agent_type are edge members, not attributes
-        assert isinstance(edge.knowledge_level, str)
-        assert isinstance(edge.agent_type, str)
+        assert any(attribute.attribute_type_id == "biolink:knowledge_level" for attribute in edge.attributes)
+        assert any(attribute.attribute_type_id == "biolink:agent_type" for attribute in edge.attributes)
+        assert all(isinstance(attribute.value, str) for attribute in edge.attributes
+                   if attribute.attribute_type_id in {"biolink:knowledge_level", "biolink:agent_type"})
 
 # change "CHEBI:175901" to "CHEBI:28748" (Doxorubicin), because the "CHEBI:175901" ranks 304 among all drugs with RxCUI with the xDTD model trained on tir0 graph 20260408 version. 
 def test_treats_patch_issue_2328_a():
@@ -1473,19 +1459,14 @@ def test_treats_patch_issue_2328_a():
                 "subject": "chemical",
                 "predicates": ["biolink:treats"],
                 "knowledge_type": "inferred",
-                # TRAPI 2.0: was "attribute_constraints": [...]
-                "constraints": {
-                    "attributes": [
-                        {
-                            "id": "knowledge_source",
-                            "name": "knowledge source",
-                            "value": [
-                                "infores:arax-xdtd"
-                            ],
-                            "operator": "=="
-                        }
-                    ]
-                }
+                "attribute_constraints": [
+                    {
+                        "id": "knowledge_source",
+                        "name": "knowledge source",
+                        "value": ["infores:arax-xdtd"],
+                        "operator": "=="
+                    }
+                ]
             }
         }
     }
@@ -1670,13 +1651,13 @@ def test_issue_2736():
     query_graph_dict = {
         "edges": {
             "q0": {
-                # TRAPI 2.0: "attribute_constraints": [] dropped (an empty constraint is absent)
+                "attribute_constraints": [],
                 "knowledge_type": "inferred",
                 "object": "on",
                 "predicates": [
                     "biolink:treats"
                 ],
-                # TRAPI 2.0: "qualifier_constraints": [] dropped (an empty constraint is absent)
+                "qualifier_constraints": [],
                 "subject": "sn"
             }
         },
@@ -1719,7 +1700,8 @@ def test_issue_2736():
     for result in results:
         for analysis in result.analyses:
             edge_bindings = analysis.edge_bindings['q0']
-            for edge_key in edge_bindings.ids:  # TRAPI 2.0: one binding with ids
+            for edge_binding in edge_bindings:
+                edge_key = edge_binding.id
                 edge = edges[edge_key]
                 qedge_predicates.append(edge.predicate)
     assert all(p == 'biolink:treats' for p in qedge_predicates)

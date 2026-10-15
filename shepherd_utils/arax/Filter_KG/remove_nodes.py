@@ -2,7 +2,6 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - the general-concepts block list is the copy vendored from RTX @ 9485431 at shepherd_utils/arax/KnowledgeSources/general_concepts.json (ARAX reads its repo copy at the same commit)
-#   - TRAPI 2.0: to_dict() omits unset members, so _is_general_concept reads the optional node/attribute keys with .get()
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # ruff: noqa: E402
 """
@@ -261,7 +260,7 @@ class RemoveNodes:
         curies   : set[str] = set()
         synonyms : set[str] = set()
 
-        if not node.get('attributes'):
+        if not node['attributes']:
             return False
 
         for attribute in node['attributes']:
@@ -272,11 +271,11 @@ class RemoveNodes:
 
             # Issue #2841: Sometimes attributes are shaped like this
             if type_id == 'biolink:Attribute':
-                if attribute.get('original_attribute_name') == 'xref':
+                if attribute['original_attribute_name'] == 'xref':
                     has_curie = True
-                if attribute.get('original_attribute_name') == 'equivalent_identifiers':
+                if attribute['original_attribute_name'] == 'equivalent_identifiers':
                     has_curie = True
-                if attribute.get('original_attribute_name') == 'synonym':
+                if attribute['original_attribute_name'] == 'synonym':
                     has_synonym = True
 
             if has_curie and isinstance(attribute.get('value', []), list):
@@ -285,7 +284,7 @@ class RemoveNodes:
             if has_synonym and isinstance(attribute.get('value', []), list):
                 synonyms.update(map(str.lower, attribute.get('value', [])))
 
-        if node.get('name'):
+        if node['name']:
             synonyms.add(node['name'].lower())
 
         if (self.block_list_curies & curies) or (self.block_list_synonyms & synonyms):

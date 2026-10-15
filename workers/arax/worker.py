@@ -58,18 +58,16 @@ from shepherd_utils.db import (
     _get_sync_data_db,
     get_message,
     get_message_sync,
-    save_logs,
-    save_response,
-    save_response_sync,
+    save_message,
+    save_message_sync,
 )
 from shepherd_utils.inject_shepherd_arax_provenance import (
     add_shepherd_arax_to_edge_sources,
 )
-from shepherd_utils.logger import get_query_handler, get_worker_logger
+from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
-from shepherd_utils.trapi import normalize_query_graph, query_parameters
 
 # Queue name
 STREAM = "arax"
@@ -146,7 +144,7 @@ def uses_internal_workers(query: dict) -> bool:
     The query's own ``parameters.arax_internal`` decides when it is a boolean;
     otherwise ``settings.arax_internal_default`` does.
     """
-    requested = query_parameters(query).get("arax_internal")
+    requested = (query.get("parameters") or {}).get("arax_internal")
     if isinstance(requested, bool):
         return requested
     return settings.arax_internal_default
@@ -307,10 +305,9 @@ async def run_legacy_arax(
             # Leave the caller a TRAPI response that says what happened before
             # letting the failure reach run_task_lifecycle, which routes the
             # query to finish_query with an ERROR status.
-            await save_response(response_id, error_response(message, e), logger)
+            await save_message(response_id, error_response(message, e), logger)
             raise
-        await save_arax_logs(response_id, arax_log_entries(result), logger)
-        await save_response(
+        await save_message(
             response_id, add_shepherd_arax_to_edge_sources(result), logger
         )
     finally:
@@ -326,41 +323,20 @@ def error_response(message: dict, error: ARAXServiceError) -> dict:
     ``status``/``description`` are TRAPI Response fields, so the status code
     lands somewhere the caller already parses rather than only in the logs. The
     query graph is carried over and the result containers are emptied, so what
-    comes back is still a valid TRAPI 2.0 response for the query that was asked
-    (no query graph at all rather than an invalid empty one).
+    comes back is still a valid TRAPI response for the query that was asked.
     """
-    response_message = {
-        "knowledge_graph": {"nodes": {}, "edges": {}},
-        "results": [],
-    }
-    query_graph = None
+    query_graph = {}
     if isinstance(message.get("message"), dict):
-        query_graph = message["message"].get("query_graph")
-    if isinstance(query_graph, dict) and query_graph:
-        normalize_query_graph(query_graph)
-        response_message = {"query_graph": query_graph, **response_message}
+        query_graph = message["message"].get("query_graph") or {}
     return {
-        "message": response_message,
+        "message": {
+            "query_graph": query_graph,
+            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "results": [],
+        },
         "status": "Error",
         "description": f"[HTTP {error.status_code}] {error}",
     }
-
-
-def arax_log_entries(response: dict) -> list:
-    """Take ARAX's log off its response, as TRAPI 2.0 LogEntries.
-
-    A stored response carries no ``logs`` (``save_response``): a query's logs
-    live in Shepherd's log store and are added when the response is delivered.
-    So ARAX's log -- part of its response, and what ARAX's UI shows -- goes
-    there too, in ARAX's order. Null members (ARAX's ``code: None``) are
-    dropped; 2.0 has no nulls.
-    """
-    logs = response.pop("logs", None) or []
-    return [
-        {k: v for k, v in entry.items() if v is not None}
-        for entry in logs
-        if isinstance(entry, dict)
-    ]
 
 
 def _process_started_ns() -> int | None:
@@ -475,11 +451,6 @@ def arax_query_task(
     as ARAX returns them -- a TRAPI response with ARAX's status, description
     and log -- and reported with ARAX's HTTP status.
 
-    The response is saved in Shepherd's stored form (``save_response_sync``:
-    no delivery envelope, pruned to 2.0's no-null / no-empty rules); ARAX's log
-    comes back in the summary (``logs``) for the parent to put in the query's
-    log store.
-
     ``otel_carrier`` is the parent's span context: the query's spans start
     under it. ``submitted_at`` (``time.time()`` in the parent) gives the time
     the task waited for a free pool child.
@@ -593,12 +564,11 @@ def _save_and_summarize(
         error = ARAXServiceError(
             f"ARAX's response could not be serialized to JSON: {e}", INTERNAL_ERROR
         )
-        save_response_sync(response_id, error_response(query, error))
-        return {"http_status": INTERNAL_ERROR, "error": str(error), "logs": []}
-    logs = arax_log_entries(response)
+        save_message_sync(response_id, error_response(query, error))
+        return {"http_status": INTERNAL_ERROR, "error": str(error)}
     if 200 <= http_status < 300:
         response = add_shepherd_arax_to_edge_sources(response)
-    save_response_sync(response_id, response)
+    save_message_sync(response_id, response)
     response_message = response.get("message") or {}
     knowledge_graph = response_message.get("knowledge_graph") or {}
     return {
@@ -609,36 +579,7 @@ def _save_and_summarize(
         "n_kg_nodes": len(knowledge_graph.get("nodes") or {}),
         "n_kg_edges": len(knowledge_graph.get("edges") or {}),
         "response_bytes": len(serialized),
-        "logs": logs,
     }
-
-
-async def save_arax_logs(
-    response_id: str, entries: list, logger: logging.Logger
-) -> None:
-    """Put ARAX's log entries in the query's log store, now.
-
-    They join the task logger's queue (as a pool child's records do) and are
-    flushed straight away rather than when the task wraps up: the next
-    operation is queued before that flush, and the response is delivered with
-    whatever the store holds by then.
-    """
-    handler = get_query_handler(logger)
-    # The query's parameters.log_level is the task logger's level; ARAX's own
-    # entries honour it as Shepherd's records do (TRAPI 2.0: the least critical
-    # level of logs to return)
-    level = logger.getEffectiveLevel()
-    entries = [entry for entry in entries if log_entry_level(entry) >= level]
-    if not entries or handler is None:
-        return
-    handler.ingest(entries)
-    await save_logs(response_id, logger)
-
-
-def log_entry_level(entry: dict) -> int:
-    """A LogEntry's level as a logging level number (an unknown level is kept)."""
-    level = logging.getLevelName(str(entry.get("level") or "").upper())
-    return level if isinstance(level, int) else logging.CRITICAL
 
 
 async def arax(task, logger: logging.Logger, loop=None, pool=None):
@@ -670,7 +611,6 @@ async def arax(task, logger: logging.Logger, loop=None, pool=None):
     span.set_attribute("arax.status_code", http_status)
     if summary.get("n_results") is not None:
         span.set_attribute("arax.n_results", summary["n_results"])
-    await save_arax_logs(response_id, summary.get("logs") or [], logger)
     if "error" in summary:
         raise ARAXServiceError(summary["error"], http_status)
     logger.info(

@@ -219,8 +219,6 @@ def test_from_trapi_adds_the_response_graph(tmp_path, monkeypatch):
                                 "resource_role": "primary_knowledge_source",
                             }
                         ],
-                        "knowledge_level": "knowledge_assertion",
-                        "agent_type": "manual_agent",
                     }
                 },
             }

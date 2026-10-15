@@ -18,13 +18,16 @@
         "subject": "$source",
         "object": "nA",
         "predicates": ["biolink:affects"],
-        "constraints": {
-          "qualifiers": [
-            {
-              "biolink:object_aspect_qualifier": "activity_or_abundance"
-            }
-          ]
-        }
+        "qualifier_constraints": [
+          {
+            "qualifier_set": [
+              {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity_or_abundance"
+              }
+            ]
+          }
+        ]
       },
       "eB": {
         "subject": "nA",

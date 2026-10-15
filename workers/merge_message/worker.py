@@ -1,6 +1,7 @@
 """Merge two TRAPI messages together."""
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -32,7 +33,7 @@ from shepherd_utils.db import (
     message_exists,
     remove_callback_id,
     save_logs,
-    save_response_sync,
+    save_message_sync,
 )
 from shepherd_utils.logger import (
     LOG_LEVELS,
@@ -48,15 +49,6 @@ from shepherd_utils.response_limit import (
     get_too_large_reason,
 )
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
-from shepherd_utils.trapi import (
-    add_binding_ids,
-    binding_ids,
-    edge_binding_ids,
-    make_binding,
-    node_binding_ids,
-    qedge_qualifier_sets,
-    query_log_level,
-)
 
 # Queue name
 STREAM = "merge_message"
@@ -73,8 +65,9 @@ LOGGER = get_worker_logger(STREAM)
 def get_edgeset(result):
     """Given a result, return a frozenset of any knowledge edges in it"""
     edgeset = set()
-    for analysis in result.get("analyses") or []:
-        edgeset.update(edge_binding_ids(analysis))
+    for analysis in result["analyses"]:
+        for edge_id, edgelist in analysis["edge_bindings"].items():
+            edgeset.update([e["id"] for e in edgelist])
     return frozenset(edgeset)
 
 
@@ -83,7 +76,10 @@ def create_aux_graph(analysis):
     Look through the analysis edge bindings, get all the knowledge edges, and put them in an aux graph.
     Give it a random uuid as an id."""
     aux_graph_id = str(uuid.uuid4())
-    aux_graph = {"edges": edge_binding_ids(analysis)}
+    aux_graph = {"edges": [], "attributes": []}
+    for edge_id, edgelist in analysis["edge_bindings"].items():
+        for edge in edgelist:
+            aux_graph["edges"].append(edge["id"])
     return aux_graph_id, aux_graph
 
 
@@ -106,11 +102,14 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
         qnode_subject = answer
         qnode_object = query_graph["nodes"][qnode_object_id]["ids"][0]
     predicate = qedge["predicates"][0]
-    # TRAPI 2.0: the queried qualifiers are a list of {type_id: value}
-    # mappings under ``constraints.qualifiers``; the inferred edge asserts the
-    # first set, as a KG edge's ``[{qualifier_type_id, qualifier_value}]``.
-    qualifier_sets = qedge_qualifier_sets(qedge)
-    qualifiers = qualifier_sets[0] if qualifier_sets else None
+    if (
+        "qualifier_constraints" in qedge
+        and qedge["qualifier_constraints"] is not None
+        and len(qedge["qualifier_constraints"]) > 0
+    ):
+        qualifiers = qedge["qualifier_constraints"][0]["qualifier_set"]
+    else:
+        qualifiers = None
     # Create a new knowledge edge
     new_edge_id = str(uuid.uuid4())
     source = f"infores:shepherd-{target}"
@@ -118,22 +117,29 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
         "subject": qnode_subject,
         "object": qnode_object,
         "predicate": predicate,
-        # Shepherd inferred this edge from the support graphs, so it is a
-        # prediction made by a computational model.
-        "knowledge_level": "prediction",
-        "agent_type": "computational_model",
         "attributes": [
             {"attribute_type_id": "biolink:support_graphs", "value": aux_graph_ids},
+            {
+                "attribute_type_id": "biolink:agent_type",
+                "value": "computational_model",
+                "attribute_source": source,
+            },
+            {
+                "attribute_type_id": "biolink:knowledge_level",
+                "value": "prediction",
+                "attribute_source": source,
+            },
         ],
         # Shepherd is the primary ks because shepherd inferred the existence of this edge.
         "sources": [
             {
                 "resource_id": source,
                 "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": [],
             }
         ],
     }
-    if qualifiers:
+    if qualifiers is not None:
         new_edge["qualifiers"] = qualifiers
     result_message["message"]["knowledge_graph"]["edges"][new_edge_id] = new_edge
     return new_edge_id
@@ -182,24 +188,27 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
             creative_results.append(result)
     results["creative"] = creative_results
     # 1. Create node bindings for the original creative qnodes and lookup qnodes
-    mergedresult = {"node_bindings": {}}
+    mergedresult = {"node_bindings": {}, "analyses": []}
+    serkeys = defaultdict(set)
     for q in qnode_ids:
-        ids = []
+        mergedresult["node_bindings"][q] = []
         for result in results["creative"] + results["lookup"]:
-            ids.extend(node_binding_ids(result, q))
-        if ids:
-            mergedresult["node_bindings"][q] = make_binding(ids)
+            for nb in result["node_bindings"][q]:
+                serialized_binding = json.dumps(nb, sort_keys=True)
+                if serialized_binding not in serkeys[q]:
+                    mergedresult["node_bindings"][q].append(nb)
+                    serkeys[q].add(serialized_binding)
 
     # 2. convert the analysis of each input result into an auxiliary graph
     aux_graph_ids = []
+    if (
+        "auxiliary_graphs" not in result_message["message"]
+        or result_message["message"]["auxiliary_graphs"] is None
+    ):
+        result_message["message"]["auxiliary_graphs"] = {}
     for result in results["creative"]:
-        for analysis in result.get("analyses") or []:
+        for analysis in result["analyses"]:
             aux_graph_id, aux_graph = create_aux_graph(analysis)
-            if not aux_graph["edges"]:
-                continue
-            result_message["message"].setdefault("auxiliary_graphs", {})
-            if result_message["message"]["auxiliary_graphs"] is None:
-                result_message["message"]["auxiliary_graphs"] = {}
             result_message["message"]["auxiliary_graphs"][aux_graph_id] = aux_graph
             aux_graph_ids.append(aux_graph_id)
 
@@ -216,25 +225,23 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
 
     # 5. create an analysis with an edge binding from the original creative query edge to the new knowledge edge
     qedge_id = list(result_message["message"]["query_graph"]["edges"].keys())[0]
-    edge_bindings = {}
-    if knowledge_edge_ids:
-        add_binding_ids(edge_bindings, qedge_id, knowledge_edge_ids)
+    analysis = {
+        "resource_id": f"infores:shepherd-{target}",
+        "edge_bindings": {
+            qedge_id: [{"id": kid, "attributes": []} for kid in knowledge_edge_ids]
+        },
+    }
+    mergedresult["analyses"].append(analysis)
 
     # 6. add any lookup edges to the analysis directly
     for result in results["lookup"]:
-        for lookup_analysis in result.get("analyses") or []:
-            for qedge, binding in (lookup_analysis.get("edge_bindings") or {}).items():
-                add_binding_ids(edge_bindings, qedge, binding_ids(binding))
-
-    # TRAPI 2.0: an Analysis must bind something, and Result.analyses may be
-    # absent but not empty.
-    if edge_bindings:
-        mergedresult["analyses"] = [
-            {
-                "resource_id": f"infores:shepherd-{target}",
-                "edge_bindings": edge_bindings,
-            }
-        ]
+        for analysis in result["analyses"]:
+            for qedge in analysis["edge_bindings"]:
+                if qedge not in mergedresult["analyses"][0]["edge_bindings"]:
+                    mergedresult["analyses"][0]["edge_bindings"][qedge] = []
+                mergedresult["analyses"][0]["edge_bindings"][qedge].extend(
+                    analysis["edge_bindings"][qedge]
+                )
 
     # result_message["message"]["results"].append(mergedresult)
     return mergedresult
@@ -266,19 +273,12 @@ def _normalize_query(query):
         nq_nodes[nid] = n
 
     nq_edges = {}
-    for eid, edge in (query.get("edges") or {}).items():
+    for eid, edge in query["edges"].items():
         e = dict(edge)
-        # TRAPI 2.0's constraints object: an empty or null member is the same
-        # as an absent one, and so is a constraints object with nothing left.
-        constraints = e.get("constraints")
-        if isinstance(constraints, dict):
-            constraints = {k: v for k, v in constraints.items() if v}
-            if constraints:
-                e["constraints"] = constraints
-            else:
-                del e["constraints"]
-        elif constraints is None:
-            e.pop("constraints", None)
+        if "attribute_constraints" in e and len(e["attribute_constraints"]) == 0:
+            del e["attribute_constraints"]
+        if "qualifier_constraints" in e and len(e["qualifier_constraints"]) == 0:
+            del e["qualifier_constraints"]
         e.pop("knowledge_type", None)
         preds = e.get("predicates")
         if preds and any(p == "biolink:treats" for p in preds):
@@ -316,7 +316,8 @@ def group_results_by_qnode(merge_qnode, result_message, lookup_results):
         (lookup_results, "lookup"),
     ]:
         for result in result_set:
-            bound = frozenset(node_binding_ids(result, merge_qnode))
+            answer = result["node_bindings"][merge_qnode]
+            bound = frozenset([x["id"] for x in answer])
             grouped_results[bound][result_key].append(result)
     return grouped_results
 
@@ -355,8 +356,8 @@ def get_answer_node(query_graph: dict[str, Any]) -> Union[str, None]:
 def has_unique_nodes(result):
     """Given a result, return True if all nodes are unique, False otherwise"""
     seen = set()
-    for binding in result["node_bindings"].values():
-        knode_ids = frozenset(binding_ids(binding))
+    for qnode, knodes in result["node_bindings"].items():
+        knode_ids = frozenset([knode["id"] for knode in knodes])
         if knode_ids in seen:
             return False
         seen.add(knode_ids)
@@ -400,12 +401,8 @@ def get_promiscuous_qnodes(response):
             for eid1, eid2 in combinations(edges, 2):
                 e1 = qgraph["edges"][eid1]
                 e2 = qgraph["edges"][eid2]
-                if e1.get("predicates") == e2.get("predicates"):
-                    # Same qualifier constraints too (TRAPI 2.0 keeps them in
-                    # the QEdge's ``constraints`` object).
-                    if (e1.get("constraints") or {}).get("qualifiers") == (
-                        e2.get("constraints") or {}
-                    ).get("qualifiers"):
+                if e1["predicates"] == e2["predicates"]:
+                    if e1.get("qualifiers", []) == e2.get("qualifiers", []):
                         center_nodes.append(node)
     return center_nodes
 
@@ -425,7 +422,8 @@ def remove_promiscuous_knode_results(MAX_C, qnode, response):
         # How many distinct results have the same bozo in this spot?
         prom_counter = defaultdict(list)
         for result_i, result in enumerate(response["message"]["results"]):
-            for knode in node_binding_ids(result, qnode):
+            for binding in result["node_bindings"][qnode]:
+                knode = binding["id"]
                 prom_counter[knode].append(result_i)
         # now figure out the most common knode
         max_knode = None
@@ -493,17 +491,19 @@ def merge_messages(
             else {"nodes": {}, "edges": {}}
         )
         pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, source, logger)
-    # Construct the final result message, currently empty. There is no
-    # "logs" here: the query's logs live in the log store and are added when
-    # the response is delivered.
+    # Construct the final result message, currently empty
     result = {
         "message": {
-            "query_graph": original_query_graph,
-            "knowledge_graph": pydantic_kgraph,
+            "query_graph": {"nodes": {}, "edges": {}},
+            "knowledge_graph": {"nodes": {}, "edges": {}},
             "results": [],
+            "auxiliary_graphs": {},
         },
+        "logs": [],
     }
-    merged_aux = {}
+    result["message"]["query_graph"] = original_query_graph
+    result["message"]["knowledge_graph"] = pydantic_kgraph
+    merged_aux = result["message"]["auxiliary_graphs"]
     for result_message in [response, new_response]:
         src_aux = result_message["message"].get("auxiliary_graphs")
         if not src_aux:
@@ -526,8 +526,6 @@ def merge_messages(
                         )
                 else:
                     existing[key] = val
-    if merged_aux:
-        result["message"]["auxiliary_graphs"] = merged_aux
 
     # Determine type of message
     if "edges" in original_query_graph:
@@ -571,7 +569,7 @@ def merge_messages(
         constraints = og_path.get("constraints") or []
         if len(constraints) > 0:
             intermediate_categories = (
-                constraints[0].get("required_intermediate_categories") or []
+                constraints[0].get("intermediate_categories") or []
             )
             if len(intermediate_categories) > 0:
                 intermediate_category = intermediate_categories[0]
@@ -584,8 +582,11 @@ def merge_messages(
         analyses = []
         for new_result in new_response["message"]["results"]:
             path_edge_ids = set()
-            for analysis in new_result.get("analyses") or []:
-                path_edge_ids.update(edge_binding_ids(analysis))
+            for analysis in new_result.get("analyses", []):
+                edge_bindings = analysis.get("edge_bindings", {})
+                for qg_edge_key, bindings in edge_bindings.items():
+                    for binding in bindings:
+                        path_edge_ids.add(binding["id"])
             score = new_result.get("score")
             if not path_edge_ids:
                 continue
@@ -594,9 +595,11 @@ def merge_messages(
                 intermediate_category is not None
                 and intermediate_category != "biolink:NamedThing"
             ):
+                nb = new_result.get("node_bindings", {})
                 pinned_ids = set()
                 for pinned in (subject_node_id, object_node_id):
-                    pinned_ids.update(node_binding_ids(new_result, pinned))
+                    for binding in nb.get(pinned, []) or []:
+                        pinned_ids.add(binding["id"])
                 intermediate_node_ids = set()
                 for edge_id in path_edge_ids:
                     edge = kg_edges.get(edge_id)
@@ -616,13 +619,14 @@ def merge_messages(
             aux_counter += 1
 
             # Add new aux graph to message
-            result["message"].setdefault("auxiliary_graphs", {})[aux_id] = {
+            result["message"]["auxiliary_graphs"][aux_id] = {
                 "edges": list(path_edge_ids),
+                "attributes": [],
             }
 
             analysis = {
                 "resource_id": source,
-                "path_bindings": {path_id: make_binding([aux_id])},
+                "path_bindings": {path_id: [{"id": aux_id}]},
             }
             if score is not None:
                 analysis["score"] = score
@@ -637,12 +641,11 @@ def merge_messages(
         start_kg_id = None
         end_kg_id = None
         for new_result in new_response["message"]["results"]:
-            subject_ids = node_binding_ids(new_result, subject_node_id)
-            if subject_ids:
-                start_kg_id = subject_ids[0]
-            object_ids = node_binding_ids(new_result, object_node_id)
-            if object_ids:
-                end_kg_id = object_ids[0]
+            nb = new_result.get("node_bindings", {})
+            if subject_node_id in nb and nb[subject_node_id]:
+                start_kg_id = nb[subject_node_id][0]["id"]
+            if object_node_id in nb and nb[object_node_id]:
+                end_kg_id = nb[object_node_id][0]["id"]
             if start_kg_id and end_kg_id:
                 break
 
@@ -653,8 +656,8 @@ def merge_messages(
         # --- Assemble the single Pathfinder result ---
         pathfinder_result = {
             "node_bindings": {
-                subject_node_id: make_binding([start_kg_id]),
-                object_node_id: make_binding([end_kg_id]),
+                subject_node_id: [{"id": start_kg_id, "attributes": []}],
+                object_node_id: [{"id": end_kg_id, "attributes": []}],
             },
             "analyses": analyses,
         }
@@ -687,8 +690,8 @@ def take_callback_logs(
     the tag is what ties a line back to the retrieval that emitted it -- and
     joins it to the dispatch and merge lines on either side.
 
-    The field is removed from the callback message itself: the merged
-    response's logs are added from the log store when the query finishes, so a
+    The field is blanked on the callback message itself: the merged response's
+    logs are spliced in from the log store when the query finishes, so a
     leftover list here would show up twice in that payload (the direct-lookup
     path returns the callback message as the accumulator verbatim).
 
@@ -696,6 +699,7 @@ def take_callback_logs(
     the rest of the pipeline persists.
     """
     logs = callback_response.pop("logs", None)
+    callback_response["logs"] = []
     if not logs:
         return []
     if not isinstance(logs, list):
@@ -785,7 +789,7 @@ def merge_messages_by_ids(
         original_query_graph = original_query["message"]["query_graph"]
         # The level the client asked for. The task carries it too, but the
         # stored query is where it comes from and it's already loaded here.
-        query_level = resolve_log_level(query_log_level(original_query), log_level)
+        query_level = resolve_log_level(original_query.get("log_level"), log_level)
         worker_logger.setLevel(query_level)
         merged: list[str] = []
         callback_log_entries: list[dict] = []
@@ -812,7 +816,7 @@ def merge_messages_by_ids(
             merged.append(callback_id)
 
         if merged:
-            save_response_sync(response_id, accumulator)
+            save_message_sync(response_id, accumulator)
         # drain() hands back oldest-first, which is the order the parent's
         # handler.ingest wants. The retrieval logs describe work that happened
         # before this merge, so they lead.

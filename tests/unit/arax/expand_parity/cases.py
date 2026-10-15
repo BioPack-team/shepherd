@@ -1,9 +1,4 @@
-"""Expand parity cases: (name, query_graph, expand parameters, query_options).
-
-The query graphs are TRAPI 2.0: the translation (trapi2_goldens.expand_case)
-of the TRAPI 1.6 ones upstream's goldens were recorded with
-(inputs_trapi16.json.gz); test_trapi2_goldens.py checks they stay so.
-"""
+"""Expand parity cases: (name, query_graph, expand parameters, query_options)."""
 
 
 def qn(ids=None, categories=None, **kw):
@@ -269,17 +264,15 @@ CASES = [
                 "e0": qe(
                     "n0",
                     "n1",
-                    constraints={
-                        "attributes": [
-                            {
-                                "id": "knowledge_source",
-                                "name": "knowledge source",
-                                "operator": "==",
-                                "value": ["infores:ctd"],
-                                "not": True,
-                            }
-                        ]
-                    },
+                    attribute_constraints=[
+                        {
+                            "id": "knowledge_source",
+                            "name": "knowledge source",
+                            "operator": "==",
+                            "value": ["infores:ctd"],
+                            "not": True,
+                        }
+                    ],
                 )
             },
         },
@@ -294,16 +287,14 @@ CASES = [
                 "e0": qe(
                     "n0",
                     "n1",
-                    constraints={
-                        "attributes": [
-                            {
-                                "id": "knowledge_source",
-                                "name": "knowledge source",
-                                "operator": "==",
-                                "value": ["infores:retriever"],
-                            }
-                        ]
-                    },
+                    attribute_constraints=[
+                        {
+                            "id": "knowledge_source",
+                            "name": "knowledge source",
+                            "operator": "==",
+                            "value": ["infores:retriever"],
+                        }
+                    ],
                 )
             },
         },
@@ -419,7 +410,7 @@ CASES = [
     ),
     (
         "single_node",
-        {"nodes": {"n0": qn(ids=["CHEBI:1", "CHEBI:2"])}},
+        {"nodes": {"n0": qn(ids=["CHEBI:1", "CHEBI:2"])}, "edges": {}},
         {},
         {},
     ),
@@ -482,7 +473,7 @@ PORT_ONLY_CASES = [
     ),
     (
         "kp_forwarded_single_node",
-        {"nodes": {"n0": qn(ids=["CHEBI:1"])}},
+        {"nodes": {"n0": qn(ids=["CHEBI:1"])}, "edges": {}},
         {"kp": ["infores:rtx-kg2"]},
         {},
     ),

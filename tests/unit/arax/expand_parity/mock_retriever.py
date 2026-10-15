@@ -1,28 +1,10 @@
-"""Mock Retriever: answers one-hop / single-node TRAPI queries from the universe.
+"""Mock Retriever: answers one-hop / single-node TRAPI queries from the universe."""
 
-It speaks TRAPI 2.0 (what the port sends and reads). Upstream's goldens were
-recorded with it speaking TRAPI 1.6, the only version upstream ARAX reads:
-each run_upstream.py sets MOCK_RETRIEVER_TRAPI=1.6 before importing it. The
-two modes give the same answer, in each version's shape (2.0 is the 1.6 answer
-translated by TOM, trapi2_goldens.py; test_trapi2_goldens.py checks this on
-every recorded request):
-
-- a binding is ``{"ids": [id]}`` in 2.0, ``[{"id": id}]`` in 1.6, where a
-  subclass child also carries the parent it fulfils as ``query_id`` (2.0 has no
-  such member);
-- a 2.0 edge carries the required ``knowledge_level`` / ``agent_type``
-  (``not_provided``: the universe's edges state neither);
-- a one-node answer's results have no analyses (a 2.0 Analysis needs edge
-  or path bindings, and there are none), and
-  2.0 aux graphs have no ``attributes``.
-"""
-
-import json, os, sys, threading, time
+import json, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import universe as U
 
 NODES, EDGES, AUX = U.build()
-TRAPI = os.environ.get("MOCK_RETRIEVER_TRAPI", "2.0")
 REQUESTS = []
 LOCK = threading.Lock()
 ALL_CATS = {
@@ -77,45 +59,7 @@ def pred_ok(pred, qpreds):
     return bool(U.PRED_PARENTS.get(pred, set()).intersection(qpreds))
 
 
-def node_binding(node_id, query_id, trapi):
-    if trapi == "1.6":
-        b = {"id": node_id}
-        if query_id != node_id:
-            b["query_id"] = query_id
-        return [b]
-    return {"ids": [node_id]}
-
-
-def edge_bindings(bound, trapi):
-    """{qedge key: edge id} -> an Analysis's edge_bindings member(s)."""
-    if trapi == "1.6":
-        return {"edge_bindings": {ek: [{"id": eid}] for ek, eid in bound.items()}}
-    if not bound:
-        return {}
-    return {"edge_bindings": {ek: {"ids": [eid]} for ek, eid in bound.items()}}
-
-
-def analysis(bound, trapi):
-    if trapi != "1.6" and not bound:
-        return None  # 2.0: an Analysis needs edge (or path) bindings
-    return [{"resource_id": "infores:retriever", **edge_bindings(bound, trapi)}]
-
-
-def kg_edge(eid, trapi):
-    e = EDGES[eid]
-    if trapi == "1.6":
-        return e
-    return dict(e, knowledge_level="not_provided", agent_type="not_provided")
-
-
-def aux_graph(ag, trapi):
-    if trapi == "1.6":
-        return AUX[ag]
-    return {"edges": AUX[ag]["edges"]}
-
-
-def answer(body, trapi=None):
-    trapi = trapi or TRAPI
+def answer(body):
     qg = body["message"]["query_graph"]
     qnodes, qedges = qg["nodes"], qg.get("edges", {})
     all_ids = [i for q in qnodes.values() for i in (q.get("ids") or [])]
@@ -129,12 +73,16 @@ def answer(body, trapi=None):
         for nid in sorted(qn.get("ids") or []):
             if nid in NODES:
                 kg_nodes[nid] = NODES[nid]
-                result = {"node_bindings": {qk: node_binding(nid, nid, trapi)}}
-                if analysis({}, trapi):
-                    result["analyses"] = analysis({}, trapi)
-                results.append(result)
+                results.append(
+                    {
+                        "node_bindings": {qk: [{"id": nid}]},
+                        "analyses": [
+                            {"resource_id": "infores:retriever", "edge_bindings": {}}
+                        ],
+                    }
+                )
     elif len(qedges) > 1:
-        return 200, {"message": answer_multi_hop(qg, trapi)}
+        return 200, {"message": answer_multi_hop(qg)}
     else:
         ((ek, qe),) = qedges.items()
         sq, oq = qnodes[qe["subject"]], qnodes[qe["object"]]
@@ -151,25 +99,33 @@ def answer(body, trapi=None):
                 sm, om = match_node(s, sq), match_node(o, oq)
                 if sm is None or om is None:
                     continue
-                kg_edges[eid] = kg_edge(eid, trapi)
+                kg_edges[eid] = e
                 kg_nodes[s] = NODES[s]
                 kg_nodes[o] = NODES[o]
+                sb = {"id": s}
+                ob = {"id": o}
+                if sm != s:
+                    sb["query_id"] = sm
+                if om != o:
+                    ob["query_id"] = om
                 results.append(
                     {
-                        "node_bindings": {
-                            qe["subject"]: node_binding(s, sm, trapi),
-                            qe["object"]: node_binding(o, om, trapi),
-                        },
-                        "analyses": analysis({ek: eid}, trapi),
+                        "node_bindings": {qe["subject"]: [sb], qe["object"]: [ob]},
+                        "analyses": [
+                            {
+                                "resource_id": "infores:retriever",
+                                "edge_bindings": {ek: [{"id": eid}]},
+                            }
+                        ],
                     }
                 )
                 for a in e["attributes"]:
                     if a["attribute_type_id"] == "biolink:support_graphs":
                         for ag in a["value"]:
-                            aux_used[ag] = aux_graph(ag, trapi)
+                            aux_used[ag] = AUX[ag]
                             for sek in AUX[ag]["edges"]:
                                 if sek in EDGES:
-                                    kg_edges[sek] = kg_edge(sek, trapi)
+                                    kg_edges[sek] = EDGES[sek]
                 break
     msg = {
         "query_graph": qg,
@@ -200,7 +156,7 @@ def edge_matches(qe, sq, oq):
     return out
 
 
-def answer_multi_hop(qg, trapi, max_results=200):
+def answer_multi_hop(qg, max_results=200):
     """A multi-edge (e.g. xCRG's two-hop) query: each qedge's matches joined on
     the qnodes they share, in a fixed order."""
     qnodes, qedges = qg["nodes"], qg["edges"]
@@ -223,13 +179,19 @@ def answer_multi_hop(qg, trapi, max_results=200):
         for qk in qnodes:
             kg_nodes[row[qk]] = NODES[row[qk]]
         for eid in row["_edges"].values():
-            kg_edges[eid] = kg_edge(eid, trapi)
+            kg_edges[eid] = EDGES[eid]
         results.append(
             {
-                "node_bindings": {
-                    qk: node_binding(row[qk], row[qk], trapi) for qk in sorted(qnodes)
-                },
-                "analyses": analysis(dict(sorted(row["_edges"].items())), trapi),
+                "node_bindings": {qk: [{"id": row[qk]}] for qk in sorted(qnodes)},
+                "analyses": [
+                    {
+                        "resource_id": "infores:retriever",
+                        "edge_bindings": {
+                            ek: [{"id": eid}]
+                            for ek, eid in sorted(row["_edges"].items())
+                        },
+                    }
+                ],
             }
         )
     return {

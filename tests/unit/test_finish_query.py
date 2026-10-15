@@ -101,13 +101,7 @@ async def test_finish_internal_ars_query_enqueues_premerge(redis_mock, mocker):
     mock_set_query_completed = mocker.patch(
         "workers.finish_query.worker.set_query_completed"
     )
-    mock_get_message = _patch_messages(
-        mocker,
-        {
-            response_id: {"message": {"results": []}},
-            "test": {"message": {}, "parameters": {"log_level": "DEBUG"}},
-        },
-    )
+    mock_get_message = mocker.patch("workers.finish_query.worker.get_message")
     mock_post = mocker.patch("httpx.AsyncClient.post")
 
     logger = logging.getLogger(__name__)
@@ -117,8 +111,8 @@ async def test_finish_internal_ars_query_enqueues_premerge(redis_mock, mocker):
     )
 
     mock_post.assert_not_called()
-    # The payload is not even loaded here -- the intake worker pulls it from
-    # the blob store by response_id -- and nothing is rewritten.
+    # the payload is not even loaded here -- the intake worker pulls it from
+    # the blob store by response_id
     mock_get_message.assert_not_called()
     task = await get_task("ars.premerge", "consumer", "t", logger)
     assert task is not None
@@ -153,13 +147,8 @@ async def test_finish_async_query(redis_mock, mocker):
             "result": "this is the final response",
         },
     }
-    _patch_messages(
-        mocker,
-        {
-            response_id: final_response,
-            "test": {"message": {}, "parameters": {"timeout": 30}},
-        },
-    )
+    mock_callback_response = mocker.patch("workers.finish_query.worker.get_message")
+    mock_callback_response.return_value = orjson.dumps(final_response)
 
     mock_post = mocker.patch("httpx.AsyncClient.post")
 
@@ -183,43 +172,7 @@ async def test_finish_async_query(redis_mock, mocker):
     assert call_kwargs["headers"]["Content-Type"] == "application/json"
     posted_payload = orjson.loads(call_kwargs["content"])
     assert posted_payload["message"] == final_response["message"]
-    # TRAPI 2.0 envelope: version stamps and the query's parameters echoed.
-    assert posted_payload["schema_version"] == "2.0.0"
-    assert posted_payload["parameters"] == {"timeout": 30}
     mock_set_query_completed.assert_called_once_with("test", "OK", logger)
-
-
-@pytest.mark.asyncio
-async def test_finish_async_query_never_decodes_the_response(redis_mock, mocker):
-    """The stored response is only ever loaded as raw bytes -- the payload is
-    built around them (delivery_payload) -- while the query is decoded for
-    its parameters."""
-    response_id = "test_response"
-    mocker.patch(
-        "workers.finish_query.worker.get_query_state",
-        return_value=[""] * 7 + [response_id, "http://test"],
-    )
-    mocker.patch("workers.finish_query.worker.set_query_completed")
-    load = _patch_messages(
-        mocker,
-        {
-            response_id: {"message": {"results": []}},
-            "test": {"message": {}, "parameters": {"timeout": 30}},
-        },
-    )
-    mock_post = mocker.patch("httpx.AsyncClient.post")
-    logger = logging.getLogger(__name__)
-
-    await finish_query(
-        ["test", {"query_id": "test", "response_id": response_id}], logger
-    )
-
-    response_loads = [c for c in load.call_args_list if c.args[0] == response_id]
-    assert response_loads
-    assert all(c.kwargs.get("raw") is True for c in response_loads)
-    payload = orjson.loads(mock_post.call_args.kwargs["content"])
-    assert payload["parameters"] == {"timeout": 30}
-    assert payload["message"] == {"results": []}
 
 
 @pytest.mark.asyncio
@@ -228,8 +181,6 @@ async def test_finish_async_query_with_a_lost_response(redis_mock, mocker):
     an older snapshot) is reported to the caller as an error, and the query is
     finished, instead of finish_query crashing on the load and leaving both
     the query and the caller hanging."""
-    from translator_tom import Response
-
     mock_query_state = mocker.patch("workers.finish_query.worker.get_query_state")
     mock_query_state.return_value = ["", "", "", "", "", "", "", "lost", "http://test"]
     mock_set_query_completed = mocker.patch(
@@ -241,7 +192,7 @@ async def test_finish_async_query_with_a_lost_response(redis_mock, mocker):
     }
     _patch_messages(
         mocker,
-        {"test": {"message": {"query_graph": query_graph}, "parameters": {}}},
+        {"test": {"message": {"query_graph": query_graph}}},
     )
     mock_post = mocker.patch("httpx.AsyncClient.post")
     logger = logging.getLogger(__name__)
@@ -265,7 +216,6 @@ async def test_finish_async_query_with_a_lost_response(redis_mock, mocker):
     assert posted["description"].startswith("Response lost")
     assert posted["message"]["results"] == []
     assert posted["message"]["query_graph"] == query_graph
-    Response.from_dict(posted)
     mock_set_query_completed.assert_called_once_with("test", "ERROR", logger)
 
 

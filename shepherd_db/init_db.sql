@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS callbacks (
 -- whose data volume predates this file change.
 CREATE INDEX IF NOT EXISTS idx_callbacks_callback_id ON callbacks (callback_id);
 CREATE INDEX IF NOT EXISTS idx_callbacks_query_id ON callbacks (query_id);
-CREATE INDEX IF NOT EXISTS idx_shepherd_brain_response_id ON shepherd_brain (response_id);
 -- The monitor's recent-query counts are time windows over start_time, and the
 -- abandoned-query reaper / post-Redis-restart sweep look only at unfinished
 -- queries (their predicate must match the partial index's to use it).

@@ -187,7 +187,7 @@ def test_TRAPI_constrained_query():
                         "object": "n1",
                         "constraints": [
                             {
-                                "required_intermediate_categories": ["biolink:Gene"]  # TRAPI 2.0: was intermediate_categories
+                                "intermediate_categories": ["biolink:Gene"]
                             }
                         ]
                     }

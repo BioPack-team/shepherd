@@ -32,7 +32,6 @@ from shepherd_utils.config import settings
 from shepherd_utils.db import save_logs
 from shepherd_utils.logger import get_worker_logger, resolve_log_level
 from shepherd_utils.task_deadline import deadline_field, query_deadline
-from shepherd_utils.trapi import query_log_level
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks
 
@@ -66,9 +65,8 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
     data["callback"] = callback
     query_id = str(uuid.uuid4())[:8]
     response_id = str(uuid.uuid4())[:8]
-    # TRAPI 2.0: the client's log level is parameters.log_level
     level_number = resolve_log_level(
-        query_log_level(data), resolve_log_level(settings.log_level)
+        data.get("log_level"), resolve_log_level(settings.log_level)
     )
     carrier = {}
     inject(carrier)

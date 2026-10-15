@@ -50,15 +50,20 @@ def _xcrg_query_graph():
                 "object": "gene",
                 "predicates": ["biolink:affects"],
                 "knowledge_type": "inferred",
-                # TRAPI 2.0: was qualifier_constraints [{qualifier_set: [...]}]
-                "constraints": {
-                    "qualifiers": [
-                        {
-                            "biolink:object_aspect_qualifier": "activity_or_abundance",
-                            "biolink:object_direction_qualifier": "decreased",
-                        },
-                    ],
-                },
+                "qualifier_constraints": [
+                    {
+                        "qualifier_set": [
+                            {
+                                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                "qualifier_value": "activity_or_abundance",
+                            },
+                            {
+                                "qualifier_type_id": "biolink:object_direction_qualifier",
+                                "qualifier_value": "decreased",
+                            },
+                        ],
+                    },
+                ],
             },
         },
     }
@@ -66,7 +71,7 @@ def _xcrg_query_graph():
 
 def _xcrg_response(query_graph):
     return {
-        "schema_version": "2.0.0",  # TRAPI 2.0: was 1.6.0
+        "schema_version": "1.6.0",
         "biolink_version": "4.3.2",
         "message": {
             "query_graph": query_graph,
@@ -87,23 +92,21 @@ def _xcrg_response(query_graph):
                                 "resource_role": "primary_knowledge_source",
                             },
                         ],
-                        # TRAPI 2.0: required edge members
-                        "knowledge_level": "prediction",
-                        "agent_type": "computational_model",
                     },
                 },
             },
-            "results": [  # TRAPI 2.0: no empty auxiliary_graphs
+            "auxiliary_graphs": {},
+            "results": [
                 {
                     "node_bindings": {
-                        "chem": {"ids": ["CHEBI:1"]},  # TRAPI 2.0: one binding with ids
-                        "gene": {"ids": ["NCBIGene:6323"]},  # TRAPI 2.0: one binding with ids
+                        "chem": [{"id": "CHEBI:1", "attributes": []}],
+                        "gene": [{"id": "NCBIGene:6323", "attributes": []}],
                     },
                     "analyses": [
                         {
                             "resource_id": "infores:arax",
                             "edge_bindings": {
-                                "e0": {"ids": ["xcrg_edge_0"]},  # TRAPI 2.0: one binding with ids
+                                "e0": [{"id": "xcrg_edge_0", "attributes": []}],
                             },
                             "score": 1.0,
                         },
@@ -185,7 +188,7 @@ def test_connect_xcrg_calls_package_and_updates_response(monkeypatch):
 
     class MockRTXConfiguration:
         maturity = "testing"
-        trapi_version = "2.0.0"  # TRAPI 2.0: was 1.6.0
+        trapi_version = "1.6.0"
 
     class MockKPQueryCacher:
         def get_cached_result(self, *_args, **_kwargs):
@@ -217,7 +220,7 @@ def test_connect_xcrg_calls_package_and_updates_response(monkeypatch):
 
     assert response.status == "OK"
     assert response.data["xcrg_connect"] is True
-    assert response.envelope.schema_version == "2.0.0"  # TRAPI 2.0: was 1.6.0
+    assert response.envelope.schema_version == "1.6.0"
     assert response.envelope.biolink_version == "4.3.2"
     assert response.total_results_count == 1
     assert len(response.envelope.message.results) == 1
@@ -252,15 +255,20 @@ def _xcrg_gene_object_query_graph():
                 "object": "on",
                 "predicates": ["biolink:affects"],
                 "knowledge_type": "inferred",
-                # TRAPI 2.0: was qualifier_constraints [{qualifier_set: [...]}]
-                "constraints": {
-                    "qualifiers": [
-                        {
-                            "biolink:object_aspect_qualifier": "activity_or_abundance",
-                            "biolink:object_direction_qualifier": "increased",
-                        },
-                    ],
-                },
+                "qualifier_constraints": [
+                    {
+                        "qualifier_set": [
+                            {
+                                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                "qualifier_value": "activity_or_abundance",
+                            },
+                            {
+                                "qualifier_type_id": "biolink:object_direction_qualifier",
+                                "qualifier_value": "increased",
+                            },
+                        ],
+                    },
+                ],
             },
         },
     }
@@ -268,7 +276,7 @@ def _xcrg_gene_object_query_graph():
 
 def _xcrg_gene_object_response(query_graph):
     return {
-        "schema_version": "2.0.0",  # TRAPI 2.0: was 1.6.0
+        "schema_version": "1.6.0",
         "biolink_version": "4.3.2",
         "message": {
             "query_graph": query_graph,
@@ -289,23 +297,21 @@ def _xcrg_gene_object_response(query_graph):
                                 "resource_role": "primary_knowledge_source",
                             },
                         ],
-                        # TRAPI 2.0: required edge members
-                        "knowledge_level": "prediction",
-                        "agent_type": "computational_model",
                     },
                 },
             },
-            "results": [  # TRAPI 2.0: no empty auxiliary_graphs
+            "auxiliary_graphs": {},
+            "results": [
                 {
                     "node_bindings": {
-                        "sn": {"ids": ["CHEBI:2"]},  # TRAPI 2.0: one binding with ids
-                        "on": {"ids": ["NCBIGene:1576"]},  # TRAPI 2.0: one binding with ids
+                        "sn": [{"id": "CHEBI:2", "attributes": []}],
+                        "on": [{"id": "NCBIGene:1576", "attributes": []}],
                     },
                     "analyses": [
                         {
                             "resource_id": "infores:arax",
                             "edge_bindings": {
-                                "t_edge": {"ids": ["xcrg_edge_0"]},  # TRAPI 2.0: one binding with ids
+                                "t_edge": [{"id": "xcrg_edge_0", "attributes": []}],
                             },
                             "score": 1.0,
                         },
@@ -334,7 +340,7 @@ def test_gene_object_connect_xcrg_calls_package_and_updates_response(monkeypatch
 
     class MockRTXConfiguration:
         maturity = "testing"
-        trapi_version = "2.0.0"  # TRAPI 2.0: was 1.6.0
+        trapi_version = "1.6.0"
 
     class MockKPQueryCacher:
         def get_cached_result(self, *_args, **_kwargs):
@@ -367,10 +373,10 @@ def test_gene_object_connect_xcrg_calls_package_and_updates_response(monkeypatch
     edge = captured["query"]["message"]["query_graph"]["edges"]["t_edge"]
     assert edge["knowledge_type"] == "inferred"
     assert edge["predicates"] == ["biolink:affects"]
-    qualifiers = {  # TRAPI 2.0: a qualifier set is a {type: value} dict
-        type_id: value
-        for qs in edge["constraints"]["qualifiers"]
-        for type_id, value in qs.items()
+    qualifiers = {
+        q["qualifier_type_id"]: q["qualifier_value"]
+        for qs in edge["qualifier_constraints"]
+        for q in qs["qualifier_set"]
     }
     assert qualifiers["biolink:object_aspect_qualifier"] == "activity_or_abundance"
     assert qualifiers["biolink:object_direction_qualifier"] == "increased"
@@ -402,15 +408,20 @@ def test_gene_object_xcrg_full_trapi_integration():
                         "knowledge_type": "inferred",
                         "object": "on",
                         "predicates": ["biolink:affects"],
-                        # TRAPI 2.0: was qualifier_constraints [{qualifier_set: [...]}]
-                        "constraints": {
-                            "qualifiers": [
-                                {
-                                    "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                    "biolink:object_direction_qualifier": "increased",
-                                }
-                            ]
-                        },
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": "activity_or_abundance",
+                                    },
+                                    {
+                                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                                        "qualifier_value": "increased",
+                                    },
+                                ]
+                            }
+                        ],
                         "subject": "sn",
                     }
                 },

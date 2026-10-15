@@ -63,11 +63,7 @@ def normalize(obj):
         seen.setdefault(z, f"Z-{len(seen)}")
     for z, token in seen.items():
         text = text.replace(z, token)
-    text = re.sub(
-        r'"timestamp": "\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:?\d\d)?"',
-        '"timestamp": "T"',
-        text,
-    )
+    text = re.sub(r'"timestamp": "\d{4}-\d\d-\d\dT[\d:.]+"', '"timestamp": "T"', text)
     # the installed reasoner-validator's version, or "" when it isn't installed
     # (as where the goldens were recorded): not ARAX's behavior
     text = re.sub(r'"validator_version": "[^"]*"', '"validator_version": ""', text)
@@ -84,10 +80,10 @@ def first_node_detail(result):
     return nodes[sorted(nodes)[0]]["detail_lookup"]
 
 
-def run_all(setup, lookup, cases=CASES):
+def run_all(setup, lookup):
     """setup(data) prepares a case's reachable data; lookup(id) -> result (tuples as lists)."""
     out = {}
-    for name, steps, data in cases:
+    for name, steps, data in CASES:
         setup(data)
         results = []
         for step in steps:

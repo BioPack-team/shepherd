@@ -14,9 +14,6 @@ by field.
   optional groups, and query by name (DSL add_qnode(name=...) and a TRAPI
   qnode's name);
 - xDTD / MVP1 variants, and the xCRG / MVP2 TRAPI route.
-
-TRAPI 2.0 like query_cases.py (``is_set`` on an unpinned qnode is 2.0's
-``set_interpretation: COLLATE``).
 """
 
 C = "biolink:ChemicalEntity"
@@ -533,8 +530,7 @@ CASES = [
             qg(
                 {
                     "n0": {"ids": ["CHEBI:3", "CHEBI:6"], "set_interpretation": "MANY"},
-                    # 1.x is_set: true on an unpinned qnode, in 2.0
-                    "n1": {"categories": [G], "set_interpretation": "COLLATE"},
+                    "n1": {"categories": [G], "is_set": True},
                     "n2": {"categories": [D]},
                 },
                 {
@@ -654,14 +650,20 @@ CASES = [
                         "object": "gene",
                         "predicates": ["biolink:affects"],
                         "knowledge_type": "inferred",
-                        "constraints": {
-                            "qualifiers": [
-                                {
-                                    "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                    "biolink:object_direction_qualifier": "decreased",
-                                }
-                            ]
-                        },
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": "activity_or_abundance",
+                                    },
+                                    {
+                                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                                        "qualifier_value": "decreased",
+                                    },
+                                ]
+                            }
+                        ],
                     }
                 },
             )

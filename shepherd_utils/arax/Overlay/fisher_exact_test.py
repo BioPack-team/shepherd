@@ -4,7 +4,6 @@
 #   - the tier0 overlay sqlite path comes from RTXConfiguration.kg2c_sqlite_path (Shepherd's pathfinder download) instead of RTX/code/ARAX/KnowledgeSources/KG2c/
 #   - the rel_edge_key background-count query goes to infores:retriever instead of infores:gandalf (DEC-4: Retriever queries Gandalf)
 #   - the virtual edges are bound to the results in one pass after the loop, not one call per edge (D-28)
-#   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type; upstream sets none, so they take compute_ngd's values for ARAX's virtual edges (statistical_association / automated_agent)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # ruff: noqa: E402
 # This class will perform fisher's exact test to evalutate the significance of connection between
@@ -405,8 +404,7 @@ class ComputeFTEST:
                                         RetrievalSource(resource_id="infores:arax", resource_role="primary_knowledge_source")
                     ]
                 edge = Edge(predicate='biolink:has_fisher_exact_test_p_value_with', subject=value[2], object=value[3],
-                            attributes=edge_attribute_list, sources=retrieval_source,
-                            knowledge_level="statistical_association", agent_type="automated_agent")
+                            attributes=edge_attribute_list, sources=retrieval_source)
                 edge.qedge_keys = [value[0]]
 
                 kg.edges[edge_id] = edge

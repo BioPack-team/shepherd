@@ -5,14 +5,6 @@ Each case is (name, steps, data). A step is a response id to look up, or
 prefix's component cache). data holds what the lookups can reach: "local"
 responses (by the port's id, with the integer id upstream uses), "urls" and
 "ars" messages ((pk, trace) -> (status, body)).
-
-The stored and fetched responses are TRAPI 2.0: the translation
-(trapi2_goldens.response_case) of the TRAPI 1.6 documents upstream's goldens
-were recorded with (inputs_trapi16.json.gz); test_trapi2_goldens.py checks
-they stay so. The fixture's edges k1 (provenance only in a legacy
-primary_knowledge_source attribute) and k2 (no provenance) have no
-``sources``, which 2.0 requires: they exercise ARAX's provenance summary on
-documents it did not write, and are deliberately left so.
 """
 
 import gzip
@@ -32,8 +24,9 @@ def _arax_envelope():
         env = json.load(f)["tpl_one_hop_classic"]["envelope"]
     env["logs"] = [
         {
-            "timestamp": "2026-01-01T00:00:00Z",
+            "timestamp": "2026-01-01T00:00:00",
             "level": "INFO",
+            "code": None,
             "message": "m",
         }
     ]
@@ -42,7 +35,7 @@ def _arax_envelope():
 
 def _kg_with_support_graph():
     return {
-        "schema_version": "2.0.0",
+        "schema_version": "1.6.0",
         "biolink_version": "4.2.5",
         "message": {
             "query_graph": {
@@ -89,11 +82,12 @@ def _kg_with_support_graph():
                                 "attribute_type_id": "biolink:support_graphs",
                                 "value": ["ag1"],
                             },
+                            {
+                                "attribute_type_id": "biolink:knowledge_level",
+                                "value": "knowledge_assertion",
+                            },
                         ],
-                        "knowledge_level": "knowledge_assertion",
-                        "agent_type": "not_provided",
                     },
-                    # no sources: see the module docstring
                     "k1": {
                         "subject": "CHEBI:1",
                         "object": "MONDO:1",
@@ -104,38 +98,35 @@ def _kg_with_support_graph():
                                 "value": "infores:semmeddb",
                             }
                         ],
-                        "knowledge_level": "not_provided",
-                        "agent_type": "not_provided",
                     },
                     "k2": {
                         "subject": "MONDO:1",
                         "object": "CHEBI:1",
                         "predicate": "biolink:treated_by",
-                        "knowledge_level": "not_provided",
-                        "agent_type": "not_provided",
                     },
                 },
             },
-            "auxiliary_graphs": {"ag1": {"edges": ["k1"]}},
+            "auxiliary_graphs": {"ag1": {"edges": ["k1"], "attributes": []}},
             "results": [
                 {
                     "node_bindings": {
-                        "n0": {"ids": ["CHEBI:1"]},
-                        "n1": {"ids": ["MONDO:1"]},
+                        "n0": [{"id": "CHEBI:1", "attributes": []}],
+                        "n1": [{"id": "MONDO:1", "attributes": []}],
                     },
                     "analyses": [
                         {
                             "resource_id": "infores:arax",
-                            "edge_bindings": {"e0": {"ids": ["k0"]}},
+                            "edge_bindings": {"e0": [{"id": "k0", "attributes": []}]},
                         }
                     ],
                 },
                 {
                     "resource_id": "infores:other",
                     "node_bindings": {
-                        "n0": {"ids": ["CHEBI:1"]},
-                        "n1": {"ids": ["MONDO:1"]},
+                        "n0": [{"id": "CHEBI:1", "attributes": []}],
+                        "n1": [{"id": "MONDO:1", "attributes": []}],
                     },
+                    "analyses": [],
                 },
             ],
         },
@@ -192,8 +183,12 @@ CASES = [
             "local": {
                 "LOCAL4": (
                     41654,
-                    # an empty query graph, deliberately (not valid 2.0)
-                    {"message": {"query_graph": {"nodes": {}}, "results": []}},
+                    {
+                        "message": {
+                            "query_graph": {"nodes": {}, "edges": {}},
+                            "results": [],
+                        }
+                    },
                 )
             }
         },
@@ -201,7 +196,7 @@ CASES = [
     (
         "local_no_query_graph",
         ["LOCAL5"],
-        {"local": {"LOCAL5": (41655, {"message": {}})}},
+        {"local": {"LOCAL5": (41655, {"message": {}, "description": None})}},
     ),
     (
         "local_validator_crash",
@@ -328,7 +323,9 @@ CASES = [
                         _ars_message(
                             CHILD,
                             "ara-arax",
-                            dict(_kg_with_support_graph(), description="boom"),
+                            dict(
+                                _kg_with_support_graph(), logs=None, description="boom"
+                            ),
                         )
                     ),
                 )

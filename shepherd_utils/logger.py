@@ -8,21 +8,6 @@ from collections import deque
 from datetime import datetime, timezone
 
 
-def trapi_log_level(levelno: int) -> str:
-    """The TRAPI LogLevel for a ``logging`` level number.
-
-    TRAPI's enum is ERROR/WARNING/INFO/DEBUG, so CRITICAL reports as ERROR and
-    anything below DEBUG as DEBUG.
-    """
-    if levelno >= logging.ERROR:
-        return "ERROR"
-    if levelno >= logging.WARNING:
-        return "WARNING"
-    if levelno >= logging.INFO:
-        return "INFO"
-    return "DEBUG"
-
-
 class ReasonerLogEntryFormatter(logging.Formatter):
     """Format to match Reasoner API LogEntry"""
 
@@ -44,10 +29,8 @@ class ReasonerLogEntryFormatter(logging.Formatter):
         ).isoformat()
         log_entry["timestamp"] = iso_timestamp
 
-        # Add level. TRAPI's LogLevel has no CRITICAL, so the loudest records
-        # are reported as ERROR (their text still says why, e.g. the
-        # RESPONSE_TOO_LARGE marker).
-        log_entry["level"] = trapi_log_level(record.levelno)
+        # Add level
+        log_entry["level"] = record.levelname
 
         return log_entry
 

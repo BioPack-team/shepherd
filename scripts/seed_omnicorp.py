@@ -51,12 +51,12 @@ def load_envelope(path: str) -> dict:
     """Read a captured response and wrap it in the shepherd worker envelope.
 
     Accepts either a full response ({"message": {...}, ...}) or a bare TRAPI
-    message; either way the worker wants {"message": <trapi>, "workflow"}.
+    message; either way the worker wants {"message": <trapi>, "workflow", "logs"}.
     """
     with open(path, "rb") as f:
         data = orjson.loads(f.read())
     message = data["message"] if isinstance(data, dict) and "message" in data else data
-    return {"message": message, "workflow": [{"id": STREAM}]}
+    return {"message": message, "workflow": [{"id": STREAM}], "logs": []}
 
 
 def main() -> None:

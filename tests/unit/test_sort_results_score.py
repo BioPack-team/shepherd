@@ -8,10 +8,6 @@ from workers.sort_results_score.worker import sort_results_score
 
 logger = logging.getLogger(__name__)
 
-# Every analysis binds something: an analysis without edge or path bindings is
-# invalid TRAPI 2.0 and is pruned when a response is stored (save_response).
-_A = {"resource_id": "infores:test", "edge_bindings": {"e0": {"ids": ["ke0"]}}}
-
 
 @pytest.mark.asyncio
 async def test_default_sort(redis_mock, mocker):
@@ -25,7 +21,6 @@ async def test_default_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
-                            **_A,
                             "score": 0.1,
                         },
                     ],
@@ -33,7 +28,6 @@ async def test_default_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
-                            **_A,
                             "score": 0.9,
                         },
                     ],
@@ -77,7 +71,6 @@ async def test_ascending_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
-                            **_A,
                             "score": 0.9,
                         },
                     ],
@@ -85,7 +78,6 @@ async def test_ascending_sort(redis_mock, mocker):
                 {
                     "analyses": [
                         {
-                            **_A,
                             "score": 0.1,
                         },
                     ],
@@ -125,39 +117,45 @@ async def test_ascending_sort(redis_mock, mocker):
 
 
 @pytest.mark.asyncio
-async def test_results_without_analyses_sort_as_zero(redis_mock, mocker):
-    """TRAPI 2.0: Result.analyses is optional. A result without it is not an
-    error; it sorts as if its score were 0 and keeps no ``analyses`` key."""
+async def test_invalid_json(redis_mock, mocker):
+    """Test sort ascending is applied."""
     mock_callback_response = mocker.patch(
         "workers.sort_results_score.worker.get_message"
     )
     mock_callback_response.return_value = {
         "message": {
             "results": [
-                {"node_bindings": {"n0": {"ids": ["X:1"]}}},
-                {"analyses": [{**_A, "score": 0.2}, {**_A, "score": 0.7}]},
+                {
+                    "analysis": {},
+                },
             ],
         },
     }
 
-    await sort_results_score(
-        [
-            "test",
-            {
-                "query_id": "test",
-                "response_id": "test_response",
-                "workflow": json.dumps([{"id": "sort_results_score"}]),
-                "log_level": "20",
-                "otel": json.dumps({}),
-            },
-        ],
-        logger,
-    )
+    logger = logging.getLogger(__name__)
 
-    message = await get_message("test_response", logger)
-    results = message["message"]["results"]
-    assert [a["score"] for a in results[0]["analyses"]] == [0.7, 0.2]
-    assert "analyses" not in results[1]
+    with pytest.raises(KeyError) as e:
+        await sort_results_score(
+            [
+                "test",
+                {
+                    "query_id": "test",
+                    "response_id": "test_response",
+                    "workflow": json.dumps(
+                        [
+                            {
+                                "id": "sort_results_score",
+                            },
+                        ],
+                    ),
+                    "log_level": "20",
+                    "otel": json.dumps({}),
+                },
+            ],
+            logger,
+        )
+
+    assert "analyses" in str(e.value)
 
 
 @pytest.mark.asyncio
