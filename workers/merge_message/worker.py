@@ -560,107 +560,13 @@ def merge_messages(
 
         return merged_messages
     elif "paths" in original_query_graph:
-        # Pathfinder query
-        path_id, og_path = next(iter(original_query_graph["paths"].items()))
-        subject_node_id = og_path.get("subject")
-        object_node_id = og_path.get("object")
-        if subject_node_id is None or object_node_id is None:
+        # Pathfinder query: each callback is one of aragorn.pathfinder's edge
+        # lookups, so only the knowledge graph accumulates here. The paths are
+        # built from it once every lookup is in.
+        _, og_path = next(iter(original_query_graph["paths"].items()))
+        if og_path.get("subject") is None or og_path.get("object") is None:
             raise KeyError("Missing either subject or object from path.")
-
-        intermediate_category = None
-        constraints = og_path.get("constraints") or []
-        if len(constraints) > 0:
-            intermediate_categories = (
-                constraints[0].get("required_intermediate_categories") or []
-            )
-            if len(intermediate_categories) > 0:
-                intermediate_category = intermediate_categories[0]
-
-        kg_nodes = result["message"]["knowledge_graph"].get("nodes", {})
-        kg_edges = result["message"]["knowledge_graph"].get("edges", {})
-
-        aux_counter = 0
-        score = 0
-        analyses = []
-        for new_result in new_response["message"]["results"]:
-            path_edge_ids = set()
-            for analysis in new_result.get("analyses") or []:
-                path_edge_ids.update(edge_binding_ids(analysis))
-            score = new_result.get("score")
-            if not path_edge_ids:
-                continue
-
-            if (
-                intermediate_category is not None
-                and intermediate_category != "biolink:NamedThing"
-            ):
-                pinned_ids = set()
-                for pinned in (subject_node_id, object_node_id):
-                    pinned_ids.update(node_binding_ids(new_result, pinned))
-                intermediate_node_ids = set()
-                for edge_id in path_edge_ids:
-                    edge = kg_edges.get(edge_id)
-                    if edge is None:
-                        continue
-                    for node_id in (edge.get("subject"), edge.get("object")):
-                        if node_id and node_id not in pinned_ids:
-                            intermediate_node_ids.add(node_id)
-                if not any(
-                    intermediate_category
-                    in (kg_nodes.get(nid, {}).get("categories") or [])
-                    for nid in intermediate_node_ids
-                ):
-                    continue
-
-            aux_id = f"a_{aux_counter}"
-            aux_counter += 1
-
-            # Add new aux graph to message
-            result["message"].setdefault("auxiliary_graphs", {})[aux_id] = {
-                "edges": list(path_edge_ids),
-            }
-
-            analysis = {
-                "resource_id": source,
-                "path_bindings": {path_id: make_binding([aux_id])},
-            }
-            if score is not None:
-                analysis["score"] = score
-            analyses.append(analysis)
-
-        # --- Resolve the pinned node IDs from any old result's node_bindings ---
-        # (They should all bind the same start/end IDs since they're pinned)
-        if not analyses:
-            result["message"]["results"] = []
-            return result
-
-        start_kg_id = None
-        end_kg_id = None
-        for new_result in new_response["message"]["results"]:
-            subject_ids = node_binding_ids(new_result, subject_node_id)
-            if subject_ids:
-                start_kg_id = subject_ids[0]
-            object_ids = node_binding_ids(new_result, object_node_id)
-            if object_ids:
-                end_kg_id = object_ids[0]
-            if start_kg_id and end_kg_id:
-                break
-
-        if not start_kg_id or not end_kg_id:
-            result["message"]["results"] = []
-            return result
-
-        # --- Assemble the single Pathfinder result ---
-        pathfinder_result = {
-            "node_bindings": {
-                subject_node_id: make_binding([start_kg_id]),
-                object_node_id: make_binding([end_kg_id]),
-            },
-            "analyses": analyses,
-        }
-
-        result["message"]["results"] = [pathfinder_result]
-
+        result["message"]["results"] = response["message"].get("results") or []
         return result
 
     raise TypeError("Unsupported query type.")
