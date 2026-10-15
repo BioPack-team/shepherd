@@ -336,17 +336,24 @@ def vector(txn, kind: str, text: str) -> np.ndarray:
     return np.frombuffer(raw, dtype=DTYPES[kind])
 
 
-def path_features(txn, config, nodes, categories, phrases):
+def path_features(txn, config, nodes, categories, phrases, kept=None):
     """One path's `(node_x, edge_x, scalars)`; KeyError naming the first
-    vector the LMDB lacks."""
+    vector the LMDB lacks. `kept` carries the category and phrase vectors,
+    as float32, from one path of a message to the next: there are few, read
+    over and over. Nodes are not kept, so it stays small."""
     dim = config["embed_dim"]
+    kept = {} if kept is None else kept
+
+    def repeated(kind, text):
+        if (kind, text) not in kept:
+            kept[kind, text] = vector(txn, kind, text).astype(np.float32)
+        return kept[kind, text]
+
     node_x = np.empty((len(nodes), 2 * dim), dtype=np.float32)
     for j, (curie, category) in enumerate(zip(nodes, categories)):
         node_x[j, :dim] = vector(txn, NODE, curie)
-        node_x[j, dim:] = vector(txn, CATEGORY, category)
-    edge_x = np.stack([vector(txn, PHRASE, phrase) for phrase in phrases]).astype(
-        np.float32
-    )
+        node_x[j, dim:] = repeated(CATEGORY, category)
+    edge_x = np.stack([repeated(PHRASE, phrase) for phrase in phrases])
 
     def context(key, width):
         raw = txn.get(key)
@@ -357,16 +364,12 @@ def path_features(txn, config, nodes, categories, phrases):
     scalars = path_scalars(
         config["scalar_names"],
         nodes,
-        (
-            (lambda c: context(lmdb_key(NODE_CONTEXT, c), NODE_CONTEXT_DIM))
-            if config["node_context"]
-            else None
-        ),
-        (
-            (lambda a, b: context(edge_context_key(a, b), len(_EDGE_BASES)))
-            if config["edge_context"]
-            else None
-        ),
+        (lambda c: context(lmdb_key(NODE_CONTEXT, c), NODE_CONTEXT_DIM))
+        if config["node_context"]
+        else None,
+        (lambda a, b: context(edge_context_key(a, b), len(_EDGE_BASES)))
+        if config["edge_context"]
+        else None,
     )
     return node_x, edge_x, scalars
 
@@ -405,7 +408,7 @@ def score_message(message, txn, model, config, bmt, chunk_size):
     knowledge_graph = msg["knowledge_graph"]
     auxiliary_graphs = msg.get("auxiliary_graphs") or {}
     qpath_id, qpath = next(iter(msg["query_graph"]["paths"].items()))
-    pending = {}
+    pending, kept = {}, {}
 
     def flush(n_hops):
         batch = pending.pop(n_hops, [])
@@ -467,7 +470,7 @@ def score_message(message, txn, model, config, bmt, chunk_size):
                 stats["no_scale"] += 1
                 continue
             try:
-                features = path_features(txn, config, nodes, categories, phrases)
+                features = path_features(txn, config, nodes, categories, phrases, kept)
             except KeyError as e:
                 stats["missing"] += 1
                 samples = stats["missing_samples"]
