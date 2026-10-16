@@ -11,6 +11,9 @@ from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
 from typing import Any, Optional, Union
 
+import orjson
+import zstandard
+
 from shepherd_utils.broker import (
     add_task,
     mark_task_as_complete,
@@ -56,6 +59,7 @@ from shepherd_utils.trapi import (
     node_binding_ids,
     qedge_qualifier_sets,
     query_log_level,
+    summarize_query_graph,
 )
 
 # Queue name
@@ -644,6 +648,48 @@ def take_callback_logs(
 # ---------------------------------------------------------------------------
 
 
+def read_callback_response(
+    callback_id: str, logger: logging.Logger
+) -> Optional[dict[str, Any]]:
+    """A callback's stored payload as a TRAPI response, or None when it is
+    gone or can't be read.
+
+    The callback route stores what was posted without parsing it (a large one
+    would stall the server), so this is where a body that isn't a TRAPI
+    response is found, and where a response missing its results or knowledge
+    graph is given empty ones.
+    """
+    try:
+        response = get_message_sync(callback_id)
+    except KeyError:
+        logger.error(f"Missing callback {callback_id} while folding; skipping.")
+        return None
+    except (orjson.JSONDecodeError, zstandard.ZstdError) as e:
+        logger.error(f"Callback {callback_id} is not valid JSON; skipping. {e}")
+        return None
+    if not isinstance(response, dict):
+        logger.error(f"Callback {callback_id} is not a JSON object; skipping.")
+        return None
+    if not isinstance(response.get("message"), dict):
+        response["message"] = {}
+    message = response["message"]
+    if message.get("results") is None:
+        message["results"] = []
+    if message.get("knowledge_graph") is None:
+        message["knowledge_graph"] = {"nodes": {}, "edges": {}}
+    kgraph = message["knowledge_graph"]
+    logger.info(
+        f"[{callback_id}] Got back {len(message['results'])} results, "
+        f"{len(kgraph.get('nodes') or {})} nodes and "
+        f"{len(kgraph.get('edges') or {})} edges."
+    )
+    logger.debug(
+        f"[{callback_id}] for query graph: "
+        f"{summarize_query_graph(message.get('query_graph'))}"
+    )
+    return response
+
+
 def merge_messages_by_ids(
     target: str,
     query_id: str,
@@ -696,12 +742,8 @@ def merge_messages_by_ids(
         merged: list[str] = []
         callback_log_entries: list[dict] = []
         for callback_id in callback_ids:
-            try:
-                callback_response = get_message_sync(callback_id)
-            except KeyError:
-                worker_logger.error(
-                    f"Missing callback {callback_id} while folding; skipping."
-                )
+            callback_response = read_callback_response(callback_id, worker_logger)
+            if callback_response is None:
                 continue
             callback_log_entries.extend(
                 take_callback_logs(

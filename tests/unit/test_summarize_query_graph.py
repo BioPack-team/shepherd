@@ -1,6 +1,6 @@
-"""Tests for how the /callback endpoint logs a lookup's query graph."""
+"""Tests for how a callback's query graph is logged."""
 
-from shepherd_server.base_routes import MAX_LOGGED_NODE_IDS, summarize_query_graph
+from shepherd_utils.trapi import MAX_LOGGED_NODE_IDS, summarize_query_graph
 
 
 def _query_graph(n0_ids, n1_ids):
