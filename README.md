@@ -16,6 +16,10 @@ is reverted, so only new code written for 2.0 needs porting by hand: query
 `parameters.log_level` / `parameters.bypass_cache` are top-level here,
 `constraints.qualifiers` is `qualifier_constraints`, bindings are lists of
 `{id}`, and stored responses carry their own `logs` (no `translator_tom`).
+`shepherd_utils/trapi.py` (devel's 2.0 helpers) stays deleted here: a merge
+that touches it is a modify/delete conflict, resolved with `git rm`, and any
+version-neutral helper it gains moves to its own module (as
+`shepherd_utils/query_graph_log.py` did).
 
 ## Local Development
 

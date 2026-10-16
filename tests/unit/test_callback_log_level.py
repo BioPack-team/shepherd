@@ -151,12 +151,12 @@ async def test_callback_that_cannot_be_stored_asks_for_redelivery(
     async def _add_ready_callback(response_id, callback_id, logger):
         ready.append(callback_id)
 
-    async def _save_message(callback_id, response, logger, **kwargs):
+    async def _save_encoded_message(callback_id, blob, logger, **kwargs):
         assert kwargs.get("raise_on_failure") is True
         raise ConnectionError("Error 111 connecting to shepherd_broker:6379")
 
     monkeypatch.setattr(base_routes, "add_ready_callback", _add_ready_callback)
-    monkeypatch.setattr(base_routes, "save_message", _save_message)
+    monkeypatch.setattr(base_routes, "save_encoded_message", _save_encoded_message)
 
     response = await callback(
         ARATargetEnum.ARAGORN, "cb-8", _make_request(_callback_body())

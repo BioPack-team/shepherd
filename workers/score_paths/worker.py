@@ -1,4 +1,5 @@
-"""Path scoring module"""
+"""Path scoring module: every analysis scored by the sequence reranker
+(``scorer``), from the LMDB squashbert's scripts/export_reranker.py writes."""
 
 import asyncio
 import logging
@@ -7,10 +8,7 @@ import time
 import uuid
 
 import lmdb
-import numpy as np
 import torch
-from bmt import Toolkit
-from torch import nn
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
@@ -21,23 +19,17 @@ from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
+import scorer
+
 STREAM = "score_paths"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 6
 EMBEDDING_DIR = settings.pathfinder_embeddings_dir
-MODEL_WEIGHTS = "model_weights/squashbert_direct_3hop.pt"
-# 11 embeddings of 768 dims each (4 node names, 4 categories, 3 hop phrases) --
-# the MLP's input width, and the width of every feature row.
-FEATURE_DIM = 11 * 768
-# Analyses scored per forward pass. Peak memory is bounded by this rather than
-# by the message's size: one float32 batch (4096 x 8448 x 4 = 138 MB) plus the
-# float16 rows still pending in the chunk (69 MB), and both are freed at the end
-# of each chunk. Scoring the whole message in one pass instead is what
-# OOM-killed the pod on large messages -- a 387k-analysis message needed the
-# row list, its stacked copy and the float32 cast all live at once, 24 GiB in
-# total. The MLP is row-independent, so chunk size changes only the batching.
-SCORE_CHUNK_SIZE = 4096
+# Paths scored per forward pass, per length. It bounds peak memory (about 40 KB
+# of inputs a path) whatever the message's size: scoring a whole message in
+# one pass is what OOM-killed the pod on large messages.
+SCORE_CHUNK_SIZE = 1024
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
@@ -46,104 +38,8 @@ LOGGER = get_worker_logger(STREAM)
 # validates the data at startup and never scores anything itself.
 bmt = None
 embedding_env = None
-mlp = None
-
-
-def convert_path_to_components(source, target, path, knowledge_graph, logger):
-    try:
-        edges = knowledge_graph["edges"]
-        nodes = knowledge_graph["nodes"]
-        ordered = [source]
-        while target not in ordered:
-            noncylcic = False
-            for eid in path:
-                edge = edges.get(eid)
-                if not edge:
-                    continue
-                tail = ordered[-1]
-                if edge["subject"] == tail and edge["object"] not in ordered:
-                    ordered.append(edge["object"])
-                    noncylcic = True
-                elif edge["object"] == tail and edge["subject"] not in ordered:
-                    ordered.append(edge["subject"])
-                    noncylcic = True
-            if not noncylcic:
-                return None  # Cyclic paths are not supported
-        if len(ordered) != 4:
-            return None
-        names = []
-        cat_phrases = []
-        for nid in ordered:
-            node = nodes.get(nid)
-            if node is None:
-                return None
-            name = node.get("name")
-            cats = node.get("categories") or []
-            if not name or not cats or not cats[0]:
-                return None
-            names.append(name)
-            cat_phrases.append(cats[0].removeprefix("biolink:"))
-        hop_phrases = []
-        for cur, nxt in zip(ordered[:-1], ordered[1:]):
-            preds = []
-            seen = set()
-            for eid in path:
-                edge = edges.get(eid)
-                if not edge:
-                    continue
-                pname = edge["predicate"].removeprefix("biolink:").replace("_", " ")
-                if not bmt.is_predicate(pname):
-                    continue  # mirror cache: drop non-biolink predicates
-                if edge["subject"] == cur and edge["object"] == nxt:
-                    name = pname
-                elif edge["object"] == cur and edge["subject"] == nxt:
-                    if bmt.is_symmetric(pname):
-                        name = pname
-                    else:
-                        inv = bmt.get_inverse(pname)
-                        if inv is None:
-                            continue  # mirror cache: silently drop non-invertibles
-                        name = inv
-                else:
-                    continue
-                if name not in seen:
-                    seen.add(name)
-                    preds.append(name)
-            if not preds:
-                return None
-            preds.sort()
-            hop_phrases.append(
-                preds[0] if len(preds) == 1 else "[" + " or ".join(preds) + "]"
-            )
-        return names, cat_phrases, hop_phrases
-    except Exception as e:
-        logger.error(f"Failed to convert path to components: {e}")
-        return None
-
-
-def _lookup(txn, key):
-    raw = txn.get(key.encode("utf-8"))
-    if raw is None:
-        raise KeyError(key)
-    return np.frombuffer(raw, dtype=np.float16)
-
-
-def _probe_cache(env):
-    """Confirm the LMDB cache is non-empty and decodes to (768,) float16."""
-    with env.begin() as txn:
-        n = txn.stat()["entries"]
-        if n == 0:
-            raise RuntimeError("embeddings cache is empty")
-        cursor = txn.cursor()
-        cursor.first()
-        key, value = cursor.item()
-        expected_bytes = 768 * np.dtype(np.float16).itemsize
-        if len(value) != expected_bytes:
-            raise RuntimeError(
-                f"embeddings cache has wrong value size: got {len(value)} bytes, "
-                f"expected {expected_bytes} (768-dim float16)"
-            )
-        return n, key.decode("utf-8", errors="replace")
+model = None
+config = None
 
 
 def _open_embeddings():
@@ -158,250 +54,101 @@ def _open_embeddings():
     )
 
 
-def _build_mlp(logger):
-    """Build the scoring MLP and load its trained weights.
-
-    The weights are memory-mapped and assigned rather than copied, so the pool's
-    children share one 61 MB mapping instead of each allocating its own copy.
-    ``mmap=True`` hands back file-backed ``MAP_PRIVATE`` tensors; ``assign=True``
-    makes those tensors *be* the module's parameters instead of a destination to
-    copy into (the default would allocate fresh storage per child and undo the
-    sharing). Scoring only ever reads them -- the model is in ``eval`` mode under
-    ``inference_mode`` -- so nothing triggers a copy-on-write fault and the pages
-    stay shared for the life of the pod.
-
-    ``mmap=True`` needs a checkpoint in torch's zipfile format (the default since
-    torch 1.6). A checkpoint re-saved in the legacy format would raise, so fall
-    back to a plain load: that child then pays for its own copy, which is the
-    pre-mmap behaviour and strictly better than failing every task.
-    """
-    model = nn.Sequential(
-        nn.Linear(FEATURE_DIM, 1536),
-        nn.GELU(),
-        nn.LayerNorm(1536),
-        nn.Linear(1536, 1536),
-        nn.GELU(),
-        nn.LayerNorm(1536),
-        nn.Linear(1536, 1),
-    )
-    try:
-        ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu", mmap=True)
-        assign = True
-    except (RuntimeError, ValueError) as e:
-        logger.warning(
-            f"Could not memory-map {MODEL_WEIGHTS} ({e}); loading a private copy "
-            "of the weights instead. Every pool child will hold its own."
-        )
-        ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu")
-        assign = False
-    model.load_state_dict(
-        {k.removeprefix("net."): v for k, v in ckpt["model"].items()}, assign=assign
-    )
-    model.eval()
-    return model
-
-
 def _validate_scoring_data(logger) -> None:
     """Fail fast at startup if the data the pool children need is missing.
 
     The children do the actual loading, so without this an empty volume mount or
-    a missing checkpoint would surface only as every task failing individually.
-    The env opened here is closed again immediately -- the parent never scores.
+    an LMDB without a reranker would surface only as every task failing
+    individually. The env opened here is closed again immediately -- the parent
+    never scores.
     """
     env = _open_embeddings()
     try:
-        count, sample = _probe_cache(env)
+        with env.begin() as txn:
+            entries = txn.stat()["entries"]
+            _, found = scorer.load_reranker(txn)
     finally:
         env.close()
-    logger.info(f"embeddings cache: {count} entries (sample key: {sample!r})")
-    if not os.path.exists(MODEL_WEIGHTS):
-        raise RuntimeError(f"model weights not found at {MODEL_WEIGHTS}")
+    logger.info(
+        f"embeddings LMDB: {entries} entries; reranker scores "
+        f"{sorted(found['length_scale'])}-hop paths, biolink "
+        f"{found['biolink_version']}, node context "
+        f"{found['node_context']}, edge context {found['edge_context']}"
+    )
 
 
 def _ensure_scoring_state(logger) -> None:
     """Build this child's scoring state on first use, then reuse it.
 
     Loaded lazily rather than through the pool's ``initializer`` so a failure
-    here (an unreadable LMDB, a corrupt checkpoint) surfaces as an ordinary task
+    here (an unreadable LMDB, a corrupt model) surfaces as an ordinary task
     failure with a traceback, instead of killing the child before it takes any
     work and leaving the pool to rebuild itself in a loop. Each child pays this
     once and amortizes it over ``pool_max_tasks_per_child`` tasks.
 
-    Two of the three are shared across children rather than duplicated: the
-    embeddings LMDB and the model weights are both file-backed mappings, so the
-    OS page cache serves every child from one copy (see ``_open_embeddings`` and
-    ``_build_mlp``). The biolink ``Toolkit`` is live Python objects and so is
-    genuinely per-child -- the one place pool size costs real memory, which is
-    why ``POOL_MAX_WORKERS`` exists for a memory-tight deployment.
+    The embeddings LMDB is a file-backed mapping, so the OS page cache serves
+    every child from one copy (see ``_open_embeddings``). The reranker (about
+    16 MB) and the biolink ``Toolkit`` are per-child -- the one place pool size
+    costs real memory, which is why ``POOL_MAX_WORKERS`` exists for a
+    memory-tight deployment.
     """
-    global bmt, embedding_env, mlp
-    if mlp is not None:
+    global bmt, embedding_env, model, config
+    if model is not None:
         return
     # One intra-op thread per child. The pool is already sized to the pod's CPU
     # allocation, so letting each child spin up a full torch thread pool
     # oversubscribes that quota several times over and the children mostly end
     # up contending with each other.
     torch.set_num_threads(1)
-    bmt = Toolkit()
     embedding_env = _open_embeddings()
-    mlp = _build_mlp(logger)
+    with embedding_env.begin() as txn:
+        model, config = scorer.load_reranker(txn)
+    bmt = scorer.load_toolkit(config)
     logger.debug(f"score_paths child {os.getpid()} loaded its scoring state.")
-
-
-def _score_chunk(rows, index, results):
-    """Score one chunk of feature rows and write the scores onto the analyses.
-
-    The rows are copied straight into a float32 batch rather than stacked as
-    float16 and cast afterwards, so only one array of the batch exists at a
-    time. float16 converts to float32 exactly, so this is the same input the
-    stack-then-cast path produced.
-
-    Returns ``(count, minimum, maximum, total)`` for the chunk, letting the
-    caller keep running statistics for the summary log line without holding
-    every score of a large message in a list.
-    """
-    features = np.empty((len(rows), FEATURE_DIM), dtype=np.float32)
-    for i, row in enumerate(rows):
-        features[i] = row
-    with torch.inference_mode():
-        logits = mlp(torch.from_numpy(features)).squeeze(-1)
-        scores = torch.sigmoid(logits).numpy()
-    for (result_ind, analysis_ind), score in zip(index, scores):
-        results[result_ind]["analyses"][analysis_ind]["score"] = float(score)
-    return (
-        len(scores),
-        float(scores.min()),
-        float(scores.max()),
-        float(scores.sum(dtype=np.float64)),
-    )
 
 
 def score_paths(response_id, logger):
     message = get_message_sync(response_id)
     try:
-        paths = message["message"]["query_graph"]["paths"]
-        results = message["message"]["results"]
-        knowledge_graph = message["message"]["knowledge_graph"]
+        results = message["message"].get("results") or []
         auxiliary_graphs = message["message"].get("auxiliary_graphs") or {}
-        qpath_id, qpath = next(iter(paths.items()))
-        subject_qnode = qpath["subject"]
-        object_qnode = qpath["object"]
-        total_analyses = sum(len(r.get("analyses", [])) for r in results)
+        total_analyses = sum(len(r.get("analyses") or []) for r in results)
         logger.info(
             f"Scoring {response_id}: {len(results)} results, "
             f"{total_analyses} analyses, {len(auxiliary_graphs)} aux graphs"
         )
-        chunk_rows = []
-        chunk_index = []
-        skip_no_binding = 0
-        skip_bad_path = 0
-        skip_missing_emb = 0
-        missing_samples = []
-        # Running totals for the summary lines. Scoring is interleaved with the
-        # feature build now, so the two timings are accumulated separately
-        # rather than measured as consecutive phases.
-        mlp_time = 0.0
-        scored = 0
-        score_min = float("inf")
-        score_max = float("-inf")
-        score_sum = 0.0
-
-        def flush_chunk():
-            """Score the pending rows, write them back, and free the chunk."""
-            nonlocal mlp_time, scored, score_min, score_max, score_sum
-            if not chunk_rows:
-                return
-            started = time.time()
-            count, lowest, highest, total = _score_chunk(
-                chunk_rows, chunk_index, results
-            )
-            mlp_time += time.time() - started
-            scored += count
-            score_min = min(score_min, lowest)
-            score_max = max(score_max, highest)
-            score_sum += total
-            chunk_rows.clear()
-            chunk_index.clear()
-
-        t0 = time.time()
+        started = time.time()
         with embedding_env.begin() as txn:
-            for result_ind, result in enumerate(results):
-                try:
-                    source = result["node_bindings"][subject_qnode][0]["id"]
-                    target = result["node_bindings"][object_qnode][0]["id"]
-                except (KeyError, IndexError, TypeError):
-                    continue
-                analyses = result.get("analyses", [])
-                for analysis_ind, analysis in enumerate(analyses):
-                    path_bindings = analysis.get("path_bindings", {}).get(qpath_id, [])
-                    try:
-                        aux_id = path_bindings[0]["id"]
-                        edge_ids = auxiliary_graphs[aux_id]["edges"]
-                    except (KeyError, IndexError, TypeError):
-                        analysis["score"] = 0.0
-                        skip_no_binding += 1
-                        continue
-                    components = convert_path_to_components(
-                        source, target, edge_ids, knowledge_graph, logger
-                    )
-                    if components is None:
-                        analysis["score"] = 0.0
-                        skip_bad_path += 1
-                        continue
-                    names, cats, hops = components
-                    try:
-                        features = np.concatenate(
-                            [
-                                _lookup(txn, names[0]),
-                                _lookup(txn, cats[0]),
-                                _lookup(txn, hops[0]),
-                                _lookup(txn, names[1]),
-                                _lookup(txn, cats[1]),
-                                _lookup(txn, hops[1]),
-                                _lookup(txn, names[2]),
-                                _lookup(txn, cats[2]),
-                                _lookup(txn, hops[2]),
-                                _lookup(txn, names[3]),
-                                _lookup(txn, cats[3]),
-                            ]
-                        )
-                    except KeyError as e:
-                        key = e.args[0]
-                        if len(missing_samples) < 5 and key not in missing_samples:
-                            missing_samples.append(key)
-                        analysis["score"] = 0.0
-                        skip_missing_emb += 1
-                        continue
-                    chunk_rows.append(features)
-                    chunk_index.append((result_ind, analysis_ind))
-                    if len(chunk_rows) >= SCORE_CHUNK_SIZE:
-                        flush_chunk()
-            flush_chunk()
-        build_time = time.time() - t0 - mlp_time
-        skipped = skip_no_binding + skip_bad_path + skip_missing_emb
-        msg = f"Feature build: {scored}/{total_analyses} ready in {build_time:.1f}s"
+            stats = scorer.score_message(
+                message, txn, model, config, bmt, SCORE_CHUNK_SIZE
+            )
+        elapsed = time.time() - started
+        skipped = (
+            stats["no_binding"]
+            + stats["bad_path"]
+            + stats["no_scale"]
+            + stats["missing"]
+        )
+        msg = (
+            f"Scored {stats['scored']}/{stats['analyses']} analyses in "
+            f"{elapsed:.1f}s ({stats['model_seconds']:.1f}s in the reranker); "
+            f"{stats['direct']} direct"
+        )
         if skipped:
             msg += (
                 f"; skipped {skipped} "
-                f"(no binding: {skip_no_binding}, "
-                f"bad path: {skip_bad_path}, "
-                f"missing embedding: {skip_missing_emb})"
+                f"(no binding: {stats['no_binding']}, "
+                f"bad path: {stats['bad_path']}, "
+                f"no length scale: {stats['no_scale']}, "
+                f"missing embedding: {stats['missing']})"
             )
-            if missing_samples:
-                msg += f"; missing keys e.g. {missing_samples}"
+            if stats["missing_samples"]:
+                msg += f"; missing keys e.g. {stats['missing_samples']}"
         logger.info(msg)
-        if scored:
-            logger.info(
-                f"Scored {scored} paths in {mlp_time:.1f}s; "
-                f"scores [{score_min:.3f}, {score_max:.3f}] "
-                f"mean {score_sum / scored:.3f}"
-            )
-        else:
-            logger.info("No paths to score")
     except Exception as e:
         logger.error(f"Error scoring paths: {e}", exc_info=True)
         for result in message["message"].get("results", []) or []:
-            for analysis in result.get("analyses", []) or []:
+            for analysis in result.get("analyses") or []:
                 analysis.setdefault("score", 0.0)
     for attempt in range(5):
         try:
@@ -482,8 +229,8 @@ async def poll_for_tasks():
     _validate_scoring_data(LOGGER)
     # Size the pool by the pod's actual CPU allocation (cgroup limit), not
     # os.cpu_count() -- see aragorn_omnicorp.poll_for_tasks. Each child holds its
-    # own copy of the MLP plus a full message, so this also bounds peak memory.
-    # POOL_MAX_WORKERS overrides.
+    # own copy of the reranker plus a full message, so this also bounds peak
+    # memory. POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
     LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     pool = ProcessPoolManager(

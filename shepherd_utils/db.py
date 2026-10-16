@@ -224,9 +224,18 @@ def encode_message(obj: Any) -> bytes:
     return zstandard.compress(orjson.dumps(obj))
 
 
+def decompress_frame(blob: bytes) -> bytes:
+    """Decompress a stored blob. A frame that omits its content size (a
+    streaming one, as a callback's sender may post) can't be decompressed in
+    one shot, so it is streamed instead."""
+    if zstandard.frame_content_size(blob) == -1:
+        return decompress_zstd(blob)
+    return zstandard.decompress(blob)
+
+
 def decode_message(blob: bytes) -> Any:
     """Deserialize a stored message blob back into a Python object."""
-    return orjson.loads(zstandard.decompress(blob))
+    return orjson.loads(decompress_frame(blob))
 
 
 class DecompressedTooLargeError(Exception):
@@ -278,6 +287,55 @@ def decompress_zstd(blob: bytes, max_bytes: int = 0) -> bytes:
             )
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+class NotAJSONObjectError(ValueError):
+    """Raised by ``encode_callback_body`` for a body that can't be a TRAPI
+    message: it doesn't start like a JSON object."""
+
+
+def _starts_like_json_object(head: bytes) -> bool:
+    return head.lstrip()[:1] == b"{"
+
+
+def encode_callback_body(
+    body: bytes, zstd_encoded: bool, max_bytes: int = 0
+) -> tuple[bytes, int]:
+    """A callback body as a stored blob, without parsing it.
+
+    Returns ``(blob, decompressed size)``. Parsing a large TRAPI message holds
+    the GIL for seconds, long enough for the server's process supervisor to
+    take a worker for hung and kill it, so the callback route stores the body
+    as it came and leaves parsing to merge_message. A zstd body whose frame
+    carries its content size already is a stored blob; any other body is
+    (re)compressed into one, so ``get_response_size`` can still read its size
+    from the header. zstd releases the GIL throughout, so run this in a thread.
+
+    ``max_bytes`` bounds the decompressed size (0 disables it), raising
+    ``DecompressedTooLargeError``. A body that doesn't start like a JSON
+    object raises ``NotAJSONObjectError``, and a bad zstd frame
+    ``zstandard.ZstdError``; anything wrong further in is merge_message's to
+    find.
+    """
+    if not zstd_encoded:
+        if not _starts_like_json_object(body[:64]):
+            raise NotAJSONObjectError("request body is not a JSON object")
+        return zstandard.compress(body), len(body)
+    size = zstandard.frame_content_size(body)
+    if size == -1:
+        data = decompress_zstd(body, max_bytes)
+        if not _starts_like_json_object(data[:64]):
+            raise NotAJSONObjectError("request body is not a JSON object")
+        return zstandard.compress(data), len(data)
+    if max_bytes > 0 and size > max_bytes:
+        raise DecompressedTooLargeError(
+            f"zstd frame declares {size} decompressed bytes, over the "
+            f"{max_bytes}-byte limit"
+        )
+    head = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read(64)
+    if not _starts_like_json_object(head):
+        raise NotAJSONObjectError("request body is not a JSON object")
+    return body, size
 
 
 # Idempotent DDL applied on every startup. The image's init_db.sql only runs
@@ -531,18 +589,33 @@ async def save_message(
             callers whose success response promises the payload is stored
             (e.g. ARS submit); default keeps the historical swallow-and-log.
     """
+    start_comp = time.time()
+    # a thread: orjson+zstd over a multi-MB message is pure CPU
+    try:
+        compressed = await asyncio.to_thread(encode_message, response)
+    except Exception as e:
+        logger.error(f"Failed to encode a message for redis: {e}")
+        if raise_on_failure:
+            raise
+        return
+    logger.info(f"Compression took {time.time() - start_comp}")
+    await save_encoded_message(
+        callback_id, compressed, logger, num_tries, raise_on_failure
+    )
+
+
+async def save_encoded_message(
+    message_id: str,
+    blob: bytes,
+    logger: logging.Logger,
+    num_tries: int = 0,
+    raise_on_failure: bool = False,
+):
+    """Store an already-encoded message blob, retrying as ``save_message``
+    does."""
     start = time.time()
     try:
-        start_comp = time.time()
-        # a thread: orjson+zstd over a multi-MB message is pure CPU, and the
-        # server's callback path runs this on its event loop
-        compressed = await asyncio.to_thread(encode_message, response)
-        logger.info(f"Compression took {time.time() - start_comp}")
-        await data_db_client.set(
-            callback_id,
-            compressed,
-            ex=settings.redis_ttl,
-        )
+        await data_db_client.set(message_id, blob, ex=settings.redis_ttl)
         logger.debug(f"Saving message took {time.time() - start} seconds")
     except Exception as e:
         # failed to put message in db
@@ -550,8 +623,8 @@ async def save_message(
             num_tries += 1
             logger.warning(f"Failed to save message {num_tries} times. Trying again...")
             await asyncio.sleep(0.5)
-            await save_message(
-                callback_id, response, logger, num_tries, raise_on_failure
+            await save_encoded_message(
+                message_id, blob, logger, num_tries, raise_on_failure
             )
         else:
             logger.error(f"Failed to save a message into redis: {e}")
@@ -667,7 +740,7 @@ async def get_message(
         raise KeyError(f"Failed to get {message_id} from db")
 
     if raw:
-        result = zstandard.decompress(blob)
+        result = decompress_frame(blob)
         logger.debug(f"Getting raw message took {time.time() - start} seconds")
         return result
 

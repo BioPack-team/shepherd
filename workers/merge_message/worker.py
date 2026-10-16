@@ -12,6 +12,9 @@ from concurrent.futures.process import BrokenProcessPool
 from itertools import combinations
 from typing import Any, Optional, Union
 
+import orjson
+import zstandard
+
 from shepherd_utils.broker import (
     add_task,
     mark_task_as_complete,
@@ -49,6 +52,7 @@ from shepherd_utils.response_limit import (
     get_too_large_reason,
 )
 from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
+from shepherd_utils.query_graph_log import summarize_query_graph
 
 # Queue name
 STREAM = "merge_message"
@@ -558,112 +562,13 @@ def merge_messages(
 
         return merged_messages
     elif "paths" in original_query_graph:
-        # Pathfinder query
-        path_id, og_path = next(iter(original_query_graph["paths"].items()))
-        subject_node_id = og_path.get("subject")
-        object_node_id = og_path.get("object")
-        if subject_node_id is None or object_node_id is None:
+        # Pathfinder query: each callback is one of aragorn.pathfinder's edge
+        # lookups, so only the knowledge graph accumulates here. The paths are
+        # built from it once every lookup is in.
+        _, og_path = next(iter(original_query_graph["paths"].items()))
+        if og_path.get("subject") is None or og_path.get("object") is None:
             raise KeyError("Missing either subject or object from path.")
-
-        intermediate_category = None
-        constraints = og_path.get("constraints") or []
-        if len(constraints) > 0:
-            intermediate_categories = (
-                constraints[0].get("intermediate_categories") or []
-            )
-            if len(intermediate_categories) > 0:
-                intermediate_category = intermediate_categories[0]
-
-        kg_nodes = result["message"]["knowledge_graph"].get("nodes", {})
-        kg_edges = result["message"]["knowledge_graph"].get("edges", {})
-
-        aux_counter = 0
-        score = 0
-        analyses = []
-        for new_result in new_response["message"]["results"]:
-            path_edge_ids = set()
-            for analysis in new_result.get("analyses", []):
-                edge_bindings = analysis.get("edge_bindings", {})
-                for qg_edge_key, bindings in edge_bindings.items():
-                    for binding in bindings:
-                        path_edge_ids.add(binding["id"])
-            score = new_result.get("score")
-            if not path_edge_ids:
-                continue
-
-            if (
-                intermediate_category is not None
-                and intermediate_category != "biolink:NamedThing"
-            ):
-                nb = new_result.get("node_bindings", {})
-                pinned_ids = set()
-                for pinned in (subject_node_id, object_node_id):
-                    for binding in nb.get(pinned, []) or []:
-                        pinned_ids.add(binding["id"])
-                intermediate_node_ids = set()
-                for edge_id in path_edge_ids:
-                    edge = kg_edges.get(edge_id)
-                    if edge is None:
-                        continue
-                    for node_id in (edge.get("subject"), edge.get("object")):
-                        if node_id and node_id not in pinned_ids:
-                            intermediate_node_ids.add(node_id)
-                if not any(
-                    intermediate_category
-                    in (kg_nodes.get(nid, {}).get("categories") or [])
-                    for nid in intermediate_node_ids
-                ):
-                    continue
-
-            aux_id = f"a_{aux_counter}"
-            aux_counter += 1
-
-            # Add new aux graph to message
-            result["message"]["auxiliary_graphs"][aux_id] = {
-                "edges": list(path_edge_ids),
-                "attributes": [],
-            }
-
-            analysis = {
-                "resource_id": source,
-                "path_bindings": {path_id: [{"id": aux_id}]},
-            }
-            if score is not None:
-                analysis["score"] = score
-            analyses.append(analysis)
-
-        # --- Resolve the pinned node IDs from any old result's node_bindings ---
-        # (They should all bind the same start/end IDs since they're pinned)
-        if not analyses:
-            result["message"]["results"] = []
-            return result
-
-        start_kg_id = None
-        end_kg_id = None
-        for new_result in new_response["message"]["results"]:
-            nb = new_result.get("node_bindings", {})
-            if subject_node_id in nb and nb[subject_node_id]:
-                start_kg_id = nb[subject_node_id][0]["id"]
-            if object_node_id in nb and nb[object_node_id]:
-                end_kg_id = nb[object_node_id][0]["id"]
-            if start_kg_id and end_kg_id:
-                break
-
-        if not start_kg_id or not end_kg_id:
-            result["message"]["results"] = []
-            return result
-
-        # --- Assemble the single Pathfinder result ---
-        pathfinder_result = {
-            "node_bindings": {
-                subject_node_id: [{"id": start_kg_id, "attributes": []}],
-                object_node_id: [{"id": end_kg_id, "attributes": []}],
-            },
-            "analyses": analyses,
-        }
-
-        result["message"]["results"] = [pathfinder_result]
-
+        result["message"]["results"] = response["message"].get("results") or []
         return result
 
     raise TypeError("Unsupported query type.")
@@ -742,6 +647,48 @@ def take_callback_logs(
 # ---------------------------------------------------------------------------
 
 
+def read_callback_response(
+    callback_id: str, logger: logging.Logger
+) -> Optional[dict[str, Any]]:
+    """A callback's stored payload as a TRAPI response, or None when it is
+    gone or can't be read.
+
+    The callback route stores what was posted without parsing it (a large one
+    would stall the server), so this is where a body that isn't a TRAPI
+    response is found, and where a response missing its results or knowledge
+    graph is given empty ones.
+    """
+    try:
+        response = get_message_sync(callback_id)
+    except KeyError:
+        logger.error(f"Missing callback {callback_id} while folding; skipping.")
+        return None
+    except (orjson.JSONDecodeError, zstandard.ZstdError) as e:
+        logger.error(f"Callback {callback_id} is not valid JSON; skipping. {e}")
+        return None
+    if not isinstance(response, dict):
+        logger.error(f"Callback {callback_id} is not a JSON object; skipping.")
+        return None
+    if not isinstance(response.get("message"), dict):
+        response["message"] = {}
+    message = response["message"]
+    if message.get("results") is None:
+        message["results"] = []
+    if message.get("knowledge_graph") is None:
+        message["knowledge_graph"] = {"nodes": {}, "edges": {}}
+    kgraph = message["knowledge_graph"]
+    logger.info(
+        f"[{callback_id}] Got back {len(message['results'])} results, "
+        f"{len(kgraph.get('nodes') or {})} nodes and "
+        f"{len(kgraph.get('edges') or {})} edges."
+    )
+    logger.debug(
+        f"[{callback_id}] for query graph: "
+        f"{summarize_query_graph(message.get('query_graph'))}"
+    )
+    return response
+
+
 def merge_messages_by_ids(
     target: str,
     query_id: str,
@@ -794,12 +741,8 @@ def merge_messages_by_ids(
         merged: list[str] = []
         callback_log_entries: list[dict] = []
         for callback_id in callback_ids:
-            try:
-                callback_response = get_message_sync(callback_id)
-            except KeyError:
-                worker_logger.error(
-                    f"Missing callback {callback_id} while folding; skipping."
-                )
+            callback_response = read_callback_response(callback_id, worker_logger)
+            if callback_response is None:
                 continue
             callback_log_entries.extend(
                 take_callback_logs(

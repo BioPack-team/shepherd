@@ -22,7 +22,7 @@ from shepherd_utils.db import (
     DecompressedTooLargeError,
     add_query,
     add_ready_callback,
-    decompress_zstd,
+    NotAJSONObjectError,
     get_callback_query_id,
     get_logs,
     get_message,
@@ -30,7 +30,8 @@ from shepherd_utils.db import (
     get_query_state,
     remove_callback_id,
     save_logs,
-    save_message,
+    encode_callback_body,
+    save_encoded_message,
 )
 from shepherd_utils.logger import (
     attach_query_handler,
@@ -649,12 +650,15 @@ async def callback(
             },
             status_code=413,
         )
+    # Stored as it came, never parsed here: parsing a large message holds the
+    # GIL long enough for uvicorn's supervisor to take this worker for hung and
+    # kill it. merge_message parses it. The cap applies to what that has to
+    # hold in memory, so a compressed body is bounded on its decompressed size.
+    zstd_encoded = "zstd" in request.headers.get("content-encoding", "").lower()
     try:
-        if "zstd" in request.headers.get("content-encoding", "").lower():
-            # The cap applies to what we have to hold in memory, so a
-            # compressed body is bounded on its decompressed size too.
-            raw = decompress_zstd(raw, max_bytes)
-        response = orjson.loads(raw)
+        blob, payload_size = await asyncio.to_thread(
+            encode_callback_body, raw, zstd_encoded, max_bytes
+        )
     except DecompressedTooLargeError as e:
         await _fail_query_for_oversized_callback(
             callback_id,
@@ -672,7 +676,7 @@ async def callback(
             },
             status_code=413,
         )
-    except (orjson.JSONDecodeError, zstandard.ZstdError):
+    except (NotAJSONObjectError, zstandard.ZstdError):
         logger.warning(f"Rejecting callback {callback_id}: invalid request body.")
         await _save_callback_error_logs(callback_id, logger)
         return JSONResponse(
@@ -695,30 +699,7 @@ async def callback(
     level_number = await get_query_log_level(original_query[0], logger)
     logger.setLevel(level_number)
     logger.debug(f"Got original query: {original_query}")
-    # logger.info(response)
-    results = response["message"].get("results")
-    if results is None:
-        response["message"]["results"] = []
-    kgraph = response["message"].get("knowledge_graph")
-    if kgraph is None:
-        response["message"]["knowledge_graph"] = {
-            "nodes": {},
-            "edges": {},
-        }
-
-    logger.info(
-        f"[{callback_id}] Got back {len(response['message']['results'])} results."
-    )
-    logger.debug(
-        f"[{callback_id}] for query graph: {response['message'].get('query_graph')}"
-    )
-    # if len(response["message"]["results"]) > 0:
-    #     with open(
-    #         f"shepherd_server/debug/{query_id}_{callback_id}_response.json",
-    #         "w",
-    #         encoding="utf-8",
-    #     ) as f:
-    #         json.dump(response, f, indent=2)
+    logger.info(f"[{callback_id}] Got back a {payload_size}-byte response.")
     query_state = await get_query_state(original_query[0], logger)
     if query_state is None:
         logger.warning(
@@ -735,7 +716,7 @@ async def callback(
         # to) could still record the callback as ready once Redis was back --
         # e.g. across a Redis restart -- and merge_message would then skip it
         # as missing, silently dropping results the sender was told arrived.
-        await save_message(callback_id, response, logger, raise_on_failure=True)
+        await save_encoded_message(callback_id, blob, logger, raise_on_failure=True)
     except Exception:
         logger.error(
             f"[{callback_id}] could not save callback payload after retries; "
@@ -764,12 +745,9 @@ async def callback(
     # adds otel trace to carrier for next worker
     parent_ctx = extract(json.loads(original_query[1]))
     with tracer.start_as_current_span("callback", context=parent_ctx) as span:
-        kgraph = response["message"]["knowledge_graph"]
         span.set_attribute("callback.id", callback_id)
-        span.set_attribute("callback.results", len(response["message"]["results"]))
-        span.set_attribute("callback.kg_nodes", len(kgraph.get("nodes", {})))
-        span.set_attribute("callback.kg_edges", len(kgraph.get("edges", {})))
         span.set_attribute("callback.payload_bytes", len(raw))
+        span.set_attribute("callback.decompressed_bytes", payload_size)
         span_carrier = {}
         inject(span_carrier)
         # add new task to merge callback response into original message
