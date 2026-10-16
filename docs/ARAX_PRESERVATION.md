@@ -109,21 +109,31 @@ upstream suite's `test_ARAX_infer.py` covers the rest with `--arax-live`.
 ## 4. xCRG / MVP2
 
 **What the port does.**
-- **Routing:** the query graph interpreter recognizes an MVP2 query
-  (`is_xcrg_mvp2_query`) and runs `connect(action=xcrg)`, which calls the
-  catrax-xcrg package with Shepherd's Retriever.
+- **Routing:** the query graph interpreter recognizes an inferred MVP2 query
+  (`is_xcrg_mvp2_query`, inferred only) and runs `connect(action=xcrg)`, which
+  calls xCRG with Shepherd's Retriever.
+- **Package:** xCRG is vendored at `shepherd_utils/arax/xcrg/` from
+  Translator-CATRAX/xCRG @ `e67f2c0` and speaks TRAPI 2.0 (DEC-21); see its
+  README for the changes.
 - **Artifacts:** its database artifacts are `curie_ngd` (from the pathfinder
   data) and `curie_to_pmids` (from `ARAX_DBS_DIR`). The transcription-factor
   list ships inside the package.
 - **Cache:** results are cached as in ARAX.
 
 **Tests.**
-- **`mvp2_xcrg_route` (query parity):** a TRAPI MVP2 query runs the real xCRG
-  package against the mock Retriever, with both database artifacts present on
-  both sides (487 transcription factors in 3 batches, 5 results), and matches
-  upstream.
+- **`mvp2_xcrg_route` (query parity):** a TRAPI MVP2 query runs xCRG against
+  the mock Retriever, with both database artifacts present (487 transcription
+  factors in 3 batches, 5 results). It finds upstream's answers with the same
+  bindings, knowledge graph, support graphs and Retriever lookups; the order
+  and scores (xCRG's newer ranker) and the log differ
+  (`test_xcrg_answers_are_upstreams_reranked`).
 - **Upstream's `test_ARAX_xcrg_connect.py`:** 6 tests pass; 2 are xfails for
   DEC-4 (Shepherd's Retriever instead of a per-maturity URL).
+- **`test_xcrg.py`:** Shepherd's changes to the package (query parsing, the
+  Retriever lookups' parameters, both artifact formats, ranking on 2.0's
+  knowledge level and agent type, NaN values, routing), and a run against a
+  fake TRAPI 2.0 Retriever.
+- **`xcrg_suite/`:** xCRG's own unit tests, adapted to TRAPI 2.0.
 - **`test_ARAX_connect.py`:** Shepherd's wiring, the cache and `bypass_cache`.
 - **`test_mock_data.py`:** xCRG reads both mock artifacts.
 
@@ -161,6 +171,10 @@ them (DEC-1):
   bind in one pass, as upstream's NGD does, with the same bindings.
 - **D-29:** clinical info needs cohd.io at query time (curie to OMOP id
   mapping), with no timeout; when cohd.io is down, those overlays fail.
+- **D-30:** a large multi-hop answer with support graphs can leave edges in
+  the KG whose endpoint node Expand pruned, and the next action that reads
+  every edge's endpoints fails (on a three-hop lookup, the Fisher's exact test
+  in its template).
 - **D-26:** `overlay_connect_knodes` fails in Jaccard. The port's E-4 change
   removes the disabled overlay action that made it fail sooner upstream.
 
@@ -169,9 +183,9 @@ them (DEC-1):
 | Feature | What the port does | Cases |
 |---|---|---|
 | "not" (`exclude: true`) | As ARAX (Expand's kryptonite edges) | `araxi_exclude`, `trapi_exclude`, `trapi_optional_and_exclude_mixed`; Expand parity `kryptonite`, `fda_constraint_not` |
-| "any" / "all" (`is_set`, `set_interpretation`, `member_ids`) | As ARAX: accepted and sent to the KP. `member_ids` and a set qnode's categories are not forwarded, upstream included (D-25) | `trapi_set_interpretation_all`, `trapi_set_interpretation_many_and_is_set`, `araxi_is_set_and_option_group` |
+| "any" / "all" (`is_set`, `set_interpretation`, `member_ids`) | As ARAX: accepted and sent to the KP, `set_interpretation` and `member_ids` included; ARAX itself does no set logic, so ALL/MANY are the KP's to answer (Retriever does not support them, D-25). A set qnode's categories are dropped, as for any qnode with ids | `trapi_set_interpretation_all`, `trapi_set_interpretation_many_and_is_set`, `araxi_is_set_and_option_group` |
 | Optional groups | As ARAX, including its crash when a result lacks the optional part (D-27) | `optional_group_query`, `araxi_is_set_and_option_group`, Expand parity `optional_group` |
-| Query by name | ARAXi's `add_qnode(name=...)`, resolved through NameRes. A TRAPI qnode's `name` is not resolved, upstream included (D-25). The UI resolves names itself, through autocomplete and `/entity` | `araxi_create_envelope_and_name`, `araxi_unknown_name`, `trapi_qnode_name`, `dsl_infer_no_qg` |
+| Query by name | ARAXi's `add_qnode(name=...)`, resolved through NameRes. A TRAPI qnode with a `name` and no `ids` is resolved the same way (Shepherd's D-25 fix; upstream ignores the name). The UI resolves names itself, through autocomplete and `/entity` | `araxi_create_envelope_and_name`, `araxi_unknown_name`, `trapi_qnode_name`, `dsl_infer_no_qg` |
 
 ## Needs live services
 
@@ -186,7 +200,7 @@ data files.
    failure lists. See `tests/unit/arax/upstream_suite/README.md`.
 2. **Side by side with production ARAX.** Send the same queries to
    arax.ncats.io and to Shepherd's `/arax`, and compare the answers.
-   `scripts/test_shepherd.py` and `scripts/test_async.py` run queries against
-   Shepherd.
+   `scripts/run_query.py` runs queries against Shepherd (`/query`, or
+   `/asyncquery` with `--async`).
 3. **The UI against a deployed Shepherd.** Point the UI's `config.js` at
    `https://<shepherd>/arax` and route `/rtxcomplete/nodeslike` there.

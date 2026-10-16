@@ -624,10 +624,21 @@ async def save_arax_logs(
     whatever the store holds by then.
     """
     handler = get_query_handler(logger)
+    # The query's parameters.log_level is the task logger's level; ARAX's own
+    # entries honour it as Shepherd's records do (TRAPI 2.0: the least critical
+    # level of logs to return)
+    level = logger.getEffectiveLevel()
+    entries = [entry for entry in entries if log_entry_level(entry) >= level]
     if not entries or handler is None:
         return
     handler.ingest(entries)
     await save_logs(response_id, logger)
+
+
+def log_entry_level(entry: dict) -> int:
+    """A LogEntry's level as a logging level number (an unknown level is kept)."""
+    level = logging.getLevelName(str(entry.get("level") or "").upper())
+    return level if isinstance(level, int) else logging.CRITICAL
 
 
 async def arax(task, logger: logging.Logger, loop=None, pool=None):

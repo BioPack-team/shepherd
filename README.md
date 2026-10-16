@@ -451,4 +451,15 @@ and then run:
 This will run all the tests and then also provide code coverage.
 
 
-If you would like to run local integration tests, run the `scripts/test_shepherd.py` script to run a query against your ARA. Replace the `target` argument with your ARA name so the server routes the query to your worker. This script requires that Shepherd be running locally.
+If you would like to run local integration tests, use `scripts/run_query.py` to send a query to your ARA (or to the ARS) through a running Shepherd. Pick where it goes with a target (`<ara>-<env>`, e.g. `aragorn-local`, or a URL), the query type with `-t`, and the curies with `-c`:
+
+```bash
+python scripts/run_query.py --list                                   # targets, query types, default curies
+python scripts/run_query.py aragorn-local -c MONDO:0005148           # MVP1: what treats type 2 diabetes
+python scripts/run_query.py arax-local -t mvp2-decreased -c NCBIGene:1017
+python scripts/run_query.py aragorn-local -t pathfinder -c "CHEBI:45783~MONDO:0004979"
+python scripts/run_query.py ars-local -t mvp1 --limit 3              # submit to Shepherd's ARS and poll
+python scripts/run_query.py arax-local --async --callback-host 172.17.0.1   # /asyncquery + callback
+```
+
+Responses are saved under `responses/` and timings under `benchmark_metrics.json`; `--help` lists every option.

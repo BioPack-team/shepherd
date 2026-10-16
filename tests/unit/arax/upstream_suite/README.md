@@ -28,9 +28,7 @@ shows exactly what changed. Code that was already broken upstream (the TRAPI
 ARAX itself with no network and no ARAX data files (and all 81 pass on the
 port, adapted to TRAPI 2.0 as above). The rest are skipped because they fail
 offline on upstream too. The two xfails are the port's recorded difference
-DEC-4 (xCRG uses Shepherd's Retriever). With `--arax-live`,
-`test_gene_object_xcrg_full_trapi_integration` is a strict xfail: the
-catrax-xcrg package xCRG runs speaks TRAPI 1.x and has no 2.0 release.
+DEC-4 (xCRG uses Shepherd's Retriever).
 
 ## Against live services (`--arax-live`)
 

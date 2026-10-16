@@ -7,6 +7,9 @@
     python test_arax_queries.py --base http://localhost:5439/arax --workers 4
     python test_arax_queries.py --from-saved --only lookup_two_hop   # re-read saved responses' logs
     python test_arax_queries.py --trace --only wf_overlays           # print each step as it runs
+    python test_arax_queries.py --arax-internal                       # run Shepherd's in-process ARAX
+    python test_arax_queries.py --target arax --base https://arax.ci.transltr.io/api/arax/v1.4
+                                                     # the same cases against a live (TRAPI 1.6) ARAX
 
 Groups: lookup (TRAPI one-hop to three-hop), creative (MVP1 xDTD, MVP2 xCRG,
 pathfinder), flexible (not / any / all / optional groups / constraints),
@@ -33,11 +36,31 @@ docs/ARAX_PORT_BASELINE.md, reproduced by the port on purpose) are expected to
 fail: XFAIL when they do, XPASS when they don't (D-23 only fires when the KP's
 answer includes support-graph edges, so it can XPASS on a small answer).
 
+A local Retriever answers hops fed by more than 300 ids with a 422 unless its
+OPENAPI__X_TRAPI__BATCH_SIZE_LIMIT is raised; the run says so when it sees one.
+
 The curies are real (type 2 diabetes, metformin, PPARG, ...) and are also in
 the seed of shepherd_utils.arax_mock_data, so overlays, Infer and xCRG have data
 with the mock files too. Result counts come from the live Retriever, so a
 "0 results" failure on a lookup can be the KG's answer rather than the port's;
 the saved response (--out) shows which.
+
+--arax-internal sets parameters.arax_internal: true on every query, so Shepherd's
+arax worker runs it in-process (its ARAX port) whatever ARAX_INTERNAL_DEFAULT says;
+without it, a worker on the default legacy path proxies to the remote ARAX
+service, whose TRAPI 1.6 answers fail the 2.0 checks.
+
+--target arax runs the cases against a live ARAX, which still speaks TRAPI
+1.6, to compare it with Shepherd. Each query is sent in its 1.6 form
+(parameters.log_level / bypass_cache become top-level fields and timeout is
+dropped, constraints.qualifiers become qualifier_constraints, constraints.attributes
+attribute_constraints, a QPath's required_intermediate_categories its
+intermediate_categories, set_interpretation COLLATE is_set). Each response is
+checked to be a TRAPI 1.x Response, then raised to 2.0 with translator_tom's
+converter (required for this target) so the same checks read it. Where Shepherd
+deliberately differs from ARAX (a DEC-* decision or a D-* fix), a case carries
+upstream's expectation for this target; cases that only test Shepherd (its 400
+for TRAPI 1.x spellings, the UI's X prefix) are SKIPped.
 
 Every response is saved under --out (default responses/arax-validation/), and
 a summary is written to <out>/summary.json. The exit code is 1 if any case
@@ -48,6 +71,8 @@ querying again.
 """
 
 import argparse
+import copy
+import dataclasses
 import json
 import re
 import sys
@@ -56,6 +81,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -196,6 +222,81 @@ def trapi_2_problems(body: dict, sent: dict) -> list:
     return problems
 
 
+def to_trapi_1_6(body: dict) -> dict:
+    """A TRAPI 2.0 query in its TRAPI 1.6 form, for a live ARAX (--target arax)."""
+    body = copy.deepcopy(body)
+    parameters = body.pop("parameters", None) or {}
+    for key in ("log_level", "bypass_cache"):  # top-level query fields in 1.6
+        if key in parameters:
+            body[key] = parameters.pop(key)
+    parameters.pop("timeout", None)  # 1.6 has no query timeout
+    if parameters:
+        body["parameters"] = parameters
+    query_graph = (body.get("message") or {}).get("query_graph") or {}
+    if (
+        query_graph.get("nodes")
+        and "edges" not in query_graph
+        and "paths" not in query_graph
+    ):
+        query_graph["edges"] = {}  # 1.6's one-node query graph
+    for qnode in (query_graph.get("nodes") or {}).values():
+        if qnode.get("set_interpretation") == "COLLATE":  # 2.0's form of 1.x is_set
+            del qnode["set_interpretation"]
+            qnode["is_set"] = True
+    for key, qedge in (query_graph.get("edges") or {}).items():
+        constraints = qedge.pop("constraints", None) or {}
+        qualifiers = constraints.pop("qualifiers", None)
+        if qualifiers:
+            qedge["qualifier_constraints"] = [
+                {
+                    "qualifier_set": [
+                        {"qualifier_type_id": type_id, "qualifier_value": value}
+                        for type_id, value in qualifier_set.items()
+                    ]
+                }
+                for qualifier_set in qualifiers
+            ]
+        attributes = constraints.pop("attributes", None)
+        if attributes:
+            qedge["attribute_constraints"] = attributes
+        if constraints:
+            raise ValueError(
+                f"qedge {key}: constraints {sorted(constraints)} have no TRAPI 1.6 form"
+            )
+    for qpath in (query_graph.get("paths") or {}).values():
+        for constraint in qpath.get("constraints") or []:
+            if "required_intermediate_categories" in constraint:
+                constraint["intermediate_categories"] = constraint.pop(
+                    "required_intermediate_categories"
+                )
+    return body
+
+
+def trapi_1_problems(body: dict) -> list:
+    """What makes ``body`` not a TRAPI 1.x Response (a live ARAX's)."""
+    problems = []
+    version = str(body.get("schema_version") or "")
+    if not version.startswith("1."):
+        problems.append(f"schema_version {version!r}, not 1.x")
+    if not body.get("biolink_version"):
+        problems.append("no biolink_version")
+    return problems
+
+
+def as_trapi_2(body: dict) -> tuple[dict, list]:
+    """A TRAPI 1.6 response raised to 2.0 (translator_tom's dict converter), so the
+    checks, which read 2.0 shapes, read it; the body itself if it can't be."""
+    from translator_tom import v1_6
+    from translator_tom.v2_0.convert import dict_up_version
+
+    try:
+        return dict_up_version(json.loads(json.dumps(body)), v1_6.Response), []
+    except Exception as e:
+        return body, [
+            f"could not read as TRAPI 1.6: {type(e).__name__}: {str(e)[:200]}"
+        ]
+
+
 def xdtd_predictions(r):
     """MVP1: xDTD's inferred treats edges, with their support graphs."""
     inferred = [e for e in _edges(r) if "probability_treats" in set(_attr_names([e]))]
@@ -267,6 +368,10 @@ class Case:
     after: bool = False  # runs after the query cases (it uses their responses)
     stream: bool = False
     note: str = ""
+    # --target arax: fields that differ for a live (upstream) ARAX, e.g. its
+    # error code where Shepherd deliberately differs; "skip": why the case only
+    # tests Shepherd
+    arax: Optional[dict] = None
 
 
 CASES = []
@@ -389,14 +494,18 @@ case(
             "e2": {"subject": "n2", "object": "n3"},
         },
     ),
+    known_defect="D-30",
     timeout=900,
+    note="a large answer leaves support-graph edges to pruned nodes in the KG, and "
+    "the template's Fisher's exact test fails on them (D-30)",
 )
 case(
     "lookup_single_node",
     "lookup",
-    trapi({"n0": {"ids": [METFORMIN]}}, {}),
-    checks=[log_contains("422")],
-    note="Retriever refuses a query with no edges (422); upstream sends these to rtx-kg2 (DEC-4)",
+    trapi({"n0": {"ids": [METFORMIN]}}),
+    note="TRAPI 2.0's one-node query graph (no edges); it goes to Retriever, where "
+    "upstream sends it to rtx-kg2 (DEC-4)",
+    arax={"min_results": 1, "note": "ARAX answers it from rtx-kg2"},
 )
 case(
     "lookup_kp_list_forwarded",
@@ -554,6 +663,7 @@ case(
     checks=[path_bindings],
     timeout=900,
     note="routed to the arax.pathfinder worker",
+    arax={"note": "ARAX's own pathfinder"},
 )
 case(
     "pathfinder_dsl_connect_nodes",
@@ -671,7 +781,8 @@ case(
         },
         {"e0": {"subject": "n0", "object": "n1"}},
     ),
-    note="member_ids are not forwarded to the KP, as in ARAX (D-25)",
+    note="forwarded to the KP with member_ids, as in ARAX, which does no set logic itself; "
+    "Retriever does not support set queries, so 0 results is its answer (D-25)",
 )
 case(
     "attribute_constraint_fda_approved",
@@ -704,9 +815,17 @@ case(
         },
         {"e0": {"subject": "n1", "object": "n0"}},
     ),
-    http=400,
-    status="QueryGraphNoIds",
-    note="ARAX does not resolve a TRAPI qnode name (D-25)",
+    min_results=1,
+    checks=[log_contains("Resolved QueryGraph node 'n0' name")],
+    note="a TRAPI qnode name is resolved through Name Resolver, as ARAXi's "
+    "add_qnode(name=...) is (Shepherd's D-25 fix; upstream ignores the name)",
+    arax={
+        "http": 400,
+        "status": "QueryGraphNoIds",
+        "min_results": 0,
+        "checks": [],
+        "note": "ARAX ignores a TRAPI qnode name (D-25, fixed in Shepherd)",
+    },
 )
 
 # --- araxi: the DSL ---
@@ -810,7 +929,9 @@ case(
         ]
     ),
     min_results=1,
-    note="COHD values need cohd.io's OMOP ids to be in the COHD file",
+    known_defect="D-29",
+    note="maps curies to OMOP ids with a live call to cohd.io (D-29), so it fails "
+    "where cohd.io is unreachable; the COHD values also need those ids in the COHD file",
 )
 case(
     "dsl_overlay_add_node_pmids",
@@ -1123,13 +1244,15 @@ case(
     status="UnknownQEdgeProperty",
 )
 case(
-    "val_no_edges_or_paths",
+    "val_empty_edges",
     "validation",
-    trapi({"n0": {"ids": [METFORMIN]}}),
+    trapi({"n0": {"ids": [METFORMIN]}}, {}),
     http=400,
     status="ERROR",
-    note="TRAPI 2.0 requires edges or paths: Shepherd's 400, before ARAX's "
-    "MissingQEdgeAndQPath",
+    note="TRAPI 2.0 forbids an empty edges map (a one-node query omits it): Shepherd's 400",
+    arax={
+        "skip": "1.6's form of a one-node query graph (lookup_single_node), not an error"
+    },
 )
 # TRAPI 1.x spellings are rejected by Shepherd with a 400 naming the 2.0 one
 case(
@@ -1138,6 +1261,7 @@ case(
     trapi(ONE_HOP_NODES, ONE_HOP_EDGES, log_level="DEBUG"),
     http=400,
     status="ERROR",
+    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_trapi1_log_level_dsl",
@@ -1145,6 +1269,7 @@ case(
     dsl(BASE_ONE_HOP, log_level="DEBUG"),
     http=400,
     status="ERROR",
+    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_trapi1_qualifier_constraints",
@@ -1155,6 +1280,7 @@ case(
     ),
     http=400,
     status="ERROR",
+    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_trapi1_intermediate_categories",
@@ -1171,6 +1297,7 @@ case(
     ),
     http=400,
     status="ERROR",
+    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_parameters_log_level",
@@ -1179,6 +1306,10 @@ case(
     min_results=1,
     checks=[lambda r: _only_levels(r, {"WARNING", "ERROR"})],
     note="TRAPI 2.0's parameters.log_level",
+    arax={
+        "checks": [],
+        "note": "sent as 1.6's top-level log_level, which ARAX ignores (ORC-05)",
+    },
 )
 case(
     "val_no_pinned_node",
@@ -1259,6 +1390,7 @@ case(
     ),
     after=True,
     note="TRAPI 2.0's parameters.bypass_cache",
+    arax={"note": "sent as 1.6's top-level bypass_cache, which ARAX ignores (ORC-05)"},
 )
 case(
     "message_uris_reuse_a_response",
@@ -1304,6 +1436,14 @@ case(
         and b.get("logs"),
         "a stored response with results, as a TRAPI 2.0 Response with its logs",
     ),
+    arax={
+        "endpoint_check": json_ok(
+            lambda b: (b.get("message") or {}).get("results")
+            and str(b.get("schema_version") or "").startswith("1.")
+            and b.get("logs"),
+            "a stored response with results, as a TRAPI 1.x Response with its logs",
+        )
+    },
 )
 case(
     "endpoint_response_ui_x_prefix",
@@ -1314,6 +1454,7 @@ case(
     endpoint_check=json_ok(
         lambda b: (b.get("message") or {}).get("results"), "the UI's X prefix (DEC-19)"
     ),
+    arax={"skip": "DEC-19 is Shepherd's: ARAX reads an X-prefixed id as an ARS PK"},
 )
 case(
     "endpoint_response_missing",
@@ -1409,6 +1550,8 @@ case(
     "endpoints",
     method="GET",
     path="/rtxcomplete/nodeslike?word=metf&limit=5&callback=cb",
+    # the UI calls it on its own host (Shepherd serves it under /arax)
+    arax={"path": "{origin}/rtxcomplete/nodeslike?word=metf&limit=5&callback=cb"},
     endpoint_check=lambda r: (
         None
         if r.status_code == 200 and r.text.startswith("cb(")
@@ -1435,7 +1578,7 @@ case(
 @dataclass
 class Outcome:
     case: Case
-    verdict: str  # PASS FAIL XFAIL XPASS
+    verdict: str  # PASS FAIL XFAIL XPASS SKIP
     problems: list
     seconds: float
     n_results: Optional[int] = None
@@ -1445,12 +1588,22 @@ class Outcome:
 
 
 def check_query_response(
-    c: Case, http_status: int, body: dict, sent: Optional[dict] = None
+    c: Case,
+    http_status: int,
+    body: dict,
+    sent: Optional[dict] = None,
+    target: str = "shepherd",
 ) -> list:
     problems = []
     if sent is not None and "message" in body:
-        # every response ARAX (or Shepherd) finished is a TRAPI 2.0 Response
-        problems += trapi_2_problems(body, sent)
+        if target == "arax":
+            # a live ARAX answers TRAPI 1.x; the checks read it raised to 2.0
+            problems += trapi_1_problems(body)
+            body, read_problems = as_trapi_2(body)
+            problems += read_problems
+        else:
+            # every response ARAX (or Shepherd) finished is a TRAPI 2.0 Response
+            problems += trapi_2_problems(body, sent)
     if http_status != c.http:
         problems.append(f"HTTP {http_status}, expected {c.http}")
     status = body.get("status")
@@ -1515,16 +1668,15 @@ def read_stream(resp, trace: Optional[str] = None) -> tuple[dict, list]:
 
 
 def problem_log_lines(body: dict, limit: int = 12) -> list:
-    """The WARNING and ERROR lines of a response's log, shortened."""
+    """The ERROR, then WARNING, lines of a response's log, shortened (the errors
+    first: thousands of warnings can come before the one error that matters)."""
     lines = []
-    for entry in body.get("logs") or []:
-        if not isinstance(entry, dict) or entry.get("level") not in (
-            "WARNING",
-            "ERROR",
-        ):
-            continue
-        text = " ".join(str(entry.get("message") or "").split())
-        lines.append(f"{entry['level']}: {text[:400]}")
+    for level in ("ERROR", "WARNING"):
+        for entry in body.get("logs") or []:
+            if not isinstance(entry, dict) or entry.get("level") != level:
+                continue
+            text = " ".join(str(entry.get("message") or "").split())
+            lines.append(f"{level}: {text[:400]}")
     if len(lines) > limit:
         lines = lines[:limit] + [f"... {len(lines) - limit} more in the saved response"]
     return lines
@@ -1548,9 +1700,23 @@ def print_saved_logs(out_dir: Path, cases: list) -> int:
     return 0
 
 
+def for_target(c: Case, target: str) -> Case:
+    """The case as run against ``target``: with its ARAX overrides for a live ARAX."""
+    if target != "arax" or not c.arax:
+        return c
+    overrides = {k: v for k, v in c.arax.items() if k != "skip"}
+    return dataclasses.replace(c, **overrides)
+
+
 class Runner:
-    def __init__(self, base, out_dir, trace=False):
+    def __init__(
+        self, base, out_dir, trace=False, target="shepherd", arax_internal=False
+    ):
         self.base = base.rstrip("/")
+        parts = urlsplit(self.base)
+        self.origin = f"{parts.scheme}://{parts.netloc}"
+        self.target = target  # shepherd (TRAPI 2.0) or arax (a live ARAX, TRAPI 1.6)
+        self.arax_internal = arax_internal  # ask Shepherd for its in-process ARAX
         self.out_dir = out_dir
         self.trace = trace  # stream every query, printing its steps as they run
         self.bodies = {}  # case name -> response body
@@ -1581,11 +1747,17 @@ class Runner:
         stream = c.stream or self.trace
         if stream:
             body = dict(body, stream_progress=True)
-        # How long Shepherd waits for the answer (its default is 360 s); the
-        # client waits a minute longer
-        parameters = dict(body.get("parameters") or {})
-        parameters.setdefault("timeout", c.timeout)
-        body = dict(body, parameters=parameters)
+        sent = body
+        if self.target == "arax":
+            body = to_trapi_1_6(body)
+        else:
+            # How long Shepherd waits for the answer (its default is 360 s); the
+            # client waits a minute longer
+            parameters = dict(body.get("parameters") or {})
+            parameters.setdefault("timeout", c.timeout)
+            if self.arax_internal:
+                parameters["arax_internal"] = True
+            body = sent = dict(body, parameters=parameters)
         start = time.perf_counter()
         problems = []
         try:
@@ -1612,12 +1784,18 @@ class Runner:
         seconds = time.perf_counter() - start
         self.bodies[c.name] = result
         self.save(c.name, result)
-        problems += check_query_response(c, http_status, result, body)
+        problems += check_query_response(c, http_status, result, sent, self.target)
         out = self._outcome(c, problems, seconds)
         out.n_results = len(_msg(result).get("results") or [])
         out.status, out.http = result.get("status"), http_status
         if problems:
             out.log_lines = problem_log_lines(result)
+            if any("ClientResponseError: 422" in line for line in out.log_lines):
+                out.problems.append(
+                    "Retriever refused a hop (HTTP 422): a local Retriever needs "
+                    "OPENAPI__X_TRAPI__BATCH_SIZE_LIMIT above its default of 300 ids per "
+                    "qnode, or every hop fed by a larger first hop is refused"
+                )
         return out
 
     def run_endpoint(self, c: Case) -> Outcome:
@@ -1628,10 +1806,14 @@ class Runner:
             if (rid is None and "{rid}" in path) or (qid is None and "{qid}" in path):
                 return Outcome(c, "FAIL", ["no earlier response to look up"], 0)
             path = path.replace("{rid}", rid or "").replace("{qid}", qid or "")
+        if path.startswith("{origin}"):  # on the API's host, not under its base
+            url = self.origin + path[len("{origin}") :]
+        else:
+            url = f"{self.base}{path}"
         start = time.perf_counter()
         try:
             with httpx.Client(timeout=120) as client:
-                resp = client.request(c.method, f"{self.base}{path}", json=c.json_body)
+                resp = client.request(c.method, url, json=c.json_body)
         except Exception as e:
             return self._outcome(
                 c, [f"{type(e).__name__}: {e}"], time.perf_counter() - start
@@ -1674,6 +1856,9 @@ class Runner:
         return Outcome(c, verdict, problems, seconds)
 
     def run(self, c: Case) -> Outcome:
+        if self.target == "arax" and (c.arax or {}).get("skip"):
+            return Outcome(c, "SKIP", [c.arax["skip"]], 0)
+        c = for_target(c, self.target)
         try:
             return self.run_endpoint(c) if c.method else self.run_query(c)
         except Exception as e:  # one broken case must not stop the run
@@ -1686,8 +1871,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
         "--base",
-        default="http://localhost:5439/arax",
-        help="Shepherd's ARAX API base URL",
+        help="the ARAX API base URL (default: a local Shepherd's, "
+        "http://localhost:5439/arax; required with --target arax)",
+    )
+    parser.add_argument(
+        "--target",
+        choices=("shepherd", "arax"),
+        default="shepherd",
+        help="shepherd: Shepherd's /arax (TRAPI 2.0); arax: a live ARAX (TRAPI 1.6), "
+        "with upstream's expectations where Shepherd deliberately differs",
     )
     parser.add_argument(
         "--only", nargs="+", help="run cases whose name contains any of these"
@@ -1708,7 +1900,30 @@ def main():
         action="store_true",
         help="print the WARNING/ERROR log lines of responses saved in --out, without querying",
     )
+    parser.add_argument(
+        "--arax-internal",
+        action="store_true",
+        help="set parameters.arax_internal: true on every query, so Shepherd runs it "
+        "in-process (its ARAX port) instead of proxying to the remote ARAX service",
+    )
     args = parser.parse_args()
+    if args.arax_internal and args.target == "arax":
+        parser.error(
+            "--arax-internal is a Shepherd option; it means nothing to a live ARAX"
+        )
+    if args.base is None:
+        if args.target == "arax" and not args.list:
+            parser.error(
+                "--target arax needs --base, e.g. https://arax.ci.transltr.io/api/arax/v1.4"
+            )
+        args.base = "http://localhost:5439/arax"
+    if args.target == "arax" and not args.list and not args.from_saved:
+        try:
+            import translator_tom.v2_0.convert  # noqa: F401
+        except ImportError:
+            parser.error(
+                "--target arax needs translator_tom (pip install translator_tom)"
+            )
 
     selected = [
         c
@@ -1721,7 +1936,10 @@ def main():
             print(f"\n{group}")
             for c in CASES:
                 if c.group == group:
+                    skip = (c.arax or {}).get("skip") if args.target == "arax" else None
+                    c = for_target(c, args.target)
                     extra = f"  [{c.known_defect}]" if c.known_defect else ""
+                    extra += f"  [SKIP: {skip}]" if skip else ""
                     print(f"  {c.name}{extra}" + (f"  -- {c.note}" if c.note else ""))
         return 0
 
@@ -1729,11 +1947,19 @@ def main():
     if args.from_saved:
         return print_saved_logs(out_dir, selected)
     out_dir.mkdir(parents=True, exist_ok=True)
-    runner = Runner(args.base, out_dir, trace=args.trace)
+    runner = Runner(
+        args.base,
+        out_dir,
+        trace=args.trace,
+        target=args.target,
+        arax_internal=args.arax_internal,
+    )
     first = [c for c in selected if not c.after]
     later = [c for c in selected if c.after]
     print(
-        f"Running {len(selected)} cases against {args.base} ({args.workers} at a time)\n"
+        f"Running {len(selected)} cases against {args.base} ({args.target}"
+        f"{', in-process ARAX' if args.arax_internal else ''}, "
+        f"{args.workers} at a time)\n"
     )
     start = time.time()
     outcomes = []
@@ -1767,11 +1993,12 @@ def main():
 
     counts = {
         v: sum(o.verdict == v for o in outcomes)
-        for v in ("PASS", "FAIL", "XFAIL", "XPASS")
+        for v in ("PASS", "FAIL", "XFAIL", "XPASS", "SKIP")
     }
     print(
         f"\n{counts['PASS']} passed, {counts['FAIL']} failed, {counts['XFAIL']} known upstream defects "
-        f"(xfail), {counts['XPASS']} xpass in {time.time() - start:.0f}s. Responses are in {out_dir}/"
+        f"(xfail), {counts['XPASS']} xpass, {counts['SKIP']} skipped in {time.time() - start:.0f}s. "
+        f"Responses are in {out_dir}/"
     )
     summary = [
         {

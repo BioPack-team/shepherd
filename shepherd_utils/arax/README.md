@@ -28,6 +28,8 @@ Rules for this directory:
   interface but is backed by Shepherd: `RTXConfiguration.py`,
   `ARAX_query_tracker.py`, `ResponseCache/response_cache.py` and
   `Path_Finder/utility.py`. Their headers say so.
+- **Vendored packages.** `xcrg/` is the xCRG package (catrax-xcrg), vendored
+  and converted to TRAPI 2.0 (DEC-21); see its README.
 
 Parity tests are in `tests/unit/arax/`: `test_expand_parity.py` (Expand) and
 `test_query_parity.py` (whole queries through `ARAXQuery`), each against goldens
