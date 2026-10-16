@@ -3,16 +3,18 @@ run so new developers can spin the stack up locally.
 
 Several workers read from datasets that are far too large to commit to git --
 they're gitignored and volume-mounted from the host (``./omnicorp_lmdb``,
-``./pathfinder_embeddings``, ``./arax_pathfinder_dbs``, ``./arax_dbs``). In
-production these volumes are provisioned out of band, but a developer running
-``docker compose up`` for the first time has empty directories, and the
-workers crash on startup trying to open missing files.
+``./pathfinder_embeddings``, ``./pathfinder_search_graph``,
+``./arax_pathfinder_dbs``, ``./arax_dbs``). In production these volumes are
+provisioned out of band, but a developer running ``docker compose up`` for the
+first time has empty directories, and the workers crash on startup trying to
+open missing files.
 
 Two flavors of HTTP source are supported:
 
 * **Archive** -- a single ``.tar.gz`` fetched via ``urllib`` and extracted in
-  place (``OMNICORP_LMDB_URL`` / ``PATHFINDER_EMBEDDINGS_URL``, used by
-  ``aragorn_omnicorp`` and ``score_paths`` below).
+  place (``OMNICORP_LMDB_URL`` / ``PATHFINDER_EMBEDDINGS_URL`` /
+  ``PATHFINDER_SEARCH_GRAPH_URL``, used by ``aragorn_omnicorp``,
+  ``score_paths`` and ``aragorn_pathfinder`` below).
 * **Per-file** -- individual files fetched directly, no archive/extract step
   (``arax_pathfinder`` below, whose two sqlite databases are served as plain
   files rather than bundled into one archive, plus the ARAX blocked-concept
@@ -311,6 +313,21 @@ def ensure_pathfinder_embeddings(logger: Optional[logging.Logger] = None) -> Non
         target_dir=settings.pathfinder_embeddings_dir,
         required_files=["data.mdb"],
         url=settings.pathfinder_embeddings_url,
+        logger=logger,
+    )
+
+
+def ensure_pathfinder_search_graph(logger: Optional[logging.Logger] = None) -> None:
+    """Ensure the aragorn_pathfinder search graph is present.
+
+    The backbone's pair graph as a CSR plus its node CURIEs in index order,
+    written by squashbert's ``scripts/export_search_graph.py``.
+    """
+    ensure_lmdb_dataset(
+        name="aragorn_pathfinder",
+        target_dir=settings.pathfinder_search_graph_dir,
+        required_files=["offsets.npy", "neighbors.npy", "weights.npy", "nodes.txt"],
+        url=settings.pathfinder_search_graph_url,
         logger=logger,
     )
 

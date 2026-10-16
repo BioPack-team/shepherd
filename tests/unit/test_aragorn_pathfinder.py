@@ -1,8 +1,9 @@
 """Tests for ``workers.aragorn_pathfinder.worker.shadowfax``.
 
-The pathfinder entry point validates the input pathfinder query, builds a
-3-hop expanded query, and delegates to the gandalf stream. We exercise the
-validation paths and the happy path (mocking out postgres + redis).
+The pathfinder entry point validates the input pathfinder query, sends
+one-hop edge lookups to Retriever, waits for their callbacks, and builds the
+paths in a process pool. We exercise the validation paths and the happy path
+(mocking out postgres, redis and the pool).
 """
 
 import json
@@ -10,9 +11,20 @@ import logging
 
 import pytest
 
+from workers.aragorn_pathfinder import worker as pathfinder_worker
 from workers.aragorn_pathfinder.worker import shadowfax
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def pool(mocker):
+    """Stands in for the process pool poll_for_tasks sets up: the path build
+    is not run, only the lookups that feed it."""
+    pool = mocker.Mock()
+    pool.run = mocker.AsyncMock(return_value=[])
+    mocker.patch.object(pathfinder_worker, "POOL", pool)
+    return pool
 
 
 def _make_task(workflow=None):
@@ -50,9 +62,9 @@ def _pathfinder_message(constraints=None):
 
 
 @pytest.mark.asyncio
-async def test_shadowfax_happy_path_dispatches_to_gandalf(redis_mock, mocker):
-    """A valid pathfinder query: callback registered, threehop saved, gandalf
-    task enqueued, polling loop exits when no callbacks remain."""
+async def test_shadowfax_happy_path_builds_paths(redis_mock, mocker, pool):
+    """A valid pathfinder query: callback registered, edge lookup sent, the
+    wait exits when no callbacks remain, and the paths are built in the pool."""
     mocker.patch(
         "workers.aragorn_pathfinder.worker.get_message",
         new_callable=mocker.AsyncMock,
@@ -79,6 +91,7 @@ async def test_shadowfax_happy_path_dispatches_to_gandalf(redis_mock, mocker):
 
     assert mock_add_cb.called
     assert mock_httpx.called
+    pool.run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -131,9 +144,9 @@ async def test_shadowfax_rejects_multiple_intermediate_categories(redis_mock, mo
 
 
 @pytest.mark.asyncio
-async def test_shadowfax_propagates_gandalf_parameters(redis_mock, mocker):
-    """Custom gandalf_parameters in the input should ride along into the
-    saved threehop's parameters."""
+async def test_shadowfax_sends_its_own_lookup_parameters(redis_mock, mocker):
+    """The edge lookups carry the worker's own retrieval parameters (one
+    tier, no tier fallback, dehydrated), not the caller's 3-hop filters."""
     msg = _pathfinder_message()
     msg["parameters"]["filter_config"] = {
         "min_information_content": 1,
@@ -168,15 +181,17 @@ async def test_shadowfax_propagates_gandalf_parameters(redis_mock, mocker):
     args, kwargs = mock_httpx.call_args
 
     query_parameters = kwargs["json"]["parameters"]
-    assert query_parameters["filter_config"]["min_information_content"] == 1
-    assert query_parameters["filter_config"]["max_node_degree"] == 10
+    assert "filter_config" not in query_parameters
+    assert query_parameters["timeout"] == 5
+    assert query_parameters["tier_fallback"] is False
+    assert query_parameters["dehydrated"] is True
 
 
 @pytest.mark.asyncio
 async def test_shadowfax_sends_valid_trapi_2_query(redis_mock, mocker):
     """A 2.0 path constraint (required_intermediate_categories) is accepted,
-    and the expanded 3-hop query sent to Retriever is a valid TRAPI 2.0 query
-    with no top-level log_level."""
+    and the edge lookup sent to Retriever is a valid TRAPI 2.0 query with no
+    top-level log_level."""
     from translator_tom import Query
 
     msg = _pathfinder_message(
@@ -209,5 +224,4 @@ async def test_shadowfax_sends_valid_trapi_2_query(redis_mock, mocker):
 
     sent = mock_httpx.call_args.kwargs["json"]
     assert "log_level" not in sent
-    assert sent["parameters"]["log_level"] == "DEBUG"
     Query.from_dict(sent)

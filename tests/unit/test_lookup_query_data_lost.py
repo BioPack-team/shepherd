@@ -146,6 +146,12 @@ def lookup(request, redis_mock, cleanup, mocker):
         return_value=mocker.Mock(status_code=200),
     )
     mocker.patch.object(module.asyncio, "sleep", new_callable=mocker.AsyncMock)
+    if hasattr(module, "POOL"):
+        # aragorn.pathfinder builds its paths in a process pool that only
+        # poll_for_tasks sets up; the build itself is not under test here.
+        pool = mocker.Mock()
+        pool.run = mocker.AsyncMock(return_value=[])
+        mocker.patch.object(module, "POOL", pool)
     running = mocker.patch.object(
         module,
         "get_running_callbacks",

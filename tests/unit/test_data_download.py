@@ -16,6 +16,7 @@ from shepherd_utils.data_download import (
     ensure_lmdb_dataset,
     ensure_omnicorp_lmdb,
     ensure_pathfinder_embeddings,
+    ensure_pathfinder_search_graph,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,38 @@ def test_ensure_pathfinder_embeddings_wires_settings(tmp_path, mocker):
 
     assert (target / "data.mdb").exists()
     assert (target / "lock.mdb").exists()
+
+
+def test_ensure_pathfinder_search_graph_downloads_the_csr_and_node_list(
+    tmp_path, mocker
+):
+    files = ["offsets.npy", "neighbors.npy", "weights.npy", "nodes.txt"]
+    url = _make_archive(tmp_path, files)
+    target = tmp_path / "pathfinder_search_graph"
+    mocker.patch.object(
+        data_download.settings, "pathfinder_search_graph_dir", str(target)
+    )
+    mocker.patch.object(data_download.settings, "pathfinder_search_graph_url", url)
+
+    ensure_pathfinder_search_graph(logger)
+
+    assert all((target / name).exists() for name in files)
+
+
+def test_ensure_pathfinder_search_graph_needs_every_array_and_the_node_list(
+    tmp_path, mocker
+):
+    """An archive without nodes.txt would leave the worker unable to map its
+    search graph's indices back to CURIEs: it is refused, naming the file."""
+    url = _make_archive(tmp_path, ["offsets.npy", "neighbors.npy", "weights.npy"])
+    target = tmp_path / "pathfinder_search_graph"
+    mocker.patch.object(
+        data_download.settings, "pathfinder_search_graph_dir", str(target)
+    )
+    mocker.patch.object(data_download.settings, "pathfinder_search_graph_url", url)
+
+    with pytest.raises(RuntimeError, match="nodes.txt"):
+        ensure_pathfinder_search_graph(logger)
 
 
 # --- download timeout --------------------------------------------------------
