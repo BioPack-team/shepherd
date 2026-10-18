@@ -163,33 +163,29 @@ def parse_query_graph(qgraph):
     pinned_node_keys = []
     pinned_node_ids = []
     for node_key, node in qgraph["nodes"].items():
-        pinned_node_keys.append(node_key)
+        # Only pinned qnodes, so the keys line up with the ids.
         if node.get("ids", None) is not None:
+            pinned_node_keys.append(node_key)
             pinned_node_ids.append(node["ids"][0])
     if len(set(pinned_node_ids)) != 2:
         raise ValueError("Pathfinder queries require two pinned nodes.")
 
-    intermediate_categories = []
+    intermediate_categories = ["biolink:NamedThing"]
     path_key = next(iter(qgraph["paths"].keys()))
     qpath = qgraph["paths"][path_key]
-    if (
-        qpath.get("constraints", None) is not None
-        and len(qpath.get("constraints", [])) > 0
-    ):
-        constraints = qpath["constraints"]
-        if len(constraints) > 1:
-            raise ValueError("Pathfinder queries do not support multiple constraints.")
-        if len(constraints) > 0:
-            # TRAPI 2.0 renamed PathConstraint.intermediate_categories.
-            intermediate_categories = (
-                constraints[0].get("required_intermediate_categories", None) or []
-            )
-        if len(intermediate_categories) > 1:
+    constraints = qpath.get("constraints", None) or []
+    if len(constraints) > 1:
+        raise ValueError("Pathfinder queries do not support multiple constraints.")
+    if len(constraints) > 0:
+        # TRAPI 2.0 renamed PathConstraint.intermediate_categories. It is
+        # optional on a PathConstraint, so one without it constrains nothing.
+        categories = constraints[0].get("required_intermediate_categories", None) or []
+        if len(categories) > 1:
             raise ValueError(
                 "Pathfinder queries do not support multiple intermediate categories"
             )
-    else:
-        intermediate_categories = ["biolink:NamedThing"]
+        if categories:
+            intermediate_categories = categories
 
     return pinned_node_keys, pinned_node_ids, intermediate_categories
 
@@ -233,7 +229,7 @@ def execute_pathfinding(
     return result, aux_graphs, knowledge_graph
 
 
-def pathfinder_results(result, aux_graphs) -> tuple[list, dict]:
+def pathfinder_results(result, aux_graphs, qpath_key=None) -> tuple[list, dict]:
     """TRAPI 2.0 results and auxiliary graphs from what ``get_paths`` returns.
 
     catrax-pathfinder builds its result in its own (TRAPI 1.x-like) shape:
@@ -247,7 +243,11 @@ def pathfinder_results(result, aux_graphs) -> tuple[list, dict]:
       out (2.0 requires edges), with the path bindings to it; an analysis left
       without path bindings is dropped, and a result left without analyses;
     - ARAX's ``id`` and ``essence`` stay on the Result (additional properties
-      are allowed there, and ARAX's UI reads them).
+      are allowed there, and ARAX's UI reads them);
+    - path bindings are keyed by ``qpath_key``, the query's QPath: PathFinder
+      always binds to a hard-coded ``"p0"``, which a query whose path has
+      another key does not have;
+    - a result without node bindings is dropped (2.0 requires at least one).
     """
     aux_graphs = aux_graphs or {}
     kept_aux_graphs = {
@@ -260,10 +260,12 @@ def pathfinder_results(result, aux_graphs) -> tuple[list, dict]:
     analyses = []
     for analysis in result.get("analyses") or []:
         path_bindings = {}
-        for qpath_key, bindings in (analysis.get("path_bindings") or {}).items():
+        for key, bindings in (analysis.get("path_bindings") or {}).items():
             ids = [b["id"] for b in bindings or [] if b["id"] in kept_aux_graphs]
             if ids:
-                path_bindings[qpath_key] = {"ids": list(dict.fromkeys(ids))}
+                key = qpath_key or key
+                prior = path_bindings.get(key, {}).get("ids", [])
+                path_bindings[key] = {"ids": list(dict.fromkeys(prior + ids))}
         if not path_bindings:
             continue
         trapi_analysis = {
@@ -273,13 +275,13 @@ def pathfinder_results(result, aux_graphs) -> tuple[list, dict]:
         if analysis.get("score") is not None:
             trapi_analysis["score"] = analysis["score"]
         analyses.append(trapi_analysis)
-    if not analyses:
-        return [], kept_aux_graphs
     node_bindings = {
         qnode_key: {"ids": list(dict.fromkeys(b["id"] for b in bindings))}
         for qnode_key, bindings in (result.get("node_bindings") or {}).items()
         if bindings
     }
+    if not analyses or not node_bindings:
+        return [], kept_aux_graphs
     trapi_result = {"node_bindings": node_bindings, "analyses": analyses}
     if result.get("id") is not None:
         trapi_result = {"id": result["id"], **trapi_result}
@@ -349,7 +351,8 @@ def _arax_pathfinder_task(
         raise
 
     with tracer.start_as_current_span("arax_pathfinder.save_response"):
-        res, aux_graphs = pathfinder_results(result, aux_graphs)
+        qpath_key = next(iter(message["message"]["query_graph"]["paths"]))
+        res, aux_graphs = pathfinder_results(result, aux_graphs, qpath_key)
         if not isinstance(knowledge_graph, dict):
             knowledge_graph = {}
         knowledge_graph.setdefault("nodes", {})
