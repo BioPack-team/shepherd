@@ -230,8 +230,10 @@ def edge_lookups(node_paths, source, target, parameters):
     """One-hop lookups for every hop the paths take, and for the direct edge.
 
     Gandalf expands the endpoints to their subclass children: the direct edge,
-    and each endpoint against anything, since pinning the other side would
-    expand that too. The hops between intermediates are exact, pinned in one
+    and each endpoint against the nodes the paths take next to it, with
+    ``subclass_qnodes`` keeping those nodes exact. Against anything, a hub
+    endpoint returns every edge of it and its children. The hops between
+    intermediates are exact, pinned in one
     lookup with every near node on one side and every far node on the other:
     one lookup per hop would be thousands of lookups, each with its callback
     to register and merge. Its ``pairs`` hold gandalf to the hops themselves
@@ -241,8 +243,14 @@ def edge_lookups(node_paths, source, target, parameters):
     """
     lookups = [one_hop([source], [target], parameters, True)]
     if node_paths:
-        lookups.append(one_hop([source], None, parameters, True))
-        lookups.append(one_hop(None, [target], parameters, True))
+        first = sorted({path[1] for path in node_paths})
+        last = sorted({path[-2] for path in node_paths})
+        lookups.append(
+            one_hop([source], first, {**parameters, "subclass_qnodes": ["n0"]}, True)
+        )
+        lookups.append(
+            one_hop(last, [target], {**parameters, "subclass_qnodes": ["n1"]}, True)
+        )
     hops = set()
     for path in node_paths:
         if len(path) > 3:

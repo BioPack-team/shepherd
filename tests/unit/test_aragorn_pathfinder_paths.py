@@ -265,13 +265,17 @@ def test_edge_lookups_cover_every_hop():
 
     lookups = edge_lookups(paths, "S", "T", {"timeout": 5})
 
-    # the endpoints are expanded to their subclasses, against anything
+    # the endpoints are expanded to their subclasses, against the nodes the
+    # paths take next to them, which are kept exact
     assert [query_ids(lookup) for lookup in lookups[:3]] == [
         (["S"], ["T"]),
-        (["S"], None),
-        (None, ["T"]),
+        (["S"], ["A", "D", "M"]),
+        (["B", "C", "M"], ["T"]),
     ]
     assert all(lookup["parameters"]["subclass"] for lookup in lookups[:3])
+    assert "subclass_qnodes" not in lookups[0]["parameters"]
+    assert lookups[1]["parameters"]["subclass_qnodes"] == ["n0"]
+    assert lookups[2]["parameters"]["subclass_qnodes"] == ["n1"]
     # the hops between intermediates are one exact lookup
     assert len(lookups) == 4
     near, far = query_ids(lookups[3])
@@ -294,8 +298,8 @@ def test_edge_lookups_for_two_hop_paths_need_no_interior_lookup():
 
     assert [query_ids(lookup) for lookup in lookups] == [
         (["S"], ["T"]),
-        (["S"], None),
-        (None, ["T"]),
+        (["S"], ["M", "N"]),
+        (["M", "N"], ["T"]),
     ]
 
 
@@ -648,8 +652,8 @@ async def test_shadowfax_searches_the_backbone(redis_mock, mocker, graph_dir):
     assert sorted(sent, key=str) == sorted(
         [
             (["X:S"], ["X:T"]),
-            (["X:S"], None),
-            (None, ["X:T"]),
+            (["X:S"], ["X:A", "X:M"]),
+            (["X:B", "X:M"], ["X:T"]),
             (["X:A"], ["X:B"]),
         ],
         key=str,
@@ -667,7 +671,7 @@ async def test_shadowfax_searches_the_backbone(redis_mock, mocker, graph_dir):
 async def test_shadowfax_on_the_backbone_sends_valid_lookups_and_builds_the_paths(
     redis_mock, mocker, graph_dir
 ):
-    """Every lookup a query on the backbone sends -- the open endpoint lookups
+    """Every lookup a query on the backbone sends -- the endpoint lookups
     and the interior one pinning many ids -- is a valid TRAPI 2.0 query with
     the worker's parameters and its own callback, and once they are merged
     the paths are built and saved."""
@@ -683,7 +687,7 @@ async def test_shadowfax_on_the_backbone_sends_valid_lookups_and_builds_the_path
         parameters = {
             k: v
             for k, v in lookup["parameters"].items()
-            if k not in ("subclass", "pairs")
+            if k not in ("subclass", "pairs", "subclass_qnodes")
         }
         assert parameters == {
             "timeout": 5,
