@@ -277,10 +277,16 @@ def test_edge_lookups_cover_every_hop():
     near, far = query_ids(lookups[3])
     assert near == ["A", "C", "D"]
     assert far == ["B", "M"]
-    assert lookups[3]["parameters"] == {"timeout": 5, "subclass": False}
-    pairs = set(itertools.product(near, far))
-    for u, v in [("A", "B"), ("A", "M"), ("C", "M"), ("D", "M")]:
-        assert (u, v) in pairs
+    # held to the hops the paths take, not every near and far combination
+    assert lookups[3]["parameters"] == {
+        "timeout": 5,
+        "subclass": False,
+        "pairs": [["A", "B"], ["A", "M"], ["C", "M"], ["D", "M"]],
+    }
+    for u, v in lookups[3]["parameters"]["pairs"]:
+        assert u in near and v in far
+    # the endpoint lookups are not restricted to pairs
+    assert all("pairs" not in lookup["parameters"] for lookup in lookups[:3])
 
 
 def test_edge_lookups_for_two_hop_paths_need_no_interior_lookup():
@@ -674,13 +680,23 @@ async def test_shadowfax_on_the_backbone_sends_valid_lookups_and_builds_the_path
     for lookup in lookups:
         AsyncQuery.from_dict(lookup)
         assert "log_level" not in lookup
-        parameters = {k: v for k, v in lookup["parameters"].items() if k != "subclass"}
+        parameters = {
+            k: v
+            for k, v in lookup["parameters"].items()
+            if k not in ("subclass", "pairs")
+        }
         assert parameters == {
             "timeout": 5,
             "tiers": [settings.default_data_tier],
             "tier_fallback": False,
             "dehydrated": True,
+            "kg_only": True,
         }
+    assert [
+        lookup["parameters"]["pairs"]
+        for lookup in lookups
+        if "pairs" in lookup["parameters"]
+    ] == [[["X:A", "X:B"]]]
     assert add_callback.await_count == len(lookups)
     callbacks = {lookup["callback"] for lookup in lookups}
     assert len(callbacks) == len(lookups)
