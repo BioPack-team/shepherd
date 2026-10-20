@@ -200,8 +200,8 @@ class Settings(BaseSettings):
     omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.lmdb"
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
 
-    pathfinder_embeddings_dir: str = "pathfinder_embeddings"
-    pathfinder_search_graph_dir: str = "pathfinder_search_graph"
+    pathfinder_embeddings_dir: str = "/app/pathfinder_embeddings"
+    pathfinder_search_graph_dir: str = "/app/pathfinder_search_graph"
 
     # First-run data downloads for local docker compose development. When set,
     # the worker fetches a ``.tar.gz`` from this URL on startup (if the LMDB
