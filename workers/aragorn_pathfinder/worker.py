@@ -553,7 +553,7 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         "dehydrated": True,
         # the paths are built from the knowledge graph alone, and merging
         # drops a lookup's results anyway
-        "kg_only": True,
+        "exclude_results": True,
     }
 
     node_paths = []

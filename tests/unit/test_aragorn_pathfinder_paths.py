@@ -694,7 +694,7 @@ async def test_shadowfax_on_the_backbone_sends_valid_lookups_and_builds_the_path
             "tiers": [settings.default_data_tier],
             "tier_fallback": False,
             "dehydrated": True,
-            "kg_only": True,
+            "exclude_results": True,
         }
     assert [
         lookup["parameters"]["pairs"]
