@@ -121,6 +121,7 @@ def rehydrate(kg, rehydrate_url, logger):
     payload = {
         "message": {"knowledge_graph": kg},
         "parameters": {"rehydrate": True, "tier": 0},
+        "submitter": f"arax-pathfinder@{settings.server_maturity}",
     }
 
     try:
@@ -203,6 +204,7 @@ def execute_pathfinding(
         blocked_curies,
         blocked_synonyms,
         logger,
+        settings.server_maturity,
     )
 
     descendants = get_descendants(intermediate_categories[0])
