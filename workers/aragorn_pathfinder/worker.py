@@ -230,17 +230,27 @@ def edge_lookups(node_paths, source, target, parameters):
     """One-hop lookups for every hop the paths take, and for the direct edge.
 
     Gandalf expands the endpoints to their subclass children: the direct edge,
-    and each endpoint against anything, since pinning the other side would
-    expand that too. The hops between intermediates are exact, pinned in one
+    and each endpoint against the nodes the paths take next to it, with
+    ``subclass_qnodes`` keeping those nodes exact. Against anything, a hub
+    endpoint returns every edge of it and its children. The hops between
+    intermediates are exact, pinned in one
     lookup with every near node on one side and every far node on the other:
     one lookup per hop would be thousands of lookups, each with its callback
-    to register and merge. It also returns the edges between the other pairs,
-    which no path uses and the orphan filter drops.
+    to register and merge. Its ``pairs`` hold gandalf to the hops themselves
+    rather than the edges between every near and every far node; a server
+    that ignores them returns those too, which no path uses and the orphan
+    filter drops.
     """
     lookups = [one_hop([source], [target], parameters, True)]
     if node_paths:
-        lookups.append(one_hop([source], None, parameters, True))
-        lookups.append(one_hop(None, [target], parameters, True))
+        first = sorted({path[1] for path in node_paths})
+        last = sorted({path[-2] for path in node_paths})
+        lookups.append(
+            one_hop([source], first, {**parameters, "subclass_qnodes": ["n0"]}, True)
+        )
+        lookups.append(
+            one_hop(last, [target], {**parameters, "subclass_qnodes": ["n1"]}, True)
+        )
     hops = set()
     for path in node_paths:
         if len(path) > 3:
@@ -250,7 +260,8 @@ def edge_lookups(node_paths, source, target, parameters):
     if hops:
         near = sorted({u for u, _ in hops})
         far = sorted({v for _, v in hops})
-        lookups.append(one_hop(near, far, parameters, False))
+        pairs = [list(hop) for hop in sorted(hops)]
+        lookups.append(one_hop(near, far, {**parameters, "pairs": pairs}, False))
     return lookups
 
 
@@ -540,6 +551,9 @@ async def shadowfax(task, logger: logging.Logger) -> str:
         # tier 1 would expand every pinned node and cannot dehydrate
         "tier_fallback": False,
         "dehydrated": True,
+        # the paths are built from the knowledge graph alone, and merging
+        # drops a lookup's results anyway
+        "exclude_results": True,
     }
 
     node_paths = []
