@@ -163,32 +163,29 @@ def parse_query_graph(qgraph):
     pinned_node_keys = []
     pinned_node_ids = []
     for node_key, node in qgraph["nodes"].items():
-        pinned_node_keys.append(node_key)
+        # Only pinned qnodes, so the keys line up with the ids.
         if node.get("ids", None) is not None:
+            pinned_node_keys.append(node_key)
             pinned_node_ids.append(node["ids"][0])
     if len(set(pinned_node_ids)) != 2:
         raise ValueError("Pathfinder queries require two pinned nodes.")
 
-    intermediate_categories = []
+    intermediate_categories = ["biolink:NamedThing"]
     path_key = next(iter(qgraph["paths"].keys()))
     qpath = qgraph["paths"][path_key]
-    if (
-        qpath.get("constraints", None) is not None
-        and len(qpath.get("constraints", [])) > 0
-    ):
-        constraints = qpath["constraints"]
-        if len(constraints) > 1:
-            raise ValueError("Pathfinder queries do not support multiple constraints.")
-        if len(constraints) > 0:
-            intermediate_categories = (
-                constraints[0].get("intermediate_categories", None) or []
-            )
-        if len(intermediate_categories) > 1:
+    constraints = qpath.get("constraints", None) or []
+    if len(constraints) > 1:
+        raise ValueError("Pathfinder queries do not support multiple constraints.")
+    if len(constraints) > 0:
+        # intermediate_categories is optional on a PathConstraint, so one
+        # without it constrains nothing.
+        categories = constraints[0].get("intermediate_categories", None) or []
+        if len(categories) > 1:
             raise ValueError(
                 "Pathfinder queries do not support multiple intermediate categories"
             )
-    else:
-        intermediate_categories = ["biolink:NamedThing"]
+        if categories:
+            intermediate_categories = categories
 
     return pinned_node_keys, pinned_node_ids, intermediate_categories
 
@@ -230,6 +227,21 @@ def execute_pathfinding(
     logger.info(f"pathfinder.get_paths() finished in {elapsed:.3f} seconds")
 
     return result, aux_graphs, knowledge_graph
+
+
+def rekey_path_bindings(result, qpath_key):
+    """PathFinder binds every path to a hard-coded ``"p0"``; bind them to the
+    query's own QPath key instead, which a query whose path has another key
+    needs."""
+    for analysis in result.get("analyses") or []:
+        path_bindings = analysis.get("path_bindings") or {}
+        bindings = []
+        for key_bindings in path_bindings.values():
+            for binding in key_bindings or []:
+                if binding not in bindings:
+                    bindings.append(binding)
+        analysis["path_bindings"] = {qpath_key: bindings} if bindings else {}
+    return result
 
 
 def arax_pathfinder_task(
@@ -296,6 +308,8 @@ def _arax_pathfinder_task(
     with tracer.start_as_current_span("arax_pathfinder.save_response"):
         res = []
         if result is not None:
+            qpath_key = next(iter(message["message"]["query_graph"]["paths"]))
+            rekey_path_bindings(result, qpath_key)
             res.append(
                 {
                     "id": result["id"],

@@ -270,3 +270,46 @@ def test_descendants_are_memoized_per_child(mocker):
     assert first == second == {"biolink:Gene", "biolink:Protein"}
     helper_cls.assert_called_once()
     helper.get_descendants.assert_called_once_with("biolink:NamedThing")
+
+
+def _pathfinder_qgraph(constraints=None, unpinned_first=False):
+    nodes = {"n0": {"ids": ["A:1"]}, "n1": {"ids": ["B:1"]}}
+    if unpinned_first:
+        nodes = {"x": {"categories": ["biolink:Gene"]}, **nodes}
+    path = {"subject": "n0", "object": "n1"}
+    if constraints is not None:
+        path["constraints"] = constraints
+    return {"nodes": nodes, "paths": {"path": path}}
+
+
+def test_parse_query_graph_keys_line_up_with_the_pinned_ids():
+    keys, ids, _ = pf_worker.parse_query_graph(_pathfinder_qgraph(unpinned_first=True))
+    assert keys == ["n0", "n1"]
+    assert ids == ["A:1", "B:1"]
+
+
+@pytest.mark.parametrize(
+    "constraints, expected",
+    [
+        (None, ["biolink:NamedThing"]),
+        ([{}], ["biolink:NamedThing"]),
+        ([{"intermediate_categories": ["biolink:Gene"]}], ["biolink:Gene"]),
+    ],
+)
+def test_parse_query_graph_intermediate_categories(constraints, expected):
+    _, _, categories = pf_worker.parse_query_graph(_pathfinder_qgraph(constraints))
+    assert categories == expected
+
+
+def test_rekey_path_bindings_binds_the_querys_path():
+    result = {
+        "analyses": [
+            {"path_bindings": {"p0": [{"id": "a1"}, {"id": "a2"}]}},
+            {"path_bindings": {}},
+        ]
+    }
+    pf_worker.rekey_path_bindings(result, "path")
+    assert result["analyses"][0]["path_bindings"] == {
+        "path": [{"id": "a1"}, {"id": "a2"}]
+    }
+    assert result["analyses"][1]["path_bindings"] == {}

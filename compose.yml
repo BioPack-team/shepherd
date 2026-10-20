@@ -347,6 +347,7 @@ services:
       # the worker downloads + extracts the search graph into this mount on
       # startup (see README "Worker data (LMDB / sqlite) downloads").
       - ./pathfinder_search_graph:/app/pathfinder_search_graph
+      - ./pathfinder_embeddings:/app/pathfinder_embeddings
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
     platform: linux/amd64
