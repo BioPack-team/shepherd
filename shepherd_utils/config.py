@@ -135,7 +135,6 @@ class Settings(BaseSettings):
     # parameters.arax_internal itself: false sends it to arax_url, true runs it
     # in-process.
     arax_internal_default: bool = False
-    arax_biolink_version: str = "v4.2.5"
     # Where the ARAX port's BiolinkHelper caches the Biolink model and its
     # lookup map (must be writable; upstream writes next to its own source
     # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so

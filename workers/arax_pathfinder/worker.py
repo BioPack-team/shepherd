@@ -26,6 +26,7 @@ from shepherd_utils.db import (
     get_message_sync,
     save_response_sync,
 )
+from shepherd_utils.trapi import BIOLINK_VERSION
 from shepherd_utils.inject_shepherd_arax_provenance import (
     add_shepherd_arax_to_edge_sources,
 )
@@ -103,9 +104,7 @@ def get_descendants(category: str):
     if category not in _descendants_cache:
         if _biolink_helper is None:
             Path(BIOLINK_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-            _biolink_helper = BiolinkHelper(
-                settings.arax_biolink_version, BIOLINK_CACHE_DIR
-            )
+            _biolink_helper = BiolinkHelper(BIOLINK_VERSION, BIOLINK_CACHE_DIR)
         _descendants_cache[category] = set(_biolink_helper.get_descendants(category))
     return _descendants_cache[category]
 
