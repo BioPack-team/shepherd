@@ -104,9 +104,7 @@ def get_descendants(category: str):
     if category not in _descendants_cache:
         if _biolink_helper is None:
             Path(BIOLINK_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-            _biolink_helper = BiolinkHelper(
-                BIOLINK_VERSION, BIOLINK_CACHE_DIR
-            )
+            _biolink_helper = BiolinkHelper(BIOLINK_VERSION, BIOLINK_CACHE_DIR)
         _descendants_cache[category] = set(_biolink_helper.get_descendants(category))
     return _descendants_cache[category]
 
