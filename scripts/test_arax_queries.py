@@ -1644,7 +1644,7 @@ class Runner:
         parameters.setdefault("timeout", c.timeout)
         if self.arax_internal:
             parameters["arax_internal"] = True
-        body = dict(body, parameters=parameters)
+        body = sent = dict(body, parameters=parameters)
         start = time.perf_counter()
         problems = []
         try:
