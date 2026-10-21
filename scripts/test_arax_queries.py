@@ -9,13 +9,13 @@
     python test_arax_queries.py --trace --only wf_overlays           # print each step as it runs
     python test_arax_queries.py --arax-internal                       # run Shepherd's in-process ARAX
     python test_arax_queries.py --target arax --base https://arax.ci.transltr.io/api/arax/v1.4
-                                                     # the same cases against a live (TRAPI 1.6) ARAX
+                                                     # the same cases against a live ARAX
 
 Groups: lookup (TRAPI one-hop to three-hop), creative (MVP1 xDTD, MVP2 xCRG,
 pathfinder), flexible (not / any / all / optional groups / constraints),
 araxi (the DSL: every command and the overlay, filter_kg and filter_results
 actions), workflows (TRAPI workflow operations, as the CQS sends them),
-validation (the errors ARAX answers, and Shepherd's 400 for a body that is not
+validation (the errors ARAX answers, and the 400 for a body that is not
 TRAPI 2.0 -- a 1.x spelling such as a top-level log_level or
 qualifier_constraints), delivery (streaming, the KP cache,
 message_uris), endpoints (/response, /status, /entity, /meta_knowledge_graph,
@@ -48,19 +48,13 @@ the saved response (--out) shows which.
 --arax-internal sets parameters.arax_internal: true on every query, so Shepherd's
 arax worker runs it in-process (its ARAX port) whatever ARAX_INTERNAL_DEFAULT says;
 without it, a worker on the default legacy path proxies to the remote ARAX
-service, whose TRAPI 1.6 answers fail the 2.0 checks.
+service.
 
---target arax runs the cases against a live ARAX, which still speaks TRAPI
-1.6, to compare it with Shepherd. Each query is sent in its 1.6 form
-(parameters.log_level / bypass_cache become top-level fields and timeout is
-dropped, constraints.qualifiers become qualifier_constraints, constraints.attributes
-attribute_constraints, a QPath's required_intermediate_categories its
-intermediate_categories, set_interpretation COLLATE is_set). Each response is
-checked to be a TRAPI 1.x Response, then raised to 2.0 with translator_tom's
-converter (required for this target) so the same checks read it. Where Shepherd
-deliberately differs from ARAX (a DEC-* decision or a D-* fix), a case carries
-upstream's expectation for this target; cases that only test Shepherd (its 400
-for TRAPI 1.x spellings, the UI's X prefix) are SKIPped.
+--target arax runs the cases against a live ARAX, to compare it with Shepherd.
+ARAX speaks TRAPI 2.0 too, so the same queries are sent and the same TRAPI 2.0
+checks read its responses. Where Shepherd deliberately differs from ARAX (a
+DEC-* decision or a D-* fix), a case carries upstream's expectation for this
+target; cases that only test Shepherd (the UI's X prefix) are SKIPped.
 
 Every response is saved under --out (default responses/arax-validation/), and
 a summary is written to <out>/summary.json. The exit code is 1 if any case
@@ -71,7 +65,6 @@ querying again.
 """
 
 import argparse
-import copy
 import dataclasses
 import json
 import re
@@ -220,81 +213,6 @@ def trapi_2_problems(body: dict, sent: dict) -> list:
     except Exception as e:
         problems.append(f"not a valid TOM 2.0 Response: {str(e)[:300]}")
     return problems
-
-
-def to_trapi_1_6(body: dict) -> dict:
-    """A TRAPI 2.0 query in its TRAPI 1.6 form, for a live ARAX (--target arax)."""
-    body = copy.deepcopy(body)
-    parameters = body.pop("parameters", None) or {}
-    for key in ("log_level", "bypass_cache"):  # top-level query fields in 1.6
-        if key in parameters:
-            body[key] = parameters.pop(key)
-    parameters.pop("timeout", None)  # 1.6 has no query timeout
-    if parameters:
-        body["parameters"] = parameters
-    query_graph = (body.get("message") or {}).get("query_graph") or {}
-    if (
-        query_graph.get("nodes")
-        and "edges" not in query_graph
-        and "paths" not in query_graph
-    ):
-        query_graph["edges"] = {}  # 1.6's one-node query graph
-    for qnode in (query_graph.get("nodes") or {}).values():
-        if qnode.get("set_interpretation") == "COLLATE":  # 2.0's form of 1.x is_set
-            del qnode["set_interpretation"]
-            qnode["is_set"] = True
-    for key, qedge in (query_graph.get("edges") or {}).items():
-        constraints = qedge.pop("constraints", None) or {}
-        qualifiers = constraints.pop("qualifiers", None)
-        if qualifiers:
-            qedge["qualifier_constraints"] = [
-                {
-                    "qualifier_set": [
-                        {"qualifier_type_id": type_id, "qualifier_value": value}
-                        for type_id, value in qualifier_set.items()
-                    ]
-                }
-                for qualifier_set in qualifiers
-            ]
-        attributes = constraints.pop("attributes", None)
-        if attributes:
-            qedge["attribute_constraints"] = attributes
-        if constraints:
-            raise ValueError(
-                f"qedge {key}: constraints {sorted(constraints)} have no TRAPI 1.6 form"
-            )
-    for qpath in (query_graph.get("paths") or {}).values():
-        for constraint in qpath.get("constraints") or []:
-            if "required_intermediate_categories" in constraint:
-                constraint["intermediate_categories"] = constraint.pop(
-                    "required_intermediate_categories"
-                )
-    return body
-
-
-def trapi_1_problems(body: dict) -> list:
-    """What makes ``body`` not a TRAPI 1.x Response (a live ARAX's)."""
-    problems = []
-    version = str(body.get("schema_version") or "")
-    if not version.startswith("1."):
-        problems.append(f"schema_version {version!r}, not 1.x")
-    if not body.get("biolink_version"):
-        problems.append("no biolink_version")
-    return problems
-
-
-def as_trapi_2(body: dict) -> tuple[dict, list]:
-    """A TRAPI 1.6 response raised to 2.0 (translator_tom's dict converter), so the
-    checks, which read 2.0 shapes, read it; the body itself if it can't be."""
-    from translator_tom import v1_6
-    from translator_tom.v2_0.convert import dict_up_version
-
-    try:
-        return dict_up_version(json.loads(json.dumps(body)), v1_6.Response), []
-    except Exception as e:
-        return body, [
-            f"could not read as TRAPI 1.6: {type(e).__name__}: {str(e)[:200]}"
-        ]
 
 
 def xdtd_predictions(r):
@@ -1250,18 +1168,14 @@ case(
     http=400,
     status="ERROR",
     note="TRAPI 2.0 forbids an empty edges map (a one-node query omits it): Shepherd's 400",
-    arax={
-        "skip": "1.6's form of a one-node query graph (lookup_single_node), not an error"
-    },
 )
-# TRAPI 1.x spellings are rejected by Shepherd with a 400 naming the 2.0 one
+# TRAPI 1.x spellings are rejected with a 400 naming the 2.0 one
 case(
     "val_trapi1_log_level",
     "validation",
     trapi(ONE_HOP_NODES, ONE_HOP_EDGES, log_level="DEBUG"),
     http=400,
     status="ERROR",
-    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_trapi1_log_level_dsl",
@@ -1269,7 +1183,6 @@ case(
     dsl(BASE_ONE_HOP, log_level="DEBUG"),
     http=400,
     status="ERROR",
-    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_trapi1_qualifier_constraints",
@@ -1280,7 +1193,6 @@ case(
     ),
     http=400,
     status="ERROR",
-    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_trapi1_intermediate_categories",
@@ -1297,7 +1209,6 @@ case(
     ),
     http=400,
     status="ERROR",
-    arax={"skip": "tests Shepherd's 400 for a TRAPI 1.x spelling; ARAX speaks 1.6"},
 )
 case(
     "val_parameters_log_level",
@@ -1306,10 +1217,6 @@ case(
     min_results=1,
     checks=[lambda r: _only_levels(r, {"WARNING", "ERROR"})],
     note="TRAPI 2.0's parameters.log_level",
-    arax={
-        "checks": [],
-        "note": "sent as 1.6's top-level log_level, which ARAX ignores (ORC-05)",
-    },
 )
 case(
     "val_no_pinned_node",
@@ -1390,7 +1297,6 @@ case(
     ),
     after=True,
     note="TRAPI 2.0's parameters.bypass_cache",
-    arax={"note": "sent as 1.6's top-level bypass_cache, which ARAX ignores (ORC-05)"},
 )
 case(
     "message_uris_reuse_a_response",
@@ -1436,14 +1342,6 @@ case(
         and b.get("logs"),
         "a stored response with results, as a TRAPI 2.0 Response with its logs",
     ),
-    arax={
-        "endpoint_check": json_ok(
-            lambda b: (b.get("message") or {}).get("results")
-            and str(b.get("schema_version") or "").startswith("1.")
-            and b.get("logs"),
-            "a stored response with results, as a TRAPI 1.x Response with its logs",
-        )
-    },
 )
 case(
     "endpoint_response_ui_x_prefix",
@@ -1592,18 +1490,11 @@ def check_query_response(
     http_status: int,
     body: dict,
     sent: Optional[dict] = None,
-    target: str = "shepherd",
 ) -> list:
     problems = []
     if sent is not None and "message" in body:
-        if target == "arax":
-            # a live ARAX answers TRAPI 1.x; the checks read it raised to 2.0
-            problems += trapi_1_problems(body)
-            body, read_problems = as_trapi_2(body)
-            problems += read_problems
-        else:
-            # every response ARAX (or Shepherd) finished is a TRAPI 2.0 Response
-            problems += trapi_2_problems(body, sent)
+        # every response ARAX (or Shepherd) finished is a TRAPI 2.0 Response
+        problems += trapi_2_problems(body, sent)
     if http_status != c.http:
         problems.append(f"HTTP {http_status}, expected {c.http}")
     status = body.get("status")
@@ -1715,7 +1606,7 @@ class Runner:
         self.base = base.rstrip("/")
         parts = urlsplit(self.base)
         self.origin = f"{parts.scheme}://{parts.netloc}"
-        self.target = target  # shepherd (TRAPI 2.0) or arax (a live ARAX, TRAPI 1.6)
+        self.target = target  # shepherd (Shepherd's /arax) or arax (a live ARAX)
         self.arax_internal = arax_internal  # ask Shepherd for its in-process ARAX
         self.out_dir = out_dir
         self.trace = trace  # stream every query, printing its steps as they run
@@ -1747,17 +1638,13 @@ class Runner:
         stream = c.stream or self.trace
         if stream:
             body = dict(body, stream_progress=True)
-        sent = body
-        if self.target == "arax":
-            body = to_trapi_1_6(body)
-        else:
-            # How long Shepherd waits for the answer (its default is 360 s); the
-            # client waits a minute longer
-            parameters = dict(body.get("parameters") or {})
-            parameters.setdefault("timeout", c.timeout)
-            if self.arax_internal:
-                parameters["arax_internal"] = True
-            body = sent = dict(body, parameters=parameters)
+        # How long the service waits for the answer (Shepherd's default is 360 s);
+        # the client waits a minute longer
+        parameters = dict(body.get("parameters") or {})
+        parameters.setdefault("timeout", c.timeout)
+        if self.arax_internal:
+            parameters["arax_internal"] = True
+        body = dict(body, parameters=parameters)
         start = time.perf_counter()
         problems = []
         try:
@@ -1784,7 +1671,7 @@ class Runner:
         seconds = time.perf_counter() - start
         self.bodies[c.name] = result
         self.save(c.name, result)
-        problems += check_query_response(c, http_status, result, sent, self.target)
+        problems += check_query_response(c, http_status, result, sent)
         out = self._outcome(c, problems, seconds)
         out.n_results = len(_msg(result).get("results") or [])
         out.status, out.http = result.get("status"), http_status
@@ -1878,8 +1765,8 @@ def main():
         "--target",
         choices=("shepherd", "arax"),
         default="shepherd",
-        help="shepherd: Shepherd's /arax (TRAPI 2.0); arax: a live ARAX (TRAPI 1.6), "
-        "with upstream's expectations where Shepherd deliberately differs",
+        help="shepherd: Shepherd's /arax; arax: a live ARAX, with upstream's "
+        "expectations where Shepherd deliberately differs (both TRAPI 2.0)",
     )
     parser.add_argument(
         "--only", nargs="+", help="run cases whose name contains any of these"
@@ -1917,13 +1804,6 @@ def main():
                 "--target arax needs --base, e.g. https://arax.ci.transltr.io/api/arax/v1.4"
             )
         args.base = "http://localhost:5439/arax"
-    if args.target == "arax" and not args.list and not args.from_saved:
-        try:
-            import translator_tom.v2_0.convert  # noqa: F401
-        except ImportError:
-            parser.error(
-                "--target arax needs translator_tom (pip install translator_tom)"
-            )
 
     selected = [
         c

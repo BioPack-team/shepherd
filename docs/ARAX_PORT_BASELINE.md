@@ -100,8 +100,9 @@ What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
    qnode, or every hop fed by a larger first hop is refused with a 422; the
    shared Translator Retrievers run the default. The side-by-side comparison
    with a live ARAX is still to do: `scripts/test_arax_queries.py --target arax --base <ARAX's
-   /api/arax/v1.4>` runs the same cases against it, sent as TRAPI 1.6, with upstream's
-   expectations where Shepherd deliberately differs.
+   API base>` runs the same cases against it (both speak TRAPI 2.0, so the same
+   queries and checks apply), with upstream's expectations where Shepherd
+   deliberately differs.
 3. **Build and deploy.** The `arax` worker and server images have not been built
    (the install steps were checked in fresh environments). The `arax` worker's
    resources were sized for the old proxy (1 CPU, 3 GB, so one query at a
