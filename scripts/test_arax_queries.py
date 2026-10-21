@@ -1677,6 +1677,10 @@ class Runner:
         out.status, out.http = result.get("status"), http_status
         if problems:
             out.log_lines = problem_log_lines(result)
+            if "message" not in result and "logs" not in result:
+                # not a TRAPI Response (a server error page, a validation error):
+                # the body itself says why
+                out.log_lines.append(f"body: {json.dumps(result)[:600]}")
             if any("ClientResponseError: 422" in line for line in out.log_lines):
                 out.problems.append(
                     "Retriever refused a hop (HTTP 422): a local Retriever needs "
