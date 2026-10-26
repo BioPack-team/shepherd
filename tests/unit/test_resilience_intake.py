@@ -42,8 +42,11 @@ def _curie_query(curie: str) -> dict:
                     "n1": {"categories": ["biolink:Gene"]},
                 },
                 "edges": {
-                    "e01": {"subject": "n0", "object": "n1",
-                            "predicates": ["biolink:related_to"]},
+                    "e01": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:related_to"],
+                    },
                 },
             }
         },
@@ -92,8 +95,11 @@ _NOT_VALID_JSON = {
 @pytest.mark.parametrize("path", ["/query", "/asyncquery"])
 def test_unparseable_bodies_return_422(name, path, client_factory):
     client, captured = client_factory()
-    resp = client.post(path, content=_NOT_VALID_JSON[name],
-                        headers={"content-type": "application/json"})
+    resp = client.post(
+        path,
+        content=_NOT_VALID_JSON[name],
+        headers={"content-type": "application/json"},
+    )
     assert resp.status_code == 422, (name, resp.text)
     assert "not valid JSON" in resp.json()["description"]
     assert captured == {}
@@ -102,8 +108,11 @@ def test_unparseable_bodies_return_422(name, path, client_factory):
 def test_double_encoded_json_is_a_non_object_422(client_factory):
     """A JSON *string* that contains the JSON parses to a str, not an object."""
     client, captured = client_factory()
-    resp = client.post("/query", content=json.dumps(json.dumps(VALID)).encode(),
-                       headers={"content-type": "application/json"})
+    resp = client.post(
+        "/query",
+        content=json.dumps(json.dumps(VALID)).encode(),
+        headers={"content-type": "application/json"},
+    )
     assert resp.status_code == 422
     assert "expected a JSON object" in resp.json()["description"]
     assert captured == {}
@@ -119,8 +128,10 @@ _SCHEMA_INVALID = {
     # Query wrapped in an extra envelope.
     "extra_envelope": ({"query": VALID}, "message"),
     # Empty query graph.
-    "empty_graph": ({"message": {"query_graph": {"nodes": {}, "edges": {}}}},
-                    "query_graph has no nodes"),
+    "empty_graph": (
+        {"message": {"query_graph": {"nodes": {}, "edges": {}}}},
+        "query_graph has no nodes",
+    ),
 }
 
 
@@ -141,16 +152,27 @@ def test_mixed_trapi_version_rejects_the_retired_1x_field(client_factory):
     2.0 replacement, before intake."""
     client, captured = client_factory()
     body = {
-        "message": {"query_graph": {
-            "nodes": {"n0": {"ids": ["NCBIGene:1017"]}, "n1": {}, "n2": {}},
-            "edges": {
-                "e01": {"subject": "n0", "object": "n1",
-                        "constraints": {"qualifiers": [
-                            {"biolink:object_direction_qualifier": "increased"}]}},
-                "e02": {"subject": "n1", "object": "n2",
-                        "qualifier_constraints": [{"qualifier_set": []}]},
-            },
-        }},
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["NCBIGene:1017"]}, "n1": {}, "n2": {}},
+                "edges": {
+                    "e01": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "constraints": {
+                            "qualifiers": [
+                                {"biolink:object_direction_qualifier": "increased"}
+                            ]
+                        },
+                    },
+                    "e02": {
+                        "subject": "n1",
+                        "object": "n2",
+                        "qualifier_constraints": [{"qualifier_set": []}],
+                    },
+                },
+            }
+        },
         "parameters": {"log_level": "INFO"},
     }
     resp = client.post("/query", json=body)
@@ -170,21 +192,39 @@ _ACCEPTED_BUT_WEIRD = {
     "disease_name_as_curie": _curie_query("type 2 diabetes mellitus"),
     "hallucinated_prefix": _curie_query("DISEASE:diabetes"),
     "curie_category_mismatch": {
-        "message": {"query_graph": {
-            "nodes": {"n0": {"ids": ["CHEBI:15365"], "categories": ["biolink:Gene"]},
-                      "n1": {"categories": ["biolink:Gene"]}},
-            "edges": {"e01": {"subject": "n0", "object": "n1",
-                              "predicates": ["biolink:related_to"]}},
-        }},
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["CHEBI:15365"], "categories": ["biolink:Gene"]},
+                    "n1": {"categories": ["biolink:Gene"]},
+                },
+                "edges": {
+                    "e01": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:related_to"],
+                    }
+                },
+            }
+        },
         "parameters": {"log_level": "INFO"},
     },
     "hallucinated_predicate": {
-        "message": {"query_graph": {
-            "nodes": {"n0": {"ids": ["MONDO:0005148"]},
-                      "n1": {"categories": ["biolink:Drug"]}},
-            "edges": {"e01": {"subject": "n1", "object": "n0",
-                              "predicates": ["biolink:TreatsDisease"]}},
-        }},
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["MONDO:0005148"]},
+                    "n1": {"categories": ["biolink:Drug"]},
+                },
+                "edges": {
+                    "e01": {
+                        "subject": "n1",
+                        "object": "n0",
+                        "predicates": ["biolink:TreatsDisease"],
+                    }
+                },
+            }
+        },
         "parameters": {"log_level": "INFO"},
     },
 }
@@ -210,7 +250,9 @@ def test_injection_shaped_curie_is_passed_through_as_inert_data(client_factory):
     body = dict(_curie_query(hostile), callback="http://callback/1")
     resp = client.post("/asyncquery", json=body)
     assert resp.status_code == 200
-    assert captured["query"]["message"]["query_graph"]["nodes"]["n0"]["ids"] == [hostile]
+    assert captured["query"]["message"]["query_graph"]["nodes"]["n0"]["ids"] == [
+        hostile
+    ]
 
 
 def test_unknown_agent_fields_currently_pass_through(client_factory):
