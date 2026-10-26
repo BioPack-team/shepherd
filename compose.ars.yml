@@ -1,0 +1,86 @@
+# Translator ARS (hosted port of NCATSTranslator/Relay) -- opt-in.
+#
+# Not started by a plain `docker compose up`. Layer it on top of the base
+# stack when you need the ARS:
+#
+#   docker compose -f compose.yml -f compose.ars.yml up --build
+#
+# These services depend on shepherd_db / shepherd_broker from compose.yml, so
+# this file is an overlay and can't be run on its own. Resource limits for
+# local testing live in compose.ars.test.yml.
+
+services:
+  ars_fanout:
+    container_name: ars_fanout
+    build:
+      context: .
+      dockerfile: workers/ars_fanout/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_premerge:
+    container_name: ars_premerge
+    build:
+      context: .
+      dockerfile: workers/ars_premerge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_merge:
+    container_name: ars_merge
+    build:
+      context: .
+      dockerfile: workers/ars_merge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_watchdog:
+    container_name: ars_watchdog
+    build:
+      context: .
+      dockerfile: workers/ars_watchdog/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_notify:
+    container_name: ars_notify
+    build:
+      context: .
+      dockerfile: workers/ars_notify/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
