@@ -271,10 +271,32 @@ L9. **Status-poll storm** — hot-loop GET on `/asyncquery_status/{id}` (the cla
 L10. **Orphaned async** — `/asyncquery` with a hallucinated callback host that never
     resolves. Accepted at intake, but `finish_query` can't deliver → watch delivery
     retries/timeouts and whether failed deliveries pile up.
+L11. **Abandon-and-poll** (combined flow) — POST `/asyncquery` with a callback never
+    served, then hot-poll `/asyncquery_status/{job_id}` for the job that will never be
+    delivered. The full realistic agent failure. Does the abandoned query hold a
+    DB-poller or a pending callback for its whole timeout while the client hammers
+    status? Watch the PG pool and the pending-callback count.
+L12. **Mixed TRAPI version** — a Frankenstein query with 2.0 `constraints` on one edge
+    and retired 1.x `qualifier_constraints` on another (an LLM trained on both). Confirm
+    the retired-field check catches the 1.x half and none slips through unfiltered.
+L13. **Semantic contradiction** — schema-valid but nonsensical: a chemical curie
+    (`CHEBI:…`) pinned under `categories=[biolink:Gene]`. Confirm a worker doesn't choke
+    on the contradiction; a clean empty result is fine.
 
 **Mitigation angle:** clear, structured, stable error messages (so agents self-correct);
 a sane unknown-field policy; and per-client rate limiting so a retry loop is capped. This
 is the category the weekend incident most resembles, so it is worth the most attention.
+
+### N. Encoding / charset games
+
+Front door: `POST /{ara}/query`. An agent's serialization layer misbehaves. All should
+decode correctly or reject cleanly — never crash the parser.
+
+N1. **BOM-prefixed** — a UTF-8 BOM before the JSON. Handled or cleanly rejected.
+N2. **UTF-16 body** — the server parses with orjson (UTF-8 only), so this should be a
+    clean 422, not a decode crash.
+N3. **Double-encoded** — a JSON *string* that itself contains the JSON. Parses to a
+    `str`, not an object → `QueryBodyError` 422, confirmed not a downstream `.get()` 500.
 
 ### M. Prompt-injection-shaped data (inert-data hygiene)
 
@@ -338,11 +360,11 @@ read/callback (§D)**, and **callback-URL SSRF (§E.19)**.
 ## 5. Sequencing
 
 1. Stand up Test with the overlay; confirm observability.
-2. Run A (malformed), K (hostile identifiers), L (LLM-agent traffic), and
-   M (injection-shaped data) — fast, safe, mostly intake-level; fix any 500s /
-   crashes / injections first, and note any error message too vague for an agent to
-   self-correct from (that is a finding in category L). Only `agent.orphaned-async`
-   is heavy here; the rest are cheap.
+2. Run A (malformed), K (hostile identifiers), L (LLM-agent traffic),
+   M (injection-shaped data), and N (encoding) — fast, safe, mostly intake-level; fix
+   any 500s / crashes / injections first, and note any error message too vague for an
+   agent to self-correct from (that is a finding in category L). Only
+   `agent.orphaned-async` and `agent.abandon-and-poll` are heavy here; the rest are cheap.
 3. Run D + E at low volume (enumeration, SSRF) — cheap requests, high-value findings.
 4. Run B (oversized/structural) single-shot, watching the event loop.
 5. Run the expensive-pipeline categories last and most carefully, with caps,

@@ -1001,6 +1001,97 @@ def build_probes(cfg: RunConfig) -> list[Probe]:
         ),
     ]
 
+    # ---- Agent additions: version mixing, semantic nonsense, abandon ---
+    probes += [
+        Probe(
+            "agent.mixed-trapi-version", "agent", "POST", "/query",
+            "Frankenstein query: 2.0 constraints on one edge, retired 1.x "
+            "qualifier_constraints on another",
+            expect={400}, signal=(
+                "an LLM trained on both TRAPI versions mixes them. The retired-"
+                "field check should catch the 1.x half -- confirm none slips "
+                "through silently unfiltered."
+            ),
+            json_body={
+                "message": {"query_graph": {
+                    "nodes": {"n0": {"ids": ["NCBIGene:1017"]},
+                              "n1": {"categories": ["biolink:ChemicalEntity"]},
+                              "n2": {"categories": ["biolink:Disease"]}},
+                    "edges": {
+                        "e01": {"subject": "n0", "object": "n1",
+                                "constraints": {"qualifiers": [
+                                    {"biolink:object_direction_qualifier": "increased"}]}},
+                        "e02": {"subject": "n1", "object": "n2",
+                                "qualifier_constraints": [{"qualifier_set": []}]},
+                    },
+                }},
+                "parameters": {"log_level": "INFO"},
+            },
+        ),
+        Probe(
+            "agent.curie-category-mismatch", "agent", "POST", "/query",
+            "Schema-valid but contradictory: a chemical curie typed as a Gene",
+            expect={200, 400, 422}, signal=(
+                "CHEBI (a chemical) pinned under categories=[biolink:Gene]. Valid "
+                "shape, nonsense semantics -- confirm a worker doesn't choke on "
+                "the contradiction; clean empty result is fine."
+            ),
+            json_body={
+                "message": {"query_graph": {
+                    "nodes": {"n0": {"ids": ["CHEBI:15365"], "categories": ["biolink:Gene"]},
+                              "n1": {"categories": ["biolink:Gene"]}},
+                    "edges": {"e01": {"subject": "n0", "object": "n1",
+                                      "predicates": ["biolink:related_to"]}},
+                }},
+                "parameters": {"log_level": "INFO"},
+            },
+        ),
+        Probe(
+            "agent.abandon-and-poll", "agent", "POST", "/asyncquery",
+            "POST async, never serve the callback, then hot-poll the status",
+            expect={200}, signal=(
+                "the full realistic agent failure. Does the abandoned query hold "
+                "a DB-poller or a pending callback for its whole timeout while the "
+                "client hammers status? Watch the PG pool and pending-callback "
+                "count. (polls = min(--flood-count, 20))"
+            ),
+            heavy=True,
+            json_body={**VALID_QUERY,
+                       "callback": "https://example.invalid/never-served"},
+        ),
+    ]
+
+    # ---- N. Encoding / charset games -----------------------------------
+    # An agent's serialization layer misbehaves: BOM, wrong charset, or
+    # double-encoding. All should be rejected cleanly (or decoded correctly),
+    # never crash the parser.
+    probes += [
+        Probe(
+            "encoding.bom-prefixed", "encoding", "POST", "/query",
+            "UTF-8 BOM prefixed before the JSON",
+            expect={200, 400, 422}, signal="BOM handled or cleanly rejected, not a 500",
+            raw_body=b"\xef\xbb\xbf" + json.dumps(VALID_QUERY).encode(),
+            headers={"content-type": "application/json"},
+        ),
+        Probe(
+            "encoding.utf16", "encoding", "POST", "/query",
+            "Body encoded as UTF-16 (parser expects UTF-8)",
+            expect={400, 422}, signal="clean 422, not a decode crash",
+            raw_body=json.dumps(VALID_QUERY).encode("utf-16"),
+            headers={"content-type": "application/json; charset=utf-16"},
+        ),
+        Probe(
+            "encoding.double-encoded", "encoding", "POST", "/query",
+            "A JSON string that itself contains the JSON (double-encoded)",
+            expect={422}, signal=(
+                "parses to a str, not an object -> QueryBodyError 'expected a "
+                "JSON object'. Confirm the clean 422, not a downstream .get() 500."
+            ),
+            raw_body=json.dumps(json.dumps(VALID_QUERY)).encode(),
+            headers={"content-type": "application/json"},
+        ),
+    ]
+
     # ---- M. Prompt-injection-shaped data -------------------------------
     # Shepherd's logs and responses increasingly get fed to OTHER LLMs
     # downstream. Confirm injection-shaped text in query fields is treated as
@@ -1269,6 +1360,58 @@ async def _run_repeated(
     return results
 
 
+async def _run_abandon_poll(
+    client: httpx.AsyncClient, cfg: RunConfig, probe: Probe, polls: int
+) -> list[Result]:
+    """The realistic agent failure: POST /asyncquery, never serve the callback,
+    then hot-poll /asyncquery_status for the job that will never be delivered.
+
+    Combines orphaned-async and poll-storm into one flow. Watch whether the
+    abandoned query holds resources (a DB-poller or a pending callback) for its
+    whole timeout while the client hammers the status endpoint.
+    """
+    results: list[Result] = []
+    url = _probe_url(cfg, probe)
+    body = json.dumps(probe.json_body).encode()
+    t0 = time.perf_counter()
+    try:
+        resp = await client.post(
+            url, content=body, headers={"content-type": "application/json"}
+        )
+        results.append(
+            Result(probe, resp.status_code, (time.perf_counter() - t0) * 1000,
+                   resp.text[:200].replace("\n", " "))
+        )
+        job_id = None
+        try:
+            job_id = resp.json().get("job_id")
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as e:  # noqa: BLE001
+        results.append(Result(probe, None, (time.perf_counter() - t0) * 1000, "",
+                              error=f"{type(e).__name__}: {e}"))
+        return results
+    if not job_id:
+        return results
+    status_path = f"/asyncquery_status/{job_id}"
+    status_url = f"{cfg.base_url.rstrip('/')}/{cfg.ara}{status_path}"
+    poll_probe = Probe(
+        "agent.abandon-and-poll:status", "agent", "GET", status_path,
+        "hot-poll of the abandoned job", set(), "status reads for a job never delivered",
+    )
+    for _ in range(polls):
+        t = time.perf_counter()
+        try:
+            r = await client.get(status_url)
+            results.append(Result(poll_probe, r.status_code,
+                                  (time.perf_counter() - t) * 1000,
+                                  r.text[:120].replace("\n", " ")))
+        except Exception as e:  # noqa: BLE001
+            results.append(Result(poll_probe, None, (time.perf_counter() - t) * 1000,
+                                  "", error=f"{type(e).__name__}: {e}"))
+    return results
+
+
 def _fmt_result(r: Result) -> str:
     held = r.held
     mark = {True: "PASS", False: "FAIL", None: "LOOK"}[held]
@@ -1328,6 +1471,8 @@ async def run(cfg: RunConfig, args) -> int:
                 batch = await _run_repeated(
                     client, cfg, p, cfg.flood_count, args.concurrency
                 )
+            elif p.id == "agent.abandon-and-poll":
+                batch = await _run_abandon_poll(client, cfg, p, min(cfg.flood_count, 20))
             elif p.category == "cache":
                 # Sequential on purpose: a cached repeat can only be a hit once
                 # the first has finished and written the cache.
@@ -1403,7 +1548,7 @@ def parse_args(argv=None):
                    help="allow a target host not in the built-in Test allowlist")
     p.add_argument("--only", help="comma-separated categories: malformed,oversized,"
                    "exhaust,overbroad,topology,cache,constraints,identifier,agent,"
-                   "injection,enum,ssrf,surface")
+                   "encoding,injection,enum,ssrf,surface")
     p.add_argument("--case", help="comma-separated specific probe ids")
     p.add_argument("--list", action="store_true", help="list selected probes and exit")
     p.add_argument("--dry-run", action="store_true",
