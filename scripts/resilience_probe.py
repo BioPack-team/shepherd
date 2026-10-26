@@ -641,14 +641,16 @@ def build_probes(cfg: RunConfig) -> list[Probe]:
         ),
         Probe(
             "oversized.lying-content-length", "oversized", "POST", "/query",
-            "Honest small body, Content-Length header claims huge",
-            expect={400, 422, 200, 504}, signal=(
-                "server must not trust the header; /query path has no "
-                "_read_body_within_limit guard (that's callback-only)"
+            "Honest small body, Content-Length header claims huge (raw socket)",
+            expect={400, 408, 413, 422, 431}, signal=(
+                "sent via a raw socket (httpx refuses to). The server must not "
+                "trust the header and block waiting for bytes that never arrive: "
+                "a clean 4xx is safe, an ERR(TIMEOUT ...) is a slowloris-style "
+                "finding. /query has no _read_body_within_limit guard (callback-only)."
             ),
             heavy=True,
             raw_body=json.dumps(VALID_QUERY).encode(),
-            headers={"content-type": "application/json", "content-length": "999999999"},
+            headers={"content-type": "application/json"},
         ),
     ]
 
@@ -1360,6 +1362,71 @@ async def _run_repeated(
     return results
 
 
+def _send_raw_lying_content_length(
+    cfg: RunConfig, probe: Probe, declared: int = 999_999_999, timeout: float = 10.0
+) -> Result:
+    """Send a request whose Content-Length lies (declares far more than the body
+    carries), using a raw socket.
+
+    httpx/h11 refuse to send this (they validate the body against the declared
+    length on the client), so a raw socket is the only way to actually put it in
+    front of the server. The question: does the server trust the header and
+    block waiting for bytes that never come (a slowloris-style worker tie-up), or
+    does it bound/validate the read? A clean 4xx is the safe outcome; a hang
+    until our socket timeout is the finding.
+
+    HTTP only -- for a localhost/Test target that is all we need; a raw TLS
+    handshake is out of scope here.
+    """
+    url = _probe_url(cfg, probe)
+    u = urlparse(url)
+    if u.scheme != "http":
+        return Result(probe, None, 0.0, "",
+                      error="raw lying-content-length probe supports http:// only")
+    host = u.hostname or "127.0.0.1"
+    port = u.port or 80
+    path = u.path or "/"
+    body = probe.raw_body if probe.raw_body is not None else b"{}"
+    request = (
+        f"POST {path} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Content-Length: {declared}\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode() + body
+    start = time.perf_counter()
+    sock = None
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.sendall(request)
+        sock.settimeout(timeout)
+        data = b""
+        while len(data) < 2048:
+            chunk = sock.recv(2048)
+            if not chunk:
+                break
+            data += chunk
+        elapsed = (time.perf_counter() - start) * 1000
+        if not data:
+            return Result(probe, None, elapsed, "",
+                          error="connection closed with no response")
+        first_line = data.split(b"\r\n", 1)[0].decode("latin1")
+        parts = first_line.split()
+        status = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+        return Result(probe, status, elapsed, first_line[:120])
+    except socket.timeout:
+        elapsed = (time.perf_counter() - start) * 1000
+        return Result(probe, None, elapsed, "",
+                      error="TIMEOUT: server waited for the declared Content-Length "
+                      "(possible slowloris-style worker tie-up)")
+    except Exception as e:  # noqa: BLE001
+        return Result(probe, None, (time.perf_counter() - start) * 1000, "",
+                      error=f"{type(e).__name__}: {e}")
+    finally:
+        if sock is not None:
+            sock.close()
+
+
 async def _run_abandon_poll(
     client: httpx.AsyncClient, cfg: RunConfig, probe: Probe, polls: int
 ) -> list[Result]:
@@ -1471,6 +1538,10 @@ async def run(cfg: RunConfig, args) -> int:
                 batch = await _run_repeated(
                     client, cfg, p, cfg.flood_count, args.concurrency
                 )
+            elif p.id == "oversized.lying-content-length":
+                # Can't go through httpx (h11 validates Content-Length client
+                # side), so this one talks to the socket directly.
+                batch = [_send_raw_lying_content_length(cfg, p)]
             elif p.id == "agent.abandon-and-poll":
                 batch = await _run_abandon_poll(client, cfg, p, min(cfg.flood_count, 20))
             elif p.category == "cache":
