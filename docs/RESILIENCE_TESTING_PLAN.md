@@ -19,7 +19,8 @@ own.
   "quick check" can't accidentally become a real DoS of our own Test cluster.
 - **Observability on.** Before each run, confirm we can see: the monitor worker,
   OTEL traces, server `EVENT_LOOP_LAG` / `PG_SLOW` logs, `docker stats` (CPU/RSS vs
-  the `compose.test.yml` limits), Redis stream depth, and Postgres pool/connection
+  the per-service `cpus` / `mem_limit` in `compose.yml`), Redis stream depth, and
+  Postgres pool/connection
   counts. The point is not "did it 500" — it's "what did it cost us and did we
   recover."
 - **One variable at a time, then combine.** Run each category in isolation first
@@ -27,15 +28,18 @@ own.
 
 ## 1. Bring up Test the way Prod behaves
 
-`compose.test.yml` exists precisely for this — it applies the cgroup CPU quota and
-`mem_limit`s so pool sizing, OOM-kill, and recovery actually reproduce locally:
+`compose.yml` now carries each service's prod-matching `cpus` / `mem_limit` by
+default (the old `compose.test.yml` overlay was folded in), so a plain bring-up
+applies the cgroup CPU quota and memory limits that make pool sizing, OOM-kill, and
+recovery reproduce locally. The stack needs a host with at least 6 CPUs; to lift the
+limits for a given run, override them in a gitignored `compose.override.yml`.
 
 ```
-docker compose -f compose.yml -f compose.test.yml up --build
+docker compose up --build
 ```
 
 Confirm the "process pool sized to N worker(s)" startup logs match the `cpus:` in
-the overlay, and note the deployed values of the two knobs that default to
+`compose.yml`, and note the deployed values of the two knobs that default to
 *disabled* (`"0"`): `callback_max_request_size` and `max_response_size`. If Test
 runs them at 0, that is itself finding #1 (see §3.C).
 

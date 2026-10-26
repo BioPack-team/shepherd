@@ -1597,7 +1597,7 @@ async def run(cfg: RunConfig, args) -> int:
     print(
         "Remember: a PASS only means the HTTP contract held. The real question "
         "is what each probe cost us -- check EVENT_LOOP_LAG / PG_SLOW logs, "
-        "`docker stats` vs compose.test.yml limits, Redis stream depth, and "
+        "`docker stats` vs the cpus/mem_limit in compose.yml, Redis stream depth, and "
         "whether a normal query still succeeds right after."
     )
     # Non-zero exit if any guard we expected to hold did not.
