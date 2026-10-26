@@ -41,8 +41,8 @@ services:
     # even though the comments in this file and shepherd_utils/config.py both
     # say the sum must stay under it. 300 restores the headroom the docs claim.
     # Adding a worker service? Re-do this arithmetic.
-    # The budget below assumes the opt-in ARS overlay (compose.ars.yml) is
-    # running too; without it the worst case is 5 pools (~50) lower.
+    # The budget below assumes the opt-in `ars` profile is running too;
+    # without it the worst case is 5 pools (~50) lower.
     # 2026-09: +5 ARS workers (ars_fanout/merge/postprocess/watchdog/notify)
     # at the default 10-max pool each pushed the worst case to ~290, so the
     # cap moves to 400 to restore headroom.
@@ -503,5 +503,88 @@ services:
         condition: service_healthy
     volumes:
       - ./workers/sipr/debug:/app/debug
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+  ######### Translator ARS (hosted port of NCATSTranslator/Relay)
+  # Opt-in: these services sit in the `ars` profile, so a plain
+  # `docker compose up` skips them. Include them with
+  # `docker compose --profile ars up --build` (or COMPOSE_PROFILES=ars).
+  ars_fanout:
+    container_name: ars_fanout
+    profiles: [ars]
+    build:
+      context: .
+      dockerfile: workers/ars_fanout/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_premerge:
+    container_name: ars_premerge
+    profiles: [ars]
+    build:
+      context: .
+      dockerfile: workers/ars_premerge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_merge:
+    container_name: ars_merge
+    profiles: [ars]
+    build:
+      context: .
+      dockerfile: workers/ars_merge/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_watchdog:
+    container_name: ars_watchdog
+    profiles: [ars]
+    build:
+      context: .
+      dockerfile: workers/ars_watchdog/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+
+  ars_notify:
+    container_name: ars_notify
+    profiles: [ars]
+    build:
+      context: .
+      dockerfile: workers/ars_notify/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env

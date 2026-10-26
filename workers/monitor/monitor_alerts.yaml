@@ -135,7 +135,7 @@ rules:
   # This counts backends on the database, so it has to clear the fleet's IDLE
   # FLOOR -- every container holds POSTGRES_POOL_MIN_SIZE connections open for
   # its whole life -- or it fires around the clock on a healthy system. With
-  # the full compose topology (compose.yml + compose.ars.yml; 29 DB-connecting
+  # the full compose topology (including the `ars` profile; 29 DB-connecting
   # containers: 26 at the default min 2, the two lookup workers at 10, the
   # server at 3) that floor is ~75, and the
   # all-pools-saturated ceiling is ~330 against max_connections=400. 250 sits

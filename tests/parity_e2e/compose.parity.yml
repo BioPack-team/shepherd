@@ -1,7 +1,7 @@
 # Differential parity topology: the original Relay ARS and Shepherd's port,
 # side by side, both pointed at the same mockworld.
 #
-#   docker compose -f compose.yml -f compose.ars.yml \
+#   docker compose --profile ars -f compose.yml \
 #     -f tests/parity_e2e/compose.parity.yml up
 #   (plus the Relay stack from its own checkout -- see README.md)
 #

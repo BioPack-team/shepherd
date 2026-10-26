@@ -5,10 +5,7 @@
 #
 #   docker compose -f compose.yml -f compose.test.yml up --build
 #
-# Running the ARS too? Add its overlay and its limits:
-#
-#   docker compose -f compose.yml -f compose.ars.yml \
-#     -f compose.test.yml -f compose.ars.test.yml up --build
+# Add `--profile ars` to also run (and limit) the opt-in ARS services.
 #
 # Prefer the auto-merge convenience locally? Copy it to compose.override.yml
 # (gitignored, so it stays on your machine):  cp compose.test.yml compose.override.yml
@@ -82,6 +79,21 @@ services:
   arax_rank:
     cpus: 4
     mem_limit: 10g
+  ars_fanout:
+    cpus: 1
+    mem_limit: 2g
+  ars_merge:
+    cpus: 2
+    mem_limit: 5g
+  ars_notify:
+    cpus: 0.5
+    mem_limit: 1g
+  ars_premerge:
+    cpus: 2
+    mem_limit: 5g
+  ars_watchdog:
+    cpus: 0.5
+    mem_limit: 1g
   bte:
     cpus: 1
     mem_limit: 1g

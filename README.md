@@ -61,16 +61,13 @@ monitor, shared workers and the hosted ARAs).
 - In the root folder, run `docker compose up --build`
 
 The Translator ARS services (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_watchdog`,
-`ars_notify`) are opt-in and live in `./compose.ars.yml`. Layer it on top of the base file to
-include them:
+`ars_notify`) are opt-in, behind the `ars` [compose profile](https://docs.docker.com/compose/how-tos/profiles/):
 
-- `docker compose -f compose.yml -f compose.ars.yml up --build`
-
-When you pass `-f`, Compose skips the default file lookup, so `compose.yml` always has to be the
-first file listed.
+- `docker compose --profile ars up --build`, or
+- set `COMPOSE_PROFILES=ars` in your `.env` to always include them.
 
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`
-(or in `compose.ars.yml` if it's part of the ARS).
+(with `profiles: [ars]` if it's part of the ARS).
 
 ### Worker data (LMDB / sqlite) downloads
 
