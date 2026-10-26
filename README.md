@@ -66,6 +66,20 @@ The Translator ARS services (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_wat
 - `docker compose --profile ars up --build`, or
 - set `COMPOSE_PROFILES=ars` in your `.env` to always include them.
 
+To run with the prod-matching CPU / memory limits from `./compose.test.yml` (see its header for
+why they matter), either pass it explicitly:
+
+- `docker compose -f compose.yml -f compose.test.yml up --build` (add `--profile ars` for the ARS)
+
+or set `COMPOSE_FILE` in your `.env` so every plain `docker compose ...` picks it up:
+
+```
+COMPOSE_FILE=compose.yml:compose.test.yml
+COMPOSE_PROFILES=ars   # optional
+```
+
+(On Windows the separator is `;`.)
+
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`
 (with `profiles: [ars]` if it's part of the ARS).
 

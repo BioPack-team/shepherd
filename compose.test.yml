@@ -7,8 +7,15 @@
 #
 # Add `--profile ars` to also run (and limit) the opt-in ARS services.
 #
-# Prefer the auto-merge convenience locally? Copy it to compose.override.yml
-# (gitignored, so it stays on your machine):  cp compose.test.yml compose.override.yml
+# Want it applied to every plain `docker compose ...` locally? Set COMPOSE_FILE
+# in your .env (gitignored, so it stays on your machine; Windows uses `;` as
+# the separator):
+#
+#   COMPOSE_FILE=compose.yml:compose.test.yml
+#   COMPOSE_PROFILES=ars   # optional, same idea for the ARS
+#
+# Unlike copying this file to compose.override.yml, that keeps tracking the
+# checked-in limits instead of a copy that drifts.
 #
 # Why the resource limits matter: they make local behavior match prod. Docker
 # writes a cgroup CPU quota (which resolve_pool_workers reads to size the pool)
