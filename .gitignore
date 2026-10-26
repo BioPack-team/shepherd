@@ -12,7 +12,7 @@ arax_dbs/
 # Project specific
 scripts/
 # Local docker compose override (auto-merged by `docker compose up`); keep it
-# per-developer. Use the tracked compose.test.yml via `-f` instead, or copy it here.
+# per-developer, e.g. to lift the resource limits in compose.yml.
 compose.override.yml
 pgdata/
 scripts/
