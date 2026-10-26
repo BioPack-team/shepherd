@@ -141,6 +141,9 @@ class Probe:
     heavy: bool = False
     # For SSRF/async cases: substitute the live callback-sink URL into the body.
     needs_callback: bool = False
+    # Path relative to base_url, bypassing the /{ara} prefix (e.g. to hit a
+    # deliberately unknown ARA mount regardless of --ara).
+    abs_path: Optional[str] = None
 
 
 @dataclass
@@ -1253,7 +1256,11 @@ def build_probes(cfg: RunConfig) -> list[Probe]:
         Probe(
             "surface.unknown-ara", "surface", "POST", "/query",
             "Unknown ARA target in the path",
-            expect={404}, signal="clean 404 (set via --ara bogus)",
+            expect={404}, signal="clean 404 for an unmounted ARA path",
+            # Hit a deliberately unmounted ARA, independent of --ara, with an
+            # otherwise-valid body so the 404 is about routing, not the body.
+            abs_path="/__no_such_ara__/query",
+            json_body=dict(VALID_QUERY),
         ),
         Probe(
             "surface.docs-reachable", "surface", "GET", "/docs",
@@ -1315,6 +1322,8 @@ def start_callback_sink(host: str, port: int) -> tuple[ThreadingHTTPServer, str]
 
 
 def _probe_url(cfg: RunConfig, probe: Probe) -> str:
+    if probe.abs_path is not None:
+        return f"{cfg.base_url.rstrip('/')}{probe.abs_path}"
     return f"{cfg.base_url.rstrip('/')}/{cfg.ara}{probe.path}"
 
 
