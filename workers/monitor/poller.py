@@ -336,6 +336,11 @@ async def _collect_postgres_slow() -> Dict[str, Any]:
         logger.debug(f"Couldn't refresh the finished-query counts: {e}")
         return _pg_slow
     sizes = await _collect_postgres_size()
+    if sizes is None:
+        # Keep the last reading rather than report an empty disk: a size
+        # check fails exactly when the volume is too slow to answer, and a 0
+        # there would hide the database from the db_capacity alert.
+        sizes = {k: _pg_slow.get(k, 0) for k in ("db_size_bytes", "wal_size_bytes")}
     _pg_slow = {"finished_state_counts": finished, **sizes}
     _pg_slow_at = now
     return _pg_slow
@@ -407,8 +412,8 @@ async def _collect_redis_info() -> Dict[str, Any]:
     }
 
 
-async def _collect_postgres_size() -> Dict[str, int]:
-    """Logical DB size + WAL size in bytes.
+async def _collect_postgres_size() -> "Dict[str, int] | None":
+    """Logical DB size + WAL size in bytes, or None if they couldn't be read.
 
     Used for the History infra panel and for the disk-fullness estimate that
     drives the ``db_capacity`` alert. WAL is included because a stalled archiver
@@ -431,8 +436,9 @@ async def _collect_postgres_size() -> Dict[str, int]:
             except Exception:
                 # pg_ls_waldir needs superuser/pg_monitor; skip if not granted.
                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Couldn't read the Postgres database size: {e}")
+        return None
     return sizes
 
 
