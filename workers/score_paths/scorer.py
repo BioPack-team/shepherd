@@ -231,8 +231,13 @@ def edge_phrase(bmt, edge: dict, backward: bool) -> str | None:
 
 def hop_phrase(bmt, current: str, following: str, edge_ids, edges: dict) -> str | None:
     """Every edge of the path between two nodes, read from `current`; None
-    where none can be walked across."""
-    carried = {}
+    where none can be walked across.
+
+    An edge gandalf inferred through a subclass, which stands on a support
+    graph, counts only where the pair has no edge of its own: an endpoint's
+    hop reads as the endpoint's own edges, as every training path read, not
+    as their union with its subclass children's."""
+    carried, inferred = {}, {}
     for edge_id in edge_ids:
         edge = edges.get(edge_id)
         if not edge or edge["predicate"] in ONTOLOGY_PREDICATES:
@@ -257,9 +262,19 @@ def hop_phrase(bmt, current: str, following: str, edge_ids, edges: dict) -> str 
                     raise ValueError(f"negated is {value!r}; expected a boolean")
                 negated = bool(value)
                 break
+        held = (
+            inferred
+            if any(
+                attribute.get("attribute_type_id") == "biolink:support_graphs"
+                for attribute in edge.get("attributes") or ()
+            )
+            else carried
+        )
         # A label only NOT annotations carry is dropped
-        carried[phrase] = carried.get(phrase, False) or not negated
-    phrases = sorted(phrase for phrase, kept in carried.items() if kept)
+        held[phrase] = held.get(phrase, False) or not negated
+    phrases = sorted(phrase for phrase, kept in carried.items() if kept) or sorted(
+        phrase for phrase, kept in inferred.items() if kept
+    )
     if not phrases:
         return None
     if len(phrases) == 1:

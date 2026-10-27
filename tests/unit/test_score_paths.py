@@ -450,6 +450,30 @@ def test_hop_phrase_rejects_a_negated_that_is_not_a_boolean():
         scorer.hop_phrase(BMT, "A", "B", ["e"], edges)
 
 
+def inferred():
+    return {
+        "attributes": [
+            {"attribute_type_id": "biolink:support_graphs", "value": ["aux_e"]}
+        ]
+    }
+
+
+def test_hop_phrase_reads_an_endpoint_s_own_edges_before_inferred_ones():
+    edges = {
+        "own": edge("A", "B", "biolink:affects"),
+        "child": edge("A", "B", "biolink:treats", **inferred()),
+        "child_back": edge("B", "A", "biolink:causes", **inferred()),
+        "not": edge("A", "B", "biolink:affects", **negated(True)),
+    }
+
+    assert scorer.hop_phrase(BMT, "A", "B", list(edges), edges) == "affects"
+    assert (
+        scorer.hop_phrase(BMT, "A", "B", ["child", "child_back"], edges)
+        == "[caused by or treats]"
+    )
+    assert scorer.hop_phrase(BMT, "A", "B", ["not", "child"], edges) == "treats"
+
+
 def test_hop_phrase_with_nothing_walkable():
     edges = {"e": edge("B", "A", "biolink:not_a_predicate")}
 
