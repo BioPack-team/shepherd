@@ -597,6 +597,18 @@ class Settings(BaseSettings):
     # Re-notify backoff while memory stays elevated -- a full day by default, so
     # a sustained condition reminds once a day rather than every few minutes.
     monitor_redis_memory_cooldown_sec: float = 86400.0
+    # Above this, the critical alert fires on the first tick, skipping the
+    # grace window: a broker that goes from fine to OOM-killed in under the
+    # grace (a burst of concurrent large queries) otherwise never alerts.
+    monitor_redis_memory_immediate_pct: float = 98.0
+    # The broker container's memory limit, set from the SAME Helm value as the
+    # pod's ``resources.limits.memory`` (e.g. "25Gi"). ``used_memory`` against
+    # ``maxmemory`` only sees the data: the kernel OOM-kills on the container's
+    # whole footprint -- RSS (data + fragmentation) plus the pages a snapshot or
+    # AOF-rewrite fork has copied. With this set, the memory alert also tracks
+    # that footprint against the limit and fires on whichever is higher. Empty
+    # disables the footprint check.
+    redis_memory_limit: str = ""
     # Postgres availability alerting. Same debounce idea as the broker: Postgres
     # must stay unreachable this long before the single ``postgres_down`` alert
     # fires, so a transient query timeout doesn't trip it. No recovery-grace
@@ -631,6 +643,11 @@ class Settings(BaseSettings):
     def pg_volume_capacity_bytes(self) -> int:
         """Configured Postgres volume size in bytes (0 if unset)."""
         return parse_size_to_bytes(self.pg_volume_capacity)
+
+    @property
+    def redis_memory_limit_bytes(self) -> int:
+        """Broker container memory limit in bytes (0 if unset)."""
+        return parse_size_to_bytes(self.redis_memory_limit)
 
     @property
     def callback_max_request_size_bytes(self) -> int:

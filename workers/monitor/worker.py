@@ -123,6 +123,7 @@ async def _poll_loop(
             # Redis memory pressure is an automatic engine state machine (like
             # broker/postgres health), not a YAML rule -- drive it each tick.
             await engine.handle_redis_memory(snapshot)
+            await engine.handle_redis_persistence(snapshot)
             # A Redis restart loses everything written since its snapshot:
             # alert, and finish the queries that lost their data.
             await restarts.observe(snapshot)

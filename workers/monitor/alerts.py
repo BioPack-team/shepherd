@@ -15,7 +15,7 @@ import ssl
 import time
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import yaml
@@ -221,6 +221,30 @@ def load_rules(path: str) -> List[Rule]:
     return rules
 
 
+# (what the alert calls it, the INFO field holding its last status)
+_PERSISTENCE_STATUSES = (
+    ("AOF write", "aof_last_write_status"),
+    ("AOF rewrite", "aof_last_bgrewrite_status"),
+    ("snapshot", "rdb_last_bgsave_status"),
+)
+
+
+def _redis_memory_usage(redis: Dict[str, Any]) -> Optional[Tuple[float, str]]:
+    """The broker's memory use as (percent, what it's a percent of), taking
+    the higher of data vs. ``maxmemory`` and footprint vs. the container limit.
+    None when neither is known."""
+    candidates = []
+    maxmem = int(redis.get("maxmemory_bytes", 0) or 0)
+    if maxmem > 0:
+        used = int(redis.get("used_memory_bytes", 0) or 0)
+        candidates.append((100.0 * used / maxmem, "maxmemory"))
+    limit = int(redis.get("memory_limit_bytes", 0) or 0)
+    if limit > 0:
+        footprint = int(redis.get("footprint_bytes", 0) or 0)
+        candidates.append((100.0 * footprint / limit, "container memory limit"))
+    return max(candidates) if candidates else None
+
+
 class AlertEngine:
     def __init__(self, rules: List[Rule]):
         self.rules = rules
@@ -273,6 +297,9 @@ class AlertEngine:
         self._redis_mem_candidate: str = "ok"
         self._redis_mem_candidate_since: float = 0.0
         self._redis_mem_last_alerted_at: float = 0.0
+        # Whether the last snapshot showed a failing snapshot/AOF save (see
+        # handle_redis_persistence).
+        self._redis_persistence_failing: bool = False
 
     @property
     def in_startup_grace(self) -> bool:
@@ -450,21 +477,34 @@ class AlertEngine:
           instead of every few minutes.
         * **Recovery**: when usage falls back below the warning threshold we send
           a one-off "recovered" alert, just like the broker/postgres machines.
+        * **No debounce at the brink**: at ``monitor_redis_memory_immediate_pct``
+          the critical alert fires on the first tick. A burst can take the
+          broker from fine to OOM-killed well inside the grace window.
 
-        A no-op when the broker runs uncapped (``maxmemory`` 0) -- without a
-        denominator there's nothing to measure.
+        Usage is the higher of two ratios: the data (``used_memory``) against
+        ``maxmemory``, and the container footprint (RSS plus fork copy-on-write)
+        against the container memory limit (``redis_memory_limit``). The second
+        is what the kernel OOM-kills on, and it can run out first. A no-op when
+        neither denominator is known (``maxmemory`` 0 and no limit configured).
         """
         now = time.time()
-        redis = snapshot.get("redis", {}) or {}
-        maxmem = int(redis.get("maxmemory_bytes", 0) or 0)
-        used = int(redis.get("used_memory_bytes", 0) or 0)
-        if maxmem <= 0:
+        usage = _redis_memory_usage(snapshot.get("redis", {}) or {})
+        if usage is None:
             # Uncapped: reset to ok silently. Losing the denominator isn't a real
             # recovery, so don't announce one.
             self._redis_mem_level = "ok"
             self._redis_mem_candidate = "ok"
             return
-        pct = 100.0 * used / maxmem
+        pct, basis = usage
+        if (
+            pct >= settings.monitor_redis_memory_immediate_pct
+            and self._redis_mem_level != "critical"
+        ):
+            self._redis_mem_level = "critical"
+            self._redis_mem_candidate = "critical"
+            self._redis_mem_candidate_since = now
+            await self._fire_redis_memory("critical", pct, now, basis)
+            return
         if pct >= settings.monitor_redis_memory_critical_pct:
             target = "critical"
         elif pct >= settings.monitor_redis_memory_warning_pct:
@@ -486,7 +526,7 @@ class AlertEngine:
                 and (now - self._redis_mem_last_alerted_at)
                 >= settings.monitor_redis_memory_cooldown_sec
             ):
-                await self._fire_redis_memory(target, pct, now)
+                await self._fire_redis_memory(target, pct, now, basis)
             return
         # A different level has held steady long enough: commit the transition.
         if (
@@ -498,14 +538,16 @@ class AlertEngine:
         if target == "ok":
             # Recovery: an elevated committed level is only ever reached by
             # alerting, so a return to ok is always worth an "it's better" note.
-            await self._fire_redis_memory_recovery(pct, now)
+            await self._fire_redis_memory_recovery(pct, now, basis)
         elif target == "critical" or prev == "ok":
             # Fire when entering an elevated level from ok, or escalating to
             # critical. A critical->warning de-escalation stays quiet (still
             # elevated and already alerted) until it either clears or re-escalates.
-            await self._fire_redis_memory(target, pct, now)
+            await self._fire_redis_memory(target, pct, now, basis)
 
-    async def _fire_redis_memory(self, level: str, pct: float, now: float) -> None:
+    async def _fire_redis_memory(
+        self, level: str, pct: float, now: float, basis: str = "maxmemory"
+    ) -> None:
         """Dispatch (and record) a Redis memory warning/critical alert."""
         self._redis_mem_last_alerted_at = now
         if level == "critical":
@@ -522,9 +564,9 @@ class AlertEngine:
             "ts": now,
             "rule": rule,
             "severity": severity,
-            "detail": f"Redis memory {pct:.1f}% of maxmemory (>= {threshold:.0f}%)",
+            "detail": f"Redis memory {pct:.1f}% of {basis} (>= {threshold:.0f}%)",
             "message": (
-                f"Redis broker memory is at {pct:.1f}% of its maxmemory cap "
+                f"Redis broker memory is at {pct:.1f}% of its {basis} "
                 f"(>= {threshold:.0f}%). {tail} -- shed load, raise the cap, or "
                 "lower redis_ttl."
             ),
@@ -532,19 +574,64 @@ class AlertEngine:
         await _record_alert(event)
         await dispatch(event)
 
-    async def _fire_redis_memory_recovery(self, pct: float, now: float) -> None:
+    async def _fire_redis_memory_recovery(
+        self, pct: float, now: float, basis: str = "maxmemory"
+    ) -> None:
         """Dispatch (and record) the Redis memory 'recovered' alert."""
         warn = settings.monitor_redis_memory_warning_pct
         event = {
             "ts": now,
             "rule": "redis_memory_recovered",
             "severity": "info",
-            "detail": f"Redis memory back to {pct:.1f}% of maxmemory",
+            "detail": f"Redis memory back to {pct:.1f}% of {basis}",
             "message": (
                 f"Redis broker memory has fallen back below {warn:.0f}% of its "
-                f"maxmemory cap (now {pct:.1f}%). Memory pressure has cleared."
+                f"{basis} (now {pct:.1f}%). Memory pressure has cleared."
             ),
         }
+        await _record_alert(event)
+        await dispatch(event)
+
+    async def handle_redis_persistence(self, snapshot: Dict[str, Any]) -> None:
+        """Alert when the broker's snapshot or append-only file stops saving.
+
+        A failing save is silent until the next restart, which then loses
+        everything since the last good one. One ``redis_persistence_failing``
+        alert when any save reports an error, one ``redis_persistence_recovered``
+        when they all succeed again.
+        """
+        redis = snapshot.get("redis", {}) or {}
+        if "error" in redis:
+            return
+        failing = [
+            name for name, key in _PERSISTENCE_STATUSES if redis.get(key) == "err"
+        ]
+        was_failing = self._redis_persistence_failing
+        self._redis_persistence_failing = bool(failing)
+        now = time.time()
+        if failing and not was_failing:
+            event = {
+                "ts": now,
+                "rule": "redis_persistence_failing",
+                "severity": "critical",
+                "detail": f"Redis {', '.join(failing)} failing",
+                "message": (
+                    f"Broker `redis` reports its last {', '.join(failing)} "
+                    "failed. Until it saves again, a restart loses everything "
+                    "written since the last good save. Check the broker log "
+                    "and that /data has free space."
+                ),
+            }
+        elif was_failing and not failing:
+            event = {
+                "ts": now,
+                "rule": "redis_persistence_recovered",
+                "severity": "info",
+                "detail": "Redis saving to disk again",
+                "message": "Broker `redis` persistence is succeeding again.",
+            }
+        else:
+            return
         await _record_alert(event)
         await dispatch(event)
 
