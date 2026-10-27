@@ -14,7 +14,7 @@ checkout are available.
   stub smart-api.info registry resolving every armed infores to itself,
   stub Appraiser (zstd, deterministic ordering components), Annotator,
   NodeNorm, and a notification sink. Journals every inbound request.
-- **Shepherd stack**: `compose.yml` + this directory's overlay
+- **Shepherd stack**: `compose.yml` (with the opt-in `ars` profile) + this directory's overlay
   (`compose.parity.yml`) repointing external URLs at the mockworld.
   Since de-federation the Shepherd ARS fans out only to its own hosted
   ARAs over the broker, so the stub ARAs and stub registry are used by the
@@ -31,7 +31,7 @@ checkout are available.
 
 ```console
 # 1. Shepherd stack + mockworld
-docker compose -f compose.yml -f tests/parity_e2e/compose.parity.yml up --build
+docker compose --profile ars -f compose.yml -f tests/parity_e2e/compose.parity.yml up --build
 
 # 2. Relay stack (from the pinned checkout)
 cd /path/to/relay && docker compose up

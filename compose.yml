@@ -1,6 +1,24 @@
+# Local development stack.
+#
+#   docker compose up --build                 # core stack
+#   docker compose --profile ars up --build   # + the opt-in Translator ARS
+#
+# Resource limits: every service carries `cpus` / `mem_limit` so local behavior
+# matches prod. Docker writes a cgroup CPU quota (which resolve_pool_workers
+# reads to size the pool) and a memory limit (so a child that balloons is
+# actually OOM-killed). Without them a container sees the whole host, the pool
+# sizes huge, and none of the sizing / OOM / recovery behavior reproduces.
+# Docker refuses to start a container whose `cpus` exceeds the host's cores, so
+# the stack needs a machine (or Docker Desktop VM) with at least 6 CPUs.
+# The production values live in the Helm chart -- keep the two in step.
+# To run without limits locally, override them in a gitignored
+# compose.override.yml (`cpus: 0` / `mem_limit: 0` means unlimited).
+
 services:
   shepherd_server:
     container_name: shepherd_server
+    cpus: 3
+    mem_limit: 5g
     platform: linux/amd64
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
@@ -32,6 +50,8 @@ services:
       - '5439:5439'
   shepherd_db:
     container_name: shepherd_db
+    cpus: 2
+    mem_limit: 2g
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
     # Connection budget: every container holds its own psycopg pool, so the
@@ -41,6 +61,8 @@ services:
     # even though the comments in this file and shepherd_utils/config.py both
     # say the sum must stay under it. 300 restores the headroom the docs claim.
     # Adding a worker service? Re-do this arithmetic.
+    # The budget below assumes the opt-in `ars` profile is running too;
+    # without it the worst case is 5 pools (~50) lower.
     # 2026-09: +5 ARS workers (ars_fanout/merge/postprocess/watchdog/notify)
     # at the default 10-max pool each pushed the worst case to ~290, so the
     # cap moves to 400 to restore headroom.
@@ -66,6 +88,8 @@ services:
       - ./pgdata:/var/lib/postgresql/data
   shepherd_broker:
     container_name: shepherd_broker
+    cpus: 2
+    mem_limit: 25g
     build:
       context: .
       dockerfile: shepherd_broker/Dockerfile
@@ -100,6 +124,8 @@ services:
       - ./data/redisinsight:/db
   shepherd_monitor:
     container_name: shepherd_monitor
+    cpus: 1
+    mem_limit: 2g
     build:
       context: .
       dockerfile: workers/monitor/Dockerfile
@@ -130,6 +156,8 @@ services:
   ########## Shared Workers
   merge_message:
     container_name: merge_message
+    cpus: 2
+    mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
@@ -146,6 +174,8 @@ services:
       - ./.env:/app/.env
   sort_results_score:
     container_name: sort_results_score
+    cpus: 1
+    mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
@@ -161,6 +191,8 @@ services:
       - ./.env:/app/.env
   filter_results_top_n:
     container_name: filter_results_top_n
+    cpus: 1
+    mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
@@ -176,6 +208,8 @@ services:
       - ./.env:/app/.env
   filter_kgraph_orphans:
     container_name: filter_kgraph_orphans
+    cpus: 1
+    mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
@@ -192,6 +226,8 @@ services:
       - ./.env:/app/.env
   finish_query:
     container_name: finish_query
+    cpus: 1
+    mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
@@ -207,6 +243,8 @@ services:
       - ./.env:/app/.env
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
+    cpus: 1
+    mem_limit: 5g
     build:
       context: .
       dockerfile: workers/filter_analyses_top_n/Dockerfile
@@ -221,6 +259,8 @@ services:
       - ./.env:/app/.env
   score_paths:
     container_name: score_paths
+    cpus: 6
+    mem_limit: 22g
     build:
       context: .
       dockerfile: workers/score_paths/Dockerfile
@@ -290,6 +330,8 @@ services:
   ######### ARAGORN
   aragorn:
     container_name: aragorn
+    cpus: 1
+    mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
@@ -305,6 +347,8 @@ services:
       - ./.env:/app/.env
   aragorn_lookup:
     container_name: aragorn_lookup
+    cpus: 1
+    mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
@@ -329,6 +373,8 @@ services:
       - ./.env:/app/.env
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
+    cpus: 1
+    mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
@@ -350,6 +396,30 @@ services:
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
+    cpus: 2 # -> pool sizes to 2; confirm via the "process pool sized to 2 worker(s)" startup log
+    mem_limit: 6g # -> a child exceeding this is cgroup-OOM-killed (kernel), parent survives
+    # Robustness-test knobs: uncomment per test (see scripts/seed_omnicorp.py).
+    # Env set here is scoped to this service and overrides the shared .env.
+    # environment:
+      # P0 timeout: set a short limit, then replay a big/slow query. Expect
+      # "task exceeded 10s; killing the stuck child", that query -> finish_query
+      # ERROR, and the NEXT task succeeding.
+      # POOL_TASK_TIMEOUT_SEC: "10"
+      # Pin pool concurrency (e.g. to 1) instead of trusting cgroup detection.
+      # Also the reliable way to serialize tasks for the idempotency demo.
+      # POOL_MAX_WORKERS: "1"
+      # Child recycling cadence (default 100). Lower it to watch RSS sawtooth
+      # sooner under a --repeat run in `docker stats` / the monitor.
+      # POOL_MAX_TASKS_PER_CHILD: "20"
+      # Loop watchdog threshold (default 60s). Only fires on a genuinely wedged
+      # loop -- to see it, temporarily inject a blocking sleep in poll_for_tasks.
+      # WORKER_LOOP_STALL_EXIT_SEC: "60"
+      # Broker-wedge self-heal window (default 300s). Lower it, then
+      # `docker compose stop shepherd_broker`, to see the worker exit + restart.
+      # BROKER_UNHEALTHY_EXIT_SEC: "30"
+      # Force the pair overlay to run even on huge queries (default 1_000_000),
+      # so a big message does the full memory-heavy work instead of being skipped.
+      # OMNICORP_MAX_CURIE_PAIRS: "1000000000"
     platform: linux/amd64
     build:
       context: .
@@ -370,6 +440,8 @@ services:
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
+    cpus: 4
+    mem_limit: 10g
     platform: linux/amd64
     build:
       context: .
@@ -388,6 +460,15 @@ services:
   ######### ARAX
   arax:
     container_name: arax
+    # Runs ARAX's whole plan in-process (DEC-14): one pool child per query, so
+    # cpus is how many queries run at once. A large multi-hop answer's KG and
+    # results live in one child, hence about 3 GB per child.
+    cpus: 4
+    mem_limit: 12g
+    environment:
+      # ARAX puts no ceiling on a query, and Expand waits up to 120 s per hop,
+      # so the shared 300 s default would kill slow multi-hop queries.
+      POOL_TASK_TIMEOUT_SEC: "900"
     platform: linux/amd64
     build:
       context: .
@@ -410,6 +491,8 @@ services:
       - ./arax_dbs:/app/arax_dbs
   arax_pathfinder:
     container_name: arax_pathfinder
+    cpus: 6
+    mem_limit: 22g
     build:
       context: .
       dockerfile: workers/arax_pathfinder/Dockerfile
@@ -435,6 +518,8 @@ services:
 
   arax_rank:
     container_name: arax_rank
+    cpus: 4
+    mem_limit: 10g
     build:
       context: .
       dockerfile: workers/arax_rank/Dockerfile
@@ -451,6 +536,8 @@ services:
 ######### BTE
   bte:
     container_name: bte
+    cpus: 1
+    mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
@@ -467,6 +554,8 @@ services:
   
   bte_lookup:
     container_name: bte_lookup
+    cpus: 1
+    mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
@@ -489,6 +578,8 @@ services:
   ######### SIPR
   sipr:
     container_name: sipr
+    cpus: 1
+    mem_limit: 2g
     platform: linux/amd64
     build:
       context: .
@@ -504,8 +595,14 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env
   ######### Translator ARS (hosted port of NCATSTranslator/Relay)
+  # Opt-in: these services sit in the `ars` profile, so a plain
+  # `docker compose up` skips them. Include them with
+  # `docker compose --profile ars up --build` (or COMPOSE_PROFILES=ars).
   ars_fanout:
     container_name: ars_fanout
+    cpus: 1
+    mem_limit: 2g
+    profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_fanout/Dockerfile
@@ -521,6 +618,9 @@ services:
 
   ars_premerge:
     container_name: ars_premerge
+    cpus: 2
+    mem_limit: 5g
+    profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_premerge/Dockerfile
@@ -536,6 +636,9 @@ services:
 
   ars_merge:
     container_name: ars_merge
+    cpus: 2
+    mem_limit: 5g
+    profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_merge/Dockerfile
@@ -551,6 +654,9 @@ services:
 
   ars_watchdog:
     container_name: ars_watchdog
+    cpus: 0.5
+    mem_limit: 1g
+    profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_watchdog/Dockerfile
@@ -566,6 +672,9 @@ services:
 
   ars_notify:
     container_name: ars_notify
+    cpus: 0.5
+    mem_limit: 1g
+    profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_notify/Dockerfile

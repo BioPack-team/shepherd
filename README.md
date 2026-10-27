@@ -25,11 +25,24 @@ version-neutral helper it gains moves to its own module (as
 
 All Shepherd services are set up as docker containers. You can learn about docker and install here: https://www.docker.com/
 
-The main entrypoint is `./compose.yml` and will spin everything up.
+The main entrypoint is `./compose.yml` and will spin up the core stack (server, db, broker,
+monitor, shared workers and the hosted ARAs).
 
 - In the root folder, run `docker compose up --build`
 
-If you want to add a new operation/worker, add a new service in `compose.yml` under `services`.
+The Translator ARS services (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_watchdog`,
+`ars_notify`) are opt-in, behind the `ars` [compose profile](https://docs.docker.com/compose/how-tos/profiles/):
+
+- `docker compose --profile ars up --build`, or
+- set `COMPOSE_PROFILES=ars` in your `.env` to always include them.
+
+Every service in `compose.yml` carries prod-matching CPU / memory limits (see the header of
+`compose.yml` for why), so the stack needs a machine (or Docker Desktop VM) with at least 6 CPUs.
+To lift them locally, override `cpus` / `mem_limit` (0 = unlimited) in a gitignored
+`compose.override.yml`.
+
+If you want to add a new operation/worker, add a new service in `compose.yml` under `services`
+(with `profiles: [ars]` if it's part of the ARS).
 
 ### Worker data (LMDB / sqlite) downloads
 

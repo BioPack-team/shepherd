@@ -103,7 +103,7 @@ What is left after the port (branch `claude/optimistic-gauss-bjtrzh`):
 3. **Build and deploy.** The `arax` worker and server images have not been built
    (the install steps were checked in fresh environments). The `arax` worker's
    resources were sized for the old proxy (1 CPU, 3 GB, so one query at a
-   time). `compose.test.yml` now gives it 4 CPUs, 12 GB and a 900 s task
+   time). `compose.yml` now gives it 4 CPUs, 12 GB and a 900 s task
    timeout; the production values still need measuring under real queries.
 4. **UI deployment.** The real UI was confirmed working against Shepherd, set up as a deployment should be (see [ARAX_PRESERVATION.md](ARAX_PRESERVATION.md)). The UI calls autocomplete at `/rtxcomplete/nodeslike` on
    its own host, which must route to `/arax/rtxcomplete/nodeslike`. Its Swagger
