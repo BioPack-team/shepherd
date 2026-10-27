@@ -92,6 +92,18 @@ def load_search_graph(graph_dir: str):
     return _search_graphs[graph_dir]
 
 
+def read_search_graph(graph_dir: str) -> float:
+    """Read the search graph's arrays through once and return the seconds it
+    took, so the page cache holds them before the first search: a search
+    that finds them on disk spends its budget reading them instead."""
+    started = time.monotonic()
+    for name in ("offsets", "neighbors", "weights"):
+        with open(Path(graph_dir) / f"{name}.npy", "rb") as f:
+            while f.read(1 << 24):
+                pass
+    return time.monotonic() - started
+
+
 def cheapest_legs(graph, start, far):
     """The one-hop leg and the two cheapest two-hop legs, through different
     intermediates, from ``start`` to every node.
@@ -632,7 +644,11 @@ async def poll_for_tasks():
             f"{SEARCH_GRAPH_DIR} holds {len(offsets) - 1} nodes in its CSR but "
             f"{len(NODE_CURIES)} in nodes.txt"
         )
-    LOGGER.info(f"{STREAM}: search graph over {len(NODE_CURIES)} nodes.")
+    seconds = read_search_graph(SEARCH_GRAPH_DIR)
+    LOGGER.info(
+        f"{STREAM}: search graph over {len(NODE_CURIES)} nodes, read in "
+        f"{seconds:.1f}s."
+    )
     # The search and the path building are CPU-bound; the waits between them
     # are not, so more tasks run than there are pool workers.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
