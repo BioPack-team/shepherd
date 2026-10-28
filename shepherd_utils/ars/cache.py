@@ -10,9 +10,10 @@ Done, ``merged_version`` set) with the caller's own submit body as its
 ``data`` -- and the client fetches the tree exactly as it would its own.
 
 The cache index (``ars_response_cache``) maps a canonical query-graph hash
-to the source parent's pk; the payloads are the ones already kept in
-``ars_message.data``. Source trees backing a live generation are exempt
-from the payload retention purge.
+to the source parent's pk; the payloads are the tree's own durable copies.
+Source trees backing a live generation are exempt from the age-based
+payload purge, and are the last to go under disk-pressure eviction (which
+drops their entries along with them; shepherd_utils/ars/retention.py).
 
 Two request-side knobs: TRAPI 2.0 ``parameters.bypass_cache`` (no read, no
 write) and ``parameters.overwrite_cache`` (no read, forced write). Whole-cache

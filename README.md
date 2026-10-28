@@ -270,11 +270,40 @@ running query's pk. Hits create no rows and no payloads and decompress
 nothing, so no ARA, merge or post-process worker runs and nothing is stored.
 
 The cache lives in Postgres and holds no payloads of its own: it indexes a
-query-graph hash to the source tree already kept in `ars_message.data`,
-and source trees backing a live cache generation are exempt from the
-`ARS_DATA_RETENTION_DAYS` payload purge. Budget disk for one tree per
-distinct query per generation. Entries have no TTL; old pks keep working
-after an invalidation until their payloads age out (or forever if retained).
+query-graph hash to the source tree's own durable payloads, and source trees
+backing a live cache generation are exempt from the `ARS_DATA_RETENTION_DAYS`
+payload purge (under disk pressure they are evicted last, with their cache
+entries). Budget disk for one tree per distinct query per generation.
+Entries have no TTL; old pks keep working after an invalidation until their
+payloads age out (or forever if retained).
+
+#### ARS payload storage and retention
+
+Every ARS message keeps a durable copy of its payload once it finishes, so
+results stay readable after the Redis copy expires. Set `ARS_PAYLOAD_DIR` to
+keep those copies as files on a volume instead of in Postgres -- a single
+stress run of large merged results otherwise fills a small Postgres volume,
+and space freed inside Postgres is never returned to the disk. The directory
+must be shared by the server and every `ars_*` worker that writes or reads
+payloads (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_watchdog`), so in
+Kubernetes it is a `ReadWriteMany` volume; compose mounts `./ars_payloads`.
+Copies already in Postgres stay readable. Unset, payloads stay in Postgres.
+
+The ARS watchdog keeps it bounded, always working on whole finished trees
+(a parent with every child and merged version under it) so a tree is never
+left half there, and never touching retained trees:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `ARS_PAYLOAD_EVICT_HIGH_PCT` / `ARS_PAYLOAD_EVICT_LOW_PCT` | `80` / `65` | Checked every pass (`ARS_WATCHDOG_INTERVAL_SEC`): once the payload volume is this full, evict tree payloads -- uncached oldest first, then cache-backed least recently used (dropping their cache entries) -- until it is back under the low mark. |
+| `ARS_DATA_RETENTION_DAYS` | `30` | Hourly: drop the payloads of trees finished this long ago. Rows stay. |
+| `ARS_ROW_RETENTION_DAYS` | `90` | Hourly: delete the rows of trees finished this long ago. |
+
+The rest of the database is aged out by the monitor's janitor
+(`QUERY_RETENTION_DAYS` for queries and callbacks, 30 days of monitor
+history). The monitor alerts when the payload volume passes 85% / 95%,
+which means eviction isn't keeping up -- typically a volume filling with
+retained trees, which the alert reports.
 
 Controls:
 

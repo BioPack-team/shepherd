@@ -321,7 +321,7 @@ def ensure_pathfinder_search_graph(logger: Optional[logging.Logger] = None) -> N
     """Ensure the aragorn_pathfinder search graph is present.
 
     The backbone's pair graph as a CSR plus its node CURIEs in index order,
-    written by squashbert's ``scripts/export_search_graph.py``.
+    written by ``generate_pathfinder_resources_from_graph.py``.
     """
     ensure_lmdb_dataset(
         name="aragorn_pathfinder",

@@ -499,6 +499,27 @@ class Settings(BaseSettings):
     # long as their generation is current; after an invalidation they fall
     # under this window like any other tree.
     ars_data_retention_days: int = 30
+    # Where durable payload copies go (shepherd_utils/ars/payload_store.py).
+    # Set, each message's payload is a file under this directory instead of
+    # ars_message.data, so payloads stop filling the Postgres volume; it must
+    # be a volume shared by the server and every ars_* worker (ReadWriteMany
+    # in Kubernetes). Empty keeps payloads in Postgres. Payloads already in
+    # Postgres stay readable either way.
+    ars_payload_dir: str = ""
+    # Disk-pressure eviction on that volume (shepherd_utils/ars/retention.py).
+    # Once it is this full, the watchdog evicts the payloads of whole finished
+    # trees, oldest first, until it is back under the low mark. Trees backing
+    # a response-cache entry go last (their entries are dropped with them);
+    # retained trees are never evicted. A row's metadata stays, exactly as
+    # after the age purge. Only applies when ars_payload_dir is set.
+    ars_payload_evict_high_pct: float = 80.0
+    ars_payload_evict_low_pct: float = 65.0
+    # Days after which whole finished, non-retained ARS trees are deleted --
+    # the rows themselves, not just their payloads -- so ars_message doesn't
+    # grow forever. Counted from the newest update anywhere in the tree, and
+    # should exceed ars_data_retention_days. Retained trees are kept. 0
+    # disables.
+    ars_row_retention_days: int = 90
     # ------------------------------------------------------------------
     # ARS response cache (docs/ARS_RESPONSE_CACHE_PLAN.md). A submit whose
     # canonical query graph matches a completed prior submit is answered by

@@ -13,6 +13,7 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
+import shepherd_utils.ars.retention as retention
 from shepherd_utils.broker import broker_client
 from shepherd_utils.config import settings
 from shepherd_utils.db import pool as pg_pool
@@ -412,6 +413,26 @@ async def _collect_redis_info() -> Dict[str, Any]:
     }
 
 
+async def _collect_payload_store() -> Dict[str, Any]:
+    """The ARS payload volume's state, as the ARS watchdog last published it
+    (it is the process with the volume mounted). Empty when the ARS isn't
+    running, payloads are kept in Postgres, or the watchdog has gone quiet
+    for long enough that the key expired."""
+    try:
+        state = retention.read_usage(await broker_client.get(retention.USAGE_KEY))
+    except Exception:
+        return {}
+    if not state or not state.get("total_bytes"):
+        return {}
+    total = state["total_bytes"]
+    state["used_pct"] = round(100.0 * state.get("used_bytes", 0) / total, 1)
+    retained = state.get("retained_bytes")
+    state["retained_pct"] = (
+        round(100.0 * retained / total, 1) if retained is not None else None
+    )
+    return state
+
+
 async def _collect_postgres_size() -> "Dict[str, int] | None":
     """Logical DB size + WAL size in bytes, or None if they couldn't be read.
 
@@ -677,11 +698,12 @@ async def collect_snapshot() -> Dict[str, Any]:
         _known_workers(),
     )
     streams = _discover_streams(workers, known)
-    stream_stats, pg_state, redis_info, pg_slow = await asyncio.gather(
+    stream_stats, pg_state, redis_info, pg_slow, payloads = await asyncio.gather(
         _collect_streams(streams),
         _collect_postgres(),
         _collect_redis_info(),
         _collect_postgres_slow(),
+        _collect_payload_store(),
     )
     # live unfinished counts on top of the cached finished ones
     pg_state["state_counts"] = {
@@ -711,6 +733,7 @@ async def collect_snapshot() -> Dict[str, Any]:
         "streams": stream_stats,
         "postgres": pg_state,
         "redis": redis_info,
+        "ars_payload_store": payloads,
         "events": events,
         "aras": ARAS,
     }

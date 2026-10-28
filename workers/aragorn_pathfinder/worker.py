@@ -51,7 +51,7 @@ tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
 # The backbone's pair graph as a CSR (offsets, neighbors, weights) plus its node
-# CURIEs in index order, written by squashbert's scripts/export_search_graph.py.
+# CURIEs in index order, written by generate_pathfinder_resources_from_graph.py.
 SEARCH_GRAPH_DIR = settings.pathfinder_search_graph_dir
 MAX_PATHS = 12000
 SEARCH_BUDGET_SEC = 5.0
@@ -90,6 +90,18 @@ def load_search_graph(graph_dir: str):
             for name in ("offsets", "neighbors", "weights")
         )
     return _search_graphs[graph_dir]
+
+
+def read_search_graph(graph_dir: str) -> float:
+    """Read the search graph's arrays through once and return the seconds it
+    took, so the page cache holds them before the first search: a search
+    that finds them on disk spends its budget reading them instead."""
+    started = time.monotonic()
+    for name in ("offsets", "neighbors", "weights"):
+        with open(Path(graph_dir) / f"{name}.npy", "rb") as f:
+            while f.read(1 << 24):
+                pass
+    return time.monotonic() - started
 
 
 def cheapest_legs(graph, start, far):
@@ -632,7 +644,11 @@ async def poll_for_tasks():
             f"{SEARCH_GRAPH_DIR} holds {len(offsets) - 1} nodes in its CSR but "
             f"{len(NODE_CURIES)} in nodes.txt"
         )
-    LOGGER.info(f"{STREAM}: search graph over {len(NODE_CURIES)} nodes.")
+    seconds = read_search_graph(SEARCH_GRAPH_DIR)
+    LOGGER.info(
+        f"{STREAM}: search graph over {len(NODE_CURIES)} nodes, read in "
+        f"{seconds:.1f}s."
+    )
     # The search and the path building are CPU-bound; the waits between them
     # are not, so more tasks run than there are pool workers.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)

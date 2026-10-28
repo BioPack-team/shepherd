@@ -194,3 +194,20 @@ async def test_snapshot_merges_live_and_cached_state_counts(pg, monkeypatch):
     }
     assert snapshot["postgres"]["db_size_bytes"] == 1000
     assert snapshot["postgres"]["wal_size_bytes"] == 24
+
+
+async def test_payload_volume_state_comes_from_the_watchdog(redis_mock, monkeypatch):
+    import json
+
+    from shepherd_utils.ars import retention
+
+    monkeypatch.setattr(poller, "broker_client", redis_mock["broker"])
+    assert await poller._collect_payload_store() == {}
+
+    await redis_mock["broker"].set(
+        retention.USAGE_KEY,
+        json.dumps({"used_bytes": 30, "total_bytes": 40, "retained_bytes": 10}),
+    )
+    state = await poller._collect_payload_store()
+    assert state["used_pct"] == 75.0
+    assert state["retained_pct"] == 25.0

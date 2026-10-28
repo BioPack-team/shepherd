@@ -1,12 +1,14 @@
 """Score a TRAPI 2.0 message's paths with the sequence reranker.
 
-Everything the reranker reads is in one LMDB, written by squashbert's
-scripts/export_reranker.py under the keys below: the TorchScript model, its
-config, and the vectors and context tables for the graph's nodes, categories
-and hop phrases. A path is read the way squashbert's training paths were
-written, so it looks up the vectors it was trained on; squashbert's tests
-check that reading and the scores, which is why this module imports nothing
-from shepherd_utils.
+Everything the reranker reads is in one LMDB, the pathfinder embeddings
+(version 2) that ranking-distillation's
+generate_pathfinder_resources_from_graph.py builds for a graph release,
+under the keys below: the TorchScript model, its config, and the vectors and
+context tables for the graph's nodes, categories and hop phrases. Each vector
+is held already through the model's input projections, so a node's token is
+its vector plus its category's, and a hop's is its phrase's. A path is read
+the way the reranker's training paths were written, so it looks up the
+vectors it was trained on.
 """
 
 import functools
@@ -22,10 +24,9 @@ from bmt import Toolkit
 
 NODE, CATEGORY, PHRASE = "node", "category", "phrase"
 NODE_CONTEXT, EDGE_CONTEXT = "node_context", "edge_context"
-# Nodes and categories keep the SAPBERT caches' float16
 DTYPES = {
-    NODE: np.float16,
-    CATEGORY: np.float16,
+    NODE: np.float32,
+    CATEGORY: np.float32,
     PHRASE: np.float32,
     NODE_CONTEXT: np.float32,
     EDGE_CONTEXT: np.float32,
@@ -84,7 +85,7 @@ def lmdb_key(kind: str, text: str) -> bytes:
 
 
 def edge_context_key(a: str, b: str) -> bytes:
-    """Keyed by the pair's 64-bit blake2b digest, as squashbert's PairTable
+    """Keyed by the pair's 64-bit blake2b digest, as the embeddings build
     stores every pair of the graph."""
     pair = "|".join(sorted((a, b)))
     digest = hashlib.blake2b(pair.encode(), digest_size=8).digest()
@@ -96,12 +97,17 @@ def load_reranker(txn):
     blob, config = txn.get(MODEL_KEY), txn.get(CONFIG_KEY)
     if blob is None or config is None:
         raise RuntimeError(
-            "the embeddings LMDB holds no reranker; write one with squashbert's "
-            "scripts/export_reranker.py"
+            "the embeddings LMDB holds no reranker; build the pathfinder "
+            "embeddings with generate_pathfinder_resources_from_graph.py"
+        )
+    config = json.loads(config)
+    if "token_dim" not in config:
+        raise RuntimeError(
+            "the embeddings LMDB holds SAPBERT's vectors (pathfinder "
+            "embeddings version 1), not the model's tokens; serve version 2"
         )
     model = torch.jit.load(io.BytesIO(blob), map_location="cpu")
     model.eval()
-    config = json.loads(config)
     config["length_scale"] = {
         int(length): (float(mean), float(spread))
         for length, (mean, spread) in config["length_scale"].items()
@@ -130,7 +136,7 @@ def predicate_curie(name: str) -> str:
 # thousands of times, so answers are kept for the life of the process.
 @functools.lru_cache(maxsize=None)
 def inverse_predicate(bmt, predicate: str) -> str | None:
-    # squashbert's stand-in for an inverse the model lacks
+    # The training paths' stand-in for an inverse biolink lacks
     if predicate in ("biolink:has_chemical_role", "has_chemical_role"):
         return "biolink:is_chemical_role_of"
     if predicate in ("biolink:is_chemical_role_of", "is_chemical_role_of"):
@@ -225,8 +231,13 @@ def edge_phrase(bmt, edge: dict, backward: bool) -> str | None:
 
 def hop_phrase(bmt, current: str, following: str, edge_ids, edges: dict) -> str | None:
     """Every edge of the path between two nodes, read from `current`; None
-    where none can be walked across."""
-    carried = {}
+    where none can be walked across.
+
+    An edge gandalf inferred through a subclass, which stands on a support
+    graph, counts only where the pair has no edge of its own: an endpoint's
+    hop reads as the endpoint's own edges, as every training path read, not
+    as their union with its subclass children's."""
+    carried, inferred = {}, {}
     for edge_id in edge_ids:
         edge = edges.get(edge_id)
         if not edge or edge["predicate"] in ONTOLOGY_PREDICATES:
@@ -251,9 +262,19 @@ def hop_phrase(bmt, current: str, following: str, edge_ids, edges: dict) -> str 
                     raise ValueError(f"negated is {value!r}; expected a boolean")
                 negated = bool(value)
                 break
+        held = (
+            inferred
+            if any(
+                attribute.get("attribute_type_id") == "biolink:support_graphs"
+                for attribute in edge.get("attributes") or ()
+            )
+            else carried
+        )
         # A label only NOT annotations carry is dropped
-        carried[phrase] = carried.get(phrase, False) or not negated
-    phrases = sorted(phrase for phrase, kept in carried.items() if kept)
+        held[phrase] = held.get(phrase, False) or not negated
+    phrases = sorted(phrase for phrase, kept in carried.items() if kept) or sorted(
+        phrase for phrase, kept in inferred.items() if kept
+    )
     if not phrases:
         return None
     if len(phrases) == 1:
@@ -337,23 +358,21 @@ def vector(txn, kind: str, text: str) -> np.ndarray:
 
 
 def path_features(txn, config, nodes, categories, phrases, kept=None):
-    """One path's `(node_x, edge_x, scalars)`; KeyError naming the first
-    vector the LMDB lacks. `kept` carries the category and phrase vectors,
-    as float32, from one path of a message to the next: there are few, read
+    """One path's `(node tokens, hop tokens, scalars)`; KeyError naming the
+    first vector the LMDB lacks. `kept` carries the category and phrase
+    vectors from one path of a message to the next: there are few, read
     over and over. Nodes are not kept, so it stays small."""
-    dim = config["embed_dim"]
     kept = {} if kept is None else kept
 
     def repeated(kind, text):
         if (kind, text) not in kept:
-            kept[kind, text] = vector(txn, kind, text).astype(np.float32)
+            kept[kind, text] = vector(txn, kind, text)
         return kept[kind, text]
 
-    node_x = np.empty((len(nodes), 2 * dim), dtype=np.float32)
+    node_t = np.empty((len(nodes), config["token_dim"]), dtype=np.float32)
     for j, (curie, category) in enumerate(zip(nodes, categories)):
-        node_x[j, :dim] = vector(txn, NODE, curie)
-        node_x[j, dim:] = repeated(CATEGORY, category)
-    edge_x = np.stack([repeated(PHRASE, phrase) for phrase in phrases])
+        np.add(vector(txn, NODE, curie), repeated(CATEGORY, category), out=node_t[j])
+    edge_t = np.stack([repeated(PHRASE, phrase) for phrase in phrases])
 
     def context(key, width):
         raw = txn.get(key)
@@ -375,7 +394,7 @@ def path_features(txn, config, nodes, categories, phrases, kept=None):
             else None
         ),
     )
-    return node_x, edge_x, scalars
+    return node_t, edge_t, scalars
 
 
 def is_direct_path(source, target, path, knowledge_graph):
@@ -419,13 +438,13 @@ def score_message(message, txn, model, config, bmt, chunk_size):
         if not batch:
             return
         started = time.time()
-        node_x, edge_x, scalars = (
+        node_t, edge_t, scalars = (
             np.stack(column) for column in zip(*(features for _, features in batch))
         )
         with torch.inference_mode():
-            raw = model(
-                torch.from_numpy(node_x),
-                torch.from_numpy(edge_x),
+            raw = model.score_tokens(
+                torch.from_numpy(node_t),
+                torch.from_numpy(edge_t),
                 torch.full((len(batch),), n_hops, dtype=torch.int64),
                 torch.from_numpy(scalars),
                 torch.zeros(len(batch), dtype=torch.int64),
