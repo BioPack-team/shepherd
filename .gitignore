@@ -183,3 +183,4 @@ cython_debug/
 
 # The ARAX port keeps ARAX's own scripts/ packages (Infer, COHD_local)
 !shepherd_utils/arax/**/scripts/
+ars_payloads/

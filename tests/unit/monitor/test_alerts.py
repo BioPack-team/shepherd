@@ -260,6 +260,29 @@ async def test_redis_memory_uncapped_is_noop(patched, clock):
     patched["dispatch"].assert_not_called()
 
 
+def test_payload_volume_rule_fires_past_its_threshold():
+    rule = Rule({"name": "pv", "type": "payload_store_capacity", "threshold": 85})
+    store = {
+        "used_pct": 84.0,
+        "used_bytes": 84e9,
+        "total_bytes": 100e9,
+        "retained_pct": 70.0,
+        "short_bytes": 19e9,
+    }
+    assert rule.evaluate({"ars_payload_store": store}) is None
+    store["used_pct"] = 90.0
+    detail = rule.evaluate({"ars_payload_store": store})
+    assert "90.0% full" in detail
+    assert "70.0% retained" in detail
+    assert "19.00 GB short" in detail
+
+
+def test_payload_volume_rule_is_quiet_without_a_published_volume():
+    rule = Rule({"name": "pv", "type": "payload_store_capacity", "threshold": 85})
+    assert rule.evaluate({"ars_payload_store": {}}) is None
+    assert rule.evaluate({}) is None
+
+
 def test_redis_eviction_rule_fires_on_any_delta():
     rule = Rule({"name": "evict", "type": "redis_eviction", "threshold": 0})
     assert rule.evaluate(_redis_snap(1, 10, evicted_delta=0)) is None

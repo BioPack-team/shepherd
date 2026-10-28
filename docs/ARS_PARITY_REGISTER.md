@@ -189,7 +189,7 @@ Infrastructure substitutions (behavior-preserving by definition):
 | Upstream | Port |
 |---|---|
 | Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.notify`) + the `ars_watchdog` loop |
-| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + `ars_message.data` bytea (durable, written at terminal status) |
+| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` when set, else `ars_message.data` bytea |
 | `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent, lock-and-drain: `ars_premerge` records each validated child in a merge-ready index and wakes `ars.merge`; the worker that wins the parent's lock folds every ready child in arrival order and a loser simply acks (the semaphore column is still maintained for envelope parity; see deviation 17) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
 | self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |
@@ -247,10 +247,16 @@ Behavioral deviations:
    resolution fails); the port returns the endpoint's own
    `Unknown message: <pk>` text. Status code identical.
 10. **Retention**: upstream never purges (out-of-band cleanup honors
-    `retain`); the port nulls durable payload copies after
-    `ars_data_retention_days` for non-retained terminal messages, keeping
-    row metadata. Trees that back a live response-cache entry (item 13)
-    are exempt while their cache generation is current.
+    `retain`); the port drops the durable payload copies of whole
+    non-retained finished trees after `ars_data_retention_days`, keeping
+    row metadata, and deletes the trees' rows after
+    `ars_row_retention_days`. Trees that back a live response-cache entry
+    (item 13) are exempt while their cache generation is current. With
+    `ars_payload_dir` set it also evicts whole finished trees' payloads,
+    oldest first and cache-backed last, when the payload volume passes
+    `ars_payload_evict_high_pct`. A message whose payload was dropped reads
+    exactly as one past the age window (item 11). Retained trees are never
+    touched.
 11. **Payload inclusion in envelopes**: a single message GET loads its
     payload from the blob store, and one evicted from Redis with no durable
     copy renders `fields.data: null` (upstream MySQL always had it inline).

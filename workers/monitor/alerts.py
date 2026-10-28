@@ -92,6 +92,8 @@ class Rule:
             return None
         if self.kind == "db_capacity":
             return self._eval_db_capacity(snapshot)
+        if self.kind == "payload_store_capacity":
+            return self._eval_payload_store_capacity(snapshot)
         if self.kind == "redis_eviction":
             return self._eval_redis_eviction(snapshot)
         if self.kind == "stuck_pending":
@@ -114,6 +116,34 @@ class Rule:
             if self.threshold is not None and v > self.threshold:
                 return f"pg connections {v} > {self.threshold}"
         return None
+
+    def _eval_payload_store_capacity(self, snapshot: Dict[str, Any]) -> Optional[str]:
+        """Fire when the ARS payload volume is ``threshold`` percent full.
+
+        The watchdog evicts finished trees from ``ars_payload_evict_high_pct``
+        down to the low mark, so a threshold above the high mark only trips
+        when eviction can't keep up: a burst faster than a watchdog pass, or
+        a volume filled by retained and still-running trees, which are never
+        evicted. A no-op when the watchdog isn't publishing (no ARS, or
+        payloads still kept in Postgres).
+        """
+        store = snapshot.get("ars_payload_store") or {}
+        pct = store.get("used_pct")
+        if pct is None or self.threshold is None or pct < float(self.threshold):
+            return None
+        detail = (
+            f"ARS payload volume {pct:.1f}% full "
+            f"({store.get('used_bytes', 0) / 1e9:.1f} of "
+            f"{store.get('total_bytes', 0) / 1e9:.1f} GB)"
+        )
+        if store.get("retained_pct") is not None:
+            detail += f", {store['retained_pct']:.1f}% retained trees"
+        if store.get("short_bytes"):
+            detail += (
+                f"; eviction is {store['short_bytes'] / 1e9:.2f} GB short "
+                "with nothing left it may evict"
+            )
+        return detail
 
     def _eval_db_capacity(self, snapshot: Dict[str, Any]) -> Optional[str]:
         """Fire when the Postgres volume crosses ``threshold`` percent full.
