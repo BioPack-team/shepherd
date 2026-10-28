@@ -581,7 +581,7 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env
   
-  ######### SIPR
+######### SIPR
   sipr:
     container_name: sipr
     cpus: 1
@@ -600,7 +600,7 @@ services:
       - ./workers/sipr/debug:/app/debug
       - ./logs:/app/logs
       - ./.env:/app/.env
-  ######### Translator ARS (hosted port of NCATSTranslator/Relay)
+######### Translator ARS (hosted port of NCATSTranslator/Relay)
   # Opt-in: these services sit in the `ars` profile, so a plain
   # `docker compose up` skips them. Include them with
   # `docker compose --profile ars up --build` (or COMPOSE_PROFILES=ars).
