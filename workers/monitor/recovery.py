@@ -116,12 +116,17 @@ class RedisRestartWatcher:
         self._recorded: Optional[str] = None
         self._sweep: Optional[asyncio.Task] = None
         self._sweep_from = 0.0
+        # Redis' INFO as of the last tick, so the restart alert can say what it
+        # looked like just before it went down.
+        self._last_redis: Dict[str, Any] = {}
 
     async def observe(self, snapshot: Dict[str, Any]) -> bool:
         """Check one poll snapshot; True when it shows a restart."""
-        run_id = (snapshot.get("redis") or {}).get("run_id")
+        redis = snapshot.get("redis") or {}
+        run_id = redis.get("run_id")
         if not run_id:
             return False
+        before, self._last_redis = self._last_redis, redis
         previous = self._run_id
         if previous is None:
             # First tick since the monitor started: compare with the run_id
@@ -142,12 +147,22 @@ class RedisRestartWatcher:
             return False
         if previous is None:
             return False  # first time this Redis has been seen at all
-        await self._on_restart(snapshot)
+        await self._on_restart(snapshot, before)
         return True
 
-    async def _on_restart(self, snapshot: Dict[str, Any]) -> None:
+    async def _on_restart(
+        self, snapshot: Dict[str, Any], before: Dict[str, Any]
+    ) -> None:
         now = time.time()
-        uptime = (snapshot.get("redis") or {}).get("uptime_in_seconds")
+        redis = snapshot.get("redis") or {}
+        uptime = redis.get("uptime_in_seconds")
+        if redis.get("aof_enabled"):
+            lost = (
+                "came back from its append-only file: about the last second "
+                "of writes"
+            )
+        else:
+            lost = "came back from its last snapshot: anything written after it"
         logger.warning(
             f"Redis restarted (up {uptime}s); sweeping queries that lost their "
             f"data in {settings.monitor_redis_restart_grace_sec}s"
@@ -158,11 +173,10 @@ class RedisRestartWatcher:
             "severity": "warning",
             "detail": f"broker Redis restarted (up {uptime}s)",
             "message": (
-                "Broker `redis` restarted and came back from its last "
-                "snapshot: anything written after it -- in-flight query data, "
-                "queued tasks, received callbacks -- is gone. Queries that "
-                "lost their data will be finished as errors once it has "
-                "loaded."
+                f"Broker `redis` restarted and {lost} -- in-flight query "
+                "data, queued tasks, received callbacks -- is gone. Queries "
+                "that lost their data will be finished as errors once it has "
+                f"loaded.{_last_seen(before)}"
             ),
         }
         await alerts._record_alert(event)
@@ -179,6 +193,28 @@ class RedisRestartWatcher:
     def cancel(self) -> None:
         if self._sweep is not None:
             self._sweep.cancel()
+
+
+def _gb(n: Any) -> str:
+    return f"{int(n or 0) / 2**30:.1f} GB"
+
+
+def _last_seen(redis: Dict[str, Any]) -> str:
+    """What the broker looked like on the monitor's last tick before the
+    restart -- Redis can't say why it died, but a footprint near the container
+    limit or a fork in progress points at an OOM kill."""
+    if not redis or "error" in redis:
+        return ""
+    parts = [f"data {_gb(redis.get('used_memory_bytes'))}"]
+    if redis.get("maxmemory_pct") is not None:
+        parts[0] += f" ({redis['maxmemory_pct']}% of maxmemory)"
+    footprint = f"footprint {_gb(redis.get('footprint_bytes'))}"
+    if redis.get("memory_limit_pct") is not None:
+        footprint += f" ({redis['memory_limit_pct']}% of the container limit)"
+    parts.append(footprint)
+    if redis.get("fork_in_progress"):
+        parts.append("a snapshot/AOF-rewrite fork was running")
+    return f" Last seen before the restart: {', '.join(parts)}."
 
 
 def _log_sweep_failure(task: asyncio.Task) -> None:

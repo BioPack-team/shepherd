@@ -229,6 +229,33 @@ async def test_a_new_run_id_is_a_restart(redis_mock, alerted, sweep):
     assert not await watcher.observe(_snapshot("run-b"))
 
 
+async def test_the_restart_alert_says_what_redis_looked_like_before(
+    redis_mock, alerted, sweep
+):
+    watcher = recovery.RedisRestartWatcher()
+    before = _snapshot("run-a")
+    before["redis"].update(
+        {
+            "used_memory_bytes": 4 * 2**30,
+            "maxmemory_pct": 40.0,
+            "footprint_bytes": 24 * 2**30,
+            "memory_limit_pct": 96.0,
+            "fork_in_progress": 1,
+        }
+    )
+    await watcher.observe(before)
+    after = _snapshot("run-b")
+    after["redis"]["aof_enabled"] = 1
+
+    assert await watcher.observe(after)
+    await watcher._sweep
+
+    message = alerted["record"].await_args.args[0]["message"]
+    assert "append-only file" in message
+    assert "24.0 GB (96.0% of the container limit)" in message
+    assert "fork was running" in message
+
+
 async def test_a_restart_is_spotted_across_a_monitor_restart(
     redis_mock, alerted, sweep
 ):

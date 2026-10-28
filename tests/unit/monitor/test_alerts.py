@@ -260,6 +260,76 @@ async def test_redis_memory_uncapped_is_noop(patched, clock):
     patched["dispatch"].assert_not_called()
 
 
+def _footprint_snap(footprint, limit, used=10, maxmem=100):
+    snap = _redis_snap(used, maxmem)
+    snap["redis"].update({"footprint_bytes": footprint, "memory_limit_bytes": limit})
+    return snap
+
+
+async def test_redis_memory_alerts_on_footprint_near_container_limit(patched, clock):
+    """Data well under maxmemory, but RSS + fork copy-on-write near the
+    container limit: the OOM-kill risk the data ratio can't see."""
+    engine = _engine()
+    await _settle(engine, _footprint_snap(96, 100, used=10), clock, 7_000.0)
+    patched["dispatch"].assert_called_once()
+    ev = patched["dispatch"].call_args.args[0]
+    assert ev["rule"] == "redis_memory_critical"
+    assert "container memory limit" in ev["detail"]
+
+
+async def test_redis_memory_footprint_needs_a_configured_limit(patched, clock):
+    engine = _engine()
+    # No container limit set: a big footprint alone is not measured.
+    await _settle(engine, _footprint_snap(10**12, 0, used=10), clock, 8_000.0)
+    patched["dispatch"].assert_not_called()
+
+
+async def test_redis_memory_at_the_brink_skips_the_grace(patched, clock):
+    engine = _engine()
+    clock.return_value = 9_000.0
+    await engine.handle_redis_memory(_footprint_snap(99, 100))
+    patched["dispatch"].assert_called_once()
+    assert patched["dispatch"].call_args.args[0]["rule"] == "redis_memory_critical"
+    # Still critical next tick: committed, so no repeat.
+    clock.return_value = 9_003.0
+    await engine.handle_redis_memory(_footprint_snap(99, 100))
+    patched["dispatch"].assert_called_once()
+
+
+def _persistence_snap(**statuses):
+    snap = _redis_snap(1, 100)
+    snap["redis"].update(statuses)
+    return snap
+
+
+async def test_redis_persistence_failure_alerts_once_then_recovers(patched, clock):
+    engine = _engine()
+    await engine.handle_redis_persistence(
+        _persistence_snap(aof_last_write_status="ok", rdb_last_bgsave_status="ok")
+    )
+    patched["dispatch"].assert_not_called()
+
+    failing = _persistence_snap(aof_last_write_status="err")
+    await engine.handle_redis_persistence(failing)
+    await engine.handle_redis_persistence(failing)
+    patched["dispatch"].assert_called_once()
+    ev = patched["dispatch"].call_args.args[0]
+    assert ev["rule"] == "redis_persistence_failing"
+    assert ev["severity"] == "critical" and "AOF write" in ev["detail"]
+
+    await engine.handle_redis_persistence(_persistence_snap(aof_last_write_status="ok"))
+    assert patched["dispatch"].call_count == 2
+    assert (
+        patched["dispatch"].call_args.args[0]["rule"] == "redis_persistence_recovered"
+    )
+
+
+async def test_redis_persistence_ignores_an_unreachable_broker(patched, clock):
+    engine = _engine()
+    await engine.handle_redis_persistence({"redis": {"error": "down"}})
+    patched["dispatch"].assert_not_called()
+
+
 def test_payload_volume_rule_fires_past_its_threshold():
     rule = Rule({"name": "pv", "type": "payload_store_capacity", "threshold": 85})
     store = {
