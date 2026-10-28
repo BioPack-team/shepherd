@@ -1,7 +1,7 @@
 import re
 from typing import Literal
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Binary suffixes (Ki/Mi/...) are powers of 1024; decimal suffixes (K/M/...) are
 # powers of 1000 -- matching Kubernetes resource-quantity semantics.
@@ -40,6 +40,10 @@ def parse_size_to_bytes(value: str) -> int:
 
 
 class Settings(BaseSettings):
+    # .env is shared with docker compose, so ignore compose-only keys like
+    # COMPOSE_PROFILES instead of failing on them.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     server_url: str = "http://localhost:5439"
     server_maturity: str = "development"
     server_location: str = "RENCI"
@@ -637,9 +641,6 @@ class Settings(BaseSettings):
     def max_response_size_bytes(self) -> int:
         """Max uncompressed response size in bytes (0 disables the guard)."""
         return parse_size_to_bytes(self.max_response_size)
-
-    class Config:
-        env_file = ".env"
 
 
 settings = Settings()
