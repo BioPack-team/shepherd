@@ -1,7 +1,7 @@
 """Tests for the local aragorn_omnicorp worker.
 
 Builds two on-disk LMDB files matching the real schema (json-encoded curie
-records, raw little-endian-int shared counts) and exercises both the leaf
+records, ASCII-decimal shared counts) and exercises both the leaf
 LMDB shims and the full overlay on a small TRAPI message.
 """
 
@@ -26,12 +26,12 @@ def _build_curies_lmdb(path, entries):
 
 
 def _build_shared_counts_lmdb(path, entries):
-    """Write ``{"<i1>_<i2>": int}`` entries as raw little-endian unsigned ints."""
+    """Write ``{"<i1>_<i2>": int}`` entries as ASCII decimal text, the format
+    the production artifact uses."""
     env = lmdb.open(str(path), subdir=False, map_size=10 * 1024 * 1024)
     with env.begin(write=True) as txn:
         for key, count in entries.items():
-            # 8 bytes is comfortable for any plausible publication count.
-            txn.put(key.encode("utf-8"), int(count).to_bytes(8, "little", signed=False))
+            txn.put(key.encode("utf-8"), str(int(count)).encode("ascii"))
     env.close()
 
 
@@ -93,13 +93,67 @@ def test_curie_query_decodes_present_and_missing(lmdb_envs):
     assert result["DOES:NOT_EXIST"] == {}
 
 
-def test_shared_count_query_decodes_int_bytes_and_missing(lmdb_envs):
+def test_shared_count_query_decodes_decimal_text_and_missing(lmdb_envs):
     result = worker.shared_count_query(["1_2", "2_3", "9_99"])
 
     assert result["1_2"] == 10
     assert result["2_3"] == 5
     # Missing pair keys come back as None so the caller can skip them.
     assert result["9_99"] is None
+
+
+def _put_shared_counts(path, entries):
+    """Write raw ``{key: bytes}`` values straight into an existing shared-counts LMDB."""
+    env = lmdb.open(str(path), subdir=False, map_size=10 * 1024 * 1024)
+    with env.begin(write=True) as txn:
+        for key, raw in entries.items():
+            txn.put(key, raw)
+    env.close()
+    worker._shared_counts_env = None
+
+
+def test_shared_count_query_matches_production_artifact(lmdb_envs):
+    """Raw key/value bytes read from the deployed shared_counts.lmdb.
+
+    "267_25657" is Diabetes Mellitus (index 267) vs Metformin (index 25657).
+    Decoding these as little-endian ints instead yields e.g. 224281309233 for
+    b"10584" (issue #192).
+    """
+    real = {
+        b"267_25657": b"10584",
+        b"0_1": b"80",
+        b"0_10": b"2293",
+        b"0_100": b"27082",
+        b"0_10000": b"1",
+    }
+    _put_shared_counts(lmdb_envs["shared_counts_path"], real)
+
+    result = worker.shared_count_query([k.decode() for k in real])
+
+    assert result == {
+        "267_25657": 10584,
+        "0_1": 80,
+        "0_10": 2293,
+        "0_100": 27082,
+        "0_10000": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        (10).to_bytes(8, "little", signed=False),  # binary, not decimal text
+        b"-1",
+        b" 12",
+        b"1_000",
+        b"",
+    ],
+)
+def test_shared_count_query_rejects_non_decimal_values(lmdb_envs, raw):
+    _put_shared_counts(lmdb_envs["shared_counts_path"], {b"1_2": raw})
+
+    with pytest.raises(ValueError, match="not ASCII decimal"):
+        worker.shared_count_query(["1_2"])
 
 
 def test_make_key_sorts_indices():
@@ -321,7 +375,7 @@ def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):
     )
     with env.begin(write=True) as txn:
         # MONDO(1) <-> HP(3) -> "1_3"
-        txn.put(b"1_3", (0).to_bytes(8, "little", signed=False))
+        txn.put(b"1_3", b"0")
     env.close()
     # Force the worker to reopen against the updated file.
     worker._shared_counts_env = None
