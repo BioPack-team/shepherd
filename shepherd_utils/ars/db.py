@@ -2,9 +2,11 @@
 
 Ported from NCATSTranslator/Relay @ 3e65975 (tr_sys/tr_ars/models.py). Uses
 the shared Shepherd Postgres pool; payload blobs ride Shepherd's Redis data
-store (keyed by ``str(message_pk)``) with a durable zstd copy in
-``ars_message.data`` once a message goes terminal, so the UI can fetch
-merged results long after the Redis TTL.
+store (keyed by ``str(message_pk)``) with a durable zstd copy kept once a
+message goes terminal, so the UI can fetch merged results long after the
+Redis TTL. The durable copy is a file under ``ars_payload_dir`` when that is
+set (``payload_store``), else ``ars_message.data``; either way
+``ars_message.data_size`` records its size.
 
 Upstream's Agent/Channel/Actor registry is not persisted: the de-federated
 ARS only talks to the ARAs this Shepherd deployment hosts, a static roster in
@@ -27,7 +29,7 @@ from psycopg.types.json import Jsonb
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.config import settings
 
-from . import aras
+from . import aras, payload_store
 from .statuses import coerce_code, to_letter, validate_letter
 
 MESSAGE_COLUMNS = (
@@ -428,43 +430,6 @@ async def get_running_messages(
     ]
 
 
-async def purge_old_message_data(retention_days: int) -> int:
-    """Null out payload copies for old, non-retained, terminal messages.
-
-    Upstream has no purge job (the retain flag is honored by out-of-band
-    cleanup); this is Shepherd's equivalent for the durable bytea copies.
-    Row metadata is kept for reports/latest_pk. Returns rows purged.
-    """
-    if retention_days <= 0:
-        return 0
-    # Trees backing a live response-cache entry are the cache: purging their
-    # payloads would silently empty it. A message's tree root is itself for
-    # a parent and ``ref`` for a child / merge child; the root is exempt
-    # while an entry of the CURRENT generation points at it. Superseded
-    # generations are purged by the watchdog first (ars_cache_stale_grace_sec),
-    # after which their sources age out here like any other tree.
-    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-        await shepherd_db.lift_statement_timeout(conn)
-        cur = await conn.execute(
-            """
-            UPDATE ars_message m SET data = NULL
-            WHERE m.data IS NOT NULL
-              AND m.retain = FALSE
-              AND m.status IN ('D', 'S', 'E', 'U')
-              AND m.updated_at < NOW() - make_interval(days => %s)
-              AND NOT EXISTS (
-                SELECT 1 FROM ars_response_cache c
-                JOIN ars_cache_meta g ON g.generation = c.generation
-                WHERE c.source_pk = COALESCE(m.ref, m.id)
-              )
-            """,
-            (retention_days,),
-        )
-        purged = cur.rowcount or 0
-        await conn.commit()
-    return purged
-
-
 # ---------------------------------------------------------------------------
 # Clients / subscriptions
 # ---------------------------------------------------------------------------
@@ -580,9 +545,11 @@ async def clear_subscriptions(message_id: Union[str, uuid.UUID]) -> None:
 # Payload blobs
 #
 # Hot path: Shepherd's Redis data store, keyed by str(message_pk) (a full
-# UUID, so it can't collide with Shepherd's 8-char ids). Durable copy: the
-# ars_message.data bytea column, written when a message goes terminal.
-# Reads try Redis first and fall back to (and re-warm from) Postgres.
+# UUID, so it can't collide with Shepherd's 8-char ids). Durable copy,
+# written when a message goes terminal: a file under ars_payload_dir when
+# that is set (payload_store), else the ars_message.data bytea column. Reads
+# try Redis first and fall back to (and re-warm from) the durable copy; a
+# copy left in Postgres from before ars_payload_dir was set stays readable.
 # ---------------------------------------------------------------------------
 
 
@@ -733,9 +700,11 @@ async def persist_data_copy(
     message_id: Union[str, uuid.UUID],
     logger: logging.Logger,
 ) -> None:
-    """Copy the Redis blob into ars_message.data for durability.
+    """Copy the Redis blob to durable storage: a file under ars_payload_dir
+    when that is set (clearing any older copy in Postgres), else
+    ars_message.data. Either way ars_message.data_size records its size.
 
-    Retries through transient Redis/Postgres pressure (both operations are
+    Retries through transient Redis/Postgres/disk pressure (every step is
     idempotent); after that it stays best-effort -- the blob is still live
     in Redis and any later terminal update re-attempts the copy."""
     last_error: Optional[Exception] = None
@@ -753,14 +722,23 @@ async def persist_data_copy(
             continue
         if blob is None:
             return
+        pk = uuid.UUID(str(message_id))
         try:
+            if payload_store.enabled():
+                await asyncio.to_thread(payload_store.write, pk, blob)
+                sql, params = (
+                    "UPDATE ars_message SET data = NULL, data_size = %s WHERE id = %s",
+                    (len(blob), pk),
+                )
+            else:
+                sql, params = (
+                    "UPDATE ars_message SET data = %s, data_size = %s WHERE id = %s",
+                    (blob, len(blob), pk),
+                )
             async with shepherd_db.pool.connection(
                 settings.postgres_pool_timeout
             ) as conn:
-                await conn.execute(
-                    "UPDATE ars_message SET data = %s WHERE id = %s",
-                    (blob, uuid.UUID(str(message_id))),
-                )
+                await conn.execute(sql, params)
                 await conn.commit()
             return
         except Exception as e:
@@ -773,6 +751,36 @@ async def persist_data_copy(
         f"Failed to persist durable copy for {message_id} after retries: "
         f"{last_error}"
     )
+
+
+async def _load_durable(
+    message_id: Union[str, uuid.UUID], logger: logging.Logger
+) -> Optional[bytes]:
+    """The durable copy's stored bytes (zstd, or an older codec), or None.
+
+    The file under ars_payload_dir first, when that is set, then
+    ``ars_message.data`` -- where every copy written before it was set
+    still lives."""
+    if payload_store.enabled():
+        try:
+            blob = await asyncio.to_thread(payload_store.read, message_id)
+            if blob is not None:
+                return blob
+        except Exception as e:
+            logger.error(f"Payload file read failed for {message_id}: {e}")
+    try:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute(
+                "SELECT data FROM ars_message WHERE id = %s",
+                (uuid.UUID(str(message_id)),),
+            )
+            row = await cur.fetchone()
+    except Exception as e:
+        logger.error(f"Postgres blob read failed for {message_id}: {e}")
+        return None
+    if row is None or row[0] is None:
+        return None
+    return bytes(row[0])
 
 
 async def load_message_data(
@@ -791,19 +799,10 @@ async def load_message_data(
         logger.warning(f"Redis read failed for {message_id}: {e}")
     if blob is not None:
         return await asyncio.to_thread(shepherd_db.decode_message, blob)
-    try:
-        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-            cur = await conn.execute(
-                "SELECT data FROM ars_message WHERE id = %s",
-                (uuid.UUID(str(message_id)),),
-            )
-            row = await cur.fetchone()
-    except Exception as e:
-        logger.error(f"Postgres blob read failed for {message_id}: {e}")
+    stored = await _load_durable(message_id, logger)
+    if stored is None:
         return None
-    if row is None or row[0] is None:
-        return None
-    payload = await asyncio.to_thread(_decompress_payload, bytes(row[0]))
+    payload = await asyncio.to_thread(_decompress_payload, stored)
     # Re-warm Redis so subsequent reads are cheap again.
     try:
         await shepherd_db.save_message(str(message_id), payload, logger)
@@ -822,7 +821,7 @@ async def load_message_bytes(
     releases the GIL (so the worker thread genuinely frees the event loop),
     and no Python object graph is built -- a parsed payload costs ~4x its
     JSON size in memory and a GIL-holding parse per read. None when no blob
-    exists anywhere. A Postgres fallback re-warms Redis with the stored
+    exists anywhere. A durable-copy fallback re-warms Redis with the stored
     compressed bytes as-is."""
     blob = None
     try:
@@ -831,19 +830,9 @@ async def load_message_bytes(
         logger.warning(f"Redis read failed for {message_id}: {e}")
     if blob is not None:
         return await asyncio.to_thread(shepherd_db.decompress_zstd, blob)
-    try:
-        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-            cur = await conn.execute(
-                "SELECT data FROM ars_message WHERE id = %s",
-                (uuid.UUID(str(message_id)),),
-            )
-            row = await cur.fetchone()
-    except Exception as e:
-        logger.error(f"Postgres blob read failed for {message_id}: {e}")
+    stored = await _load_durable(message_id, logger)
+    if stored is None:
         return None
-    if row is None or row[0] is None:
-        return None
-    stored = bytes(row[0])
     try:
         raw = await asyncio.to_thread(_decompress_payload_bytes, stored)
     except Exception as e:
@@ -865,8 +854,8 @@ async def load_message_compressed(
 ) -> Optional[bytes]:
     """The payload as the compressed frame clients get from ``?compress``.
 
-    Redis first, then the durable ``ars_message.data`` copy -- which outlives
-    the Redis TTL by ``ars_data_retention_days``. Serving only from Redis (as
+    Redis first, then the durable copy -- which outlives the Redis TTL by
+    ``ars_data_retention_days``. Serving only from Redis (as
     this path used to) made ``?compress`` 404 on messages that were still
     perfectly readable through every other endpoint. A durable copy stored in
     some other codec is re-compressed as zstd so the response always matches
@@ -878,19 +867,9 @@ async def load_message_compressed(
             return blob
     except Exception as e:
         logger.warning(f"Redis read failed for {message_id}: {e}")
-    try:
-        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
-            cur = await conn.execute(
-                "SELECT data FROM ars_message WHERE id = %s",
-                (uuid.UUID(str(message_id)),),
-            )
-            row = await cur.fetchone()
-    except Exception as e:
-        logger.error(f"Postgres blob read failed for {message_id}: {e}")
+    stored = await _load_durable(message_id, logger)
+    if stored is None:
         return None
-    if row is None or row[0] is None:
-        return None
-    stored = bytes(row[0])
     if stored[:4] == ZSTD_MAGIC:
         try:  # re-warm with the same frame Redis normally holds
             await shepherd_db.data_db_client.set(
@@ -910,6 +889,12 @@ async def load_message_compressed(
 async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
     if await shepherd_db.message_exists(str(message_id)):
         return True
+    if payload_store.enabled():
+        try:
+            if await asyncio.to_thread(payload_store.exists, message_id):
+                return True
+        except Exception:
+            pass
     try:
         async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
             cur = await conn.execute(
@@ -927,7 +912,7 @@ async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
 #
 # The cache stores no payloads: ``ars_response_cache`` maps a canonical
 # query-graph hash to the parent pk of the one tree that answers it (its
-# blobs already live in ``ars_message.data``); identical submits are handed
+# blobs already live in the durable copies); identical submits are handed
 # that pk. Orchestration lives in ``shepherd_utils.ars.cache``; this section
 # is the SQL.
 # ---------------------------------------------------------------------------
@@ -1194,9 +1179,9 @@ async def purge_expired_ready_cache_entries(
     """Delete ready entries older than ``max_age_sec``, a batch at a time.
 
     Without this nothing ever retires a current-generation entry short of an
-    explicit invalidation, and because ``purge_old_message_data`` exempts any
-    tree a live entry points at, every distinct query ever cached pinned its
-    payloads in ``ars_message.data`` forever. Returns rows deleted.
+    explicit invalidation, and because the age-based payload purge
+    (ars/retention.py) exempts any tree a live entry points at, every
+    distinct query ever cached pinned its durable payloads forever. Returns rows deleted.
     """
     if max_age_sec <= 0:
         return 0

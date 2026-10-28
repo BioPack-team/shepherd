@@ -349,12 +349,13 @@ async def test_initialize_db_skips_upgrades_when_indexes_present(mocker):
     """The pre-flight catalog check short-circuits the common case: when every
     upgrade index already exists, no advisory lock is taken and no DDL runs, so
     a whole fleet booting at once doesn't queue on one lock for a no-op."""
-    # +3: the ARS schema marker index (idx_ars_message_ref), the ARS
-    # response-cache marker (idx_ars_response_cache_source), and the ARS
-    # registry-retirement marker (idx_ars_message_agent) joined the
-    # pre-flight set when those upgrades were added to startup.
+    # +4: the ARS schema marker index (idx_ars_message_ref), the ARS
+    # response-cache marker (idx_ars_response_cache_source), the ARS
+    # registry-retirement marker (idx_ars_message_agent) and the payload
+    # marker (idx_ars_message_stored) joined the pre-flight set when those
+    # upgrades were added to startup.
     mock_conn, mock_pool = _install_pool_mock(
-        mocker, cursor_fetchone=(len(db._SCHEMA_UPGRADES) + 3,)
+        mocker, cursor_fetchone=(len(db._SCHEMA_UPGRADES) + 4,)
     )
     await db.initialize_db()
     assert mock_pool.open.called

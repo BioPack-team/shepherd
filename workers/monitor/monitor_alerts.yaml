@@ -7,6 +7,7 @@
 #   name:       unique identifier (used as cooldown key)
 #   type:       threshold | heartbeat_lost | queue_pending | oldest_callback_age
 #               | db_capacity | redis_eviction | stuck_pending
+#               | payload_store_capacity
 #   metric:     for type=threshold: xlen | callbacks_pending | pg_connection_count
 #   stream:     redis stream name (for xlen / queue_pending / stuck_pending;
 #               stuck_pending scans all streams when omitted)
@@ -166,6 +167,25 @@ rules:
     duration: 1m
     severity: critical
     message: "Postgres data volume is over 90% full. Grow the PVC now to avoid a crash."
+
+  # ARS payload volume (ARS_PAYLOAD_DIR). The ARS watchdog evicts finished
+  # trees once it passes ARS_PAYLOAD_EVICT_HIGH_PCT (80% by default), so being
+  # above that means eviction can't keep up -- a burst, or the volume filling
+  # with retained / still-running trees, which are never evicted. The alert
+  # says how much is retained. A no-op unless the watchdog is publishing.
+  - name: ars_payload_volume_almost_full
+    type: payload_store_capacity
+    threshold: 85
+    duration: 2m
+    severity: warning
+    message: "ARS payload volume is over 85% and eviction isn't bringing it down. Grow the volume, or release retained trees."
+
+  - name: ars_payload_volume_critically_full
+    type: payload_store_capacity
+    threshold: 95
+    duration: 1m
+    severity: critical
+    message: "ARS payload volume is over 95% full. Durable copies will start failing; grow the volume now."
 
 # Broker (Redis) availability is monitored automatically by the alert engine --
 # there is no rule to configure here. The poller PINGs the broker each tick; a
