@@ -1,5 +1,6 @@
 """Path scoring module: every analysis scored by the sequence reranker
-(``scorer``), from the LMDB squashbert's scripts/export_reranker.py writes."""
+(``scorer``), from the pathfinder embeddings LMDB (version 2) that
+generate_pathfinder_resources_from_graph.py builds."""
 
 import asyncio
 import logging
@@ -26,9 +27,9 @@ GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 6
 EMBEDDING_DIR = settings.pathfinder_embeddings_dir
-# Paths scored per forward pass, per length. It bounds peak memory (about 40 KB
-# of inputs a path) whatever the message's size: scoring a whole message in
-# one pass is what OOM-killed the pod on large messages.
+# Paths scored per forward pass, per length. It bounds peak memory whatever the
+# message's size: scoring a whole message in one pass is what OOM-killed the pod
+# on large messages.
 SCORE_CHUNK_SIZE = 1024
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
