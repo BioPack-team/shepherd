@@ -137,6 +137,34 @@ async def test_a_failed_slow_refresh_keeps_the_last_counts(pg, monkeypatch):
     assert await poller._collect_postgres_slow() is first
 
 
+async def test_a_timed_out_size_check_keeps_the_last_size(pg, monkeypatch):
+    """A size check that times out (a stalled volume) must not read as an
+    empty database -- that would blind the db_capacity alert."""
+    await poller._collect_postgres_slow()
+    monkeypatch.setattr(poller, "_pg_slow_at", 0.0)  # due again
+    pg.answers = [
+        (
+            (f, TimeoutError("canceling statement due to statement timeout"))
+            if f == "pg_database_size"
+            else (f, rows)
+        )
+        for f, rows in pg.answers
+    ]
+    real_execute = pg.execute
+
+    async def execute(sql, params=None):
+        cur = await real_execute(sql, params)
+        if isinstance(cur.rows, Exception):
+            raise cur.rows
+        return cur
+
+    monkeypatch.setattr(pg, "execute", execute)
+
+    second = await poller._collect_postgres_slow()
+    assert second["db_size_bytes"] == 1000
+    assert second["wal_size_bytes"] == 24
+
+
 async def test_snapshot_merges_live_and_cached_state_counts(pg, monkeypatch):
     async def _nothing(*args, **kwargs):
         return {}
@@ -166,3 +194,20 @@ async def test_snapshot_merges_live_and_cached_state_counts(pg, monkeypatch):
     }
     assert snapshot["postgres"]["db_size_bytes"] == 1000
     assert snapshot["postgres"]["wal_size_bytes"] == 24
+
+
+async def test_payload_volume_state_comes_from_the_watchdog(redis_mock, monkeypatch):
+    import json
+
+    from shepherd_utils.ars import retention
+
+    monkeypatch.setattr(poller, "broker_client", redis_mock["broker"])
+    assert await poller._collect_payload_store() == {}
+
+    await redis_mock["broker"].set(
+        retention.USAGE_KEY,
+        json.dumps({"used_bytes": 30, "total_bytes": 40, "retained_bytes": 10}),
+    )
+    state = await poller._collect_payload_store()
+    assert state["used_pct"] == 75.0
+    assert state["retained_pct"] == 25.0

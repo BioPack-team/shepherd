@@ -18,7 +18,9 @@ is bounded by ars_timeout_scan_limit rows per pass instead, oldest first.
 
 The loop also hosts the response-cache repair sweep (shepherd_utils.ars.cache
 .repair_sweep): pending entries whose leader is finished or gone, and
-superseded cache generations.
+superseded cache generations; and storage retention (shepherd_utils.ars
+.retention): eviction from the payload volume under disk pressure every
+pass, the age-based payload purge and old-tree deletion hourly.
 
 Intent-level deviations, register-documented: upstream resolves the agent by
 indexing the Agent table with the ACTOR's pk (a latent bug whose outcome
@@ -36,6 +38,7 @@ import uuid
 import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
+import shepherd_utils.ars.retention as retention
 from shepherd_utils.config import settings
 from shepherd_utils.db import initialize_db
 from shepherd_utils.heartbeat import Heartbeat
@@ -102,6 +105,36 @@ async def sweep(logger: logging.Logger) -> int:
     return timed_out
 
 
+async def retention_pass(logger: logging.Logger, hourly: bool) -> None:
+    """Storage retention, each step isolated so one failing doesn't skip the
+    rest. Eviction runs every pass so a burst is caught within a minute; the
+    age-based passes only hourly."""
+    eviction = {}
+    try:
+        eviction = await retention.evict_for_space(logger)
+    except Exception as e:
+        logger.error(f"Payload eviction failed: {e}", exc_info=True)
+    await retention.publish_usage(eviction, logger)
+    if not hourly:
+        return
+    try:
+        purged = await retention.purge_expired_payloads(
+            settings.ars_data_retention_days, logger
+        )
+        if purged:
+            logger.info(f"Purged the durable payloads of {purged} old ARS trees")
+    except Exception as e:
+        logger.error(f"Payload purge failed: {e}", exc_info=True)
+    try:
+        deleted = await retention.delete_expired_trees(
+            settings.ars_row_retention_days, logger
+        )
+        if deleted:
+            logger.info(f"Deleted {deleted} ARS trees past row retention")
+    except Exception as e:
+        logger.error(f"ARS tree deletion failed: {e}", exc_info=True)
+
+
 async def run_forever():
     await initialize_db()
     # kept alive for the process lifetime; the loop below never returns
@@ -122,16 +155,10 @@ async def run_forever():
         except Exception as e:
             LOGGER.error(f"Cache repair sweep failed: {e}", exc_info=True)
         now = loop.time()
-        if now - last_purge >= _PURGE_INTERVAL_SEC:
+        hourly = now - last_purge >= _PURGE_INTERVAL_SEC
+        if hourly:
             last_purge = now
-            try:
-                purged = await ars_db.purge_old_message_data(
-                    settings.ars_data_retention_days
-                )
-                if purged:
-                    LOGGER.info(f"Purged durable payloads of {purged} old ARS messages")
-            except Exception as e:
-                LOGGER.error(f"Payload purge failed: {e}")
+        await retention_pass(LOGGER, hourly)
         await asyncio.sleep(settings.ars_watchdog_interval_sec)
 
 

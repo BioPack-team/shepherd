@@ -1,9 +1,10 @@
 """Tests for the score_paths worker and its sequence-reranker ``scorer``.
 
-The reranker itself is a TorchScript model squashbert exports; here a fake
-model stands in, so what is checked is everything around it: how a TRAPI path
-is read into nodes, categories and hop phrases, the features looked up for it,
-and how the model's output becomes each analysis' score.
+The reranker itself is a TorchScript model the pathfinder embeddings LMDB
+holds; here a fake model stands in, so what is checked is everything around
+it: how a TRAPI path is read into nodes, categories and hop phrases, the
+tokens and features looked up for it, and how the model's output becomes each
+analysis' score.
 
 torch is not a test requirement (its default Linux wheel is gigabytes), so when
 it is missing a stand-in with the handful of calls the scorer makes is
@@ -127,27 +128,28 @@ class _Output:
 
 
 class FakeModel:
-    """Scores a path by the first value of its second node's vector, and
+    """Scores a path by the first value of its second node's token, and
     records what it was given."""
 
     def __init__(self):
         self.calls = []
 
-    def __call__(self, node_x, edge_x, n_hops, scalars, extra):
-        node_x, edge_x, n_hops, scalars = (
-            np.asarray(x) for x in (node_x, edge_x, n_hops, scalars)
+    def score_tokens(self, node_t, edge_t, n_hops, scalars, extra):
+        node_t, edge_t, n_hops, scalars = (
+            np.asarray(x) for x in (node_t, edge_t, n_hops, scalars)
         )
         self.calls.append(
             {
-                "node_x": node_x,
-                "edge_x": edge_x,
+                "node_t": node_t,
+                "edge_t": edge_t,
                 "n_hops": n_hops,
                 "scalars": scalars,
             }
         )
-        return _Output(node_x[:, 1, 0].astype(np.float32))
+        return _Output(node_t[:, 1, 0].astype(np.float32))
 
 
+# The model's token width; the SAPBERT width the LMDB records is never read
 DIM = 2
 SCALAR_NAMES = (
     ["n_hops_scaled"]
@@ -158,7 +160,8 @@ SCALAR_NAMES = (
 
 def make_config(**overrides):
     config = {
-        "embed_dim": DIM,
+        "embed_dim": 768,
+        "token_dim": DIM,
         "scalar_names": SCALAR_NAMES,
         "node_context": True,
         "edge_context": True,
@@ -170,8 +173,8 @@ def make_config(**overrides):
 
 
 def store(**vectors):
-    """An LMDB stand-in holding the given vectors, keyed as squashbert's
-    export writes them."""
+    """An LMDB stand-in holding the given vectors, keyed as the pathfinder
+    embeddings hold them."""
     data = {}
     for kind, entries in vectors.items():
         for text, values in entries.items():
@@ -228,7 +231,11 @@ def test_load_reranker(mocker):
         {
             scorer.MODEL_KEY: b"model bytes",
             scorer.CONFIG_KEY: json.dumps(
-                {"length_scale": {"2": [0.5, 2], "3": [1, 3]}, "embed_dim": 4}
+                {
+                    "length_scale": {"2": [0.5, 2], "3": [1, 3]},
+                    "embed_dim": 4,
+                    "token_dim": 2,
+                }
             ).encode(),
         }
     )
@@ -239,7 +246,29 @@ def test_load_reranker(mocker):
     model.eval.assert_called_once()
     blob = load.call_args.args[0]
     assert isinstance(blob, io.BytesIO) and blob.getvalue() == b"model bytes"
-    assert config == {"length_scale": {2: (0.5, 2.0), 3: (1.0, 3.0)}, "embed_dim": 4}
+    assert config == {
+        "length_scale": {2: (0.5, 2.0), 3: (1.0, 3.0)},
+        "embed_dim": 4,
+        "token_dim": 2,
+    }
+
+
+def test_load_reranker_refuses_sapbert_vectors(mocker):
+    """An LMDB of SAPBERT's vectors (pathfinder embeddings version 1) has no
+    token width: its vectors are not the tokens the model scores."""
+    load = mocker.patch.object(scorer.torch.jit, "load")
+    txn = FakeTxn(
+        {
+            scorer.MODEL_KEY: b"model bytes",
+            scorer.CONFIG_KEY: json.dumps(
+                {"length_scale": {"2": [0.5, 2]}, "embed_dim": 4}
+            ).encode(),
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="serve version 2"):
+        scorer.load_reranker(txn)
+    load.assert_not_called()
 
 
 @pytest.mark.parametrize("missing", [scorer.MODEL_KEY, scorer.CONFIG_KEY])
@@ -421,6 +450,30 @@ def test_hop_phrase_rejects_a_negated_that_is_not_a_boolean():
         scorer.hop_phrase(BMT, "A", "B", ["e"], edges)
 
 
+def inferred():
+    return {
+        "attributes": [
+            {"attribute_type_id": "biolink:support_graphs", "value": ["aux_e"]}
+        ]
+    }
+
+
+def test_hop_phrase_reads_an_endpoint_s_own_edges_before_inferred_ones():
+    edges = {
+        "own": edge("A", "B", "biolink:affects"),
+        "child": edge("A", "B", "biolink:treats", **inferred()),
+        "child_back": edge("B", "A", "biolink:causes", **inferred()),
+        "not": edge("A", "B", "biolink:affects", **negated(True)),
+    }
+
+    assert scorer.hop_phrase(BMT, "A", "B", list(edges), edges) == "affects"
+    assert (
+        scorer.hop_phrase(BMT, "A", "B", ["child", "child_back"], edges)
+        == "[caused by or treats]"
+    )
+    assert scorer.hop_phrase(BMT, "A", "B", ["not", "child"], edges) == "treats"
+
+
 def test_hop_phrase_with_nothing_walkable():
     edges = {"e": edge("B", "A", "biolink:not_a_predicate")}
 
@@ -553,7 +606,7 @@ def test_path_features():
     ).tobytes()
     kept = {}
 
-    node_x, edge_x, scalars = scorer.path_features(
+    node_t, edge_t, scalars = scorer.path_features(
         FakeTxn(data),
         make_config(),
         ["S", "T"],
@@ -562,8 +615,9 @@ def test_path_features():
         kept,
     )
 
-    assert node_x.tolist() == [[1, 2, 5, 6], [3, 4, 7, 8]]
-    assert edge_x.tolist() == [[0.25, 0.5]]
+    # a node's token is its vector plus its category's
+    assert node_t.tolist() == [[6, 8], [10, 12]]
+    assert edge_t.tolist() == [[0.25, 0.5]]
     got = dict(zip(SCALAR_NAMES, scalars.tolist()))
     # T has no node context: zeros
     assert got["deg_out_max"] == 2 and got["deg_out_mean"] == 1
@@ -681,8 +735,8 @@ def test_score_message(chunk_size):
     assert len(model.calls) == (2 if chunk_size == 1 else 1)
     for call in model.calls:
         assert call["n_hops"].tolist() == [2] * len(call["n_hops"])
-        assert call["node_x"].shape[1:] == (3, 2 * DIM)
-        assert call["edge_x"].shape[1:] == (2, DIM)
+        assert call["node_t"].shape[1:] == (3, DIM)
+        assert call["edge_t"].shape[1:] == (2, DIM)
         assert call["scalars"].shape[1:] == (len(SCALAR_NAMES),)
 
 
@@ -784,6 +838,7 @@ def test_validate_scoring_data(tmp_path, mocker, caplog):
             json.dumps(
                 {
                     "length_scale": {"3": [0, 1], "2": [0, 1]},
+                    "token_dim": 128,
                     "biolink_version": "4.2.5",
                     "node_context": True,
                     "edge_context": False,

@@ -13,6 +13,7 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
+import shepherd_utils.ars.retention as retention
 from shepherd_utils.broker import broker_client
 from shepherd_utils.config import settings
 from shepherd_utils.db import pool as pg_pool
@@ -336,6 +337,11 @@ async def _collect_postgres_slow() -> Dict[str, Any]:
         logger.debug(f"Couldn't refresh the finished-query counts: {e}")
         return _pg_slow
     sizes = await _collect_postgres_size()
+    if sizes is None:
+        # Keep the last reading rather than report an empty disk: a size
+        # check fails exactly when the volume is too slow to answer, and a 0
+        # there would hide the database from the db_capacity alert.
+        sizes = {k: _pg_slow.get(k, 0) for k in ("db_size_bytes", "wal_size_bytes")}
     _pg_slow = {"finished_state_counts": finished, **sizes}
     _pg_slow_at = now
     return _pg_slow
@@ -362,6 +368,14 @@ async def _collect_redis_info() -> Dict[str, Any]:
     if _last_evicted_keys is not None:
         evicted_delta = max(0, evicted - _last_evicted_keys)
     _last_evicted_keys = evicted
+    # What the kernel counts against the container's memory limit: the
+    # process's resident memory (data + allocator fragmentation + client
+    # buffers) plus the pages a running snapshot / AOF-rewrite fork has copied
+    # since it forked. ``used_memory`` sees none of the extra, which is how the
+    # broker can be OOM-killed with the maxmemory alert never firing.
+    rss = int(info.get("used_memory_rss", 0) or 0)
+    footprint = rss + int(info.get("current_cow_size", 0) or 0)
+    limit = settings.redis_memory_limit_bytes
     return {
         "used_memory_human": info.get("used_memory_human"),
         "used_memory_bytes": used,
@@ -373,6 +387,22 @@ async def _collect_redis_info() -> Dict[str, Any]:
         "evicted_keys": evicted,
         "evicted_keys_delta": evicted_delta,
         "mem_fragmentation_ratio": info.get("mem_fragmentation_ratio"),
+        "used_memory_rss_bytes": rss,
+        "footprint_bytes": footprint,
+        # The container's memory limit (``redis_memory_limit``); 0 when unset,
+        # which skips the footprint side of the memory alert.
+        "memory_limit_bytes": limit,
+        "memory_limit_pct": round(100.0 * footprint / limit, 1) if limit else None,
+        # Persistence health. A failed snapshot or AOF write means a restart
+        # would lose more than it should, and nothing else surfaces it.
+        "aof_enabled": int(info.get("aof_enabled", 0) or 0),
+        "aof_last_write_status": info.get("aof_last_write_status"),
+        "aof_last_bgrewrite_status": info.get("aof_last_bgrewrite_status"),
+        "rdb_last_bgsave_status": info.get("rdb_last_bgsave_status"),
+        "rdb_last_save_time": info.get("rdb_last_save_time"),
+        "fork_in_progress": int(info.get("rdb_bgsave_in_progress", 0) or 0)
+        or int(info.get("aof_rewrite_in_progress", 0) or 0),
+        "latest_fork_usec": info.get("latest_fork_usec"),
         "connected_clients": info.get("connected_clients"),
         "instantaneous_ops_per_sec": info.get("instantaneous_ops_per_sec"),
         "uptime_in_seconds": info.get("uptime_in_seconds"),
@@ -383,8 +413,28 @@ async def _collect_redis_info() -> Dict[str, Any]:
     }
 
 
-async def _collect_postgres_size() -> Dict[str, int]:
-    """Logical DB size + WAL size in bytes.
+async def _collect_payload_store() -> Dict[str, Any]:
+    """The ARS payload volume's state, as the ARS watchdog last published it
+    (it is the process with the volume mounted). Empty when the ARS isn't
+    running, payloads are kept in Postgres, or the watchdog has gone quiet
+    for long enough that the key expired."""
+    try:
+        state = retention.read_usage(await broker_client.get(retention.USAGE_KEY))
+    except Exception:
+        return {}
+    if not state or not state.get("total_bytes"):
+        return {}
+    total = state["total_bytes"]
+    state["used_pct"] = round(100.0 * state.get("used_bytes", 0) / total, 1)
+    retained = state.get("retained_bytes")
+    state["retained_pct"] = (
+        round(100.0 * retained / total, 1) if retained is not None else None
+    )
+    return state
+
+
+async def _collect_postgres_size() -> "Dict[str, int] | None":
+    """Logical DB size + WAL size in bytes, or None if they couldn't be read.
 
     Used for the History infra panel and for the disk-fullness estimate that
     drives the ``db_capacity`` alert. WAL is included because a stalled archiver
@@ -407,8 +457,9 @@ async def _collect_postgres_size() -> Dict[str, int]:
             except Exception:
                 # pg_ls_waldir needs superuser/pg_monitor; skip if not granted.
                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Couldn't read the Postgres database size: {e}")
+        return None
     return sizes
 
 
@@ -647,11 +698,12 @@ async def collect_snapshot() -> Dict[str, Any]:
         _known_workers(),
     )
     streams = _discover_streams(workers, known)
-    stream_stats, pg_state, redis_info, pg_slow = await asyncio.gather(
+    stream_stats, pg_state, redis_info, pg_slow, payloads = await asyncio.gather(
         _collect_streams(streams),
         _collect_postgres(),
         _collect_redis_info(),
         _collect_postgres_slow(),
+        _collect_payload_store(),
     )
     # live unfinished counts on top of the cached finished ones
     pg_state["state_counts"] = {
@@ -681,6 +733,7 @@ async def collect_snapshot() -> Dict[str, Any]:
         "streams": stream_stats,
         "postgres": pg_state,
         "redis": redis_info,
+        "ars_payload_store": payloads,
         "events": events,
         "aras": ARAS,
     }

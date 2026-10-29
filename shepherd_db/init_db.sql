@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS ars_message (
   merged_version UUID REFERENCES ars_message(id),
   merged_versions_list JSONB,
   params JSONB,
-  data BYTEA
+  data BYTEA,
+  data_size BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_ars_message_ref ON ars_message (ref);
 CREATE INDEX IF NOT EXISTS idx_ars_message_status_updated ON ars_message (status, updated_at);
@@ -77,6 +78,18 @@ CREATE INDEX IF NOT EXISTS idx_ars_message_ts ON ars_message (ts);
 -- registry retirement (shepherd_utils.db.apply_schema_upgrades migrates a
 -- volume still carrying ars_message.actor + the registry tables first).
 CREATE INDEX IF NOT EXISTS idx_ars_message_agent ON ars_message (agent, ts);
+-- Durable payload size in bytes, wherever the copy lives (``data`` or a file
+-- under ars_payload_dir -- shepherd_utils/ars/payload_store.py). NULL means
+-- no durable copy. Retention sums and finds stored payloads by it, so it
+-- never has to read a payload. Added after the ARS port, hence the ALTER for
+-- older volumes; idx_ars_message_stored doubles as its schema-upgrade
+-- marker.
+ALTER TABLE ars_message ADD COLUMN IF NOT EXISTS data_size BIGINT;
+CREATE INDEX IF NOT EXISTS idx_ars_message_stored ON ars_message (ref)
+  WHERE data IS NOT NULL OR data_size IS NOT NULL;
+-- Payloads that do stay in Postgres are large TOAST values: vacuum the TOAST
+-- table early so space freed by retention is reused instead of growing it.
+ALTER TABLE ars_message SET (toast.autovacuum_vacuum_scale_factor = 0.02);
 
 CREATE TABLE IF NOT EXISTS ars_client (
   id SERIAL PRIMARY KEY,

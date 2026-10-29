@@ -400,6 +400,8 @@ ARS_CACHE_SCHEMA_MARKER_INDEX = "idx_ars_response_cache_source"
 # this marker is what makes a volume still carrying the registry tables run
 # ``_migrate_ars_registry`` below.
 ARS_AGENT_SCHEMA_MARKER_INDEX = "idx_ars_message_agent"
+# ars_message.data_size (durable payloads off Postgres, size-based retention).
+ARS_PAYLOAD_SCHEMA_MARKER_INDEX = "idx_ars_message_stored"
 
 
 async def _migrate_ars_registry(conn) -> None:
@@ -469,6 +471,7 @@ async def apply_schema_upgrades() -> None:
             ARS_SCHEMA_MARKER_INDEX,
             ARS_CACHE_SCHEMA_MARKER_INDEX,
             ARS_AGENT_SCHEMA_MARKER_INDEX,
+            ARS_PAYLOAD_SCHEMA_MARKER_INDEX,
         ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",
