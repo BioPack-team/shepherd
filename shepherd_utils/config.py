@@ -119,6 +119,32 @@ class Settings(BaseSettings):
     # ends with an empty response saying why rather than a partial one that
     # silently omits the rejected data.
     callback_max_request_size: str = "0"
+    # Maximum accepted request body for ``/{ara}/query`` and
+    # ``/{ara}/asyncquery``. The body is buffered and parsed in the server
+    # process, so an unbounded one ties up the event loop (and memory) for
+    # every other caller; anything larger is rejected with 413 -- on the
+    # declared Content-Length before a byte is read, or mid-stream once the
+    # running total crosses it. Same size syntax as above; 0 disables. Queries
+    # carrying a populated knowledge graph (score/filter workflows) run to
+    # tens of MB, so leave plenty of headroom above the largest real one.
+    query_max_request_size: str = "100MB"
+    # How long (seconds) a request body may go without delivering a byte
+    # before the server gives up on it (408), on the query and callback
+    # endpoints. Without it a client that declares a large Content-Length and
+    # then stops sending holds a worker open indefinitely (slowloris) -- a
+    # size cap never trips on a stream that simply stalls. This is an idle
+    # gap, not a total: a large body that keeps arriving is never cut off.
+    # 0 disables.
+    request_body_idle_timeout_sec: float = 30.0
+    # Hosts an /asyncquery callback may point at even though they resolve to
+    # a private, loopback or link-local address (see
+    # shepherd_utils/callback_url.py). Comma-separated hostnames, IPs or CIDR
+    # networks. Public addresses are always allowed and cloud metadata
+    # addresses never are. Empty -- the default -- allows public addresses
+    # only, which is what production wants; the local/Test flow calls back to
+    # host.docker.internal or the docker bridge (scripts/run_query.py
+    # --async), so compose.yml allowlists those.
+    callback_allowed_hosts: str = ""
     kg_retrieval_url: str = "http://host.docker.internal:8080/asyncquery"
     # How long a lookup worker waits for the retrieval service to ACK an
     # /asyncquery submission. This bounds only the acknowledgement, the
@@ -674,6 +700,11 @@ class Settings(BaseSettings):
     def callback_max_request_size_bytes(self) -> int:
         """Max accepted ``/callback`` body in bytes (0 disables the limit)."""
         return parse_size_to_bytes(self.callback_max_request_size)
+
+    @property
+    def query_max_request_size_bytes(self) -> int:
+        """Max accepted ``/query``/``/asyncquery`` body in bytes (0 disables)."""
+        return parse_size_to_bytes(self.query_max_request_size)
 
     @property
     def max_response_size_bytes(self) -> int:
