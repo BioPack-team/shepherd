@@ -127,7 +127,7 @@ class Settings(BaseSettings):
     # running total crosses it. Same size syntax as above; 0 disables. Queries
     # carrying a populated knowledge graph (score/filter workflows) run to
     # tens of MB, so leave plenty of headroom above the largest real one.
-    query_max_request_size: str = "100MB"
+    query_max_request_size: str = "250MB"
     # How long (seconds) a request body may go without delivering a byte
     # before the server gives up on it (408), on the query and callback
     # endpoints. Without it a client that declares a large Content-Length and
