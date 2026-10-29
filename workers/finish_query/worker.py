@@ -14,6 +14,7 @@ from opentelemetry.trace import Status, StatusCode, get_current_span
 
 from shepherd_utils.ars.handoff import parse_handoff_callback
 from shepherd_utils.broker import add_task, mark_task_as_complete
+from shepherd_utils.callback_url import CallbackURLError, validate_callback_url
 from shepherd_utils.db import (
     DatabaseUnavailableError,
     ResponseTooLargeError,
@@ -443,7 +444,15 @@ async def finish_query(task, logger: logging.Logger):
             # its duration.
             del logs, logs_bytes
 
-            await send_callback(callback_url, message_bytes, logger)
+            # Checked at intake too; re-checked here because the host's DNS can
+            # have changed since (rebinding), and for queries accepted before
+            # intake checked at all. See shepherd_utils/callback_url.py.
+            try:
+                await validate_callback_url(callback_url)
+            except CallbackURLError as e:
+                logger.error(f"Not sending the response to {callback_url}: {e}")
+            else:
+                await send_callback(callback_url, message_bytes, logger)
             # Release the payload before the remaining db round trips.
             del message_bytes
 

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, ORJSONResponse
 from opentelemetry.propagate import extract, inject
 
 from shepherd_utils.broker import add_task
+from shepherd_utils.callback_url import CallbackURLError, validate_callback_url
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     DatabaseUnavailableError,
@@ -78,6 +79,11 @@ CLIENT_CLOSED_REQUEST_CODE = 499
 # ``query: dict = Body(...)`` validation returned for the same rejections, kept
 # so the parser swap isn't visible to callers.
 QUERY_BODY_ERROR_CODE = 422
+# What a body over ``query_max_request_size`` answers with.
+QUERY_TOO_LARGE_CODE = 413
+# What a body that stops arriving (``request_body_idle_timeout_sec``) answers
+# with. The caller is most likely gone, but a slow one learns why.
+BODY_READ_TIMEOUT_CODE = 408
 
 
 class QueryIntakeError(Exception):
@@ -94,6 +100,17 @@ class QueryBodyError(Exception):
 
     Client-safe like ``QueryIntakeError``: the message is returned verbatim as
     the 422 ``detail``."""
+
+
+class QueryBodyTooLarge(Exception):
+    """Raised when a posted query body exceeds ``query_max_request_size``.
+
+    Client-safe: the message is returned verbatim as the 413 ``description``."""
+
+
+class BodyReadTimeout(Exception):
+    """Raised when a request body goes ``request_body_idle_timeout_sec``
+    without delivering a byte. Client-safe, like ``QueryBodyError``."""
 
 
 class ARATargetEnum(str, Enum):
@@ -210,11 +227,21 @@ async def parse_query_body(request: Request) -> dict:
     the single event loop this server runs on, so it stalls every other
     in-flight request for its duration. orjson cuts that stall by roughly a
     third (measured: ~87ms -> ~59ms on a 6.8MB body), which makes it cheaper but
-    does not make it go away -- the parse is still synchronous, and moving it to
-    ``run_in_threadpool`` is what would actually unblock the loop. Dropping
+    does not make it go away -- the parse is still synchronous. Dropping
     FastAPI's ``dict`` body field also skips a pydantic pass, but that one is a
     shallow check on the four top-level keys and measures at ~0ms; it is not
-    part of the win.
+    part of the win. Moving the parse to a thread would not help as much as it
+    sounds: orjson holds the GIL while it runs, so the loop would still be
+    stalled.
+
+    What bounds the stall is the size cap: the body is read through
+    ``_read_body_within_limit`` against ``query_max_request_size``, so an
+    oversized body is refused with 413 before it is buffered or parsed, and a
+    body that stops arriving is dropped after ``request_body_idle_timeout_sec``
+    instead of holding the worker open.
+
+    Raises ``QueryBodyTooLarge`` for a body over the cap and
+    ``BodyReadTimeout`` for one that stalls.
 
     Raises ``QueryBodyError`` for a body that isn't JSON-typed, isn't valid
     JSON, or isn't a JSON object. The ``query: dict = Body(...)`` signature got
@@ -227,7 +254,14 @@ async def parse_query_body(request: Request) -> dict:
             "Invalid request body: expected content-type application/json, "
             f"got {content_type}."
         )
-    raw = await request.body()
+    max_bytes = settings.query_max_request_size_bytes
+    raw = await _read_body_within_limit(
+        request, max_bytes, settings.request_body_idle_timeout_sec
+    )
+    if raw is None:
+        raise QueryBodyTooLarge(
+            f"Request body exceeds the maximum allowed size of {max_bytes} bytes."
+        )
     try:
         query = orjson.loads(raw)
     except orjson.JSONDecodeError as e:
@@ -443,6 +477,16 @@ async def run_sync_query(
             content={"status": "ERROR", "description": str(e)},
             status_code=QUERY_BODY_ERROR_CODE,
         )
+    except QueryBodyTooLarge as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_TOO_LARGE_CODE,
+        )
+    except BodyReadTimeout as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=BODY_READ_TIMEOUT_CODE,
+        )
     try:
         query_id, response_id, logger = await run_query(target, query_dict)
     except QueryIntakeError as e:
@@ -501,6 +545,16 @@ async def run_async_query(
             content={"status": "Failed", "description": str(e)},
             status_code=QUERY_BODY_ERROR_CODE,
         )
+    except QueryBodyTooLarge as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=QUERY_TOO_LARGE_CODE,
+        )
+    except BodyReadTimeout as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=BODY_READ_TIMEOUT_CODE,
+        )
     callback_url = query.get("callback")
     if callback_url is None:
         return ORJSONResponse(
@@ -508,6 +562,17 @@ async def run_async_query(
                 "status": "Failed",
                 "description": "callback URL missing",
             },
+            status_code=QUERY_BODY_ERROR_CODE,
+        )
+    # The callback is caller-supplied and finish_query POSTs the response to
+    # it, so it is checked here (scheme, and every address its host resolves
+    # to) before anything is stored -- see shepherd_utils/callback_url.py.
+    # Same code as the missing callback above: both are a bad callback field.
+    try:
+        await validate_callback_url(callback_url)
+    except CallbackURLError as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
             status_code=QUERY_BODY_ERROR_CODE,
         )
     try:
@@ -527,7 +592,9 @@ async def run_async_query(
     )
 
 
-async def _read_body_within_limit(request: Request, max_bytes: int):
+async def _read_body_within_limit(
+    request: Request, max_bytes: int, idle_timeout: float = 0.0
+):
     """Read the request body, aborting if it exceeds ``max_bytes``.
 
     Returns the body bytes, or ``None`` if the limit was exceeded. A
@@ -537,26 +604,46 @@ async def _read_body_within_limit(request: Request, max_bytes: int):
     rejected without buffering anything; the stream is then read in chunks and
     aborted the moment the running total crosses the limit, so a missing or
     dishonest ``Content-Length`` can't force us to buffer an unbounded body.
-    """
-    if max_bytes <= 0:
-        return await request.body()
 
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > max_bytes:
-                return None
-        except ValueError:
-            pass
+    A size cap never trips on a body that simply stops arriving (a client that
+    declares a large ``Content-Length`` and goes quiet), so with
+    ``idle_timeout`` > 0 each chunk must arrive within that many seconds of the
+    last, or ``BodyReadTimeout`` is raised. 0 waits indefinitely.
+    """
+    if max_bytes > 0:
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > max_bytes:
+                    return None
+            except ValueError:
+                pass
 
     chunks = []
     total = 0
-    async for chunk in request.stream():
+    stream = request.stream().__aiter__()
+    while True:
+        try:
+            if idle_timeout > 0:
+                chunk = await asyncio.wait_for(stream.__anext__(), idle_timeout)
+            else:
+                chunk = await stream.__anext__()
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError as e:
+            raise BodyReadTimeout(
+                f"Request body stalled: no data received for {idle_timeout:g}s."
+            ) from e
         total += len(chunk)
-        if total > max_bytes:
+        if max_bytes > 0 and total > max_bytes:
             return None
         chunks.append(chunk)
-    return b"".join(chunks)
+    body = b"".join(chunks)
+    # Cache it where Starlette's own Request.body() does, so a handler that
+    # reads the body again (parse_arax_query_body) gets it rather than an
+    # exhausted stream.
+    request._body = body
+    return body
 
 
 async def _save_callback_error_logs(callback_id: str, logger: logging.Logger) -> None:
@@ -626,7 +713,17 @@ async def callback(
     logger = logging.getLogger(f"shepherd.{callback_id}")
     attach_query_handler(logger)
     max_bytes = settings.callback_max_request_size_bytes
-    raw = await _read_body_within_limit(request, max_bytes)
+    try:
+        raw = await _read_body_within_limit(
+            request, max_bytes, settings.request_body_idle_timeout_sec
+        )
+    except BodyReadTimeout as e:
+        # Not a reason to fail the query: the sender can redeliver.
+        logger.warning(f"Rejecting callback {callback_id}: {e}")
+        await _save_callback_error_logs(callback_id, logger)
+        return JSONResponse(
+            content={"detail": str(e)}, status_code=BODY_READ_TIMEOUT_CODE
+        )
     if raw is None:
         # The rejection fails the whole query (see
         # _fail_query_for_oversized_callback), which also clears its callback

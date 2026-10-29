@@ -36,6 +36,12 @@ services:
       # ars_watchdog evicts them), not in Postgres. See
       # shepherd_utils/ars/payload_store.py.
       ARS_PAYLOAD_DIR: /app/ars_payloads
+      # /asyncquery refuses callbacks to private addresses (SSRF guard, see
+      # shepherd_utils/callback_url.py). Locally the caller is on the host --
+      # scripts/run_query.py --async calls back to host.docker.internal or the
+      # docker bridge (172.17.0.1) -- so allow those here. finish_query
+      # re-checks before delivering, so it needs the same list.
+      CALLBACK_ALLOWED_HOSTS: &callback_allowed_hosts ${CALLBACK_ALLOWED_HOSTS:-host.docker.internal,172.16.0.0/12}
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile
@@ -239,6 +245,8 @@ services:
       context: .
       dockerfile: workers/finish_query/Dockerfile
     restart: unless-stopped
+    environment:
+      CALLBACK_ALLOWED_HOSTS: *callback_allowed_hosts
     depends_on:
       shepherd_db:
         condition: service_healthy

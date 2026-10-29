@@ -113,3 +113,43 @@ def arax_kp_cache_store(monkeypatch):
         lambda: store,
     )
     return store
+
+
+# What every hostname resolves to under ``offline_callback_dns``: a public
+# address, so the callback-URL guard (shepherd_utils/callback_url.py) passes the
+# placeholder hosts tests use ("http://callback/1") without real DNS.
+TEST_PUBLIC_ADDRESS = "93.184.215.14"
+
+
+@pytest.fixture(autouse=True)
+def offline_callback_dns(request, monkeypatch):
+    """Keep the callback-URL guard off the network.
+
+    ``validate_callback_url`` resolves the callback's host; tests must not do
+    real DNS, and their placeholder hosts don't resolve anyway. IP literals are
+    still checked for real. Tests of the guard itself opt out with
+    ``@pytest.mark.real_callback_dns`` and stub resolution themselves.
+    """
+    if request.node.get_closest_marker("real_callback_dns"):
+        return
+    import ipaddress
+
+    from shepherd_utils import callback_url
+
+    real_resolve = callback_url.resolve_host
+
+    async def fake_resolve(host, port):
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return [ipaddress.ip_address(TEST_PUBLIC_ADDRESS)]
+        return await real_resolve(host, port)
+
+    monkeypatch.setattr(callback_url, "resolve_host", fake_resolve)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_callback_dns: run without the offline_callback_dns stub",
+    )
