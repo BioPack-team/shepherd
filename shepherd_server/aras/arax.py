@@ -27,16 +27,20 @@ from fastapi.responses import JSONResponse, ORJSONResponse, StreamingResponse
 from starlette.responses import HTMLResponse
 
 from shepherd_server.base_routes import (
+    BODY_READ_TIMEOUT_CODE,
     CLIENT_CLOSED_REQUEST_CODE,
     QUERY_BODY_ERROR_CODE,
     QUERY_ERROR_CODE,
     QUERY_INVALID_CODE,
     QUERY_TIMEOUT_CODE,
+    QUERY_TOO_LARGE_CODE,
     QUERY_UNAVAILABLE_CODE,
     TERMINAL_QUERY_STATES,
     ARATargetEnum,
+    BodyReadTimeout,
     ClientDisconnected,
     QueryBodyError,
+    QueryBodyTooLarge,
     QueryIntakeError,
     apply_query_status,
     base_router,
@@ -117,7 +121,8 @@ def validate_arax_query(query: dict) -> None:
 async def parse_arax_query_body(request: Request) -> dict:
     """``parse_query_body``, with ``validate_arax_query``'s rules.
 
-    Raises ``QueryBodyError`` / ``TRAPIRequestError`` as ``parse_query_body``.
+    Raises ``QueryBodyError`` / ``TRAPIRequestError`` /
+    ``QueryBodyTooLarge`` / ``BodyReadTimeout`` as ``parse_query_body``.
     """
     try:
         return await parse_query_body(request)
@@ -288,6 +293,16 @@ async def sync_query(request: Request) -> Response:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
             status_code=QUERY_INVALID_CODE,
+        )
+    except QueryBodyTooLarge as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_TOO_LARGE_CODE,
+        )
+    except BodyReadTimeout as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=BODY_READ_TIMEOUT_CODE,
         )
     if query.get("stream_progress", False):
         return await arax_stream_query(query)

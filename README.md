@@ -435,6 +435,28 @@ completing, the query is failed `RESPONSE_TOO_LARGE` instead of being retried.
 This is the always-on backstop for the case the caps were set too high to
 catch.
 
+##### Query intake limits
+
+`/{ara}/query` and `/{ara}/asyncquery` are unauthenticated, so intake bounds
+what a single request can cost:
+
+| Setting | Meaning |
+| --- | --- |
+| `QUERY_MAX_REQUEST_SIZE` | Largest query body accepted (default `100MB`, `0` disables). Checked on the declared `Content-Length` before anything is read, then on the streamed total. Over it: 413. |
+| `REQUEST_BODY_IDLE_TIMEOUT_SEC` | How long a query or `/callback` body may go without sending a byte (default `30`, `0` disables). Over it: 408. This is what stops a client that declares a large body and then stalls (slowloris); a size cap never trips on a stream that stops. It is an idle gap, not a total, so a large body that keeps arriving is never cut off. An ingress read timeout is still worth setting in front. |
+| `CALLBACK_ALLOWED_HOSTS` | Hosts an `/asyncquery` `callback` may name even though they resolve to a private, loopback or link-local address: comma-separated hostnames, IPs or CIDRs. Default empty. |
+
+The `callback` of an async query must be `http`/`https` and must resolve only to
+public addresses, unless the host or address is in `CALLBACK_ALLOWED_HOSTS`;
+cloud metadata addresses (`169.254.169.254` and friends) are refused even when
+allowlisted. Anything else is refused at intake with 422, and `finish_query`
+checks again before it POSTs (`shepherd_utils/callback_url.py`). Production
+callers (the ARS and other Translator services) call back to public hosts and
+need nothing set. `compose.yml` allowlists `host.docker.internal` and the
+docker bridge range for the local `scripts/run_query.py --async` flow; a Test
+deployment whose callers sit on a private network has to list them, on both
+the server and `finish_query`.
+
 ##### Kubernetes sizing (Helm)
 
 Production limits live in the Helm chart, not in `compose.yml` (which is
