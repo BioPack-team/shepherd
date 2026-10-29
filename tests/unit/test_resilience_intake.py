@@ -273,3 +273,34 @@ def test_unknown_agent_fields_currently_pass_through(client_factory):
     # The unknown top-level keys survived into what intake received.
     assert captured["query"]["reasoning"] == "I think this answers the question"
     assert captured["query"]["confidence"] == 0.9
+
+
+# --- A workflow Shepherd can't run -> 400 at intake ----------------------
+# run_query validates ``workflow`` before anything is stored. These used to
+# escape as an unhandled TypeError/KeyError: a bare 500, or for a non-list
+# workflow a dropped connection with no response at all.
+
+_BAD_WORKFLOWS = {
+    "not_a_list": {"id": "lookup"},
+    "operation_not_an_object": ["lookup"],
+    "unsupported_operation": [{"id": "definitely_not_real"}],
+}
+
+
+@pytest.mark.parametrize("name", sorted(_BAD_WORKFLOWS))
+@pytest.mark.parametrize("path", ["/query", "/asyncquery"])
+def test_bad_workflow_is_a_400(name, path, mocker):
+    add_query = mocker.patch.object(
+        base_routes, "add_query", new_callable=mocker.AsyncMock
+    )
+    client = TestClient(ARAGORN)
+    body = {**VALID, "workflow": _BAD_WORKFLOWS[name]}
+    if path == "/asyncquery":
+        body["callback"] = "http://callback/1"
+        mocker.patch.object(
+            base_routes, "validate_callback_url", new_callable=mocker.AsyncMock
+        )
+    resp = client.post(path, json=body)
+    assert resp.status_code == 400, (name, resp.text)
+    assert "workflow" in resp.json()["description"].lower()
+    add_query.assert_not_called()

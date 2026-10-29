@@ -807,11 +807,11 @@ async def test_arax_workflow_that_is_not_a_list_is_left_for_arax(intake):
 @pytest.mark.asyncio
 async def test_other_aras_still_get_shepherds_workflow_check(intake):
     base_routes, _, tasks = intake
-    with pytest.raises(KeyError, match="is not supported"):
+    with pytest.raises(base_routes.QueryWorkflowError, match="is not supported"):
         await base_routes.run_query(
             "aragorn", {"message": {}, "workflow": ARAX_WORKFLOW}
         )
-    with pytest.raises(TypeError):
+    with pytest.raises(base_routes.QueryWorkflowError, match="expected a list"):
         await base_routes.run_query(
             "bte", {"message": {}, "workflow": {"id": "lookup"}}
         )

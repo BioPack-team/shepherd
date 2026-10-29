@@ -1627,10 +1627,14 @@ def build_probes(cfg: RunConfig) -> list[Probe]:
             "POST",
             "/asyncquery",
             "Small request, response delivered to our own sink (measure amplification)",
-            expect={200},
+            # 422 when the sink is on a private/loopback address (the default
+            # 127.0.0.1): the intake callback check refuses it, which is that
+            # guard holding. Advertise a public --callback-host to measure.
+            expect={200, 422},
             signal=(
                 "measure request bytes vs bytes delivered to the callback sink; "
-                "that ratio is what an attacker could aim at a victim"
+                "that ratio is what an attacker could aim at a victim. A 422 "
+                "means the callback guard refused a non-public sink address."
             ),
             needs_callback=True,
             json_body={
@@ -1692,6 +1696,7 @@ def build_probes(cfg: RunConfig) -> list[Probe]:
         "malformed.type-confusion-message": _ACCEPTED_ON_1_6,
         "agent.nl-question-body": _ACCEPTED_ON_1_6,
         "agent.extra-envelope": _ACCEPTED_ON_1_6,
+        "agent.wrong-nesting": _ACCEPTED_ON_1_6,
         "agent.mixed-trapi-version": _ACCEPTED_ON_1_6,
     }
     if cfg.trapi_version == "1.6":
@@ -2122,7 +2127,8 @@ def parse_args(argv=None):
         help="which TRAPI contract the target speaks (default 2.0). On the "
         "trapi_1.6 branch pass --trapi-version 1.6: 1.6 has no 2.0 intake "
         "validation, so the retired-1x / empty-graph / no-message / "
-        "type-confusion / nl-question / extra-envelope / mixed-version probes "
+        "type-confusion / nl-question / extra-envelope / wrong-nesting / "
+        "mixed-version probes "
         "are accepted at intake rather than rejected with 400.",
     )
     p.add_argument(

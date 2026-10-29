@@ -79,6 +79,24 @@ def examine_query(message):
     return infer, question_node, answer_node, pathfinder
 
 
+# How much of a refusing retrieval service's body goes into the error. Enough
+# for its validation message; bounded because it lands in the query's logs.
+REJECTION_BODY_CHARS = 500
+
+
+class LookupRejectedError(Exception):
+    """The retrieval service refused the query's lookup submission."""
+
+
+def _describe_rejection(response: httpx.Response) -> str:
+    """One bounded line saying why the retrieval service refused a submission."""
+    try:
+        body = response.text[:REJECTION_BODY_CHARS]
+    except Exception:  # noqa: BLE001 -- the status alone still says enough
+        body = ""
+    return f"HTTP {response.status_code} {body}".strip()
+
+
 @dataclass
 class AsyncResponse:
     status_code: int
@@ -120,10 +138,12 @@ async def run_async_lookup(
                 settings.kg_retrieval_url,
                 json=message,
             )
+            success = response.status_code == 200
             return AsyncResponse(
                 status_code=response.status_code,
-                success=response.status_code == 200,
+                success=success,
                 callback_id=callback_id,
+                error=None if success else _describe_rejection(response),
             )
         except httpx.ReadTimeout as e:
             # The request went out and the service just didn't ACK in time.
@@ -189,9 +209,19 @@ async def aragorn_lookup(task, logger: logging.Logger):
             async with httpx.AsyncClient(
                 timeout=settings.kg_retrieval_submit_timeout
             ) as client:
-                await client.post(
+                response = await client.post(
                     settings.kg_retrieval_url,
                     json=message,
+                )
+            # A refused submission (e.g. a 4xx for a query graph the retrieval
+            # service can't parse) never calls back, so waiting on its callback
+            # id held the query for the whole lookup timeout. It is the query's
+            # only lookup, so fail it with the service's reason instead.
+            if not 200 <= response.status_code < 300:
+                await remove_callback_id(callback_id, logger)
+                raise LookupRejectedError(
+                    f"[{callback_id}] Lookup rejected by "
+                    f"{settings.kg_retrieval_url}: {_describe_rejection(response)}"
                 )
     else:
         expanded_messages = expand_aragorn_query(message, logger)

@@ -24,6 +24,7 @@ from shepherd_utils.db import save_message
 from workers.bte_lookup import worker as btel
 from workers.bte_lookup.worker import (
     AsyncResponse,
+    LookupRejectedError,
     bte_lookup,
     process_task,
     run_async_lookup,
@@ -658,3 +659,37 @@ async def test_bte_lookup_process_task_swallows_wrap_up_failure(redis_mock, mock
     # Should not raise.
     await process_task(_make_task(), None, logger, limiter)
     assert limiter.released
+
+
+@pytest.mark.asyncio
+async def test_bte_lookup_rejected_lookup_fails_instead_of_waiting(redis_mock, mocker):
+    """A submission the retrieval service refuses never calls back, so the
+    query fails straight away instead of waiting out the lookup timeout."""
+    msg = {
+        "message": {
+            "query_graph": {
+                "nodes": {"a": {"ids": ["X:1"]}, "b": {}},
+                "edges": {"e0": {"subject": "a", "object": "b"}},
+            }
+        },
+        "parameters": {"timeout": 5},
+    }
+    mocker.patch.object(
+        btel, "get_message", new_callable=mocker.AsyncMock, return_value=msg
+    )
+    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mock_remove = mocker.patch.object(
+        btel, "remove_callback_id", new_callable=mocker.AsyncMock
+    )
+    running = mocker.patch.object(
+        btel, "get_running_callbacks", new_callable=mocker.AsyncMock
+    )
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=httpx.Response(422, text="bad query graph"),
+    )
+    with pytest.raises(LookupRejectedError, match="HTTP 422 bad query graph"):
+        await bte_lookup(_make_task(), logger)
+    mock_remove.assert_awaited_once()
+    running.assert_not_called()

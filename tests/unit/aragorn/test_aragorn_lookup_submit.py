@@ -18,6 +18,7 @@ import pytest
 from workers.aragorn_lookup import worker as al
 from workers.aragorn_lookup.worker import (
     AsyncResponse,
+    LookupRejectedError,
     aragorn_lookup,
     run_async_lookup,
 )
@@ -128,3 +129,52 @@ async def test_aragorn_lookup_keeps_in_flight_callback_ids(redis_mock, mocker):
     )
     await aragorn_lookup(_make_task(), logger)
     mock_remove.assert_awaited_once_with("failed-cb", logger)
+
+
+LOOKUP_MSG = {
+    "message": {
+        "query_graph": {
+            "nodes": {"a": {"ids": ["X:1"]}, "b": {}},
+            "edges": {"e0": {"subject": "a", "object": "b"}},
+        }
+    },
+    "parameters": {"timeout": 5},
+}
+
+
+@pytest.mark.asyncio
+async def test_rejected_lookup_fails_instead_of_waiting(redis_mock, mocker):
+    """A submission the retrieval service refuses never calls back. Waiting on
+    its callback id held the query for the whole lookup timeout; it now fails
+    straight away with the service's reason."""
+    mocker.patch.object(
+        al, "get_message", new_callable=mocker.AsyncMock, return_value=LOOKUP_MSG
+    )
+    mocker.patch.object(al, "add_callback_id", new_callable=mocker.AsyncMock)
+    mock_remove = mocker.patch.object(
+        al, "remove_callback_id", new_callable=mocker.AsyncMock
+    )
+    running = mocker.patch.object(
+        al, "get_running_callbacks", new_callable=mocker.AsyncMock
+    )
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        new_callable=mocker.AsyncMock,
+        return_value=httpx.Response(422, text='{"detail": "query_graph missing"}'),
+    )
+    with pytest.raises(LookupRejectedError, match="HTTP 422.*query_graph missing"):
+        await aragorn_lookup(_make_task(), logger)
+    mock_remove.assert_awaited_once()
+    running.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_async_lookup_rejection_carries_the_reason(redis_mock, mocker):
+    mocker.patch.object(al, "add_callback_id", new_callable=mocker.AsyncMock)
+    client = mocker.Mock()
+    client.post = mocker.AsyncMock(return_value=httpx.Response(400, text="bad qg"))
+
+    out = await run_async_lookup(client, {"message": {}}, "qid", logger)
+    assert out.success is False
+    assert out.in_flight is False
+    assert out.error == "HTTP 400 bad qg"

@@ -79,6 +79,9 @@ CLIENT_CLOSED_REQUEST_CODE = 499
 # ``query: dict = Body(...)`` validation returned for the same rejections, kept
 # so the parser swap isn't visible to callers.
 QUERY_BODY_ERROR_CODE = 422
+# What a query whose workflow we can't run answers with. TRAPI's code for a
+# query the caller has to fix.
+QUERY_WORKFLOW_ERROR_CODE = 400
 # What a body over ``query_max_request_size`` answers with.
 QUERY_TOO_LARGE_CODE = 413
 # What a body that stops arriving (``request_body_idle_timeout_sec``) answers
@@ -100,6 +103,13 @@ class QueryBodyError(Exception):
 
     Client-safe like ``QueryIntakeError``: the message is returned verbatim as
     the 422 ``detail``."""
+
+
+class QueryWorkflowError(Exception):
+    """Raised when a query's ``workflow`` isn't one Shepherd can run.
+
+    Client-safe like ``QueryBodyError``: the message is returned verbatim as
+    the 400 ``description``. Raised before anything is stored."""
 
 
 class QueryBodyTooLarge(Exception):
@@ -328,10 +338,16 @@ async def run_query(
     ):
         workflow = query["workflow"]
         if not isinstance(workflow, list):
-            raise TypeError("Query workflow must be a list.")
+            raise QueryWorkflowError("Invalid workflow: expected a list of operations.")
         for operation in workflow:
+            if not isinstance(operation, dict):
+                raise QueryWorkflowError(
+                    "Invalid workflow: each operation must be an object with an id."
+                )
             if operation.get("id") not in supported_workflow_operations:
-                raise KeyError(f"Workflow operation {operation} is not supported.")
+                raise QueryWorkflowError(
+                    f"Workflow operation {operation.get('id')!r} is not supported."
+                )
 
     # save query to db
     try:
@@ -489,6 +505,11 @@ async def run_sync_query(
         )
     try:
         query_id, response_id, logger = await run_query(target, query_dict)
+    except QueryWorkflowError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_WORKFLOW_ERROR_CODE,
+        )
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
@@ -503,7 +524,11 @@ async def run_sync_query(
     if query_state is not None:
         # grab final response
         response_id = query_state[7]
-        response = await get_message(response_id, logger)
+        try:
+            response = await get_message(response_id, logger)
+        except KeyError:
+            # get_message raises on a missing key rather than returning None.
+            response = None
         if response is None:
             return ORJSONResponse(
                 content={
@@ -577,6 +602,11 @@ async def run_async_query(
         )
     try:
         query_id, _, _ = await run_query(target, query, callback_url)
+    except QueryWorkflowError as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=QUERY_WORKFLOW_ERROR_CODE,
+        )
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "Failed", "description": str(e)},
@@ -929,7 +959,12 @@ async def get_query_response(
     logger = logging.getLogger("shepherd.get_query")
     logger.setLevel(level_number)
     attach_query_handler(logger)
-    response = await get_message(query_id, logger)
+    try:
+        response = await get_message(query_id, logger)
+    except KeyError:
+        # get_message raises on a missing key rather than returning None, so
+        # every unknown id used to answer 500 instead of 404.
+        response = None
     if response is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
     logs = await get_logs(query_id, logger)

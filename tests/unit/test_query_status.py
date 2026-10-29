@@ -19,6 +19,7 @@ from shepherd_server.base_routes import (
     ARATargetEnum,
     QueryIntakeError,
     apply_query_status,
+    get_query_response,
     query_status,
     query_status_code,
     run_sync_query,
@@ -242,6 +243,16 @@ async def test_query_returns_an_error_code_when_the_response_is_missing(mocker):
 
 
 @pytest.mark.asyncio
+async def test_query_returns_an_error_code_when_the_response_key_is_gone(mocker):
+    """get_message raises KeyError for a missing key rather than returning None."""
+    _patch_sync_query(mocker, _row(state="COMPLETED", status="OK"))
+    base_routes.get_message.side_effect = KeyError("gone")
+    response = await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
+    assert response.status_code == 500
+    assert _body(response)["description"] == "Unable to get response"
+
+
+@pytest.mark.asyncio
 async def test_query_returns_an_error_code_when_it_times_out(mocker):
     """The caller's own timeout elapsed with the query still in flight."""
     _patch_sync_query(mocker, _row(state="QUEUED", status="OK"))
@@ -293,3 +304,20 @@ async def test_query_returns_unavailable_when_intake_fails(mocker):
 )
 def test_query_status_code_mapping(status, code):
     assert query_status_code(status) == code
+
+
+# --- /response/{id} ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_response_unknown_id_is_not_found(mocker):
+    """An unknown id is a 404. get_message raises KeyError on a miss, which
+    used to escape as a 500 for every guessed id."""
+    mocker.patch(
+        "shepherd_server.base_routes.get_message",
+        new_callable=mocker.AsyncMock,
+        side_effect=KeyError("Failed to get abcd1234 from db"),
+    )
+    response = await get_query_response("abcd1234")
+    assert response.status_code == 404
+    assert json.loads(response.body) == {"error": "Not found"}
