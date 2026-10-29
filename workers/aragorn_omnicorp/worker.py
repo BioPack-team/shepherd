@@ -8,8 +8,9 @@ cache. Here both lookups are served from local read-only LMDB environments:
 
 * curies LMDB:        key = CURIE (utf-8), value = json-encoded
                       ``{"pmc": <int>, "index": <int>}``.
-* shared counts LMDB: key = "<i1>_<i2>" with i1 < i2 (utf-8), value = raw
-                      little-endian unsigned int bytes.
+* shared counts LMDB: key = "<i1>_<i2>" with i1 < i2 (utf-8), value = the
+                      count as ASCII decimal text (e.g. ``b"10584"``), carried
+                      over verbatim from the upstream Redis string values.
 """
 
 import asyncio
@@ -126,9 +127,11 @@ def curie_query(keys: List[str]) -> Dict[str, dict]:
 def shared_count_query(keys: List[str]) -> Dict[str, int]:
     """LMDB replacement for ``Cache.shared_count_query``.
 
-    Values are raw little-endian unsigned int bytes; decode here so the caller
-    receives ints (or ``None`` for misses), matching upstream's ``int(output)``
-    expectation.
+    Values are ASCII decimal text; decode here so the caller receives ints
+    (or ``None`` for misses), matching upstream's ``int(output)`` expectation.
+    Anything that isn't a plain run of digits raises rather than being guessed
+    at, so a store in an unexpected format fails loudly instead of emitting
+    wrong counts.
     """
     out: Dict[str, int] = {}
     with _get_shared_counts_env().begin(buffers=False) as txn:
@@ -136,8 +139,13 @@ def shared_count_query(keys: List[str]) -> Dict[str, int]:
             raw = txn.get(key.encode("utf-8"))
             if raw is None:
                 out[key] = None
+            elif raw.isdigit():
+                out[key] = int(raw)
             else:
-                out[key] = int.from_bytes(raw, byteorder="little", signed=False)
+                raise ValueError(
+                    f"shared-counts LMDB value for {key!r} is not ASCII decimal: "
+                    f"{raw[:32]!r}"
+                )
     return out
 
 
