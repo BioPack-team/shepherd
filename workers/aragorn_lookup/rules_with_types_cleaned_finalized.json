@@ -1,7 +1,7 @@
 {
   "{\"predicate\": \"biolink:treats\"}": [
       {
-          "Rule": "?g  biolink:affects_response_to  ?a  ?a  biolink:treats_or_applied_or_studied_to_treat  ?b  ?g  biolink:genetic_association  ?b   => ?a  biolink:treats  ?b",
+          "Rule": "?g  biolink:affects_sensitivity_to  ?a  ?a  biolink:treats_or_applied_or_studied_to_treat  ?b  ?g  biolink:genetic_association  ?b   => ?a  biolink:treats  ?b",
           "Head Coverage": "0.056505642",
           "Std Confidence": "0.981623277",
           "PCA Confidence": "0.981999234",
@@ -39,7 +39,7 @@
                           "subject": "g",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -3382,7 +3382,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  biolink:interacts_with  ?b   => ?a  increased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  biolink:interacts_with  ?b   => ?a  increased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000758877",
           "Std Confidence": "0.527777778",
           "PCA Confidence": "0.567164179",
@@ -3415,7 +3415,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -3594,7 +3594,7 @@
           }
       },
       {
-          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_response_to  ?a   => ?a  increased_activity_biolink:affects  ?b",
+          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_sensitivity_to  ?a   => ?a  increased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000479291",
           "Std Confidence": "0.375",
           "PCA Confidence": "0.413793103",
@@ -3641,7 +3641,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       }
                   }
@@ -3710,7 +3710,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  decreased_molecular_interaction_biolink:affects  ?b   => ?a  increased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  decreased_molecular_interaction_biolink:affects  ?b   => ?a  increased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000299557",
           "Std Confidence": "0.326086957",
           "PCA Confidence": "0.340909091",
@@ -3743,7 +3743,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -3766,7 +3766,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  increased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  increased_activity_biolink:affects  ?b",
           "Head Coverage": "0.001318049",
           "Std Confidence": "0.227586207",
           "PCA Confidence": "0.251908397",
@@ -3799,7 +3799,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -3928,7 +3928,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  increased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  increased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000519232",
           "Std Confidence": "0.169934641",
           "PCA Confidence": "0.194029851",
@@ -3961,7 +3961,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -4381,7 +4381,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a   => ?a  increased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a   => ?a  increased_activity_biolink:affects  ?b",
           "Head Coverage": "0.00497264",
           "Std Confidence": "0.045721631",
           "PCA Confidence": "0.052256034",
@@ -4414,7 +4414,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       }
                   }
@@ -5303,7 +5303,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  decreased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  decreased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000302909",
           "Std Confidence": "0.375862069",
           "PCA Confidence": "0.378472222",
@@ -5336,7 +5336,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -5351,7 +5351,7 @@
           }
       },
       {
-          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_response_to  ?a   => ?a  decreased_activity_biolink:affects  ?b",
+          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_sensitivity_to  ?a   => ?a  decreased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000066696",
           "Std Confidence": "0.375",
           "PCA Confidence": "0.375",
@@ -5398,7 +5398,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       }
                   }
@@ -5570,7 +5570,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  decreased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  decreased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000130612",
           "Std Confidence": "0.307189542",
           "PCA Confidence": "0.317567568",
@@ -5603,7 +5603,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -5730,7 +5730,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?b  increased_metabolic_processing_biolink:affects  ?a   => ?a  decreased_activity_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?b  increased_metabolic_processing_biolink:affects  ?a   => ?a  decreased_activity_biolink:affects  ?b",
           "Head Coverage": "0.000030569",
           "Std Confidence": "0.20754717",
           "PCA Confidence": "0.224489796",
@@ -5763,7 +5763,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -6367,7 +6367,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  biolink:interacts_with  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  biolink:interacts_with  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000651825",
           "Std Confidence": "0.541666667",
           "PCA Confidence": "0.573529412",
@@ -6400,7 +6400,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -6579,7 +6579,7 @@
           }
       },
       {
-          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_response_to  ?a   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_sensitivity_to  ?a   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000417837",
           "Std Confidence": "0.390625",
           "PCA Confidence": "0.431034483",
@@ -6626,7 +6626,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       }
                   }
@@ -6634,7 +6634,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  decreased_molecular_interaction_biolink:affects  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  decreased_molecular_interaction_biolink:affects  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000250702",
           "Std Confidence": "0.326086957",
           "PCA Confidence": "0.340909091",
@@ -6667,7 +6667,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -6690,7 +6690,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.001169943",
           "Std Confidence": "0.24137931",
           "PCA Confidence": "0.264150943",
@@ -6723,7 +6723,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -6908,7 +6908,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.00048469",
           "Std Confidence": "0.189542484",
           "PCA Confidence": "0.211678832",
@@ -6941,7 +6941,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -7193,7 +7193,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a   => ?a  increased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.006334403",
           "Std Confidence": "0.069592361",
           "PCA Confidence": "0.078794179",
@@ -7226,7 +7226,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       }
                   }
@@ -8027,7 +8027,7 @@
           }
       },
       {
-          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_response_to  ?a   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  abundance_biolink:affects  ?a  ?b  biolink:affects_sensitivity_to  ?a   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000071122",
           "Std Confidence": "0.40625",
           "PCA Confidence": "0.40625",
@@ -8074,7 +8074,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       }
                   }
@@ -8082,7 +8082,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  biolink:directly_physically_interacts_with  ?b   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000311843",
           "Std Confidence": "0.393103448",
           "PCA Confidence": "0.395833333",
@@ -8115,7 +8115,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -8302,7 +8302,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  increased_transport_biolink:affects  ?b   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000134038",
           "Std Confidence": "0.320261438",
           "PCA Confidence": "0.331081081",
@@ -8335,7 +8335,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -8358,7 +8358,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?a  biolink:interacts_with  ?b   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?a  biolink:interacts_with  ?b   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.000054709",
           "Std Confidence": "0.277777778",
           "PCA Confidence": "0.289855072",
@@ -8391,7 +8391,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
@@ -8566,7 +8566,7 @@
           }
       },
       {
-          "Rule": "?b  biolink:affects_response_to  ?a  ?b  increased_metabolic_processing_biolink:affects  ?a   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
+          "Rule": "?b  biolink:affects_sensitivity_to  ?a  ?b  increased_metabolic_processing_biolink:affects  ?a   => ?a  decreased_activity_or_abundance_biolink:affects  ?b",
           "Head Coverage": "0.00003009",
           "Std Confidence": "0.20754717",
           "PCA Confidence": "0.22",
@@ -8599,7 +8599,7 @@
                           "subject": "$target",
                           "object": "$source",
                           "predicates": [
-                              "biolink:affects_response_to"
+                              "biolink:affects_sensitivity_to"
                           ]
                       },
                       "edge_1": {
