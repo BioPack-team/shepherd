@@ -101,7 +101,10 @@ async def test_add_query_keeps_submitted_kgraph_and_results(redis_mock, mocker):
     _install_pool_mock(mocker)
     message = {
         "query_graph": {"nodes": {}, "edges": {}},
-        "knowledge_graph": {"nodes": {"X:1": {"categories": ["biolink:Gene"]}}, "edges": {}},
+        "knowledge_graph": {
+            "nodes": {"X:1": {"categories": ["biolink:Gene"]}},
+            "edges": {},
+        },
         "results": [{"node_bindings": {}}],
     }
     await db.add_query("qid-k", "rid-k", {"message": message}, None, logger)
