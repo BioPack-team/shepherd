@@ -75,6 +75,43 @@ async def test_add_query_persists_to_redis_and_postgres(redis_mock, mocker):
 
 
 @pytest.mark.asyncio
+async def test_add_query_gives_response_empty_kgraph_and_results(redis_mock, mocker):
+    """The stored response always has a knowledge graph and results, so a query
+    nothing is ever merged into still hands every operation a full message;
+    the stored query itself is left as submitted."""
+    _install_pool_mock(mocker)
+    qgraph = {"nodes": {"a": {"ids": ["MONDO:0001"]}, "b": {}}, "edges": {}}
+    await db.add_query(
+        "qid-e", "rid-e", {"message": {"query_graph": qgraph}}, None, logger
+    )
+
+    response = await db.get_message("rid-e", logger)
+    assert response["message"] == {
+        "query_graph": qgraph,
+        "knowledge_graph": {"nodes": {}, "edges": {}},
+        "results": [],
+    }
+    query = await db.get_message("qid-e", logger)
+    assert query["message"] == {"query_graph": qgraph}
+
+
+@pytest.mark.asyncio
+async def test_add_query_keeps_submitted_kgraph_and_results(redis_mock, mocker):
+    """A query that arrives with its own knowledge graph and results keeps them."""
+    _install_pool_mock(mocker)
+    message = {
+        "query_graph": {"nodes": {}, "edges": {}},
+        "knowledge_graph": {"nodes": {"X:1": {"categories": ["biolink:Gene"]}}, "edges": {}},
+        "results": [{"node_bindings": {}}],
+    }
+    await db.add_query("qid-k", "rid-k", {"message": message}, None, logger)
+
+    response = await db.get_message("rid-k", logger)
+    assert response["message"]["knowledge_graph"] == message["knowledge_graph"]
+    assert response["message"]["results"] == message["results"]
+
+
+@pytest.mark.asyncio
 async def test_add_query_stores_target_as_domain(redis_mock, mocker):
     """``target`` passed to add_query is stored in the ``domain`` column."""
     mock_conn, _ = _install_pool_mock(mocker)

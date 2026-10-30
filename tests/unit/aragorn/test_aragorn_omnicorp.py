@@ -689,27 +689,6 @@ def test_omnicorp_overlay_tolerates_result_without_analyses(lmdb_envs):
     assert "auxiliary_graphs" not in out["message"]
 
 
-@pytest.mark.parametrize("missing", [{}, {"knowledge_graph": None, "results": None}])
-def test_omnicorp_overlay_handles_message_without_kgraph_or_results(
-    lmdb_envs, missing
-):
-    """A lookup that found nothing passes through as a valid 0-result message."""
-    message = {
-        "message": {
-            "query_graph": {
-                "nodes": {"n0": {"ids": ["MONDO:0001"]}, "n1": {}},
-                "edges": {"e0": {"subject": "n0", "object": "n1"}},
-            },
-            **missing,
-        }
-    }
-
-    out = worker.omnicorp_overlay(message, logging.getLogger(__name__))
-
-    assert out["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
-    assert out["message"]["results"] == []
-
-
 def test_create_log_entry_is_trapi_2_log_entry():
     from translator_tom import LogEntry
 

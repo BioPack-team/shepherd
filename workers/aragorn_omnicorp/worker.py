@@ -398,14 +398,8 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
 
     message = in_message["message"]
     qgraph = message["query_graph"]
-    # A lookup that got nothing back hands on a message with no knowledge graph
-    # or results; give it empty ones so it passes through with 0 results.
-    if message.get("knowledge_graph") is None:
-        message["knowledge_graph"] = {"nodes": {}, "edges": {}}
-    if message.get("results") is None:
-        message["results"] = []
     kgraph = message["knowledge_graph"]
-    answers = message["results"]
+    answers = message.setdefault("results", [])
 
     # Idempotency: if this message already carries the omnicorp overlay (a
     # reclaim redelivered a message a previous run had already overlaid and
