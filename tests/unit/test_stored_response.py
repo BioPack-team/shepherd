@@ -118,7 +118,11 @@ async def test_add_query_keeps_query_members_on_the_query_only(redis_mock, mocke
     assert stored_query == query
     stored_response = await db.get_message("rid", logger)
     assert stored_response == {
-        "message": {"query_graph": QUERY_GRAPH},
+        "message": {
+            "query_graph": QUERY_GRAPH,
+            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "results": [],
+        },
         "workflow": [{"id": "lookup"}],
     }
     # The query dict the caller handed in is not modified.

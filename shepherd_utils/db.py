@@ -16,7 +16,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
-from .trapi import prepare_stored_response, query_log_level, query_parameters
+from .trapi import (
+    empty_message,
+    prepare_stored_response,
+    query_log_level,
+    query_parameters,
+)
 
 PG_RETRIES = 5
 # Retries for the handful of Redis writes that are correctness-critical
@@ -556,10 +561,16 @@ async def add_query(
     try:
         await data_db_client.set(query_id, encode_message(query), ex=settings.redis_ttl)
         # The response starts as the query's message; the query-level members
-        # stay on the query only (see prepare_stored_response).
+        # stay on the query only (see prepare_stored_response). It gets an
+        # empty knowledge graph and results if the query has none, so every
+        # operation sees a complete message even when nothing is ever merged
+        # into it (e.g. a lookup that gets no answers back).
+        message = dict(query.get("message") or {})
+        for key, value in empty_message().items():
+            if message.get(key) is None:
+                message[key] = value
         response = prepare_stored_response(
-            {k: v for k, v in query.items() if k != "message"}
-            | {"message": dict(query.get("message") or {})}
+            {k: v for k, v in query.items() if k != "message"} | {"message": message}
         )
         await data_db_client.set(
             response_id, encode_message(response), ex=settings.redis_ttl
