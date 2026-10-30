@@ -14,19 +14,23 @@ from typing import Optional
 import httpx
 from opentelemetry.propagate import inject
 
+from shepherd_utils.broker import acquire_lock, remove_lock
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
     abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
     get_message,
+    get_response_size,
     get_running_callbacks,
     remove_callback_id,
     save_message,
+    save_response,
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.trapi import empty_message
 
 # Queue name
 STREAM = "aragorn.lookup"
@@ -269,6 +273,51 @@ async def aragorn_lookup(task, logger: logging.Logger):
         )
         # logger.warning(f"Running callbacks: {running_callback_ids}")
         await cleanup_callbacks(query_id, logger)
+
+    await ensure_response_content(query_id, response_id, logger)
+
+
+async def ensure_response_content(
+    query_id: str, response_id: str, logger: logging.Logger
+) -> None:
+    """Give the response an empty knowledge graph and results if nothing was
+    merged into it.
+
+    The stored response starts out as a copy of the query's message, and the
+    merge worker only adds a ``knowledge_graph`` and ``results`` once a lookup
+    calls back. If none did -- every submission to the Retriever failed, or the
+    lookups timed out -- the next operation would get a message with neither,
+    and fail on it instead of passing a 0-result answer along.
+
+    Only a response no bigger than the query can still be that untouched copy
+    (storing it only drops members), so the size check keeps this from ever
+    loading a response that has had results merged into it.
+    """
+    try:
+        if await get_response_size(response_id) > await get_response_size(query_id):
+            return
+    except Exception as e:
+        logger.warning(f"Could not check whether the lookup returned anything: {e}")
+        return
+    lock_id = str(uuid.uuid4())[:8]
+    # A merge that is still finishing holds this lock; don't write under it.
+    if not await acquire_lock(response_id, lock_id, logger):
+        logger.warning("Could not lock the response to check it for lookup results.")
+        return
+    try:
+        response = await get_message(response_id, logger)
+        message = response.setdefault("message", {})
+        if message.get("knowledge_graph") is not None and message.get("results") is not None:
+            return
+        logger.info("No lookup results were merged; passing on an empty message.")
+        for key, value in empty_message().items():
+            if message.get(key) is None:
+                message[key] = value
+        await save_response(response_id, response, logger)
+    except Exception as e:
+        logger.error(f"Failed to fill in the empty lookup response: {e}")
+    finally:
+        await remove_lock(response_id, lock_id, logger)
 
 
 def get_infer_parameters(input_message):
