@@ -546,9 +546,20 @@ async def add_query(
     """
     start = time.time()
     try:
-        encoded = encode_message(query)
-        await data_db_client.set(query_id, encoded, ex=settings.redis_ttl)
-        await data_db_client.set(response_id, encoded, ex=settings.redis_ttl)
+        await data_db_client.set(query_id, encode_message(query), ex=settings.redis_ttl)
+        # The response starts as the query. It gets an empty knowledge graph
+        # and results if the query has none, so every operation sees a
+        # complete message even when nothing is ever merged into it (e.g. a
+        # lookup that gets no answers back).
+        message = dict(query.get("message") or {})
+        if message.get("knowledge_graph") is None:
+            message["knowledge_graph"] = {"nodes": {}, "edges": {}}
+        if message.get("results") is None:
+            message["results"] = []
+        response = {**query, "message": message}
+        await data_db_client.set(
+            response_id, encode_message(response), ex=settings.redis_ttl
+        )
     except Exception as e:
         # failed to put message in db
         # TODO: do something more severe

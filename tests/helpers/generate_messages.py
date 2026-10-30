@@ -299,7 +299,7 @@ response_2 = {
                 "e1": {
                     "subject": "g",
                     "object": "SN",
-                    "predicates": ["biolink:affects_response_to"],
+                    "predicates": ["biolink:affects_sensitivity_to"],
                 },
             },
         },
