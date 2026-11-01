@@ -41,6 +41,7 @@ from shepherd_utils.logger import (
     setup_logging,
 )
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.query_errors import status_error_code
 from shepherd_utils.response_limit import (
     TOO_LARGE_LOG_MARKER,
     fail_response_too_large,
@@ -464,24 +465,42 @@ def query_status_code(status: Optional[str]) -> int:
 
     A query that ran out of its budget (``TIMEOUT``) or was reaped without ever
     completing (``Abandoned: ...``) is a gateway timeout: Shepherd is fine, the
-    work behind it didn't finish in time. Anything else non-OK is an operation
-    that failed, which is a genuine internal error.
+    work behind it didn't finish in time. A failure whose worker named its own
+    code (``"ERROR 501"``: BTE refusing a Pathfinder query, see
+    ``shepherd_utils.query_errors``) is answered with that code -- the ARA's
+    worker is what knows whether it broke or simply doesn't do this. Anything
+    else non-OK is an operation that failed, which is a genuine internal error.
     """
     if not status or status == OK_QUERY_STATUS:
         return 200
+    worker_code = status_error_code(status)
+    if worker_code is not None:
+        return worker_code
     if status == TIMEOUT_STATUS or status.lower().startswith(ABANDONED_STATUS_PREFIX):
         return QUERY_TIMEOUT_CODE
     return QUERY_ERROR_CODE
 
 
-def apply_query_status(response: dict, status: Optional[str]) -> None:
+def query_description(query_state) -> Optional[str]:
+    """The stored ``description`` of a ``shepherd_brain`` row (the reason a
+    failing worker gave), or None."""
+    if query_state is None or len(query_state) <= 11:
+        return None
+    return query_state[11] or None
+
+
+def apply_query_status(
+    response: dict, status: Optional[str], description: Optional[str] = None
+) -> None:
     """Stamp a non-OK query status onto the TRAPI response, in place.
 
     ``status``/``description`` are TRAPI Response fields, so a caller reading
     the body it already parses can tell a failed query from an empty one. An
     error the ARA reported itself is left alone -- it is more specific than the
     query-level status -- but a body that claims nothing, or claims success for
-    a query that failed, is corrected here.
+    a query that failed, is corrected here. ``description`` is the reason the
+    failing worker gave (stored with the status); it is used when the body
+    doesn't already carry one.
     """
     if not status or status == OK_QUERY_STATUS:
         return
@@ -491,7 +510,8 @@ def apply_query_status(response: dict, status: Optional[str]) -> None:
     ):
         return
     response["status"] = "Error"
-    response.setdefault("description", f"Query finished with status {status}.")
+    if not response.get("description"):
+        response["description"] = description or f"Query finished with status {status}."
 
 
 def query_timeout(query_dict: dict) -> float:
@@ -603,7 +623,7 @@ async def run_sync_query(
         # exactly like one that legitimately found nothing. Report it
         # rather than handing back a body that only says "here you go".
         status = query_state[10]
-        apply_query_status(response, status)
+        apply_query_status(response, status, query_description(query_state))
         # The body has said "status": "Error" since apply_query_status
         # went in, but the HTTP code said 200 -- so a caller that
         # checks the code (rather than parsing the payload for a status
