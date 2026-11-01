@@ -22,6 +22,9 @@ Outcomes, exactly as upstream's view produced them:
                          response is now a 201, see the register)
   - pipeline crash    -> child E/500 with the "Internal ARS Server Error"
                          log entry, upstream's generic handler behavior
+  - ARA query failed  -> child E/<code>: the code the ARA's worker named
+                         (501 for a query it doesn't implement), else 500 --
+                         what upstream records for an ARA answering non-200
 
 The premerge stages are pure-Python CPU over a multi-MB dict, so they run in
 a process pool: the pool child fetches the child's blob by pk with the sync
@@ -70,6 +73,11 @@ from shepherd_utils.ars.statuses import coerce_status
 from shepherd_utils.ars.trapi import strip_nulls, validate
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
+from shepherd_utils.query_errors import (
+    DEFAULT_ERROR_CODE,
+    is_error_status,
+    status_error_code,
+)
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import (
     get_logs,
@@ -262,7 +270,18 @@ async def intake_internal_response(fields, logger: logging.Logger):
         except Exception as e:
             logger.warning(f"Intake: proceeding without logs for {response_id}: {e}")
 
-        status = "D"  # broker deliveries carry no tr_ars.message.status
+        # How the ARA query ended (finish_query passes it along). One whose
+        # operation failed is what an HTTP ARA answering non-200 is to
+        # upstream: the child errors with that code -- 501 when the ARA's
+        # worker said it doesn't do this kind of query (BTE on Pathfinder),
+        # 500 for a plain failure -- instead of reading as a clean Done with
+        # no results. Deliveries from before this field existed carry none.
+        ara_status = fields.get("ara_status")
+        failed_code = None
+        if is_error_status(ara_status):
+            failed_code = status_error_code(ara_status) or DEFAULT_ERROR_CODE
+        # broker deliveries carry no tr_ars.message.status
+        status = "E" if failed_code is not None else "D"
         res = get_safe(data, "message", "results")
         agent_name = str(mesg.get("agent"))
         inforesid = aras.inforesid_for(agent_name)
@@ -296,6 +315,28 @@ async def intake_internal_response(fields, logger: logging.Logger):
             return None
         if mesg["status"] == "E":
             logger.info(f"Intake: {child_pk} already errored; response rejected")
+            return None
+        if failed_code is not None:
+            # Terminal inline: a failed query's results (if any made it into
+            # the response before the failure) are not merged, as upstream
+            # would not merge a non-200 answer. The query's logs, already on
+            # ``data``, carry the worker's reason.
+            logger.info(
+                f"Intake: {child_pk} ARA query ended {ara_status}"
+                + (
+                    f" ({fields['ara_description']})"
+                    if fields.get("ara_description")
+                    else ""
+                )
+                + f"; child errored with code {failed_code}"
+            )
+            await ars_db.save_message_data(child_pk, data, logger)
+            updated = await ars_db.update_message(
+                child_pk, status="E", code=failed_code
+            )
+            await ars_db.persist_data_copy(child_pk, logger)
+            if updated and updated["status"] in ("D", "S", "E", "U"):
+                await lifecycle.check_parent_completion(mesg["ref"], logger)
             return None
         if res is not None and result_length > 0:
             result_stat = await asyncio.to_thread(ScoreStatCalc, res)

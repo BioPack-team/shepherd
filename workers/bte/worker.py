@@ -8,6 +8,7 @@ import uuid
 from shepherd_utils.db import get_message
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.query_errors import UnsupportedQueryError
 from shepherd_utils.shared import (
     examine_query,
     get_tasks,
@@ -32,7 +33,7 @@ async def bte(task, logger: logging.Logger):
     message = await get_message(query_id, logger)
     infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     if pathfinder:
-        raise Exception("BTE does not support Pathfinder type queries.")
+        raise UnsupportedQueryError("BTE does not support Pathfinder type queries.")
 
     if workflow is None:
         if infer:

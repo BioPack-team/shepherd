@@ -472,6 +472,47 @@ async def test_intake_empty_results_terminal_without_merge(env, intake, redis_mo
     assert env["saved"] == []
 
 
+@pytest.mark.parametrize(
+    "ara_status,code",
+    [
+        # the ARA's worker said it doesn't do this kind of query (BTE on
+        # Pathfinder): what an HTTP ARA answering 501 is to upstream
+        ("ERROR 501", 501),
+        # a plain operation failure: what an ARA answering 500 is
+        ("ERROR", 500),
+    ],
+)
+async def test_intake_failed_ara_query_errors_the_child(
+    env, intake, redis_mock, ara_status, code
+):
+    """A failed ARA query used to land as a clean D/200 with no results, so
+    the ARS never said the ARA had failed, let alone how."""
+    task = _intake_task(env)
+    task[1]["ara_status"] = ara_status
+    task[1]["ara_description"] = "BTE does not support Pathfinder type queries."
+
+    await pm.ars_premerge(task, LOGGER)
+    final = _final_status_update(env)
+    assert final["status"] == "E"
+    assert final["code"] == code
+    env["completion"].assert_awaited_once()
+    # nothing is premerged or merged from a failed query
+    assert await _merge_tasks() == []
+
+
+async def test_intake_timed_out_ara_query_still_delivers(env, intake, redis_mock):
+    """Only a failed operation errors the child: a TIMEOUT query's partial
+    results are delivered as before."""
+    env["data"]["message"]["results"] = []
+    intake["get_message"].return_value = env["data"]
+    task = _intake_task(env)
+    task[1]["ara_status"] = "TIMEOUT"
+
+    await pm.ars_premerge(task, LOGGER)
+    final = _final_status_update(env)
+    assert (final["status"], final["code"]) == ("D", 200)
+
+
 async def test_intake_missing_results_zeroes_count(env, intake, redis_mock):
     del env["data"]["message"]["results"]
     intake["get_message"].return_value = env["data"]

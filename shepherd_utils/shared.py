@@ -32,6 +32,7 @@ from .db import (
 from .heartbeat import Heartbeat
 from .logger import attach_query_handler, resolve_log_level, setup_logging
 from .reclaim import reclaim_orphaned
+from .query_errors import QueryError, error_status
 from .response_limit import fail_response_too_large
 from .trapi import binding_ids, edge_support_graphs
 from .task_deadline import (
@@ -781,8 +782,20 @@ async def handle_task_failure(
     group: str,
     task: Tuple[str, dict],
     logger: logging.Logger,
+    error: "BaseException | None" = None,
 ) -> None:
-    """Handle any full query failures."""
+    """Handle any full query failures.
+
+    ``error`` is what the operation failed with. A ``QueryError`` names the
+    HTTP code and client-safe description the query should end with (BTE
+    refusing Pathfinder is a 501, not a 500), and both ride on to
+    ``finish_query``; any other exception fails the query as a plain
+    ``ERROR`` (500), as before.
+    """
+    failure = {"status": error_status()}
+    if isinstance(error, QueryError):
+        failure["status"] = error_status(error.status_code)
+        failure["description"] = error.description
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
     await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
@@ -795,7 +808,7 @@ async def handle_task_failure(
             "workflow": "[]",
             "log_level": task[1].get("log_level", 20),
             "otel": task[1]["otel"],
-            "status": "ERROR",
+            **failure,
             "metadata": task[1]["metadata"],
             **carry_deadline(task[1]),
         },
@@ -875,13 +888,21 @@ async def run_task_lifecycle(
                 logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
         except asyncio.CancelledError:
             logger.warning(f"Task {task[0]} was cancelled")
+        except QueryError as e:
+            # A failure the worker raised on purpose, naming how the query
+            # should end (e.g. 501 for a query the ARA doesn't implement).
+            # Not a crash, so no traceback.
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            logger.error(f"Task {task[0]} failed ({e.status_code}): {e.description}")
+            await handle_task_failure(stream, group, task, logger, error=e)
         except Exception as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
             logger.error(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
             )
-            await handle_task_failure(stream, group, task, logger)
+            await handle_task_failure(stream, group, task, logger, error=e)
         finally:
             limiter.release()
             logger.debug(f"Finished task {task[0]} in {time.time() - start}")

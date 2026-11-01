@@ -192,8 +192,12 @@ async def test_bte_rejects_pathfinder_query(redis_mock, mocker):
         new_callable=mocker.AsyncMock,
         return_value=pathfinder_msg,
     )
-    with pytest.raises(Exception, match="does not support Pathfinder"):
+    from shepherd_utils.query_errors import UnsupportedQueryError
+
+    # Unsupported, not broken: the query ends 501 rather than 500.
+    with pytest.raises(UnsupportedQueryError, match="does not support Pathfinder") as e:
         await bte(_make_task(None), logger)
+    assert e.value.status_code == 501
 
 
 @pytest.mark.asyncio

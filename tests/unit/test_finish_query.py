@@ -130,6 +130,58 @@ async def test_finish_internal_ars_query_enqueues_premerge(redis_mock, mocker):
 
 
 @pytest.mark.asyncio
+async def test_finish_query_carries_a_worker_failure_to_postgres_and_the_ars(
+    redis_mock, mocker
+):
+    """A worker that failed with a QueryError (BTE refusing Pathfinder) hands
+    finish_query a coded status and a reason. Both are stored -- /query and
+    /asyncquery_status read them -- and both ride along to the ARS intake, so
+    the ARS child errors with the same code."""
+    import uuid
+
+    from shepherd_utils.ars.handoff import handoff_callback_url
+    from shepherd_utils.broker import get_task
+
+    child_pk = str(uuid.uuid4())
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "resp",
+            handoff_callback_url(child_pk),
+        ],
+    )
+    completed = mocker.patch("workers.finish_query.worker.set_query_completed")
+    _patch_messages(mocker, {"resp": {"message": {"results": []}}})
+    reason = "BTE does not support Pathfinder type queries."
+
+    logger = logging.getLogger(__name__)
+    await finish_query(
+        [
+            "test",
+            {
+                "query_id": "test",
+                "response_id": "resp",
+                "status": "ERROR 501",
+                "description": reason,
+            },
+        ],
+        logger,
+    )
+
+    completed.assert_called_once_with("test", "ERROR 501", logger, description=reason)
+    task = await get_task("ars.premerge", "consumer", "t", logger)
+    assert task[1]["ara_status"] == "ERROR 501"
+    assert task[1]["ara_description"] == reason
+
+
+@pytest.mark.asyncio
 async def test_finish_async_query(redis_mock, mocker):
     """Test that a synchronous query is finished correctly."""
     mock_query_state = mocker.patch("workers.finish_query.worker.get_query_state")
@@ -266,7 +318,11 @@ async def test_finish_async_query_with_a_lost_response(redis_mock, mocker):
     assert posted["message"]["results"] == []
     assert posted["message"]["query_graph"] == query_graph
     Response.from_dict(posted)
-    mock_set_query_completed.assert_called_once_with("test", "ERROR", logger)
+    from workers.finish_query.worker import LOST_DESCRIPTION
+
+    mock_set_query_completed.assert_called_once_with(
+        "test", "ERROR", logger, description=LOST_DESCRIPTION
+    )
 
 
 @pytest.mark.asyncio
