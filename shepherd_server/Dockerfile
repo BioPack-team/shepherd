@@ -6,6 +6,12 @@ LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
 
+# Release version (git tag), injected by .github/workflows/release.yml.
+# Reported in the worker heartbeat so the monitor can show which image
+# version each replica runs. Local builds default to "dev".
+ARG SHEPHERD_VERSION=dev
+ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
+
 # uvicorn worker-process count (overridable at deploy time). One process
 # cannot keep up with concurrent multi-MB ARA callbacks; each worker
 # initializes its own tracer provider, lifespan seeding is idempotent, and
