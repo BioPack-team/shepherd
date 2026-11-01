@@ -5,6 +5,12 @@ FROM ghcr.io/translatorsri/renci-python-image:3.12.13
 LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 ENV PYTHONHASHSEED=0
+
+# Release version (git tag), injected by .github/workflows/release.yml.
+# Reported in the worker heartbeat so the monitor can show which image
+# version each replica runs. Local builds default to "dev".
+ARG SHEPHERD_VERSION=dev
+ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
 # Enable faulthandler from interpreter startup so a SIGABRT dumps every thread's
 # traceback -- including during a spawned pool child's import phase, before the
 # pool initializer's faulthandler.enable() would run. Lets ProcessPoolManager's

@@ -107,3 +107,22 @@ async def test_collect_heartbeats_reaps_dead_persistent_keys(redis_mock, monkeyp
     assert [w["consumer"] for w in workers] == ["live"]
     # The dead worker's key was reaped from the keyspace.
     assert await broker.get(dead_key) is None
+
+
+def test_rollup_reports_distinct_versions():
+    """Each replica's image version is carried through, and the bucket lists the
+    distinct versions so the dashboard can flag a mixed fleet mid-rollout.
+    Replicas that predate version reporting show as "unknown"."""
+    workers = [
+        {**_hb("c1", in_flight=0, rss=1, cpu=0.0), "version": "v1.2.0"},
+        {**_hb("c2", in_flight=0, rss=1, cpu=0.0), "version": "v1.3.0"},
+        {**_hb("c3", in_flight=0, rss=1, cpu=0.0), "version": "v1.3.0"},
+        _hb("c4", in_flight=0, rss=1, cpu=0.0),
+    ]
+
+    bucket = poller._rollup_workers(workers)["merge_message"]
+
+    assert bucket["versions"] == ["unknown", "v1.2.0", "v1.3.0"]
+    consumers = {c["consumer"]: c for c in bucket["consumers"]}
+    assert consumers["c1"]["version"] == "v1.2.0"
+    assert consumers["c4"]["version"] is None

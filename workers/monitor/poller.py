@@ -498,11 +498,19 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "mem_limit_bytes": hb.get("mem_limit_bytes"),
                 "cpu_pct": hb.get("cpu_pct"),
                 "cpu_count": hb.get("cpu_count"),
+                "version": hb.get("version"),
                 "stale": hb.get("stale", False),
             }
         )
         bucket["task_limit_total"] += int(hb.get("task_limit", 0) or 0)
         bucket["in_flight_total"] += int(hb.get("in_flight") or 0)
+    # Distinct image versions across replicas, so the dashboard can show which
+    # version a worker type runs and flag a mixed fleet (e.g. mid-rollout).
+    # Replicas from images that predate version reporting show as "unknown".
+    for bucket in grouped.values():
+        bucket["versions"] = sorted(
+            {c.get("version") or "unknown" for c in bucket["consumers"]}
+        )
     return dict(grouped)
 
 
@@ -574,6 +582,7 @@ async def _resolve_worker_states(
                 "consumers": [],
                 "task_limit_total": 0,
                 "in_flight_total": 0,
+                "versions": [],
             },
         )
         prev = await _load_worker_state(stream)

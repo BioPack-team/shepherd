@@ -6,6 +6,12 @@ LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
 
 # ARAX builds several lists from sets, so its output depends on the hash seed
 ENV PYTHONHASHSEED=0
+
+# Release version (git tag), injected by .github/workflows/release.yml.
+# Reported in the worker heartbeat so the monitor can show which image
+# version each replica runs. Local builds default to "dev".
+ARG SHEPHERD_VERSION=dev
+ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
 # Dump every thread's traceback on SIGABRT, including in a pool child that hangs
 # during import (see ProcessPoolManager's timeout handling)
 ENV PYTHONFAULTHANDLER=1
