@@ -302,6 +302,28 @@ async def test_heartbeat_ping_payload_includes_resources(redis_mock, monkeypatch
     assert payload["cpu_count"] >= 1
 
 
+async def test_heartbeat_ping_reports_image_version(redis_mock, monkeypatch):
+    """The image version baked in at build time rides along in every ping."""
+    import json
+
+    from shepherd_utils.heartbeat import heartbeat_key
+
+    monkeypatch.setattr(heartbeat_module, "broker_client", redis_mock["broker"])
+    monkeypatch.setenv("SHEPHERD_VERSION", "v1.4.2")
+    hb = Heartbeat("merge_message", "abc", 8, manage_signals=False)
+    await hb._ping()
+
+    raw = await redis_mock["broker"].get(heartbeat_key("merge_message", "abc"))
+    assert json.loads(raw)["version"] == "v1.4.2"
+
+
+def test_read_version_none_when_unset_or_blank(monkeypatch):
+    monkeypatch.delenv("SHEPHERD_VERSION", raising=False)
+    assert heartbeat_module._read_version() is None
+    monkeypatch.setenv("SHEPHERD_VERSION", "  ")
+    assert heartbeat_module._read_version() is None
+
+
 async def test_heartbeat_key_is_persistent_no_ttl(redis_mock, monkeypatch):
     """The heartbeat key carries no TTL so volatile-ttl eviction can't shed it."""
     from shepherd_utils.heartbeat import heartbeat_key

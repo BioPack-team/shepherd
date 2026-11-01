@@ -97,6 +97,19 @@ def is_heartbeat_fresh(raw: "str | bytes | None", now: "float | None" = None) ->
     return (now - last_seen) <= HEARTBEAT_TTL_SEC
 
 
+def _read_version() -> "str | None":
+    """The image version this worker was built from, or ``None`` if unknown.
+
+    Release images bake the git tag into ``SHEPHERD_VERSION`` (a Docker build
+    arg, see ``.github/workflows/release.yml``); local builds default to
+    ``"dev"``. A deployment can also override it via the environment. Reported in
+    every heartbeat so the monitor can show which version each replica runs --
+    useful mid-rollout and when images are pulled by a moving tag like ``latest``.
+    """
+    version = os.environ.get("SHEPHERD_VERSION", "").strip()
+    return version or None
+
+
 def _read_rss_bytes() -> "int | None":
     """Resident set size of this process in bytes, read from ``/proc/self``.
 
@@ -261,6 +274,8 @@ class Heartbeat:
         # the process's lifetime. Reported alongside rss_bytes so the monitor can
         # show RSS as a percentage of the cap; None when uncapped.
         self._mem_limit_bytes = _read_cgroup_memory_limit()
+        # Image version, static for the process's lifetime.
+        self._version = _read_version()
         # Previous CPU sample, so each ping can report utilization over the
         # interval since the last one rather than since process start.
         self._last_cpu_sec: float | None = None
@@ -326,6 +341,7 @@ class Heartbeat:
                 "mem_limit_bytes": self._mem_limit_bytes,
                 "cpu_pct": self._cpu_pct(),
                 "cpu_count": self._cpu_count,
+                "version": self._version,
             }
         )
         try:

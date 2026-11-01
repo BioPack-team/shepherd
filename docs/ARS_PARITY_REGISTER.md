@@ -292,7 +292,12 @@ Behavioral deviations:
     `ars_public_host`. Differences in kind: the HTTP-level answers nobody
     read (the callback's dup-200 text, 409, 400, 422) become logged skips
     or asynchronous terminal states; a dispatch failure is the same child
-    E/500 upstream recorded for a failed POST; an intake whose response
+    E/500 upstream recorded for a failed POST; an ARA query whose
+    operation failed (finish_query passes `ara_status` along) errors the
+    child with the code its worker named -- E/501 for BTE refusing a
+    Pathfinder query (`shepherd_utils.query_errors`), E/500 otherwise --
+    as upstream records an HTTP ARA answering non-200, instead of the
+    clean D/200 with no results it used to read as; an intake whose response
     blob is missing leaves the child Running for the watchdog (the shape
     of a callback that never arrived); a `get_logs` failure delivers the
     response without spliced logs; and a submit with no enabled ARA

@@ -43,6 +43,7 @@ from shepherd_server.base_routes import (
     apply_query_status,
     base_router,
     parse_query_body,
+    query_description,
     query_openapi_extra,
     query_status_code,
     query_timeout,
@@ -111,7 +112,7 @@ async def arax_final_response(
     if is_arax_envelope(response):
         return response, response.get("http_status", 200)
     response["logs"] = await get_logs(response_id, logger)
-    apply_query_status(response, status)
+    apply_query_status(response, status, query_description(query_state))
     return response, query_status_code(status)
 
 

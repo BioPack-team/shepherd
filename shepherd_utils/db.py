@@ -1669,20 +1669,38 @@ async def set_query_completed(
     query_id: str,
     status: str,
     logger: logging.Logger,
+    description: Optional[str] = None,
 ):
-    """This query is done."""
+    """This query is done.
+
+    ``description`` is the client-safe reason a failed query gave (see
+    ``shepherd_utils.query_errors``); ``/query`` and ``/asyncquery_status``
+    report it. Left alone when not given.
+    """
     for attempt in range(PG_RETRIES):
         try:
             async with timed_connection("set_query_completed", logger) as conn:
-                await conn.execute(
-                    """
+                if description is None:
+                    await conn.execute(
+                        """
                 UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s
                 """,
-                    (
-                        status,
-                        query_id,
-                    ),
-                )
+                        (
+                            status,
+                            query_id,
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s, description = %s WHERE qid = %s
+                """,
+                        (
+                            status,
+                            description,
+                            query_id,
+                        ),
+                    )
                 await conn.commit()
             break
         except OperationalError as e:

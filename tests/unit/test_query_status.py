@@ -235,6 +235,47 @@ async def test_query_returns_the_code_for_how_it_failed(mocker, status, code):
 
 
 @pytest.mark.asyncio
+async def test_query_answers_with_the_code_and_reason_its_worker_gave(mocker):
+    """BTE's worker refuses a Pathfinder query as unsupported: the caller gets
+    TRAPI's 501 and the worker's reason, not a 500 that reads as a crash."""
+    _patch_sync_query(
+        mocker,
+        _row(
+            state="COMPLETED",
+            status="ERROR 501",
+            description="BTE does not support Pathfinder type queries.",
+        ),
+        response={"message": {}},
+    )
+    response = await run_sync_query(ARATargetEnum.BTE, _query_request({"message": {}}))
+    assert response.status_code == 501
+    body = _body(response)
+    assert body["status"] == "Error"
+    assert body["description"] == "BTE does not support Pathfinder type queries."
+
+
+@pytest.mark.asyncio
+async def test_async_status_reports_the_reason_its_worker_gave(mocker):
+    _patch_state(
+        mocker,
+        _row(
+            state="COMPLETED",
+            status="ERROR 501",
+            description="BTE does not support Pathfinder type queries.",
+        ),
+    )
+    body = _body(await query_status("qid"))
+    assert body["status"] == "Failed"
+    assert body["description"] == "BTE does not support Pathfinder type queries."
+
+
+def test_stored_description_does_not_override_the_aras_own():
+    response = {"status": "OK", "description": "ARA says hi"}
+    apply_query_status(response, "ERROR 501", "from the worker")
+    assert response == {"status": "Error", "description": "ARA says hi"}
+
+
+@pytest.mark.asyncio
 async def test_query_returns_an_error_code_when_the_response_is_missing(mocker):
     _patch_sync_query(mocker, _row(state="COMPLETED", status="OK"), response=None)
     response = await run_sync_query(ARATargetEnum.ARAX, _query_request({"message": {}}))
@@ -300,6 +341,12 @@ async def test_query_returns_unavailable_when_intake_fails(mocker):
         ("TIMEOUT", 504),
         ("Abandoned: no completion within budget", 504),
         ("something nobody writes today", 500),
+        # A worker named its own code (shepherd_utils.query_errors).
+        ("ERROR 501", 501),
+        ("ERROR 422", 422),
+        # ...but never one that would pass a failed query off as a success.
+        ("ERROR 200", 500),
+        ("ERROR banana", 500),
     ],
 )
 def test_query_status_code_mapping(status, code):

@@ -26,6 +26,7 @@ from shepherd_utils.db import (
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.query_errors import UnsupportedQueryError
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
 
 # Queue name
@@ -186,7 +187,7 @@ async def bte_lookup(task, logger: logging.Logger):
     infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     if pathfinder:
         # BTE currently doesn't handle Pathfinder queries
-        raise Exception("BTE does not support Pathfinder type queries.")
+        raise UnsupportedQueryError("BTE does not support Pathfinder type queries.")
 
     if not infer:
         # Put callback UID and query ID in postgres

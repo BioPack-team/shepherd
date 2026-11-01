@@ -339,6 +339,10 @@ async def finish_query(task, logger: logging.Logger):
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
     status = task[1].get("status", "OK")
+    # Client-safe reason a failed operation gave for how the query ends (a
+    # QueryError's description, e.g. "BTE does not support Pathfinder type
+    # queries."); stored beside the status so every way out can report it.
+    description = task[1].get("description") or None
     query_state = await _wait_for_query_state(query_id, logger)
 
     if query_state is None:
@@ -353,6 +357,7 @@ async def finish_query(task, logger: logging.Logger):
             # already in flight when the query was failed can have saved the
             # big accumulator over the top of it.
             status = TOO_LARGE_STATUS
+            description = None
             logger.error(
                 f"Query {query_id} finishing with status {status}: {too_large}"
             )
@@ -371,6 +376,11 @@ async def finish_query(task, logger: logging.Logger):
             # undeliverable HTTP callback.
             carrier: dict = {}
             inject(carrier)
+            # How the ARA query ended rides along, so the ARS child records
+            # a failed one as E/<code> rather than D/200 with no results.
+            outcome = {"ara_status": status}
+            if description:
+                outcome["ara_description"] = description
             try:
                 await add_task(
                     "ars.premerge",
@@ -379,6 +389,7 @@ async def finish_query(task, logger: logging.Logger):
                         "response_id": response_id,
                         "query_id": query_id,
                         "otel": orjson.dumps(carrier).decode(),
+                        **outcome,
                     },
                     logger,
                     raise_on_failure=True,
@@ -406,6 +417,7 @@ async def finish_query(task, logger: logging.Logger):
                     # waiting until the abandoned-query reaper -- which never
                     # tells them either.
                     status = LOST_STATUS
+                    description = LOST_DESCRIPTION
                     logger.error(
                         f"Query {query_id} finishing with status {status}: "
                         f"its response is gone ({e})"
@@ -456,7 +468,10 @@ async def finish_query(task, logger: logging.Logger):
             # Release the payload before the remaining db round trips.
             del message_bytes
 
-        await set_query_completed(query_id, status, logger)
+        if description:
+            await set_query_completed(query_id, status, logger, description=description)
+        else:
+            await set_query_completed(query_id, status, logger)
 
     # Always reap any callback rows tied to this query. Lookup workers do this
     # on timeout, but successful queries previously left rows behind forever.
