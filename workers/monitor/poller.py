@@ -682,20 +682,32 @@ def _attach_load_to_workers(
 ) -> None:
     """Fold stream backlog/pending into each worker card.
 
-    A worker type's stream is itself, so the lookup is direct. Utilization is
-    clamped to a sensible range for display; the raw numbers stay accurate.
+    A worker type's stream is itself, so the lookup is direct.
+
+    Workers ``XDEL`` an entry only once it's finished (``mark_task_as_complete``),
+    so ``XLEN`` counts both tasks still waiting *and* tasks a consumer has
+    already read and is working on (the group's pending entries). ``backlog`` is
+    just the waiting part -- ``XLEN - pending`` -- so a single task in progress
+    reads as Running 1 / Backlog 0 rather than 1 and 1. Clamped at zero because
+    the two reads aren't atomic and acked-but-not-yet-deleted leftovers (which
+    the janitor sweeps) can skew either side briefly.
+
+    ``utilization`` stays total load (waiting + in progress, i.e. ``XLEN``)
+    against capacity, so a worker type that's saturated with an empty queue
+    still reads as busy. ``xlen`` is kept so history keeps recording the same
+    total-depth series it always has.
     """
     for wtype, info in workers_rollup.items():
         stats = stream_stats.get(wtype) or {}
         xlen = int(stats.get("xlen", 0) or 0)
         pending = int(stats.get("pending", 0) or 0)
-        backlog = xlen
         capacity = int(info.get("task_limit_total", 0) or 0)
-        info["backlog"] = backlog
+        info["xlen"] = xlen
+        info["backlog"] = max(0, xlen - pending)
         info["pending"] = pending
         info["capacity"] = capacity
         info["utilization"] = (
-            (backlog / capacity) if capacity > 0 else (1.0 if backlog > 0 else 0.0)
+            (xlen / capacity) if capacity > 0 else (1.0 if xlen > 0 else 0.0)
         )
 
 
@@ -778,7 +790,10 @@ async def write_history(snapshot: Dict[str, Any]) -> None:
         samples[f"consumers:{stream}"] = stats["consumer_count"]
     for wtype, info in snapshot["workers"].items():
         samples[f"workers_alive:{wtype}"] = info["alive"]
-        samples[f"backlog:{wtype}"] = info.get("backlog", 0)
+        # Total stream depth (waiting + in progress): the History page plots
+        # this as "Queue backlog (XLEN)" and derives its utilization heatmap
+        # from it, so it deliberately isn't the card's waiting-only backlog.
+        samples[f"backlog:{wtype}"] = info.get("xlen", info.get("backlog", 0))
         samples[f"capacity:{wtype}"] = info.get("capacity", 0)
     pg = snapshot["postgres"]
     samples["pg:callbacks_pending"] = pg.get("callbacks_pending", 0)

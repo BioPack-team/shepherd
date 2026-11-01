@@ -254,7 +254,7 @@
 
     const summary = `
       <div class="modal-summary">
-        <span><span class="label">Queue length</span><span class="value">${fmt(backlog)}</span></span>
+        <span><span class="label">Backlog</span><span class="value">${fmt(backlog)}</span></span>
         <span><span class="label">Running / limit</span><span class="value">${fmt(runningTotal)} / ${fmt(capacityTotal)}</span></span>
         <span><span class="label">Replicas</span><span class="value">${fmt(replicaCount)}</span></span>
       </div>`;
