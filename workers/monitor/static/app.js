@@ -144,6 +144,30 @@
     return `${Math.round(ageSec / 86400)}d ago`;
   }
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[ch]);
+  }
+
+  // Image version line for a worker card. One version across all replicas reads
+  // as a plain tag; more than one (e.g. mid-rollout) is flagged as mixed and
+  // lists how many replicas run each version.
+  function versionHtml(w) {
+    const counts = {};
+    for (const c of w.consumers || []) {
+      const v = c.version || "unknown";
+      counts[v] = (counts[v] || 0) + 1;
+    }
+    const versions = Object.keys(counts).sort();
+    if (versions.length === 0) return "";
+    if (versions.length === 1) {
+      return `<div class="version" title="Image version">${escapeHtml(versions[0])}</div>`;
+    }
+    const parts = versions.map((v) => `${escapeHtml(v)} ×${counts[v]}`).join(", ");
+    return `<div class="version mixed" title="Replicas are running different image versions">Mixed: ${parts}</div>`;
+  }
+
   function updateWorkers(workers) {
     latestWorkers = workers;
     const names = Object.keys(workers).sort();
@@ -184,6 +208,7 @@
           <div class="name">${name}</div>
           <div class="state-pill ${state}">${state.replace("_", " ")}</div>
         </div>
+        ${versionHtml(w)}
         <div class="counts">
           <span><span class="label">Alive</span><span class="value alive">${aliveDisplay}</span></span>
           <span><span class="label">Running</span><span class="value">${fmt(runningDisplay)}</span></span>
@@ -229,7 +254,7 @@
 
     const summary = `
       <div class="modal-summary">
-        <span><span class="label">Queue length</span><span class="value">${fmt(backlog)}</span></span>
+        <span><span class="label">Backlog</span><span class="value">${fmt(backlog)}</span></span>
         <span><span class="label">Running / limit</span><span class="value">${fmt(runningTotal)} / ${fmt(capacityTotal)}</span></span>
         <span><span class="label">Replicas</span><span class="value">${fmt(replicaCount)}</span></span>
       </div>`;
@@ -269,6 +294,7 @@
           const staleTag = c.stale ? ' <span class="state-pill stale">stale</span>' : "";
           return `<tr${rowClass}>
             <td>${c.consumer || "-"}${staleTag}</td>
+            <td>${escapeHtml(c.version || "unknown")}</td>
             <td class="num">${running} / ${limit}</td>
             <td class="num">${mem}</td>
             <td class="num">${cpu}</td>
@@ -280,6 +306,7 @@
         <thead>
           <tr>
             <th>Replica</th>
+            <th>Version</th>
             <th class="num">Running / limit</th>
             <th class="num">Memory</th>
             <th class="num">CPU</th>

@@ -33,6 +33,8 @@ jobs:
           context: .
           file: ./shepherd_server/Dockerfile
           push: true
+          build-args: |
+            SHEPHERD_VERSION=${{ steps.get_version.outputs.VERSION }}
           tags: |
             ghcr.io/${{ steps.lower_repo.outputs.REPO }}/shepherd_server:latest
             ghcr.io/${{ steps.lower_repo.outputs.REPO }}/shepherd_server:${{ steps.get_version.outputs.VERSION }}
@@ -92,6 +94,8 @@ jobs:
           context: .
           file: ./workers/${{ matrix.worker }}/Dockerfile
           push: true
+          build-args: |
+            SHEPHERD_VERSION=${{ steps.get_version.outputs.VERSION }}
           tags: |
             ghcr.io/${{ steps.lower_repo.outputs.REPO }}/${{ matrix.worker }}:latest
             ghcr.io/${{ steps.lower_repo.outputs.REPO }}/${{ matrix.worker }}:${{ steps.get_version.outputs.VERSION }}
