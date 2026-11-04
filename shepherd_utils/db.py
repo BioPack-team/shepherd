@@ -716,7 +716,14 @@ async def save_response(
     Every write of a response goes through here (or ``save_response_sync``):
     it is what guarantees a stored response carries no delivery envelope, so
     ``finish_query`` can add one to the stored bytes without decoding them.
+
+    Raises once ``save_message``'s retries are spent, unless the caller passes
+    ``raise_on_failure=False``. A response that silently fails to save lets
+    the workflow carry on from the previous one, as if the operation had
+    produced nothing; raising sends the query to ``finish_query`` as an error
+    instead.
     """
+    kwargs.setdefault("raise_on_failure", True)
     await save_message(response_id, prepare_stored_response(response), logger, **kwargs)
 
 

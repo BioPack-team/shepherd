@@ -118,7 +118,11 @@ async def write_too_large_response(
             f"Couldn't read query {query_id} for the too-large response: {e}"
         )
     response = build_too_large_response(query_graph, reason)
-    await _db.save_response(response_id, response, logger)
+    # Best-effort: the marker is what every later stage checks, and
+    # ``finish_query`` delivers the response returned here (rewriting the
+    # stored copy again first), so a failed save must not stop the query
+    # being failed cleanly.
+    await _db.save_response(response_id, response, logger, raise_on_failure=False)
     return response
 
 
