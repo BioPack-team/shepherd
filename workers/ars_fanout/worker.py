@@ -22,11 +22,13 @@ import uuid
 
 from opentelemetry.propagate import inject
 
+import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars import aras
 from shepherd_utils.ars.handoff import handoff_callback_url
+from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
 from shepherd_utils.db import save_logs
@@ -140,6 +142,31 @@ async def ars_fanout(task, logger: logging.Logger):
     )
 
 
+async def fail_unfanned_parent(parent_pk, logger: logging.Logger) -> None:
+    """End a parent whose fanout failed before it created any children.
+
+    Parents are exempt from the watchdog, so a parent with no children has
+    nothing that will ever move it: it would stay Running forever (and, as a
+    cache leader, hold identical submits WAITING on it). It goes to E/500 like
+    any failed query, with the ars_error notification and the cache cleanup
+    the completion path gives an errored parent. A fanout that got as far as
+    creating children is left alone: those children reach a terminal status
+    (the watchdog times them out if nothing else) and complete the parent.
+    """
+    try:
+        if await ars_db.get_children(parent_pk):
+            return
+        claimed = await ars_db.claim_terminal_transition(parent_pk, "E", 500)
+        if claimed is None:
+            return
+        logger.error(f"Fanout for {parent_pk} failed with no children; parent E/500")
+        await notify_subscribers(claimed, None, logger)
+        await ars_db.clear_subscriptions(parent_pk)
+        await cache.on_parent_failed(claimed, logger)
+    except Exception as e:
+        logger.error(f"Could not fail parent {parent_pk} after its fanout: {e}")
+
+
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
     """Hand-rolled lifecycle: this stream is not a TRAPI workflow hop."""
     with tracer.start_as_current_span(STREAM, context=parent_ctx):
@@ -147,6 +174,8 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
             await ars_fanout(task, logger)
         except Exception as e:
             logger.error(f"Task {task[0]} failed: {e}", exc_info=True)
+            if task[1].get("parent_pk"):
+                await fail_unfanned_parent(task[1]["parent_pk"], logger)
         finally:
             try:
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)

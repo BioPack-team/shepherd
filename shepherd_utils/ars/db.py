@@ -402,8 +402,13 @@ async def get_running_messages(
     stayed Running past it could never be timed out again -- so a watchdog
     outage longer than the gap between the timeout threshold and the ceiling
     stranded every message it missed, and their parents with them.
+
+    Parents (rows with no ``ref``) are left out here, in SQL: the watchdog
+    exempts them, and filtering them only after the ``LIMIT`` let enough
+    long-Running parents fill the window, so no child was ever timed out
+    again.
     """
-    clauses = ["m.status = 'R'"]
+    clauses = ["m.status = 'R'", "m.ref IS NOT NULL"]
     params: List[Any] = []
     if min_age_sec > 0:
         clauses.append("m.ts < NOW() - make_interval(secs => %s)")
