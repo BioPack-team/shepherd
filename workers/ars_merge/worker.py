@@ -422,14 +422,23 @@ LOCK_TTL_MS = 45_000
 LOCK_REFRESH_SEC = 15.0
 
 
-async def _keep_lock_alive(key: str, logger: logging.Logger):
-    """Refresh our own lock every LOCK_REFRESH_SEC until cancelled."""
+async def _keep_lock_alive(
+    key: str, logger: logging.Logger, lost: Optional[asyncio.Event] = None
+):
+    """Refresh our own lock every LOCK_REFRESH_SEC until cancelled.
+
+    If a refresh finds the lock gone (it lapsed, and someone else may hold it
+    now), ``lost`` is set so the drain stops before folding another child:
+    folding on without the lock is what lets two workers both write a new
+    merged version of the same parent.
+    """
     while True:
         await asyncio.sleep(LOCK_REFRESH_SEC)
         try:
             if not await refresh_lock(key, CONSUMER, LOCK_TTL_MS, logger):
-                # someone else holds it now -- nothing we can do but say so
                 logger.warning(f"Lost the merge lock {key} before finishing")
+                if lost is not None:
+                    lost.set()
                 return
         except Exception as e:  # never let the keep-alive kill the merge
             logger.debug(f"Lock refresh for {key} failed: {e}")
@@ -576,17 +585,24 @@ async def ars_merge(task, logger: logging.Logger):
         logger.debug(f"Merge lock busy for {parent_pk}; the holder will drain it")
         return
 
-    keepalive = asyncio.create_task(_keep_lock_alive(key, logger))
+    lost = asyncio.Event()
+    keepalive = asyncio.create_task(_keep_lock_alive(key, logger, lost))
     folded = 0
     try:
         # Drain the parent to empty, one merged version per child, oldest
         # first. Re-reading the index each pass sweeps up children that
-        # validated while we were folding.
-        while True:
+        # validated while we were folding. Stops early if the lock is lost:
+        # whoever holds it now drains the rest.
+        while not lost.is_set():
             ready = await ars_db.get_ready_children(parent_pk, logger)
             if not ready:
                 break
             for child_pk in ready:
+                if lost.is_set():
+                    logger.warning(
+                        f"Stopping the merge of {parent_pk}: its lock was lost"
+                    )
+                    break
                 try:
                     with tracer.start_as_current_span("ars.merge.one") as span:
                         span.set_attribute("merge.parent_pk", str(parent_pk))
