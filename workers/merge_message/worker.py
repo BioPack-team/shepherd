@@ -974,6 +974,50 @@ async def _reenqueue_wake_task(task, logger, attempt: int = 0):
     await add_task(STREAM, fields, logger)
 
 
+# The per-query merge lock's TTL. A single merge pass can run for up to
+# ``pool_task_timeout_sec`` -- far longer than this -- so the lock is kept
+# alive by ``_keep_lock_alive`` for as long as it is held, rather than by a
+# TTL long enough for the slowest pass (which would leave a crashed holder's
+# query blocked for that long).
+LOCK_TTL_SEC = 45
+
+
+async def _keep_lock_alive(
+    response_id: str, lost: asyncio.Event, logger: logging.Logger
+) -> None:
+    """Refresh our lock every third of its TTL until cancelled.
+
+    A pass that outlived the lock let another worker take it and merge the
+    same response from the same stored accumulator: whichever save landed
+    last won, and the other batch's callbacks -- already cleared from the
+    ready set -- were gone. If a refresh finds the lock gone anyway (this
+    process stalled past the TTL), ``lost`` is set and the drain stops.
+    """
+    while True:
+        await asyncio.sleep(LOCK_TTL_SEC / 3)
+        try:
+            held = await refresh_lock(
+                response_id, CONSUMER, int(LOCK_TTL_SEC * 1000), logger
+            )
+        except Exception as e:  # a failed refresh is retried next tick
+            logger.debug(f"Lock refresh for {response_id} failed: {e}")
+            continue
+        if not held:
+            logger.error(f"Lost the merge lock for {response_id} mid-drain")
+            lost.set()
+            return
+
+
+async def _stop_keepalive(keepalive: "asyncio.Task | None") -> None:
+    if keepalive is None or keepalive.done():
+        return
+    keepalive.cancel()
+    try:
+        await keepalive
+    except asyncio.CancelledError:
+        pass
+
+
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
     # Size by the pod's actual CPU allocation (cgroup limit), not os.cpu_count()
@@ -1015,6 +1059,15 @@ async def poll_for_tasks():
         target = task[1]["target"]
         log_level = int(task[1].get("log_level", logging.INFO))
         drained = 0
+        keepalive = None
+        lock_lost = asyncio.Event()
+
+        async def _release_lock() -> None:
+            # Stop refreshing before deleting, so the keep-alive doesn't
+            # find its own lock gone and report it lost.
+            await _stop_keepalive(keepalive)
+            await remove_lock(response_id, CONSUMER, logger)
+
         try:
             with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
                 span.set_attribute("callback.id", callback_id)
@@ -1022,7 +1075,9 @@ async def poll_for_tasks():
 
                 # Non-blocking: never wait on the lock. The worker that holds it
                 # drains the whole query, so a loser has nothing useful to add.
-                got_lock = await try_lock(response_id, CONSUMER, logger)
+                got_lock = await try_lock(
+                    response_id, CONSUMER, logger, ttl_sec=LOCK_TTL_SEC
+                )
                 if not got_lock:
                     # Someone else holds this query's lock and drains its ready
                     # set to empty, so our callback (added to the set before this
@@ -1040,6 +1095,9 @@ async def poll_for_tasks():
                     return
 
                 logger.debug(f"[{callback_id}] Obtained lock for {response_id}.")
+                keepalive = asyncio.create_task(
+                    _keep_lock_alive(response_id, lock_lost, logger)
+                )
                 # Sanity check: if the original query or the response it
                 # accumulates into is gone (e.g. lost when Redis restarted and
                 # reloaded an older snapshot), every ready callback for it is
@@ -1063,7 +1121,7 @@ async def poll_for_tasks():
                     )
                     orphans = await get_ready_callbacks(response_id, logger)
                     await _clear_batch(response_id, orphans, logger)
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     return
 
                 async def _give_up(reason: str) -> None:
@@ -1078,7 +1136,7 @@ async def poll_for_tasks():
                     span.set_attribute("merge.too_large", True)
                     await fail_response_too_large(query_id, response_id, reason, logger)
                     await clear_merge_crashes(response_id)
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
 
                 # A query already discarded as too large keeps nothing that
                 # arrives afterwards: drop the ready callbacks instead of
@@ -1091,7 +1149,7 @@ async def poll_for_tasks():
                     )
                     orphans = await get_ready_callbacks(response_id, logger)
                     await _clear_batch(response_id, orphans, logger)
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     return
 
                 # Durable crash breaker. A pass is counted in Redis before it
@@ -1167,8 +1225,14 @@ async def poll_for_tasks():
                         if too_large is not None:
                             await _give_up(too_large)
                             return
-                        # Keep our lock alive across a long multi-pass drain.
-                        await refresh_lock(response_id, CONSUMER, 45000, logger)
+                        if lock_lost.is_set():
+                            # Someone else may hold the lock now; they drain
+                            # whatever is left. Don't start another pass.
+                            logger.error(
+                                f"[{callback_id}] Stopping the drain of "
+                                f"{response_id}: its merge lock was lost"
+                            )
+                            break
                 except BrokenProcessPool:
                     # pool.run already swapped in a fresh executor. If this
                     # response has now crashed the merge too many times, fail
@@ -1182,7 +1246,7 @@ async def poll_for_tasks():
                     if _too_many_crashes(crashes):
                         await _give_up(_crash_reason(crashes))
                         return
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     span.set_attribute("merge.drained_callbacks", drained)
                     await _handle_merge_failure(task, response_id, ready, logger)
                     return
@@ -1191,7 +1255,7 @@ async def poll_for_tasks():
                         f"[{callback_id}] Error merging messages: "
                         f"{traceback.format_exc()}"
                     )
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     span.set_attribute("merge.drained_callbacks", drained)
                     await _handle_merge_failure(task, response_id, ready, logger)
                     return
@@ -1201,7 +1265,7 @@ async def poll_for_tasks():
                     f"[{callback_id}] Merged {drained} callback(s) in "
                     f"{time.time() - lock_time:.2f}s"
                 )
-                await remove_lock(response_id, CONSUMER, logger)
+                await _release_lock()
                 # Close the race where a callback landed in the ready set after
                 # our final drain pass read it empty but before we released the
                 # lock: that callback's own wake task would have found the lock
@@ -1224,6 +1288,9 @@ async def poll_for_tasks():
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
             )
         finally:
+            # Whatever path got here, never leave a keep-alive refreshing a
+            # lock this task has stopped working under.
+            await _stop_keepalive(keepalive)
             try:
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
             except Exception as e:
