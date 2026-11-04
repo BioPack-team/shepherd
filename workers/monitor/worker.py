@@ -10,6 +10,7 @@ Combines:
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -19,7 +20,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Set
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -323,13 +331,30 @@ async def api_alerts(limit: int = 50):
     return {"alerts": await alerts.recent_alerts(limit=limit)}
 
 
-@APP.post("/api/admin/cleanup")
+def require_admin(request: Request) -> None:
+    """Bearer-token gate for the admin routes.
+
+    They change state -- one ACKs and deletes pending stream messages, one
+    finishes queries as errors -- so they answer only a caller holding
+    ``monitor_admin_token``. With no token configured they are disabled.
+    """
+    token = settings.monitor_admin_token
+    scheme, _, presented = request.headers.get("authorization", "").partition(" ")
+    if not (
+        token
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(presented.strip(), token)
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@APP.post("/api/admin/cleanup", dependencies=[Depends(require_admin)])
 async def api_admin_cleanup():
     """Run the janitor immediately. Returns what got trimmed/reaped."""
     return await janitor.run_once()
 
 
-@APP.post("/api/admin/reconcile_lost_queries")
+@APP.post("/api/admin/reconcile_lost_queries", dependencies=[Depends(require_admin)])
 async def api_admin_reconcile_lost_queries(min_age_sec: float = 60.0):
     """Finish, as errors, unfinished queries older than ``min_age_sec`` whose
     query or response blob is gone from Redis -- the sweep the monitor runs
@@ -337,7 +362,7 @@ async def api_admin_reconcile_lost_queries(min_age_sec: float = 60.0):
     return {"finished": await recovery.reconcile_lost_queries(min_age_sec)}
 
 
-@APP.post("/api/admin/reclaim_dead_consumers")
+@APP.post("/api/admin/reclaim_dead_consumers", dependencies=[Depends(require_admin)])
 async def api_admin_reclaim_dead_consumers(
     min_idle_seconds: int = 3600,
     dry_run: bool = False,
@@ -355,7 +380,7 @@ async def api_admin_reclaim_dead_consumers(
     )
 
 
-@APP.post("/api/admin/forget_worker")
+@APP.post("/api/admin/forget_worker", dependencies=[Depends(require_admin)])
 async def api_admin_forget_worker(name: str):
     """Remove a worker type from the dashboard's known-workers set.
 

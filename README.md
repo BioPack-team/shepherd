@@ -74,6 +74,18 @@ To lift them locally, override `cpus` / `mem_limit` (0 = unlimited) in a gitigno
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`
 (with `profiles: [ars]` if it's part of the ARS).
 
+Credentials and admin access:
+
+- The broker's password comes from `REDIS_PASSWORD` (`shepherd_broker/entrypoint.sh` passes it
+  to `redis-server`; it is not in `redis.conf`). The broker refuses to start without it, and every
+  service must be given the same value. Compose supplies a development default.
+- The monitor's `POST /api/admin/*` routes require `Authorization: Bearer $MONITOR_ADMIN_TOKEN`,
+  and are disabled until `MONITOR_ADMIN_TOKEN` is set. Its dashboard and read-only API need no
+  token.
+- In compose, Postgres, Redis, RedisInsight, the monitor and Jaeger listen on `127.0.0.1` only;
+  use an SSH tunnel to reach them from another machine. The API server (5439) is published on
+  every interface.
+
 ### Worker data (LMDB / sqlite) downloads
 
 A couple of workers read from large, read-only sqlite databases and LMDB datasets that are too big to
