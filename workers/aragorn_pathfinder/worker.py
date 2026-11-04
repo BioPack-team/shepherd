@@ -21,6 +21,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_search_graph
 from shepherd_utils.db import (
+    new_id,
     abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
@@ -284,7 +285,7 @@ async def run_async_lookup(
     logger: logging.Logger,
 ) -> AsyncResponse:
     """Return an async lookup response with callback id."""
-    callback_id = str(uuid.uuid4())[:8]
+    callback_id = new_id()
     with tracer.start_as_current_span("aragorn.pathfinder.lookup") as span:
         span.set_attribute("callback.id", callback_id)
         lookup_carrier = {}

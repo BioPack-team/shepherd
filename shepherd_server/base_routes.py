@@ -19,6 +19,7 @@ from shepherd_utils.broker import add_task
 from shepherd_utils.callback_url import CallbackURLError, validate_callback_url
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    new_id,
     DatabaseUnavailableError,
     DecompressedTooLargeError,
     add_query,
@@ -324,8 +325,8 @@ async def run_query(
     callback_url: Optional[str] = None,
 ) -> Tuple[str, str, logging.Logger]:
     """Run a single query."""
-    query_id = str(uuid.uuid4())[:8]
-    response_id = str(uuid.uuid4())[:8]
+    query_id = new_id()
+    response_id = new_id()
     # Set up logger
     # Same resolver the callback handler and the merge use, so an unparseable
     # level from a client falls back to the default instead of failing intake.

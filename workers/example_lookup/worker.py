@@ -11,6 +11,7 @@ import httpx
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    new_id,
     abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
@@ -56,7 +57,7 @@ async def example_lookup(task, logger: logging.Logger):
     try:
         async with httpx.AsyncClient(timeout=100) as client:
             for _ in range(5):
-                callback_id = str(uuid.uuid4())[:8]
+                callback_id = new_id()
                 try:
                     # Put callback UID and query ID in postgres
                     await add_callback_id(

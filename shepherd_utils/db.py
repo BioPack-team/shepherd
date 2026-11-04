@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Union
 
@@ -36,6 +37,18 @@ REDIS_RETRIES = 3
 # a cluster-wide outage caused by a full disk is obvious in every worker's logs
 # instead of hiding behind generic "connection error" noise.
 PG_DISK_FULL_SQLSTATE = "53100"
+
+
+def new_id() -> str:
+    """A fresh query, response or callback id.
+
+    These all key the same data store (Redis db 1) and live there for
+    ``redis_ttl``. They used to be the first 8 hex characters of a UUID --
+    32 bits, which at Shepherd's volumes makes a collision likely, and a
+    collision silently overwrote another query's stored query, response or
+    callback. A full random UUID (122 bits) makes that negligible.
+    """
+    return str(uuid.uuid4())
 
 
 def is_disk_full_error(exc: BaseException) -> bool:
