@@ -16,6 +16,7 @@ from opentelemetry.propagate import inject
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    new_id,
     abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
@@ -99,7 +100,7 @@ async def run_async_lookup(
     logger: logging.Logger,
 ) -> AsyncResponse:
     """Return an async lookup response with callback id."""
-    callback_id = str(uuid.uuid4())[:8]
+    callback_id = new_id()
     with tracer.start_as_current_span("aragorn.lookup") as span:
         span.set_attribute("callback.id", callback_id)
         lookup_carrier = {}
@@ -175,7 +176,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
 
     if not infer:
         # Put callback UID and query ID in postgres
-        callback_id = str(uuid.uuid4())[:8]
+        callback_id = new_id()
         await add_callback_id(query_id, callback_id, otel, logger)
         message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
         # with open("./debug/direct_query.json", "w", encoding="utf-8") as f:

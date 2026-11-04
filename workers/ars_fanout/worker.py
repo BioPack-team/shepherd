@@ -64,8 +64,8 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
     """
     callback = handoff_callback_url(child_pk)
     data["callback"] = callback
-    query_id = str(uuid.uuid4())[:8]
-    response_id = str(uuid.uuid4())[:8]
+    query_id = shepherd_db.new_id()
+    response_id = shepherd_db.new_id()
     # TRAPI 2.0: the client's log level is parameters.log_level
     level_number = resolve_log_level(
         query_log_level(data), resolve_log_level(settings.log_level)
