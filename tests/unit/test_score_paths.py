@@ -816,6 +816,22 @@ def test_score_paths_retries_the_save(mocker, scoring_state):
     assert save.call_count == 3
 
 
+def test_score_paths_raises_when_the_save_keeps_failing(mocker, scoring_state):
+    """A response that can't be saved fails the task (#206), rather than
+    letting the workflow carry on from the unscored response."""
+    mocker.patch.object(
+        score_worker, "get_message_sync", return_value=scoring_message()
+    )
+    mocker.patch.object(score_worker.time, "sleep")
+    save = mocker.patch.object(
+        score_worker, "save_response_sync", side_effect=ConnectionError("down")
+    )
+
+    with pytest.raises(ConnectionError):
+        score_worker.score_paths("rid", logger)
+    assert save.call_count == 5
+
+
 def test_validate_scoring_data_needs_a_reranker(tmp_path, mocker):
     mocker.patch.object(score_worker, "EMBEDDING_DIR", str(tmp_path))
     env = lmdb.open(str(tmp_path))

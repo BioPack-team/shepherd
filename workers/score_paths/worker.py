@@ -162,7 +162,10 @@ def score_paths(response_id, logger):
                 )
                 time.sleep(0.5)
             else:
+                # Raise, as save_response does: swallowing it here let the
+                # workflow carry on from the unscored response.
                 logger.error(f"Failed to save a message into redis: {e}")
+                raise
 
 
 def score_paths_task(response_id: str, log_level: int = logging.INFO) -> list[dict]:

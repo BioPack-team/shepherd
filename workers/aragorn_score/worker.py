@@ -439,8 +439,21 @@ class Ranker:
         answers_ = []
         scores_for_sort = []
 
+        failed = 0
         for answer in answers:
-            scored_answer, _ = self.score(answer, jaccard_like=jaccard_like)
+            try:
+                scored_answer, _ = self.score(answer, jaccard_like=jaccard_like)
+            except Exception as e:
+                # One answer the ranker can't handle (a probe qnode with no
+                # binding, an edge whose node isn't in the KG, an attribute of
+                # an unexpected type) used to abort the loop, leaving every
+                # later answer unscored. Score this one 0 and carry on;
+                # analyses it did score before failing keep their score.
+                failed += 1
+                self.logger.warning(f"Could not score an answer, scoring it 0: {e}")
+                for analysis in answer.get("analyses") or []:
+                    analysis.setdefault("score", 0)
+                scored_answer = answer
             answers_.append(scored_answer)
             # get the highest scored analysis for this answer
             scores_for_sort.append(
@@ -448,6 +461,11 @@ class Ranker:
                     analysis["score"]
                     for analysis in answer.get("analyses") or [{"score": 0}]
                 )
+            )
+        if failed:
+            self.logger.warning(
+                f"{failed} of {len(answers)} answer(s) could not be scored and "
+                "were given a score of 0."
             )
         # order the answers by score (rank)
         answers = [
