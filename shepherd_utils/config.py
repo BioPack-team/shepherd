@@ -590,6 +590,10 @@ class Settings(BaseSettings):
     ars_admin_token: str = ""
 
     # Monitor (dashboard) worker
+    # Bearer token for the monitor's POST /api/admin/* routes (one of which
+    # ACKs and deletes queued work). Empty disables the routes (403), as for
+    # ars_admin_token; the dashboard's read-only routes are unaffected.
+    monitor_admin_token: str = ""
     monitor_port: int = 5440
     monitor_poll_interval_sec: float = 3.0
     # History samples are persisted on a slower cadence than the live UI tick.

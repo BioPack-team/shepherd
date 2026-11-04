@@ -10,6 +10,12 @@
 # sizes huge, and none of the sizing / OOM / recovery behavior reproduces.
 # Docker refuses to start a container whose `cpus` exceeds the host's cores, so
 # the stack needs a machine (or Docker Desktop VM) with at least 6 CPUs.
+#
+# Published ports: the datastores, RedisInsight, the monitor and Jaeger listen
+# on 127.0.0.1 only -- they run with development credentials (or none), so they
+# must not be reachable from other machines. Reach them from elsewhere with an
+# SSH tunnel. The API server (5439) stays on every interface: subservices call
+# back to it through host.docker.internal, which a loopback-only port refuses.
 # The production values live in the Helm chart -- keep the two in step.
 # To run without limits locally, override them in a gitignored
 # compose.override.yml (`cpus: 0` / `mem_limit: 0` means unlimited).
@@ -88,7 +94,7 @@ services:
       context: .
       dockerfile: shepherd_db/Dockerfile
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
@@ -108,7 +114,7 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-supersecretpassword}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     restart: unless-stopped
     # The default ``redis-cli ping`` healthcheck silently passed even before
     # Redis was ready, because (a) it didn't authenticate (NOAUTH error still
@@ -131,7 +137,7 @@ services:
     container_name: shepherd_broker_insight
     restart: unless-stopped
     ports:
-      - '5540:5540'
+      - '127.0.0.1:5540:5540'
     volumes:
       - ./data/redisinsight:/db
   shepherd_monitor:
@@ -148,7 +154,7 @@ services:
       shepherd_broker:
         condition: service_healthy
     ports:
-      - "5440:5440"
+      - "127.0.0.1:5440:5440"
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
@@ -157,9 +163,9 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:1.55
     ports:
-      - "16686:16686" # UI
-      - "4317:4317" # OTLP gRPC
-      - "6381:6381/udp" # Agent UDP (Jaeger native)
+      - "127.0.0.1:16686:16686" # UI
+      - "127.0.0.1:4317:4317" # OTLP gRPC
+      - "127.0.0.1:6381:6381/udp" # Agent UDP (Jaeger native)
     environment:
       - COLLECTOR_OTLP_ENABLED=true
       - LOG_LEVEL=error
