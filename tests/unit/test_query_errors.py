@@ -88,7 +88,7 @@ def _task():
 def added(monkeypatch):
     calls = []
 
-    async def _add_task(queue, payload, _logger):
+    async def _add_task(queue, payload, _logger, **_kwargs):
         calls.append((queue, payload))
 
     async def _noop(*_a, **_kw):

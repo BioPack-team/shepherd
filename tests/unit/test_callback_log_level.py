@@ -56,7 +56,7 @@ def _patch_callback_deps(monkeypatch):
     async def _add_ready_callback(response_id, callback_id, logger):
         return None
 
-    async def _add_task(stream, fields, logger):
+    async def _add_task(stream, fields, logger, **_kwargs):
         tasks.append((stream, fields))
 
     async def _save_logs(response_id, logger):

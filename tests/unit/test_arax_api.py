@@ -911,7 +911,7 @@ def intake(monkeypatch):
     ):
         stored.append((query, target))
 
-    async def fake_add_task(queue, payload, _logger):
+    async def fake_add_task(queue, payload, _logger, **_kwargs):
         tasks.append((queue, payload))
 
     monkeypatch.setattr(base_routes, "add_query", fake_add_query)

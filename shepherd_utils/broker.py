@@ -120,24 +120,37 @@ async def create_consumer_group(stream, group, logger: logging.Logger):
         pass
 
 
+# Attempts for a strict (``raise_on_failure``) enqueue: rides out a brief
+# broker blip (0.1s, then 0.2s between tries) before giving up.
+STRICT_ADD_ATTEMPTS = 3
+
+
 async def add_task(queue, payload, logger: logging.Logger, raise_on_failure=False):
     """Put a payload on the queue for a worker to pick up.
 
-    ``raise_on_failure`` is for callers whose success response PROMISES the
-    task exists (e.g. ARS submit returning 201): swallowing the enqueue
-    failure there leaves a query permanently Running with no worker ever
-    woken. Default stays swallow-and-log for fire-and-forget callers.
+    ``raise_on_failure`` is for callers that must not carry on as if the task
+    exists when it doesn't: a hand-off that ACKs its own task afterwards, or a
+    success response that promises the work is queued (ARS submit returning
+    201, intake returning Accepted). Swallowing the failure there leaves a
+    query with no next step and nobody told. Such callers get a few retries
+    first, then the error. Default stays swallow-and-log for fire-and-forget
+    callers.
     """
-    try:
-        # print(f"Putting {payload} on {queue} stream")
-        await broker_client.xadd(queue, payload)
-    except Exception as e:
-        # failed to put message on ara stream
-        logger.error(
-            f"Failed to put new task on the queue: {e}, inputs: {queue}, {payload}"
-        )
-        if raise_on_failure:
-            raise
+    attempts = STRICT_ADD_ATTEMPTS if raise_on_failure else 1
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(0.1 * (2 ** (attempt - 1)))
+        try:
+            await broker_client.xadd(queue, payload)
+            return
+        except Exception as e:
+            # failed to put message on ara stream
+            logger.error(
+                f"Failed to put new task on the queue (attempt {attempt + 1}/"
+                f"{attempts}): {e}, inputs: {queue}, {payload}"
+            )
+            if attempt == attempts - 1 and raise_on_failure:
+                raise
 
 
 async def get_task(stream, group, consumer, logger: logging.Logger):
