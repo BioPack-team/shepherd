@@ -413,6 +413,9 @@ async def run_query(
                 **deadline_field(deadline),
             },
             logger,
+            # Strict: an enqueue failure must reach the except below, not
+            # answer Accepted for a query no worker will ever pick up.
+            raise_on_failure=True,
         )
     except Exception as e:
         # Previously this was swallowed and we returned as if the query had been
@@ -957,20 +960,33 @@ async def callback(
         span.set_attribute("callback.decompressed_bytes", payload_size)
         span_carrier = {}
         inject(span_carrier)
-        # add new task to merge callback response into original message
-        await add_task(
-            "merge_message",
-            {
-                "target": target,
-                "query_id": original_query[0],
-                "response_id": response_id,
-                "callback_id": callback_id,
-                "log_level": level_number,
-                "otel": json.dumps(span_carrier),
-                "metadata": json.dumps({}),
-            },
-            logger,
-        )
+        # add new task to merge callback response into original message.
+        # Strict, like the two writes above: the wake task is what gets this
+        # callback merged, so if it can't be queued the sender is told to
+        # redeliver (the save and the ready-index add are idempotent) rather
+        # than getting a 200 for results nothing will merge.
+        try:
+            await add_task(
+                "merge_message",
+                {
+                    "target": target,
+                    "query_id": original_query[0],
+                    "response_id": response_id,
+                    "callback_id": callback_id,
+                    "log_level": level_number,
+                    "otel": json.dumps(span_carrier),
+                    "metadata": json.dumps({}),
+                },
+                logger,
+                raise_on_failure=True,
+            )
+        except Exception:
+            logger.error(
+                f"[{callback_id}] could not queue the merge after retries; "
+                "asking the sender to retry delivery"
+            )
+            await save_logs(response_id, logger)
+            return Response("Failed to queue callback merge.", 500)
     # Persist the logs generated while handling this callback so they land in
     # the query's log list (keyed by response_id, the same key finish_query
     # reads). Without this, everything logged above -- the result count, the

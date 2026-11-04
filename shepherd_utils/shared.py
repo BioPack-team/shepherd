@@ -770,6 +770,10 @@ async def wrap_up_task(
             **carry_deadline(task[1]),
         },
         logger,
+        # Strict: ACKing this task after a failed hand-off would leave the
+        # query with no next step. On failure this raises before the ACK, so
+        # the message stays pending instead of being dropped.
+        raise_on_failure=True,
     )
 
     await mark_task_as_complete(stream, group, task[0], logger)
@@ -796,24 +800,36 @@ async def handle_task_failure(
     if isinstance(error, QueryError):
         failure["status"] = error_status(error.status_code)
         failure["description"] = error.description
+    logger.error("Sending task straight to finish_query.")
+    # Enqueue the wrap-up before ACKing, strictly: ACKing first and then
+    # failing to enqueue would drop the query with nobody told. If the
+    # hand-off can't be made, the task is left un-ACKed rather than lost.
+    try:
+        await add_task(
+            "finish_query",
+            {
+                "query_id": task[1]["query_id"],
+                "response_id": task[1]["response_id"],
+                "workflow": "[]",
+                "log_level": task[1].get("log_level", 20),
+                "otel": task[1]["otel"],
+                **failure,
+                "metadata": task[1]["metadata"],
+                **carry_deadline(task[1]),
+            },
+            logger,
+            raise_on_failure=True,
+        )
+    except Exception as e:
+        logger.error(
+            f"Task {task[0]}: could not hand the failed query to finish_query; "
+            f"leaving the task un-ACKed: {e}"
+        )
+        await save_logs(task[1]["response_id"], logger)
+        return
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
     await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
-    logger.error("Sending task straight to finish_query.")
-    await add_task(
-        "finish_query",
-        {
-            "query_id": task[1]["query_id"],
-            "response_id": task[1]["response_id"],
-            "workflow": "[]",
-            "log_level": task[1].get("log_level", 20),
-            "otel": task[1]["otel"],
-            **failure,
-            "metadata": task[1]["metadata"],
-            **carry_deadline(task[1]),
-        },
-        logger,
-    )
 
 
 # Proxy tracer: resolves to whatever provider the worker process set up via

@@ -153,7 +153,7 @@ def route(redis_mock, monkeypatch, mocker):
     async def _add_ready_callback(response_id, callback_id, logger):
         ready.append((response_id, callback_id))
 
-    async def _add_task(stream, fields, logger):
+    async def _add_task(stream, fields, logger, **_kwargs):
         tasks.append((stream, fields))
 
     async def _save_logs(response_id, logger):
