@@ -190,9 +190,11 @@ def _make_task():
 
 
 @pytest.mark.asyncio
-async def test_sipr_skips_non_set_input_query(redis_mock, mocker):
-    """A query without any ``set_interpretation: MANY`` node should be skipped
-    silently (no save)."""
+async def test_sipr_rejects_non_set_input_query(redis_mock, mocker):
+    """A query without any ``set_interpretation: MANY`` node is one SIPR
+    doesn't do: it fails with 501 instead of ending as an empty OK (#215)."""
+    from shepherd_utils.query_errors import QueryError
+
     mocker.patch(
         "workers.sipr.worker.get_message",
         new_callable=mocker.AsyncMock,
@@ -209,12 +211,10 @@ async def test_sipr_skips_non_set_input_query(redis_mock, mocker):
         "workers.sipr.worker.save_response",
         new_callable=mocker.AsyncMock,
     )
-    task = _make_task()
-    await sipr_worker.sipr(task, logger)
+    with pytest.raises(QueryError) as raised:
+        await sipr_worker.sipr(_make_task(), logger)
+    assert raised.value.status_code == 501
     assert not mock_save.called
-    # The workflow on the task gets a stable sipr/sort_results_score appended.
-    workflow = json.loads(task[1]["workflow"])
-    assert [op["id"] for op in workflow] == ["sipr", "sort_results_score"]
 
 
 @pytest.mark.asyncio

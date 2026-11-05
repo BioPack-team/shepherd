@@ -56,6 +56,11 @@ PER_STREAM_MIN_IDLE_SEC: Dict[str, int] = {
     # (210s), so the floor sits just above that -- same shape as the lookup
     # workers, whose ceiling is the identical 210s lookup_timeout.
     "score_paths": 240,
+    # SIPR's retrieval runs within the query's deadline (the default budget
+    # is query_timeout_sec, 300s), so the floor sits just above that. A
+    # client that asked for a longer timeout is still covered by the
+    # heartbeat filter, the primary guard.
+    "sipr": 360,
     # Medium-duration workers.
     "arax.rank": 60,
     "merge_message": 60,
