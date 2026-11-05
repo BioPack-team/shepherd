@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from shepherd_utils.broker import add_task, broker_client
 from shepherd_utils.config import settings
-from shepherd_utils.db import find_queries_with_lost_data
+from shepherd_utils.db import find_queries_with_lost_data, find_unfinished_queries
 
 from . import alerts
 
@@ -98,12 +98,103 @@ async def reconcile_lost_queries(min_age_sec: float) -> List[Dict[str, Any]]:
     return finished
 
 
+# Streams whose tasks don't drive a query's workflow: a merge_message task
+# merges a callback into the response, but the query only moves on when the
+# lookup that is waiting on it does. A query whose only task is one of these
+# has still lost its next step.
+_NOT_A_NEXT_STEP = frozenset({"merge_message"})
+
+LOST_TASK_DESCRIPTION = (
+    "Shepherd's message broker restarted and lost this query's next step, so "
+    "it could not be completed."
+)
+
+
+async def _queries_with_a_task() -> set:
+    """The query ids some workflow task still refers to.
+
+    A task stays in its stream until it is ACKed (and then deleted), so this
+    covers both the tasks waiting to be picked up and the ones a worker is
+    running. Every stream is read in one MULTI/EXEC, so a query being handed
+    from one step's stream to the next can't be missed between two reads.
+    """
+    streams = [
+        key
+        async for key in broker_client.scan_iter(_type="stream")
+        if key not in _NOT_A_NEXT_STEP
+    ]
+    if not streams:
+        return set()
+    pipe = broker_client.pipeline(transaction=True)
+    for stream in streams:
+        pipe.xrange(stream)
+    query_ids = set()
+    for entries in await pipe.execute():
+        for _, fields in entries or []:
+            query_id = fields.get("query_id")
+            if query_id:
+                query_ids.add(query_id)
+    return query_ids
+
+
+async def reconcile_lost_tasks(min_age_sec: float) -> List[Dict[str, Any]]:
+    """Finish, as errors, unfinished queries older than ``min_age_sec`` that no
+    workflow task refers to any more.
+
+    The task streams live in the same Redis as the blobs, so a restart can
+    lose a query's queued (or in-progress) task even when its blobs survived.
+    Nothing would ever move such a query on. Run after ``reconcile_lost_queries``,
+    whose ``finish_query`` tasks then count as the queries' next step, so no
+    query is finished twice. Returns the queries it finished.
+    """
+    try:
+        unfinished = await find_unfinished_queries(min_age_sec)
+        with_a_task = await _queries_with_a_task()
+    except Exception as e:
+        logger.error(f"Couldn't check for queries that lost their task: {e}")
+        return []
+    finished: List[Dict[str, Any]] = []
+    for query in unfinished:
+        if query["qid"] in with_a_task:
+            continue
+        try:
+            await add_task(
+                "finish_query",
+                {
+                    "query_id": query["qid"],
+                    "response_id": query["response_id"],
+                    "workflow": "[]",
+                    "log_level": logging.INFO,
+                    "otel": "{}",
+                    "status": "ERROR",
+                    "description": LOST_TASK_DESCRIPTION,
+                    "metadata": "{}",
+                },
+                logger,
+                raise_on_failure=True,
+            )
+        except Exception as e:
+            logger.error(f"Couldn't hand query {query['qid']} to finish: {e}")
+            continue
+        finished.append({**query, "missing": ["its next task"]})
+    if finished:
+        logger.warning(
+            f"Finished {len(finished)} queries whose task was lost: "
+            f"{[q['qid'] for q in finished]}"
+        )
+        await _alert_lost(finished)
+    return finished
+
+
 async def reconcile_after_restart(detected_at: float) -> List[Dict[str, Any]]:
     """The post-restart sweep: wait for the load and the grace period, then
-    finish the queries from before the restart that lost their data."""
+    finish the queries from before the restart that lost their data, and then
+    the ones that lost their task."""
     await _wait_until_loaded()
     await asyncio.sleep(settings.monitor_redis_restart_grace_sec)
-    return await reconcile_lost_queries(time.time() - detected_at)
+    min_age = time.time() - detected_at
+    finished = await reconcile_lost_queries(min_age)
+    return finished + await reconcile_lost_tasks(min_age)
 
 
 class RedisRestartWatcher:
@@ -232,9 +323,8 @@ async def _alert_lost(finished: List[Dict[str, Any]]) -> None:
             "severity": "warning",
             "detail": f"query {q['qid']} lost {', '.join(q['missing'])}",
             "message": (
-                f"Query `{q['qid']}` lost its data in a Redis restart "
-                f"({json.dumps(q['missing'])} gone) and was finished as an "
-                "error."
+                f"Query `{q['qid']}` lost {json.dumps(q['missing'])} in a "
+                "Redis restart and was finished as an error."
             ),
             "qid": q["qid"],
         }
