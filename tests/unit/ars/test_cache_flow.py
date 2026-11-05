@@ -32,16 +32,18 @@ QUERY = {
 KEY, CALLER_MAP = cache.cache_key(QUERY)
 _, SOURCE_MAP = cache.canonical_graph(QUERY["message"]["query_graph"])
 
-# the same query under other labels
+# the same query from another caller: a different body (members in another
+# order), the same ids -- so the same entry. (The same structure under other
+# ids is a different entry; see test_cache_ids.)
 RELABELED = {
     "message": {
         "query_graph": {
-            "nodes": {"dz": {"ids": ["MONDO:0005148"]}, "cx": {}},
-            "edges": {"rel": {"subject": "cx", "object": "dz"}},
+            "edges": {"e": {"object": "n0", "subject": "n1"}},
+            "nodes": {"n1": {}, "n0": {"ids": ["MONDO:0005148"]}},
         }
     }
 }
-assert cache.cache_key(RELABELED)[0] == KEY
+assert RELABELED is not QUERY and cache.cache_key(RELABELED)[0] == KEY
 
 
 def row(
@@ -424,9 +426,11 @@ def _leader(role="leader", status="D", **extra):
     )
 
 
-def _ara(status, result_count=None):
+def _ara(status, result_count=None, code=None):
+    if code is None:
+        code = 200 if status == "D" else 598
     return dict(
-        row(status=status, code=200 if status == "D" else 598),
+        row(status=status, code=code),
         agent_name="ara-x",
         inforesid="infores:x",
         result_count=result_count,
@@ -488,7 +492,12 @@ async def test_leader_empty_without_errors_is_cached(db):
 async def test_partial_results_cached_unless_store_partial_off(db, monkeypatch):
     merged_pk = uuid.uuid4()
     leader = _leader(merged_version=merged_pk)
-    db["get_children"].return_value = [_ara("E"), _ara("D", 5), _merge(merged_pk, 5)]
+    # a lasting ARA error, not a timeout (a timed-out run is never cached)
+    db["get_children"].return_value = [
+        _ara("E", code=500),
+        _ara("D", 5),
+        _merge(merged_pk, 5),
+    ]
     db["load_message_data"].return_value = QUERY
     db["mark_cache_entry_ready"].return_value = entry(leader["id"])
     await cache.on_parent_complete(leader, LOGGER)
