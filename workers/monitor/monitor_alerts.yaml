@@ -206,5 +206,6 @@ rules:
 # (workers/monitor/recovery.py), and fires a `redis_restarted` (warning) alert:
 # Redis comes back from its last snapshot, so everything written after it is
 # gone. Once it has loaded, and MONITOR_REDIS_RESTART_GRACE_SEC later, queries
-# that lost their data in it are finished as errors, with one
-# `query_data_lost` (warning) alert per query, batched.
+# that lost their data in it -- or the task that would have moved them on --
+# are finished as errors, with one `query_data_lost` (warning) alert per
+# query, batched.
