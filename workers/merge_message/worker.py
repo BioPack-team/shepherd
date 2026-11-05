@@ -1061,8 +1061,13 @@ async def poll_for_tasks():
         drained = 0
         keepalive = None
         lock_lost = asyncio.Event()
+        # Whether this task holds the query's lock and hasn't released it yet;
+        # the catch-all below uses it to clean up after an unexpected error.
+        holding = False
 
         async def _release_lock() -> None:
+            nonlocal holding
+            holding = False
             # Stop refreshing before deleting, so the keep-alive doesn't
             # find its own lock gone and report it lost.
             await _stop_keepalive(keepalive)
@@ -1094,6 +1099,7 @@ async def poll_for_tasks():
                     )
                     return
 
+                holding = True
                 logger.debug(f"[{callback_id}] Obtained lock for {response_id}.")
                 keepalive = asyncio.create_task(
                     _keep_lock_alive(response_id, lock_lost, logger)
@@ -1287,6 +1293,29 @@ async def poll_for_tasks():
             logger.error(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
             )
+            if holding:
+                # Failed while holding the lock, outside the drain's own
+                # handling: one of the checks before it (a Redis blip in
+                # message_exists, say) or giving up as too large. The wake
+                # tasks that lost the race for this lock were acked on the
+                # promise that the holder drains the query, so unless this
+                # one retries, the ready callbacks wait unmerged until the
+                # lookup times out. Free the lock now rather than at its TTL,
+                # and retry like any other failed merge.
+                try:
+                    await _release_lock()
+                except Exception as release_error:
+                    logger.error(
+                        f"[{callback_id}] Failed to release the merge lock: "
+                        f"{release_error}"
+                    )
+                try:
+                    await _handle_merge_failure(task, response_id, [], logger)
+                except Exception as retry_error:
+                    logger.error(
+                        f"[{callback_id}] Failed to re-enqueue the merge: "
+                        f"{retry_error}"
+                    )
         finally:
             # Whatever path got here, never leave a keep-alive refreshing a
             # lock this task has stopped working under.

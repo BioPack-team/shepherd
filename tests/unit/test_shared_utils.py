@@ -664,7 +664,10 @@ async def test_run_task_lifecycle_failure_records_error_and_routes_to_handler(mo
 
 
 @pytest.mark.asyncio
-async def test_run_task_lifecycle_cancellation_does_not_route_failure(mocker):
+async def test_run_task_lifecycle_stray_cancellation_routes_failure(mocker):
+    """A CancelledError the operation raises, with the task itself not being
+    cancelled, fails the query rather than leaving its message pending (#213).
+    Cancelling the task itself is covered in test_unacked_messages.py."""
     import asyncio
 
     worker_fn = mocker.AsyncMock(side_effect=asyncio.CancelledError)
@@ -677,7 +680,7 @@ async def test_run_task_lifecycle_cancellation_does_not_route_failure(mocker):
         "some_stream", "consumer", _lifecycle_task(), None, logger, limiter, worker_fn
     )
 
-    assert not mock_fail.called
+    assert mock_fail.called
     assert limiter.released
 
 
