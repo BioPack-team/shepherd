@@ -42,7 +42,7 @@ from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import save_logs
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks
+from shepherd_utils.shared import get_tasks, on_graceful_shutdown
 
 STREAM = "ars.notify"
 GROUP = "consumer"
@@ -206,7 +206,16 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
             limiter.release()
 
 
+async def _drain_on_shutdown() -> None:
+    await drain_deliveries(timeout=settings.ars_notify_drain_sec)
+
+
 async def poll_for_tasks():
+    # A rollout stops this worker through get_tasks' graceful drain (SIGTERM),
+    # which waits for the stream tasks and then exits -- it never cancels this
+    # loop, so the CancelledError branch below never ran there, and every
+    # delivery still in flight was dropped. Flush them in that drain too.
+    on_graceful_shutdown(_drain_on_shutdown)
     while True:
         try:
             async for task, parent_ctx, logger, limiter in get_tasks(

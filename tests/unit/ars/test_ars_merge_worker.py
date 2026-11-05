@@ -348,9 +348,10 @@ async def test_child_arriving_after_the_final_read_gets_one_wake(
     assert "_started_at" not in tasks[0][1]
 
 
-async def test_merge_failure_leaves_merge_child_running(env, redis_mock):
-    """Upstream merge_received swallows the failure and returns {}; the shell
-    merge child stays Running (the 8-minute watchdog eventually 598s it),
+async def test_merge_failure_ends_the_merge_child_at_once(env, redis_mock):
+    """Upstream merge_received swallows the failure and returns {}, leaving the
+    shell merge child Running until the 8-minute watchdog 598s it. C8-7
+    (#214): the shell goes to E/500 right away and the completion check runs,
     the semaphore is released, and the drain goes on to the next child."""
     await _ready(env, env["child_pk"], env["child2_pk"])
 
@@ -363,12 +364,15 @@ async def test_merge_failure_leaves_merge_child_running(env, redis_mock):
     await merge_worker.ars_merge(_task(env), LOGGER)
 
     failed_shell, good = env["merge_pks"]
-    # no final state for the failed shell, no bookkeeping pointing at it
-    assert not any("status" in u for u in _updates_for(env, failed_shell))
+    # the failed shell is ended, with no bookkeeping pointing at it
+    assert [u for u in _updates_for(env, failed_shell) if "status" in u] == [
+        {"status": "E", "code": 500}
+    ]
     assert env["rows"][str(env["parent_pk"])]["merged_version"] == str(good)
     assert env["rows"][str(env["parent_pk"])]["merge_semaphore"] is False
     assert _events(env) == ["merged_version_begun", "merged_version_available"]
-    env["completion"].assert_awaited_once()
+    # once for the failed shell, once for the good merge
+    assert env["completion"].await_count == 2
     # both attempted, both cleared: a poison child cannot wedge the drain
     assert await ars_db.get_ready_children(env["parent_pk"], LOGGER) == []
 

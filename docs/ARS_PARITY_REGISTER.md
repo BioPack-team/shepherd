@@ -175,8 +175,9 @@ are valid TOM 2.0 Responses.
 - **Known-broken endpoints** — **none are reproduced any more.** Every
   upstream route that could only fail is either fixed or dropped; see the
   Endpoints table under the divergences below.
-- **Upstream error-behavior parity** — a failed merge fold leaves the shell
-  merge child Running for the watchdog. The crash-and-drop behaviors this
+- **Upstream error-behavior parity** — a failed merge fold ends the shell
+  merge child at once (E/500) instead of leaving it Running for the
+  watchdog; see divergence 6. The crash-and-drop behaviors this
   row used to list (`decorate_edges_with_infores`'s UnboundLocalError,
   `normalizeScores`'s IndexError, the `node_bindings` for/else, the
   `attributes`/`analyses` early returns) are **no longer reproduced** — see
@@ -234,9 +235,13 @@ Behavioral deviations:
    hits when a child already has stored `data` (a `str in bytes` TypeError
    → 500) is not reproduced.
 6. **merge failure retries**: upstream celery-retries `merge_and_post_process`
-   up to 20× (creating a fresh merge child per attempt); the port fails once
-   and leaves the shell merge child for the watchdog — the terminal outcome
-   (E/598 merge child decrementing `orig_count`) is the same shape.
+   up to 20× (creating a fresh merge child per attempt), and a final failure
+   leaves the shell merge child Running for the watchdog. The port fails
+   once and ends the shell merge child right away as E/500, then runs the
+   completion check, instead of waiting out the 8-minute merge timeout
+   (#214). The terminal shape (an errored merge child decrementing
+   `orig_count`) is the same; only the code (500, not 598) and the timing
+   differ.
 7. **notify stats on a custom-fields-less call**: upstream raises TypeError
    when `result_count` is set and no fields dict exists; the port carries
    the stats in a fresh dict.

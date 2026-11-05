@@ -311,8 +311,29 @@ async def intake_internal_response(fields, logger: logging.Logger):
             logger.info(f"Intake: {child_pk} already has results; skipping")
             return None
         if mesg.get("result_count") is not None and mesg["result_count"] > 0:
-            logger.info(f"Intake: {child_pk} already has a response; skipping")
-            return None
+            # Intake records the count before the premerge runs, so a
+            # redelivery of this task (its worker died part way) lands here
+            # too. Skipping it left the child Running until the watchdog
+            # timed it out, and its results never merged.
+            if mesg["status"] != "R":
+                logger.info(f"Intake: {child_pk} already has a response; skipping")
+                return None
+            if await _handed_to_merge(parent, mesg):
+                # Premerge and the hand-off to the merge are done; only the
+                # child's own status flip was lost.
+                logger.warning(
+                    f"Intake: {child_pk} was already handed to the merge; "
+                    "finishing its status"
+                )
+                updated = await ars_db.update_message(child_pk, status=status, code=200)
+                await ars_db.persist_data_copy(child_pk, logger)
+                if updated and updated["status"] in ("D", "S", "E", "U"):
+                    await lifecycle.check_parent_completion(mesg["ref"], logger)
+                return None
+            # Resume at the premerge. The response is saved over the child's
+            # blob again below, so a premerge the dead worker had already
+            # applied to it is not applied twice.
+            logger.warning(f"Intake: {child_pk} was redelivered; resuming its premerge")
         if mesg["status"] == "E":
             logger.info(f"Intake: {child_pk} already errored; response rejected")
             return None
@@ -365,6 +386,18 @@ async def intake_internal_response(fields, logger: logging.Logger):
         logger.error(f"Intake failed for {child_pk}: {e}", exc_info=True)
         await _terminal_error(child_pk, mesg.get("ref"), mesg, data, logger)
         return None
+
+
+async def _handed_to_merge(parent, mesg) -> bool:
+    """Whether ``mesg`` has already been handed to its parent's merge: it is
+    waiting in the merge-ready index, or the merge has folded it in (the
+    parent's merged_versions_list names its agent -- one child per ARA)."""
+    if await ars_db.is_ready_child(parent["id"], mesg["id"]):
+        return True
+    merged = parent.get("merged_versions_list") or []
+    return any(
+        len(entry) > 1 and entry[1] == str(mesg.get("agent")) for entry in merged
+    )
 
 
 async def _hand_to_merge(parent_pk, child_pk, agent_name, otel, logger):

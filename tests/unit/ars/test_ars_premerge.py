@@ -537,9 +537,70 @@ async def test_intake_duplicate_done_child_skips(env, intake, redis_mock):
     assert await _merge_tasks() == []
 
 
-async def test_intake_repeated_results_skips(env, intake, redis_mock):
-    """A child that already has results rejects the update (the 409 guard)."""
+async def test_intake_redelivered_before_the_merge_resumes_at_premerge(
+    env, intake, redis_mock
+):
+    """C8-6 (#214): intake records the count before premerge, so a redelivery
+    after that point (the worker died) used to hit the repeated-results guard:
+    the child stayed Running until the watchdog and its results never merged.
+    It now resumes from the stored response."""
+    env["child_row"]["result_count"] = 2
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+
+    # the raw response is saved over the child's blob again before premerge
+    assert env["save_message_data"].await_count >= 1
+    final = _final_status_update(env)
+    assert final["status"] == "D"
+    assert final["code"] == 200
+    assert await _ready(env) == [str(env["child_pk"])]
+    assert len(await _merge_tasks()) == 1
+    env["completion"].assert_awaited_once()
+
+
+async def test_intake_redelivered_after_the_hand_off_only_finishes_status(
+    env, intake, redis_mock
+):
+    """Already waiting in the merge-ready index: not premerged or merged again."""
+    env["child_row"]["result_count"] = 2
+    await ars_db.add_ready_child(env["parent_pk"], env["child_pk"], LOGGER)
+
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+
+    final = _final_status_update(env)
+    assert final["status"] == "D"
+    env["save_message_data"].assert_not_awaited()
+    assert await _merge_tasks() == []
+    env["completion"].assert_awaited_once()
+
+
+async def test_intake_redelivered_after_the_merge_only_finishes_status(
+    env, intake, redis_mock, mocker
+):
+    """Already folded in (the parent's merged_versions_list names the agent)."""
+    env["child_row"]["result_count"] = 2
+    rows = {
+        str(env["child_pk"]): env["child_row"],
+        str(env["parent_pk"]): {
+            "id": env["parent_pk"],
+            "status": "R",
+            "agent": "ars-default-agent",
+            "merged_versions_list": [[str(uuid.uuid4()), "ara-shepherd-aragorn"]],
+        },
+    }
+    env["get_message_row"].side_effect = lambda pk: rows.get(str(pk))
+
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+
+    assert _final_status_update(env)["status"] == "D"
+    env["save_message_data"].assert_not_awaited()
+    assert await _merge_tasks() == []
+
+
+async def test_intake_terminal_child_with_results_skips(env, intake, redis_mock):
+    """A child that already has results and is no longer Running is left alone
+    (the 409 guard)."""
     env["child_row"]["result_count"] = 5
+    env["child_row"]["status"] = "S"
     await pm.ars_premerge(_intake_task(env), LOGGER)
     env["update_message"].assert_not_awaited()
     assert await _merge_tasks() == []

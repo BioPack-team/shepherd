@@ -243,3 +243,31 @@ async def test_delivery_budget_stops_the_retry_ladder(env, mocker):
     await notify_worker.drain_deliveries(timeout=5)
     # one attempt, then the budget check refuses to sleep
     assert post.await_count == 1
+
+
+async def test_a_graceful_shutdown_flushes_deliveries_in_flight(monkeypatch):
+    """C8-9 (#214): a rollout stops the worker through get_tasks' graceful
+    drain, which exits without cancelling the poll loop, so the deliveries
+    still in flight were dropped. They are now flushed before the exit."""
+    from shepherd_utils import shared
+
+    monkeypatch.setattr(shared, "_shutdown_hooks", [], raising=False)
+    monkeypatch.setattr(shared, "_active_heartbeat", None)
+    delivered = []
+
+    async def _slow_delivery():
+        await asyncio.sleep(0.3)
+        delivered.append("sent")
+
+    async def _get_tasks(*args, **kwargs):
+        # One event's delivery goes out, then SIGTERM: the real get_tasks
+        # runs the graceful drain and exits.
+        notify_worker._spawn_delivery(_slow_delivery())
+        await shared._drain_and_exit(asyncio.Semaphore(1), 1, LOGGER)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(notify_worker, "get_tasks", _get_tasks)
+    with pytest.raises(SystemExit):
+        await notify_worker.poll_for_tasks()
+
+    assert delivered == ["sent"]

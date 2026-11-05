@@ -499,10 +499,15 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
             parameters,
         )
     except Exception as e:
-        # merge_received swallows and returns {} -- the shell merge child
-        # stays Running for the watchdog to reap
+        # Upstream's merge_received swallows this and returns {}, leaving the
+        # shell merge child Running for the watchdog: every such query then
+        # took at least the 8-minute merge timeout to complete. End the shell
+        # now (E/500) and run the completion check the watchdog would have.
         logger.error(f"problem with merging for {agent_name}: {e}", exc_info=True)
         await ars_db.update_message(parent_pk, merge_semaphore=False)
+        await ars_db.update_message(new_pk, status="E", code=500)
+        await ars_db.persist_data_copy(new_pk, logger)
+        await lifecycle.check_parent_completion(parent_pk, logger)
         return
     _replay_child_logs(outcome.get("logs"), logger)
     stats = outcome.get("stats") or {}
