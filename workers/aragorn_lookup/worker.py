@@ -27,7 +27,7 @@ from shepherd_utils.db import (
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.shared import get_tasks, lookup_wait_seconds, run_task_lifecycle
 
 # Queue name
 STREAM = "aragorn.lookup"
@@ -240,7 +240,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
-    MAX_QUERY_TIME = message["parameters"]["timeout"]
+    MAX_QUERY_TIME = lookup_wait_seconds(message["parameters"])
     start_time = time.time()
     running_callback_ids = [""]
     while time.time() - start_time < MAX_QUERY_TIME:

@@ -38,6 +38,7 @@ from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import (
     filter_kgraph_orphans,
     get_tasks,
+    lookup_wait_seconds,
     run_task_lifecycle,
 )
 from shepherd_utils.trapi import make_binding
@@ -594,7 +595,9 @@ async def shadowfax(task, logger: logging.Logger) -> str:
     lookups = edge_lookups(node_paths, source, target, lookup_parameters)
     logger.info(f"Sending {len(lookups)} edge lookups to {settings.kg_retrieval_url}")
     await send_lookups(lookups, query_id, logger)
-    await wait_for_callbacks(query_id, response_id, parameters["timeout"], logger)
+    await wait_for_callbacks(
+        query_id, response_id, lookup_wait_seconds(parameters), logger
+    )
 
     plan = {
         "source": source,
