@@ -101,6 +101,18 @@ def is_shutting_down() -> bool:
     return _shutdown.is_set()
 
 
+# Coroutine functions run by the graceful drain just before the process exits,
+# after the in-flight tasks drained (or the drain timed out). For a worker that
+# has to settle state belonging to work it is about to abandon.
+_shutdown_hooks: list = []
+
+
+def on_graceful_shutdown(hook) -> None:
+    """Register ``hook`` (an argument-less coroutine function) to run when the
+    worker exits through the graceful drain. Not run on a hard exit."""
+    _shutdown_hooks.append(hook)
+
+
 def _request_shutdown() -> None:
     _shutdown.set()
 
@@ -250,6 +262,12 @@ async def _drain_and_exit(
             f"Drain timed out with ~{task_limit - acquired} task(s) still "
             "running; leaving them in the stream for Redis reclaim."
         )
+
+    for hook in list(_shutdown_hooks):
+        try:
+            await hook()
+        except Exception as e:
+            logger.warning(f"Shutdown hook {hook} failed: {e}")
 
     hb = _active_heartbeat
     if hb is not None:
