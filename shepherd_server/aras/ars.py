@@ -838,6 +838,17 @@ async def query_event_subscribe(request: Request) -> Response:
                         out["failure"][key] = "Query already complete"
                 else:
                     await ars_db.add_subscription(mesg["id"], client["id"])
+                    # Re-read once subscribed. A query that finished between
+                    # the read above and the insert has already notified
+                    # (and cleared) the subscribers it found, so this client
+                    # would never hear of it: replay the completion to it.
+                    # A client whose insert landed just before the completion
+                    # read its subscribers can be told twice, which beats
+                    # never.
+                    latest = await ars_db.get_message_row(mesg["id"])
+                    if latest is not None and latest["status"] in ("D", "E"):
+                        await ars_db.remove_subscription(mesg["id"], client["id"])
+                        await replay_completion(latest, client["id"], logger)
                     out["success"].append(key)
             out["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             out, status = _analyze_response(out)

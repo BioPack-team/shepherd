@@ -107,6 +107,65 @@ async def test_scan_reaches_a_child_behind_old_running_parents(ars_pg):
     assert [row["id"] for row in rows] == [child_id]
 
 
+async def test_the_watchdog_does_not_overwrite_a_child_that_finished(ars_pg, mocker):
+    """C8-4 (#214): the sweep read the child as Running, then it reached Done
+    before the timeout write. The write must not turn it into E/598."""
+    from workers.ars_watchdog import worker as watchdog
+
+    parent_pk, child_pk = uuid.uuid4(), uuid.uuid4()
+    async with ars_pg.connection() as conn:
+        await conn.execute(
+            "INSERT INTO ars_message (id, status, agent, ts) "
+            "VALUES (%s, 'R', 'ars-default-agent', NOW() - INTERVAL '1 hour')",
+            (parent_pk,),
+        )
+        await conn.execute(
+            "INSERT INTO ars_message (id, status, code, agent, ref, ts) "
+            "VALUES (%s, 'D', 200, 'ara-shepherd-aragorn', %s, "
+            "NOW() - INTERVAL '1 hour')",
+            (child_pk, parent_pk),
+        )
+        await conn.commit()
+    stale = await ars_db.get_message_row(child_pk)
+    stale = dict(stale, status="R", agent_name="ara-shepherd-aragorn")
+    mocker.patch.object(
+        ars_db, "get_running_messages", new_callable=AsyncMock, return_value=[stale]
+    )
+    completion = mocker.patch.object(
+        watchdog.lifecycle, "check_parent_completion", new_callable=AsyncMock
+    )
+
+    assert await watchdog.sweep(LOGGER) == 0
+
+    row = await ars_db.get_message_row(child_pk)
+    assert (row["status"], row["code"]) == ("D", 200)
+    completion.assert_not_awaited()
+
+
+async def test_the_watchdog_times_out_a_child_still_running(ars_pg):
+    from workers.ars_watchdog import worker as watchdog
+
+    parent_pk, child_pk = uuid.uuid4(), uuid.uuid4()
+    async with ars_pg.connection() as conn:
+        await conn.execute(
+            "INSERT INTO ars_message (id, status, agent, ts) "
+            "VALUES (%s, 'R', 'ars-default-agent', NOW() - INTERVAL '1 hour')",
+            (parent_pk,),
+        )
+        await conn.execute(
+            "INSERT INTO ars_message (id, status, code, agent, ref, ts) "
+            "VALUES (%s, 'R', 202, 'ara-shepherd-aragorn', %s, "
+            "NOW() - INTERVAL '1 hour')",
+            (child_pk, parent_pk),
+        )
+        await conn.commit()
+
+    assert await watchdog.sweep(LOGGER) == 1
+
+    row = await ars_db.get_message_row(child_pk)
+    assert (row["status"], row["code"]) == ("E", 598)
+
+
 # --- a failed fanout (C8-2) --------------------------------------------------
 
 

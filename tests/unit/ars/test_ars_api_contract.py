@@ -1148,6 +1148,40 @@ async def test_subscribe_to_running_pk_still_subscribes(
     assert await _notify_tasks() == []
 
 
+async def test_subscribe_racing_completion_still_hears_of_it(
+    client, db, redis_mock, subscriber
+):
+    """C8-8 (#214): the query was Running when read but finished before the
+    subscription was inserted, so completion never saw this client. The
+    endpoint re-reads after subscribing and replays the completion."""
+    source, merged, _ = _source_tree(db)
+    running = dict(source, status="R", code=202)
+    rows = {str(source["id"]): running}
+    db["get_message_row"].side_effect = lambda pk: rows.get(str(pk))
+
+    async def _completes_meanwhile(message_id, client_pk):
+        rows[str(source["id"])] = source
+
+    db["add_subscription"].side_effect = _completes_meanwhile
+    body = json.dumps({"client_id": "ui", "pks": [str(source["id"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == [str(source["id"])]
+    # the stale subscription is dropped and the completion replayed to it
+    db["remove_subscription"].assert_awaited_once()
+    tasks = await _notify_tasks()
+    assert [json.loads(t["fields"])["event_type"] for t in tasks] == [
+        "last_merged_completed",
+        "admin",
+    ]
+    assert all(json.loads(t["client_pks"]) == ["7"] for t in tasks)
+
+
 async def test_subscribe_to_done_pk_refused_when_cache_disabled(
     client, db, redis_mock, subscriber, monkeypatch
 ):

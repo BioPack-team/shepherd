@@ -173,6 +173,7 @@ async def get_children(
 async def update_message(
     message_id: Union[str, uuid.UUID],
     skip_coercion: bool = False,
+    only_if_status: Optional[str] = None,
     **fields: Any,
 ) -> Optional[Dict[str, Any]]:
     """Update message fields, applying the post_save code coercion.
@@ -181,6 +182,10 @@ async def update_message(
     upstream ``_skip_post_save`` escape hatch), the code column is forced to
     202 for 'R' / 200 for 'D' regardless of what the caller passed, matching
     ``message_post_save``. ``updated_at`` is always bumped.
+
+    ``only_if_status`` makes the write conditional on the row's current
+    status, checked in the same statement: a row that has moved on is left
+    alone and ``None`` comes back, as for a missing row.
     """
     if not fields:
         return await get_message_row(message_id)
@@ -199,14 +204,19 @@ async def update_message(
     if "merged_version" in values and values["merged_version"] is not None:
         values["merged_version"] = uuid.UUID(str(values["merged_version"]))
     sets = ", ".join(f"{k} = %s" for k in values)
+    where = "id = %s"
+    params = [*values.values(), uuid.UUID(str(message_id))]
+    if only_if_status is not None:
+        where += " AND status = %s"
+        params.append(validate_letter(to_letter(only_if_status)))
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
             UPDATE ars_message SET {sets}, updated_at = NOW()
-            WHERE id = %s
+            WHERE {where}
             RETURNING {_MESSAGE_SELECT.replace("m.", "")}
             """,
-            (*values.values(), uuid.UUID(str(message_id))),
+            tuple(params),
         )
         row = await cur.fetchone()
         await conn.commit()
@@ -616,6 +626,19 @@ async def add_ready_child(parent_pk, child_pk, logger: logging.Logger) -> None:
     raise RuntimeError(
         f"Could not record merge-ready child {child_pk} of {parent_pk}"
     ) from last_error
+
+
+async def is_ready_child(parent_pk, child_pk) -> bool:
+    """Whether ``child_pk`` is waiting in its parent's merge-ready index.
+
+    Raises on a Redis error rather than answering False: callers use a False
+    to decide a child was never handed to the merge, and acting on that by
+    mistake would fold it in twice.
+    """
+    score = await shepherd_db.data_db_client.zscore(
+        _ready_children_key(parent_pk), str(child_pk)
+    )
+    return score is not None
 
 
 async def get_ready_children(parent_pk, logger: logging.Logger) -> List[str]:
