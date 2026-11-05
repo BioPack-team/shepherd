@@ -628,7 +628,7 @@ async def test_bte_lookup_process_task_routes_failure_to_handle_task_failure(
 
 
 @pytest.mark.asyncio
-async def test_bte_lookup_process_task_swallows_cancellation(redis_mock, mocker):
+async def test_bte_lookup_process_task_fails_on_stray_cancellation(redis_mock, mocker):
     mocker.patch.object(
         btel,
         "bte_lookup",
@@ -640,7 +640,8 @@ async def test_bte_lookup_process_task_swallows_cancellation(redis_mock, mocker)
     )
     limiter = _Limiter()
     await process_task(_make_task(), None, logger, limiter)
-    assert not mock_failure.called
+    # Not the task being cancelled, so the query fails rather than stalls (#213).
+    assert mock_failure.called
     assert limiter.released
 
 

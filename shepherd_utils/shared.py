@@ -8,7 +8,7 @@ import signal
 import sys
 import threading
 import time
-from typing import AsyncGenerator, Dict, List, Tuple
+from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
 
 from opentelemetry import trace
 from opentelemetry.context.context import Context
@@ -557,11 +557,17 @@ class TaskSlots:
     ``in_flight`` is what the heartbeat surfaces as "Running". A plain
     :class:`asyncio.Semaphore` interface (``acquire``/``release``) is preserved
     so the drain path and workers keep working unchanged.
+
+    ``dispatch(msg_id)`` also records which message is running and returns a
+    :class:`_TaskPermit` whose ``release`` clears it. ``in_flight_ids`` is what
+    lets reclaim tell this consumer's running messages apart from ones it left
+    pending and will never come back to (#213).
     """
 
     def __init__(self, task_limit: int):
         self._sem = asyncio.Semaphore(task_limit)
         self._in_flight = 0
+        self._ids: Dict[str, int] = {}
 
     async def acquire(self) -> None:
         await self._sem.acquire()
@@ -570,9 +576,17 @@ class TaskSlots:
         """Free a slot reserved for polling but never dispatched to a worker."""
         self._sem.release()
 
-    def dispatch(self) -> None:
-        """Mark a reserved slot as an actively-running task (about to be yielded)."""
+    def dispatch(self, msg_id: Optional[str] = None) -> "_TaskPermit | None":
+        """Mark a reserved slot as an actively-running task (about to be yielded).
+
+        Given the message id, returns the permit to hand the worker in place of
+        this limiter, so the id is cleared when the worker releases it.
+        """
         self._in_flight += 1
+        if msg_id is None:
+            return None
+        self._ids[msg_id] = self._ids.get(msg_id, 0) + 1
+        return _TaskPermit(self, msg_id)
 
     def release(self) -> None:
         """A dispatched task finished: clear its in-flight mark and free its slot."""
@@ -580,9 +594,42 @@ class TaskSlots:
             self._in_flight -= 1
         self._sem.release()
 
+    def _finish(self, msg_id: str) -> None:
+        count = self._ids.get(msg_id, 0) - 1
+        if count > 0:
+            self._ids[msg_id] = count
+        else:
+            self._ids.pop(msg_id, None)
+        self.release()
+
     @property
     def in_flight(self) -> int:
         return self._in_flight
+
+    @property
+    def in_flight_ids(self) -> Set[str]:
+        """Ids of the messages this consumer is running right now."""
+        return set(self._ids)
+
+
+class _TaskPermit:
+    """One dispatched task's hold on a :class:`TaskSlots` slot.
+
+    Workers only ever call ``release()`` on what ``get_tasks`` hands them, once,
+    in their ``finally``; a second call is ignored so it can't free a slot that
+    belongs to another task.
+    """
+
+    def __init__(self, slots: TaskSlots, msg_id: str):
+        self._slots = slots
+        self.msg_id = msg_id
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._slots._finish(self.msg_id)
 
 
 async def get_tasks(
@@ -591,7 +638,9 @@ async def get_tasks(
     consumer: str,
     task_limit: int,
     reclaim_min_idle_sec: int = None,
-) -> AsyncGenerator[Tuple[Tuple[str, str], Context, logging.Logger, "TaskSlots"], None]:
+) -> AsyncGenerator[
+    Tuple[Tuple[str, str], Context, logging.Logger, "_TaskPermit"], None
+]:
     """Continually monitor the ara queue for tasks.
 
     ``reclaim_min_idle_sec`` overrides the per-stream default for how long a
@@ -660,6 +709,7 @@ async def get_tasks(
                     worker_logger,
                     min_idle_sec=reclaim_min_idle_sec,
                     delivery_counts=delivery_counts,
+                    in_flight_ids=task_limiter.in_flight_ids,
                 )
             except Exception as e:
                 worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
@@ -710,8 +760,8 @@ async def get_tasks(
                     continue
                 # Dispatching real work: count it as in-flight until the worker
                 # releases the slot in its finally.
-                task_limiter.dispatch()
-                yield ara_task, ctx, task_logger, task_limiter
+                permit = task_limiter.dispatch(ara_task[0])
+                yield ara_task, ctx, task_logger, permit
 
         # check if we can take another task
         await task_limiter.acquire()
@@ -750,8 +800,8 @@ async def get_tasks(
                 continue
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
-            task_limiter.dispatch()
-            yield ara_task, ctx, task_logger, task_limiter
+            permit = task_limiter.dispatch(ara_task[0])
+            yield ara_task, ctx, task_logger, permit
         else:
             # Poll returned nothing (idle): free the reserved slot. Nothing was
             # dispatched, so the in-flight count is untouched.
@@ -918,13 +968,24 @@ async def run_task_lifecycle(
         try:
             await _guard_response_size(stream, task, logger)
             await worker_fn(task, logger)
-            # Always wrap up the task to ACK it in the broker
-            try:
-                await wrap_up_task(stream, group, task, logger)
-            except Exception as e:
-                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
         except asyncio.CancelledError:
-            logger.warning(f"Task {task[0]} was cancelled")
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                # This task itself is being cancelled: the worker is going
+                # down. Leave the message pending -- once this consumer's
+                # heartbeat stops, a peer reclaims and reruns it -- and let
+                # the cancellation propagate.
+                logger.warning(f"Task {task[0]} was cancelled")
+                raise
+            # A cancellation from something the operation awaited, not from
+            # this task being cancelled (e.g. a pool future cancelled when its
+            # executor was replaced). Swallowing it left the message pending
+            # under this live consumer, where nothing would ever retry it.
+            span.set_status(Status(StatusCode.ERROR, "cancelled"))
+            logger.error(
+                f"Task {task[0]} failed: an operation it awaited was cancelled"
+            )
+            await handle_task_failure(stream, group, task, logger)
         except QueryError as e:
             # A failure the worker raised on purpose, naming how the query
             # should end (e.g. 501 for a query the ARA doesn't implement).
@@ -940,6 +1001,20 @@ async def run_task_lifecycle(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
             )
             await handle_task_failure(stream, group, task, logger, error=e)
+        else:
+            # Hand the query on to its next operation and ACK this task.
+            # wrap_up_task only raises before the hand-off is made (the strict
+            # add_task, or fields it can't read); everything after it logs
+            # and carries on. So a raise here means nothing downstream has the
+            # query: end it rather than leave the message pending under this
+            # live consumer, where it used to sit until the query timed out.
+            try:
+                await wrap_up_task(stream, group, task, logger)
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, str(e)))
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+                await handle_task_failure(stream, group, task, logger, error=e)
         finally:
             limiter.release()
             logger.debug(f"Finished task {task[0]} in {time.time() - start}")
