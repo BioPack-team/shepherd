@@ -50,7 +50,12 @@ from shepherd_utils.response_limit import (
     fail_response_too_large,
     get_too_large_reason,
 )
-from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
+from shepherd_utils.shared import (
+    filter_kgraph_orphans,
+    get_tasks,
+    merge_kgraph,
+    on_graceful_shutdown,
+)
 from shepherd_utils.trapi import (
     add_binding_ids,
     binding_ids,
@@ -1018,6 +1023,25 @@ async def _stop_keepalive(keepalive: "asyncio.Task | None") -> None:
         pass
 
 
+# Responses with a merge pass running in this process right now. A pass is
+# counted as a crash before it starts and uncounted when it returns, so a pass
+# a rollout cuts short (SIGTERM, then the drain timeout) would otherwise read
+# as a crash next time -- and three rollouts during a long merge failed a
+# healthy query as RESPONSE_TOO_LARGE. The graceful-shutdown hook below
+# uncounts them; a process that really dies never runs it.
+_PASSES_IN_FLIGHT: set = set()
+
+
+async def _uncount_interrupted_passes() -> None:
+    for response_id in list(_PASSES_IN_FLIGHT):
+        try:
+            await clear_merge_crashes(response_id)
+        except Exception as e:
+            LOGGER.warning(
+                f"Couldn't uncount the interrupted merge of {response_id}: {e}"
+            )
+
+
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
     # Size by the pod's actual CPU allocation (cgroup limit), not os.cpu_count()
@@ -1027,6 +1051,7 @@ async def poll_for_tasks():
     # POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
     LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    on_graceful_shutdown(_uncount_interrupted_passes)
     # Shared self-healing pool: spawn-context executor that replaces itself in
     # place on a BrokenProcessPool (same implementation the aragorn.omnicorp /
     # aragorn.score / arax.rank workers use). run() swaps the dead pool before
@@ -1197,6 +1222,7 @@ async def poll_for_tasks():
                             await _give_up(too_large)
                             return
                         await bump_merge_crashes(response_id)
+                        _PASSES_IN_FLIGHT.add(response_id)
                         try:
                             merged, merge_logs = await pool.run(
                                 loop,
@@ -1217,6 +1243,8 @@ async def poll_for_tasks():
                             # _handle_merge_failure owns that case.
                             await clear_merge_crashes(response_id)
                             raise
+                        finally:
+                            _PASSES_IN_FLIGHT.discard(response_id)
                         await clear_merge_crashes(response_id)
                         _ingest_merge_logs(logger, merge_logs)
                         await _clear_batch(response_id, ready, logger)
