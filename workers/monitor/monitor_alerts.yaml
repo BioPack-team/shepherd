@@ -154,10 +154,15 @@ rules:
   # these rules are a no-op until that env var is configured. The percentage is
   # based on pg_database_size + WAL, which under-counts true filesystem usage --
   # treat as early warning, not a replacement for an infra-level volume alert.
+  #
+  # Disk usage moves slowly and isn't fixed in minutes, so these re-notify far
+  # less often than the 10m default: the warning once a day, the critical tier
+  # every 2h while it holds.
   - name: pg_disk_almost_full
     type: db_capacity
     threshold: 80
     duration: 2m
+    cooldown: 24h
     severity: warning
     message: "Postgres data volume is over 80% full. Plan to grow the PVC soon."
 
@@ -165,6 +170,7 @@ rules:
     type: db_capacity
     threshold: 90
     duration: 1m
+    cooldown: 2h
     severity: critical
     message: "Postgres data volume is over 90% full. Grow the PVC now to avoid a crash."
 
@@ -200,5 +206,6 @@ rules:
 # (workers/monitor/recovery.py), and fires a `redis_restarted` (warning) alert:
 # Redis comes back from its last snapshot, so everything written after it is
 # gone. Once it has loaded, and MONITOR_REDIS_RESTART_GRACE_SEC later, queries
-# that lost their data in it are finished as errors, with one
-# `query_data_lost` (warning) alert per query, batched.
+# that lost their data in it -- or the task that would have moved them on --
+# are finished as errors, with one `query_data_lost` (warning) alert per
+# query, batched.

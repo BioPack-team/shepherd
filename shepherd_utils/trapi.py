@@ -86,6 +86,7 @@ __all__ = [
     "make_binding",
     "node_binding_ids",
     "normalize_query_graph",
+    "operation_parameters",
     "prune_response",
     "qedge_qualifier_sets",
     "query_bypass_cache",
@@ -261,6 +262,21 @@ def qedge_qualifier_sets(qedge: QEdgeDict) -> list[list[QualifierDict]]:
         for qualifier_set in constraints.get("qualifiers") or []
         if qualifier_set
     ]
+
+
+def operation_parameters(operation: Mapping[str, Any]) -> dict[str, Any]:
+    """The settings of a TRAPI workflow operation.
+
+    TRAPI puts them under the operation's ``parameters`` -- as Shepherd's own
+    default workflows write them -- but the workers used to read them from the
+    top level of the operation, so a client's settings were ignored. Both are
+    read here, ``parameters`` winning, so a workflow written either way works.
+    """
+    settings_ = {k: v for k, v in operation.items() if k not in ("id", "parameters")}
+    parameters = operation.get("parameters")
+    if isinstance(parameters, dict):
+        settings_.update(parameters)
+    return settings_
 
 
 #: Query-graph element properties that 2.0 gives a ``minItems`` of 1, so an

@@ -10,6 +10,7 @@ from shepherd_utils.db import (
     get_query_state,
 )
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.trapi import operation_parameters
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 
@@ -31,7 +32,7 @@ async def sort_results_score(task, logger: logging.Logger):
     message = await get_message(response_id, logger)
     results = message["message"].get("results", [])
     current_op = workflow[0]
-    aord = current_op.get("ascending_or_descending", "descending")
+    aord = operation_parameters(current_op).get("ascending_or_descending", "descending")
     reverse = aord == "descending"
     # Sort in place (list.sort, not sorted()) throughout. The decoded response is
     # already by far the largest object in memory, so allocating a second copy of

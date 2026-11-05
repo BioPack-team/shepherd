@@ -6,6 +6,7 @@ import logging
 import uuid
 from shepherd_utils.db import get_message, save_response, get_query_state
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.trapi import operation_parameters
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 
@@ -26,10 +27,7 @@ async def filter_analyses_top_n(task, logger: logging.Logger):
     message = await get_message(response_id, logger)
     results = message["message"].get("results", [])
     current_op = workflow[0]
-    if current_op is None:
-        logger.error(f"Unable to find operation {STREAM} in workflow")
-        raise Exception(f"Operation {STREAM} is not in workflow")
-    n = current_op.get("max_analyses", 500)
+    n = operation_parameters(current_op).get("max_analyses", 500)
     logger.info(f"Filtering top {n} analyses.")
     # Truncate each analyses list in place (del ...[n:]) instead of binding an
     # ``analyses[:n]`` slice, so the dropped analyses are freed now rather than

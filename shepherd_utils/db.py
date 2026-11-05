@@ -1578,6 +1578,23 @@ async def find_queries_with_lost_data(
     return lost
 
 
+async def find_unfinished_queries(min_age_sec: float) -> List[Dict[str, Any]]:
+    """Every unfinished query started more than ``min_age_sec`` ago, as
+    ``{"qid", "response_id"}``. Errors propagate."""
+    async with pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            SELECT b.qid, b.response_id
+            FROM shepherd_brain b
+            WHERE b.state NOT IN ('COMPLETED', 'ABANDONED')
+              AND b.start_time < NOW() - make_interval(secs => %s)
+            """,
+            (float(min_age_sec),),
+        )
+        rows = await cur.fetchall()
+    return [{"qid": qid, "response_id": response_id} for qid, response_id in rows]
+
+
 async def purge_old_queries(
     retention_days: int, logger: logging.Logger
 ) -> Dict[str, int]:
