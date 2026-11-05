@@ -14,8 +14,13 @@ from opentelemetry.trace import Status, StatusCode, get_current_span
 
 from shepherd_utils.ars.handoff import parse_handoff_callback
 from shepherd_utils.broker import add_task, mark_task_as_complete
-from shepherd_utils.callback_url import CallbackURLError, validate_callback_url
+from shepherd_utils.callback_url import (
+    CallbackResolutionError,
+    CallbackURLError,
+    validate_callback_url,
+)
 from shepherd_utils.db import (
+    claim_query_finish,
     DatabaseUnavailableError,
     ResponseTooLargeError,
     cleanup_callbacks,
@@ -34,6 +39,7 @@ from shepherd_utils.response_limit import (
 )
 from shepherd_utils.shared import get_tasks
 from shepherd_utils.trapi import (
+    apply_query_status,
     BIOLINK_VERSION,
     SCHEMA_VERSION,
     query_parameters,
@@ -100,6 +106,72 @@ async def _wait_for_query_state(query_id: str, logger: logging.Logger):
                 f"{DB_RETRY_SEC}s: {e}"
             )
             await asyncio.sleep(DB_RETRY_SEC)
+
+
+async def _wait_for_claim(query_id: str, logger: logging.Logger) -> bool:
+    """``claim_query_finish``, waiting out a Postgres outage like
+    ``_wait_for_query_state``."""
+    deadline = time.time() + DB_WAIT_SEC
+    while True:
+        try:
+            return await claim_query_finish(query_id, logger)
+        except DatabaseUnavailableError as e:
+            if time.time() >= deadline:
+                raise
+            logger.warning(
+                f"Postgres unavailable claiming {query_id}; retrying in "
+                f"{DB_RETRY_SEC}s: {e}"
+            )
+            await asyncio.sleep(DB_RETRY_SEC)
+
+
+# Attempts at resolving the callback's host before giving up on delivery. A
+# resolution failure says nothing about the URL -- DNS fails briefly -- so it
+# is retried (1s, then 2s), unlike a refusal of the URL itself.
+CALLBACK_RESOLVE_ATTEMPTS = 3
+
+
+async def _check_callback_url(callback_url: str, logger: logging.Logger) -> bool:
+    """Whether ``callback_url`` may be delivered to now.
+
+    Checked at intake too; re-checked here because the host's DNS can have
+    changed since (rebinding), and for queries accepted before intake checked
+    at all. See shepherd_utils/callback_url.py.
+    """
+    for attempt in range(CALLBACK_RESOLVE_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(2 ** (attempt - 1))
+        try:
+            await validate_callback_url(callback_url)
+            return True
+        except CallbackResolutionError as e:
+            logger.warning(
+                f"Couldn't resolve {callback_url} (attempt {attempt + 1}/"
+                f"{CALLBACK_RESOLVE_ATTEMPTS}): {e}"
+            )
+        except CallbackURLError as e:
+            logger.error(f"Not sending the response to {callback_url}: {e}")
+            return False
+    logger.error(
+        f"Not sending the response to {callback_url}: its host could not be "
+        f"resolved after {CALLBACK_RESOLVE_ATTEMPTS} attempts."
+    )
+    return False
+
+
+def stamp_failure(stored: bytes, status: str, description: "str | None") -> bytes:
+    """``stored`` with a failed query's status stamped on, as ``/query`` does.
+
+    A stored response says nothing about how the query ended, so a caller of
+    an async query that failed or timed out got a body indistinguishable from
+    a clean answer. Only a failed query's response is decoded for this; an OK
+    one is delivered as stored.
+    """
+    response = orjson.loads(stored)
+    if not isinstance(response, dict):
+        return stored
+    apply_query_status(response, status, description)
+    return orjson.dumps(response)
 
 
 # ``status`` recorded in ``shepherd_brain`` for a query whose response was lost
@@ -399,6 +471,13 @@ async def finish_query(task, logger: logging.Logger):
 
     if query_state is None:
         logger.error(f"Query id {query_id} not found in db.")
+    elif not await _wait_for_claim(query_id, logger):
+        # Another finish_query has this query (or already finished it): a
+        # second delivery would send the caller its response twice.
+        logger.info(
+            f"Query {query_id} is already finished or being finished; "
+            "not delivering it again."
+        )
     else:
         too_large = await _too_large_reason(query_id, response_id, logger)
         if too_large is not None:
@@ -485,6 +564,11 @@ async def finish_query(task, logger: logging.Logger):
                         f"its response is gone ({e})"
                     )
                     message_bytes = orjson.dumps(build_lost_response(original_query))
+                else:
+                    if status != "OK":
+                        message_bytes = stamp_failure(
+                            message_bytes, status, description
+                        )
             logs = await get_logs(response_id, logger)
             # Build the TRAPI 2.0 Response around the stored bytes rather
             # than decoding them: the decoded tree is several times the size
@@ -496,14 +580,7 @@ async def finish_query(task, logger: logging.Logger):
             has_logs = bool(logs)
             del logs, original_query
 
-            # Checked at intake too; re-checked here because the host's DNS can
-            # have changed since (rebinding), and for queries accepted before
-            # intake checked at all. See shepherd_utils/callback_url.py.
-            try:
-                await validate_callback_url(callback_url)
-            except CallbackURLError as e:
-                logger.error(f"Not sending the response to {callback_url}: {e}")
-            else:
+            if await _check_callback_url(callback_url, logger):
                 await send_callback(callback_url, message_bytes, logger, has_logs)
             # Release the payload before the remaining db round trips.
             del message_bytes

@@ -48,6 +48,7 @@ from shepherd_utils.response_limit import (
     fail_response_too_large,
 )
 from shepherd_utils.trapi import (
+    apply_query_status,
     TRAPIRequestError,
     finalize_response,
     query_log_level,
@@ -491,31 +492,6 @@ def query_description(query_state) -> Optional[str]:
     if query_state is None or len(query_state) <= 11:
         return None
     return query_state[11] or None
-
-
-def apply_query_status(
-    response: dict, status: Optional[str], description: Optional[str] = None
-) -> None:
-    """Stamp a non-OK query status onto the TRAPI response, in place.
-
-    ``status``/``description`` are TRAPI Response fields, so a caller reading
-    the body it already parses can tell a failed query from an empty one. An
-    error the ARA reported itself is left alone -- it is more specific than the
-    query-level status -- but a body that claims nothing, or claims success for
-    a query that failed, is corrected here. ``description`` is the reason the
-    failing worker gave (stored with the status); it is used when the body
-    doesn't already carry one.
-    """
-    if not status or status == OK_QUERY_STATUS:
-        return
-    current = response.get("status")
-    if isinstance(current, str) and (
-        "error" in current.lower() or "fail" in current.lower()
-    ):
-        return
-    response["status"] = "Error"
-    if not response.get("description"):
-        response["description"] = description or f"Query finished with status {status}."
 
 
 def query_timeout(query_dict: dict) -> float:
