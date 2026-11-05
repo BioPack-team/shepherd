@@ -78,6 +78,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "TRAPIRequestError",
     "add_binding_ids",
+    "apply_query_status",
     "binding_ids",
     "edge_binding_ids",
     "edge_support_graphs",
@@ -570,6 +571,33 @@ def finalize_response(
         response["logs"] = final_logs
     prune_response(response)
     return cast("ResponseDict", response)
+
+
+def apply_query_status(
+    response: dict[str, Any],
+    status: Optional[str],
+    description: Optional[str] = None,
+) -> None:
+    """Stamp a non-OK query status onto the TRAPI response, in place.
+
+    ``status``/``description`` are TRAPI Response fields, so a caller reading
+    the body it already parses can tell a failed query from an empty one. An
+    error the ARA reported itself is left alone -- it is more specific than the
+    query-level status -- but a body that claims nothing, or claims success for
+    a query that failed, is corrected here. ``description`` is the reason the
+    failing worker gave (stored with the status); it is used when the body
+    doesn't already carry one.
+    """
+    if not status or status == "OK":
+        return
+    current = response.get("status")
+    if isinstance(current, str) and (
+        "error" in current.lower() or "fail" in current.lower()
+    ):
+        return
+    response["status"] = "Error"
+    if not response.get("description"):
+        response["description"] = description or f"Query finished with status {status}."
 
 
 #: Response members added when a response is delivered, from the query and

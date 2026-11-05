@@ -1770,6 +1770,63 @@ async def get_query_state(
     return query_state
 
 
+# How long a finish claim (state FINISHING) is honoured before another
+# finish_query may take it over: longer than one delivery can take (two 120s
+# callback attempts plus backoff), so a live delivery is never doubled, but
+# short enough that a task reclaimed after its finisher crashed still
+# delivers well before the abandoned-query reaper.
+FINISH_CLAIM_TIMEOUT_SEC = 600
+
+
+async def claim_query_finish(query_id: str, logger: logging.Logger) -> bool:
+    """Claim the right to finish ``query_id``: True for exactly one caller.
+
+    The pipeline delivers tasks at least once, and several paths can each
+    queue a finish_query for the same query (deadline expiry, the failure
+    path, a reclaimed task), so a query could be delivered to its caller
+    twice. The claim moves the query to FINISHING in one conditional UPDATE,
+    so only the winner delivers. A COMPLETED query, or one another finisher
+    claimed within ``FINISH_CLAIM_TIMEOUT_SEC``, is not claimed again. An
+    ABANDONED one is: the reaper never told its caller, so a late finish
+    still should. ``stop_time`` doubles as the claim time until completion
+    overwrites it.
+
+    Raises ``DatabaseUnavailableError`` when Postgres can't be reached.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(PG_RETRIES):
+        try:
+            async with timed_connection("claim_query_finish", logger) as conn:
+                cursor = await conn.execute(
+                    """
+                UPDATE shepherd_brain SET state = 'FINISHING', stop_time = NOW()
+                WHERE qid = %s
+                  AND state <> 'COMPLETED'
+                  AND NOT (
+                    state = 'FINISHING'
+                    AND stop_time > NOW() - make_interval(secs => %s)
+                  )
+                RETURNING qid
+                """,
+                    (query_id, float(FINISH_CLAIM_TIMEOUT_SEC)),
+                )
+                row = await cursor.fetchone()
+                await conn.commit()
+            return row is not None
+        except OperationalError as e:
+            last_error = e
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "claim_query_finish", e)
+                break
+            logger.error(
+                f"Connection error claiming query finish (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+    raise DatabaseUnavailableError(
+        f"Couldn't claim the finish of query {query_id}: {last_error}"
+    ) from last_error
+
+
 async def set_query_completed(
     query_id: str,
     status: str,

@@ -102,6 +102,19 @@ def redis_mock(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def finish_claim_granted(monkeypatch):
+    """finish_query claims a query in Postgres before delivering it
+    (``claim_query_finish``); tests that drive finish_query run without a
+    database, so the claim is granted. Tests of the claim itself patch it
+    (or call ``shepherd_utils.db.claim_query_finish``) directly."""
+    from workers.finish_query import worker as finish_worker
+
+    monkeypatch.setattr(
+        finish_worker, "claim_query_finish", AsyncMock(return_value=True)
+    )
+
+
+@pytest.fixture(autouse=True)
 def arax_kp_cache_store(monkeypatch):
     """ARAX's KP cache (DEC-18) in a fresh fakeredis per test, so a test never
     reaches a real data store or sees another test's cached KP responses."""
