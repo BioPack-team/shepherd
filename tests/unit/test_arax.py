@@ -449,6 +449,8 @@ def remote_arax(mocker):
             side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
         )
         mocker.patch.object(worker.settings, "arax_url", "http://arax.test/query")
+        # failed calls are retried; don't wait between the tries
+        mocker.patch.object(worker, "ARAX_RETRY_DELAY", 0)
         return sent
 
     return _setup
