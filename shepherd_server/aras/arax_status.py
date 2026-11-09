@@ -29,8 +29,14 @@ LOGGER = logging.getLogger("shepherd.arax.status")
 TOKEN_TTL_SEC = 24 * 3600
 TOKEN_COUNTER_KEY = "arax_pid_counter"
 
-# shepherd_brain.state -> ARAX's tracker states
-ARAX_STATES = {"QUEUED": "started", "COMPLETED": "Completed", "ABANDONED": "Died"}
+# shepherd_brain.state -> ARAX's tracker states (FINISHING: being delivered,
+# still in progress as far as a client can tell)
+ARAX_STATES = {
+    "QUEUED": "started",
+    "FINISHING": "started",
+    "COMPLETED": "Completed",
+    "ABANDONED": "Died",
+}
 
 
 def _token_key(pid) -> str:

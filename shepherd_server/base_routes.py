@@ -48,6 +48,8 @@ from shepherd_utils.response_limit import (
     fail_response_too_large,
 )
 from shepherd_utils.trapi import (
+    apply_query_status,
+    operation_parameters,
     TRAPIRequestError,
     finalize_response,
     query_log_level,
@@ -319,6 +321,78 @@ async def parse_query_body(request: Request) -> dict:
     return query
 
 
+# The workflow operations Shepherd runs itself (ARAX checks its own).
+SUPPORTED_WORKFLOW_OPERATIONS = frozenset(
+    [
+        "lookup",  # just for O&O ranker comparison work
+        "score",  # Ditto
+        "aragorn.lookup",
+        "aragorn.pathfinder",
+        "aragorn.omnicorp",
+        "aragorn.score",
+        "arax.pathfinder",
+        "arax.rank",
+        "bte.lookup",
+        "sort_results_score",
+        "filter_results_top_n",
+        "filter_kgraph_orphans",
+        "score_paths",
+        "filter_analyses_top_n",
+    ]
+)
+# Operation settings that must be a positive integer.
+_POSITIVE_INT_SETTINGS = {
+    "filter_results_top_n": "max_results",
+    "filter_analyses_top_n": "max_analyses",
+}
+_SORT_DIRECTIONS = ("ascending", "descending")
+
+
+def check_workflow(workflow) -> None:
+    """Reject a workflow Shepherd can't run, as a client error.
+
+    A malformed workflow used to raise a bare ``TypeError`` / ``KeyError`` out
+    of intake (a 500), and settings a worker would misread -- a negative or
+    non-integer ``max_results`` deletes the wrong results; an unknown sort
+    direction silently sorts descending -- were accepted and failed later, or
+    not at all.
+
+    Raises:
+        TRAPIRequestError: with a client-safe description of the problem.
+    """
+    if not isinstance(workflow, list):
+        raise TRAPIRequestError("Invalid workflow: expected a list of operations.")
+    for operation in workflow:
+        if not isinstance(operation, dict):
+            raise TRAPIRequestError(
+                "Invalid workflow: every operation must be an object."
+            )
+        op_id = operation.get("id")
+        if op_id not in SUPPORTED_WORKFLOW_OPERATIONS:
+            raise TRAPIRequestError(
+                f"Invalid workflow: operation {op_id!r} is not supported."
+            )
+        parameters = operation.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            raise TRAPIRequestError(
+                f"Invalid workflow: {op_id} parameters must be an object."
+            )
+        settings_ = operation_parameters(operation)
+        key = _POSITIVE_INT_SETTINGS.get(op_id)
+        if key is not None and key in settings_:
+            value = settings_[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise TRAPIRequestError(
+                    f"Invalid workflow: {op_id} {key} must be a positive integer."
+                )
+        if op_id == "sort_results_score" and "ascending_or_descending" in settings_:
+            if settings_["ascending_or_descending"] not in _SORT_DIRECTIONS:
+                raise TRAPIRequestError(
+                    f"Invalid workflow: sort_results_score ascending_or_descending "
+                    f"must be one of {list(_SORT_DIRECTIONS)}."
+                )
+
+
 async def run_query(
     target: str,
     query: dict,
@@ -343,24 +417,6 @@ async def run_query(
     # adds otel trace to carrier for next worker
     inject(span_carrier)
 
-    supported_workflow_operations = set(
-        [
-            "lookup",  # just for O&O ranker comparison work
-            "score",  # Ditto
-            "aragorn.lookup",
-            "aragorn.pathfinder",
-            "aragorn.omnicorp",
-            "aragorn.score",
-            "arax.pathfinder",
-            "arax.rank",
-            "bte.lookup",
-            "sort_results_score",
-            "filter_results_top_n",
-            "filter_kgraph_orphans",
-            "score_paths",
-            "filter_analyses_top_n",
-        ]
-    )
     # ``target`` is either an ARATargetEnum (which subclasses str -- value
     # like "aragorn") or already a plain string for workflow-driven queries.
     target_name = target.value if hasattr(target, "value") else target
@@ -375,13 +431,7 @@ async def run_query(
         and query["workflow"] is not None
     ):
         workflow = query["workflow"]
-        if not isinstance(workflow, list):
-            raise TypeError("Query workflow must be a list.")
-        for operation in workflow:
-            if not isinstance(operation, dict):
-                raise TypeError("Query workflow operations must be objects.")
-            if operation.get("id") not in supported_workflow_operations:
-                raise KeyError(f"Workflow operation {operation} is not supported.")
+        check_workflow(workflow)
 
     # save query to db
     try:
@@ -493,31 +543,6 @@ def query_description(query_state) -> Optional[str]:
     return query_state[11] or None
 
 
-def apply_query_status(
-    response: dict, status: Optional[str], description: Optional[str] = None
-) -> None:
-    """Stamp a non-OK query status onto the TRAPI response, in place.
-
-    ``status``/``description`` are TRAPI Response fields, so a caller reading
-    the body it already parses can tell a failed query from an empty one. An
-    error the ARA reported itself is left alone -- it is more specific than the
-    query-level status -- but a body that claims nothing, or claims success for
-    a query that failed, is corrected here. ``description`` is the reason the
-    failing worker gave (stored with the status); it is used when the body
-    doesn't already carry one.
-    """
-    if not status or status == OK_QUERY_STATUS:
-        return
-    current = response.get("status")
-    if isinstance(current, str) and (
-        "error" in current.lower() or "fail" in current.lower()
-    ):
-        return
-    response["status"] = "Error"
-    if not response.get("description"):
-        response["description"] = description or f"Query finished with status {status}."
-
-
 def query_timeout(query_dict: dict) -> float:
     """How long a synchronous caller waits for the query (``parameters.timeout``,
     see ``sync_timeout``)."""
@@ -597,6 +622,11 @@ async def run_sync_query(
         )
     try:
         query_id, response_id, logger = await run_query(target, query_dict)
+    except TRAPIRequestError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_INVALID_CODE,
+        )
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
@@ -690,6 +720,11 @@ async def run_async_query(
         )
     try:
         query_id, _, _ = await run_query(target, query, callback_url)
+    except TRAPIRequestError as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=QUERY_INVALID_CODE,
+        )
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "Failed", "description": str(e)},

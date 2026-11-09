@@ -78,6 +78,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "TRAPIRequestError",
     "add_binding_ids",
+    "apply_query_status",
     "binding_ids",
     "edge_binding_ids",
     "edge_support_graphs",
@@ -85,6 +86,7 @@ __all__ = [
     "make_binding",
     "node_binding_ids",
     "normalize_query_graph",
+    "operation_parameters",
     "prune_response",
     "qedge_qualifier_sets",
     "query_bypass_cache",
@@ -260,6 +262,21 @@ def qedge_qualifier_sets(qedge: QEdgeDict) -> list[list[QualifierDict]]:
         for qualifier_set in constraints.get("qualifiers") or []
         if qualifier_set
     ]
+
+
+def operation_parameters(operation: Mapping[str, Any]) -> dict[str, Any]:
+    """The settings of a TRAPI workflow operation.
+
+    TRAPI puts them under the operation's ``parameters`` -- as Shepherd's own
+    default workflows write them -- but the workers used to read them from the
+    top level of the operation, so a client's settings were ignored. Both are
+    read here, ``parameters`` winning, so a workflow written either way works.
+    """
+    settings_ = {k: v for k, v in operation.items() if k not in ("id", "parameters")}
+    parameters = operation.get("parameters")
+    if isinstance(parameters, dict):
+        settings_.update(parameters)
+    return settings_
 
 
 #: Query-graph element properties that 2.0 gives a ``minItems`` of 1, so an
@@ -554,6 +571,33 @@ def finalize_response(
         response["logs"] = final_logs
     prune_response(response)
     return cast("ResponseDict", response)
+
+
+def apply_query_status(
+    response: dict[str, Any],
+    status: Optional[str],
+    description: Optional[str] = None,
+) -> None:
+    """Stamp a non-OK query status onto the TRAPI response, in place.
+
+    ``status``/``description`` are TRAPI Response fields, so a caller reading
+    the body it already parses can tell a failed query from an empty one. An
+    error the ARA reported itself is left alone -- it is more specific than the
+    query-level status -- but a body that claims nothing, or claims success for
+    a query that failed, is corrected here. ``description`` is the reason the
+    failing worker gave (stored with the status); it is used when the body
+    doesn't already carry one.
+    """
+    if not status or status == "OK":
+        return
+    current = response.get("status")
+    if isinstance(current, str) and (
+        "error" in current.lower() or "fail" in current.lower()
+    ):
+        return
+    response["status"] = "Error"
+    if not response.get("description"):
+        response["description"] = description or f"Query finished with status {status}."
 
 
 #: Response members added when a response is delivered, from the query and

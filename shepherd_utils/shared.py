@@ -331,6 +331,27 @@ def get_next_operation(
     return next_op, workflow
 
 
+def lookup_wait_seconds(parameters: Dict) -> float:
+    """How long a lookup waits for its callbacks.
+
+    The query's ``parameters.timeout``, or ``lookup_timeout`` when it has
+    none. TRAPI reads a negative timeout as "drop the server's default", which
+    a lookup can't do -- it has to stop waiting some time -- so that gets the
+    default too, rather than being taken as a wait of less than nothing (which
+    abandoned every callback at once). ``/query`` treats it the same way.
+    """
+    timeout = parameters.get("timeout")
+    if timeout is None or isinstance(timeout, bool):
+        return float(settings.lookup_timeout)
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        return float(settings.lookup_timeout)
+    if timeout != timeout or timeout < 0:  # NaN or negative
+        return float(settings.lookup_timeout)
+    return timeout
+
+
 def _build_task_context(
     stream: str,
     consumer: str,
