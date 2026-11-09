@@ -30,7 +30,12 @@ from .db import (
     save_logs,
 )
 from .heartbeat import Heartbeat
-from .logger import attach_query_handler, resolve_log_level, setup_logging
+from .logger import (
+    attach_query_handler,
+    resolve_log_level,
+    setup_logging,
+    transient_logger,
+)
 from .reclaim import reclaim_orphaned
 from .query_errors import QueryError, error_status
 from .response_limit import fail_response_too_large
@@ -377,14 +382,16 @@ def _build_task_context(
     level_number: int,
 ) -> Tuple[Context, logging.Logger]:
     """Build the per-task logger and otel context for a fetched/reclaimed task."""
-    task_logger = logging.getLogger(
-        f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+    # One logger per task, unregistered so it is freed with the task: named
+    # loggers live for the whole process, one per query (#216). Each task
+    # flushes its own handler, so concurrent tasks for one query each store
+    # just their own records.
+    task_logger = transient_logger(
+        f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}",
+        logging.getLogger(f"shepherd.{stream}.{consumer}"),
     )
     task_log_level = int(ara_task[1].get("log_level", level_number))
     task_logger.setLevel(task_log_level)
-    # One handler per logger: this logger is shared by every task this worker
-    # runs for the query, and stacking a handler per task made each flush
-    # re-persist the previous tasks' records.
     attach_query_handler(task_logger)
     task_logger.debug(f"Doing task {ara_task}")
     ctx = extract(json.loads(ara_task[1].get("otel", "{}")))

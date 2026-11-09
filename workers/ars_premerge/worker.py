@@ -86,7 +86,7 @@ from shepherd_utils.db import (
     save_logs,
     save_message_sync,
 )
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import get_worker_logger, transient_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks
@@ -112,7 +112,10 @@ def _annotate_in_child(data, agent_name, child_pk) -> None:
     """Annotate a validated response's nodes in place. A failure never fails
     the response: it is logged (and noted in the message's logs, as the
     merge's annotation stage does) and the response merges unannotated."""
-    logger = logging.getLogger(f"shepherd.ars.premerge.child.{child_pk}")
+    # Unregistered, so this long-lived pool child doesn't keep one per response.
+    logger = transient_logger(
+        f"shepherd.ars.premerge.child.{child_pk}", logging.getLogger("shepherd")
+    )
     try:
         asyncio.run(annotate_nodes(data, agent_name, logger))
     except Exception as e:

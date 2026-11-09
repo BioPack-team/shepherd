@@ -84,7 +84,7 @@ from shepherd_utils.broker import (
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_logs, save_message_sync
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import get_worker_logger, transient_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import get_tasks
@@ -330,7 +330,10 @@ def merge_and_postprocess_in_child(
                 span.set_attribute(f"merge.{key}", stats[key])
 
     capture = _CaptureHandler()
-    child_logger = logging.getLogger(f"shepherd.ars.merge.child.{new_pk}")
+    # Unregistered, so this long-lived pool child doesn't keep one per merge.
+    child_logger = transient_logger(
+        f"shepherd.ars.merge.child.{new_pk}", logging.getLogger("shepherd")
+    )
     child_logger.setLevel(logging.DEBUG)
     child_logger.propagate = False
     child_logger.addHandler(capture)
