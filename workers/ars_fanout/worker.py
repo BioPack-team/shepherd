@@ -136,9 +136,22 @@ async def ars_fanout(task, logger: logging.Logger):
         logger.warning(f"No ARAs enabled; completing {parent_pk} empty")
         await lifecycle.check_parent_completion(parent["id"], logger)
         return
+    # A redelivered fanout task (this worker died mid-fanout and the task was
+    # reclaimed) must not create a second child per ARA and send the query
+    # out again: fan out only to the ARAs that have no child yet.
+    fanned = {child["agent"] for child in await ars_db.get_children(parent_pk)}
+    missing = [ara for ara in targets if ara.agent not in fanned]
+    if len(missing) < len(targets):
+        logger.warning(
+            f"{parent_pk} already has children for "
+            f"{[a.name for a in targets if a not in missing]}; fanning out "
+            f"only to {[a.name for a in missing]}"
+        )
+    if not missing:
+        return
     parent_data = await ars_db.load_message_data(parent_pk, logger)
     await asyncio.gather(
-        *(send_to_ara(ara, parent, parent_data, logger) for ara in targets)
+        *(send_to_ara(ara, parent, parent_data, logger) for ara in missing)
     )
 
 
