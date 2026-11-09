@@ -252,6 +252,11 @@ def decompress_frame(blob: bytes) -> bytes:
     return zstandard.decompress(blob)
 
 
+# Compressed size over which ``get_message`` decompresses in a thread. Below
+# it, the thread hop costs more than the decompression it moves.
+OFF_LOOP_DECOMPRESS_BYTES = 1 << 20
+
+
 def decode_message(blob: bytes) -> Any:
     """Deserialize a stored message blob back into a Python object."""
     return orjson.loads(decompress_frame(blob))
@@ -834,13 +839,23 @@ async def get_message(
     if blob is None:
         raise KeyError(f"Failed to get {message_id} from db")
 
-    if raw:
-        result = decompress_frame(blob)
-        logger.debug(f"Getting raw message took {time.time() - start} seconds")
-        return result
-
     start_decomp = time.time()
-    message = decode_message(blob)
+    if len(blob) > OFF_LOOP_DECOMPRESS_BYTES:
+        # zstd releases the GIL, so a big blob decompresses in a thread while
+        # the loop keeps serving heartbeats, db connections and other tasks.
+        # On the loop, a multi-hundred-MB response stalled all of them.
+        data = await asyncio.to_thread(decompress_frame, blob)
+    else:
+        data = decompress_frame(blob)
+    del blob
+    if raw:
+        logger.debug(f"Getting raw message took {time.time() - start} seconds")
+        return data
+
+    # orjson holds the GIL for the whole parse, so moving it to a thread would
+    # stall the loop all the same; callers that only forward the payload
+    # should ask for ``raw`` instead.
+    message = orjson.loads(data)
     logger.debug(f"Decompression took {time.time() - start_decomp}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
