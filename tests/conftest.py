@@ -166,3 +166,13 @@ def pytest_configure(config):
         "markers",
         "real_callback_dns: run without the offline_callback_dns stub",
     )
+
+
+@pytest.fixture(autouse=True)
+def no_merge_debounce(monkeypatch):
+    """merge_message waits up to merge_debounce_sec for more callbacks before
+    its first pass (#218). Tests drive passes directly; the ones about the
+    debounce set it themselves."""
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "merge_debounce_sec", 0.0)

@@ -791,6 +791,37 @@ async def get_response_size(message_id: str) -> int:
     return int(await data_db_client.strlen(message_id))
 
 
+async def get_response_sizes(message_ids: List[str]) -> List[int]:
+    """``get_response_size`` for many blobs in one round trip.
+
+    The header probes go out in one pipeline rather than one request per
+    blob (#218, C4-8); only a blob whose header carries no content size
+    costs a second request, for its ``STRLEN``.
+    """
+    if not message_ids:
+        return []
+    async with data_db_client.pipeline(transaction=False) as pipe:
+        for message_id in message_ids:
+            pipe.getrange(message_id, 0, _ZSTD_HEADER_PROBE_BYTES - 1)
+        headers = await pipe.execute()
+    sizes = []
+    for message_id, header in zip(message_ids, headers):
+        if not header:
+            sizes.append(0)
+            continue
+        if isinstance(header, str):
+            header = header.encode("latin-1")
+        try:
+            size = zstandard.frame_content_size(header)
+        except zstandard.ZstdError:
+            size = -1
+        if size and size > 0:
+            sizes.append(int(size))
+        else:
+            sizes.append(int(await data_db_client.strlen(message_id)))
+    return sizes
+
+
 async def enforce_response_size_limit(
     response_id: str,
     logger: logging.Logger,
