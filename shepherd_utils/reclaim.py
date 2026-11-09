@@ -26,7 +26,7 @@ goes silent while the main loop keeps running is bounded -- the existing
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Collection, Dict, List, Optional, Tuple
 
 from .broker import broker_client
 from .config import settings
@@ -70,6 +70,11 @@ PER_STREAM_MIN_IDLE_SEC: Dict[str, int] = {
 }
 
 
+# How many XPENDING pages (of ``reclaim_max_batch`` entries) one sweep reads
+# at most, so a huge backlog can't stall the poll loop.
+MAX_PEL_PAGES = 50
+
+
 def min_idle_sec_for(stream: str, override: Optional[int] = None) -> int:
     """Resolve the idle floor for a stream, preferring an explicit override."""
     if override is not None:
@@ -110,6 +115,7 @@ async def reclaim_orphaned(
     logger: logging.Logger,
     min_idle_sec: Optional[int] = None,
     delivery_counts: Optional[Dict[str, int]] = None,
+    in_flight_ids: Optional[Collection[str]] = None,
 ) -> List[Tuple[str, Any]]:
     """Claim any pending messages whose owner is no longer alive.
 
@@ -122,53 +128,79 @@ async def reclaim_orphaned(
     can spot a message that keeps being re-delivered without completing (a poison
     pill) and dead-letter it instead of retrying forever. ``times_delivered`` is
     the count as of this scan, i.e. before the XCLAIM below bumps it.
+
+    ``in_flight_ids`` are the messages this consumer is running right now.
+    When given, this consumer's own pending messages that aren't among them --
+    left behind by a path that neither acked nor failed them -- are claimed
+    back once idle past the floor, like a dead consumer's. Without it, own
+    messages are never touched.
     """
     effective_min_idle = min_idle_sec_for(stream, min_idle_sec)
     min_idle_ms = max(0, int(effective_min_idle * 1000))
     max_batch = max(1, int(settings.reclaim_max_batch))
-
-    try:
-        # XPENDING with IDLE filters at the server, but we still cross-check
-        # against heartbeats below to avoid yanking work from a slow-but-alive
-        # consumer whose idle just crossed the threshold.
-        #
-        # Use the typed ``xpending_range`` rather than
-        # ``execute_command("XPENDING", ...)``: redis-py registers a response
-        # callback on the XPENDING *command name* that only parses the summary
-        # form (``XPENDING key group``). Invoked on this extended form
-        # (IDLE/start/end/count) that callback raises ``IndexError`` -- which the
-        # ``except`` below would swallow at DEBUG level, silently disabling
-        # reclaim entirely. ``xpending_range`` returns a list of parsed dicts.
-        detail = await broker_client.xpending_range(
-            stream, group, min="-", max="+", count=max_batch, idle=min_idle_ms
-        )
-    except Exception as e:
-        logger.debug(f"Reclaim XPENDING failed for {stream}: {e}")
-        return []
-
-    if not detail:
-        return []
-
-    alive = await _alive_consumers_on_stream(stream)
-
+    alive: Optional[set] = None
     candidates: List[str] = []
-    for entry in detail:
-        raw_id = entry.get("message_id")
-        raw_owner = entry.get("consumer")
-        if raw_id is None or raw_owner is None:
-            continue
-        msg_id = raw_id if isinstance(raw_id, str) else raw_id.decode()
-        owner = raw_owner if isinstance(raw_owner, str) else raw_owner.decode()
-        if owner == consumer:
-            continue  # already ours from a previous claim
-        if owner in alive:
-            continue  # owner is alive -- the dual safety check
-        candidates.append(msg_id)
-        if delivery_counts is not None:
-            # ``times_delivered`` is how many times this message has been
-            # delivered/claimed without an ack -- the signal a caller uses to
-            # break a poison-pill retry loop.
-            delivery_counts[msg_id] = int(entry.get("times_delivered", 0) or 0)
+    cursor = "-"
+
+    # Page through the whole PEL. Reading only its first page left any orphan
+    # queued behind ``max_batch`` older entries -- long-running tasks of live
+    # consumers, say -- unreachable for as long as those stayed pending.
+    for _ in range(MAX_PEL_PAGES):
+        try:
+            # XPENDING with IDLE filters at the server, but we still
+            # cross-check against heartbeats below to avoid yanking work from
+            # a slow-but-alive consumer whose idle just crossed the threshold.
+            #
+            # Use the typed ``xpending_range`` rather than
+            # ``execute_command("XPENDING", ...)``: redis-py registers a
+            # response callback on the XPENDING *command name* that only
+            # parses the summary form (``XPENDING key group``). Invoked on this
+            # extended form (IDLE/start/end/count) that callback raises
+            # ``IndexError`` -- which the ``except`` below would swallow at
+            # DEBUG level, silently disabling reclaim entirely.
+            # ``xpending_range`` returns a list of parsed dicts.
+            detail = await broker_client.xpending_range(
+                stream, group, min=cursor, max="+", count=max_batch, idle=min_idle_ms
+            )
+        except Exception as e:
+            logger.debug(f"Reclaim XPENDING failed for {stream}: {e}")
+            break
+
+        if not detail:
+            break
+        if alive is None:
+            alive = await _alive_consumers_on_stream(stream)
+
+        msg_id = None
+        for entry in detail:
+            raw_id = entry.get("message_id")
+            raw_owner = entry.get("consumer")
+            if raw_id is None or raw_owner is None:
+                continue
+            msg_id = raw_id if isinstance(raw_id, str) else raw_id.decode()
+            owner = raw_owner if isinstance(raw_owner, str) else raw_owner.decode()
+            if owner == consumer:
+                # Ours. Normally that means we are still working on it. But
+                # given the ids we're running (``in_flight_ids``), one that
+                # isn't among them was left pending by a path that neither
+                # acked nor failed it, and nothing else will ever retry it:
+                # no peer takes a live consumer's messages. Take it back.
+                if in_flight_ids is None or msg_id in in_flight_ids:
+                    continue
+            elif owner in alive:
+                continue  # owner is alive -- the dual safety check
+            candidates.append(msg_id)
+            if delivery_counts is not None:
+                # ``times_delivered`` is how many times this message has been
+                # delivered/claimed without an ack -- the signal a caller uses
+                # to break a poison-pill retry loop.
+                delivery_counts[msg_id] = int(entry.get("times_delivered", 0) or 0)
+            if len(candidates) >= max_batch:
+                break
+
+        if len(candidates) >= max_batch or len(detail) < max_batch or msg_id is None:
+            break
+        cursor = f"({msg_id}"
 
     if not candidates:
         return []
