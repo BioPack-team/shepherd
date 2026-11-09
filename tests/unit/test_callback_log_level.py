@@ -42,6 +42,24 @@ def _make_request(body: bytes) -> Request:
     return Request(scope, receive)
 
 
+_handler_loggers = {}
+
+
+@pytest.fixture(autouse=True)
+def _capture_callback_loggers(monkeypatch):
+    """The handler's logger is unregistered (#216), so it can't be read back
+    with ``logging.getLogger``: record each one the handler builds."""
+    _handler_loggers.clear()
+    real = base_routes.transient_logger
+
+    def _capture(name, parent):
+        built = real(name, parent)
+        _handler_loggers[name] = built
+        return built
+
+    monkeypatch.setattr(base_routes, "transient_logger", _capture)
+
+
 def _patch_callback_deps(monkeypatch):
     """Stub the postgres-backed lookups and capture the enqueued task."""
     tasks = []
@@ -89,7 +107,7 @@ async def test_callback_takes_its_level_from_the_stored_query(redis_mock, monkey
     )
 
     assert response.status_code == 200
-    assert logging.getLogger("shepherd.cb-1").level == logging.DEBUG
+    assert _handler_loggers["shepherd.cb-1"].level == logging.DEBUG
     # ...and the level rides along to the merge, which filters the retrieval's
     # own log entries against it.
     assert tasks[0][0] == "merge_message"
@@ -113,7 +131,7 @@ async def test_callback_ignores_a_level_claimed_by_the_body(redis_mock, monkeypa
         ),
     )
 
-    assert logging.getLogger("shepherd.cb-2").level == logging.DEBUG
+    assert _handler_loggers["shepherd.cb-2"].level == logging.DEBUG
     assert tasks[0][1]["log_level"] == logging.DEBUG
 
 
@@ -125,7 +143,7 @@ async def test_callback_falls_back_to_the_server_default(redis_mock, monkeypatch
 
     await callback(ARATargetEnum.ARAGORN, "cb-3", _make_request(_callback_body()))
 
-    assert logging.getLogger("shepherd.cb-3").level == logging.INFO
+    assert _handler_loggers["shepherd.cb-3"].level == logging.INFO
     assert tasks[0][1]["log_level"] == logging.INFO
 
 
@@ -141,7 +159,7 @@ async def test_callback_survives_an_unreadable_query(redis_mock, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert logging.getLogger("shepherd.cb-4").level == logging.INFO
+    assert _handler_loggers["shepherd.cb-4"].level == logging.INFO
     assert tasks[0][1]["log_level"] == logging.INFO
 
 

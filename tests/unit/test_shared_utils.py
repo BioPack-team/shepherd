@@ -686,8 +686,7 @@ async def test_run_task_lifecycle_stray_cancellation_routes_failure(mocker):
 
 @pytest.mark.asyncio
 async def test_tasks_for_one_query_do_not_duplicate_each_others_logs(redis_mock):
-    """A worker gets one task per callback for the same query, and every one of
-    them builds "its" logger from the same process-wide name. Each task's flush
+    """A worker gets one task per callback for the same query. Each task's flush
     must store only what that task logged: stacking a handler per task, and
     flushing without emptying it, wrote the earlier tasks' records again every
     time -- so a single retrieval log line showed up once per later callback.
@@ -703,9 +702,10 @@ async def test_tasks_for_one_query_do_not_duplicate_each_others_logs(redis_mock)
     await save_logs("rid", first_logger)
 
     _, second_logger = _build_task_context("merge_message", "c", task("1-2"), 20)
-    assert second_logger is first_logger
-    # ...and the second task reused the handler rather than stacking another on
-    # top, which would queue every subsequent record once per attached handler.
+    # Each task now gets its own logger, freed with the task (#216), with exactly
+    # one handler: never one stacked per task, which would queue every record
+    # once per attached handler.
+    assert second_logger is not first_logger
     assert (
         len([h for h in second_logger.handlers if h.name == "query_log_handler"]) == 1
     )

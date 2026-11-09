@@ -137,6 +137,33 @@ def resolve_log_level(name, default: int = logging.INFO) -> int:
     return LOG_LEVELS.get(str(name).upper(), default)
 
 
+def transient_logger(name: str, parent: logging.Logger) -> logging.Logger:
+    """A logger for one task or request, freed once nothing references it.
+
+    ``logging.getLogger`` registers every name it is given with the logging
+    manager for the life of the process. Named per query, task or callback,
+    those loggers -- and the query log handler and its queue hanging off each
+    -- were never freed, so a pod's memory grew with every query it served
+    (#216). This one is built directly and never registered: records still
+    propagate to ``parent`` (and from there to the console), and the logger
+    goes away with the task or request that holds it.
+    """
+    logger = _TransientLogger(name)
+    logger.parent = parent
+    return logger
+
+
+class _TransientLogger(logging.Logger):
+    """A logger the logging manager doesn't track (see ``transient_logger``)."""
+
+    def setLevel(self, level):
+        super().setLevel(level)
+        # The manager clears the level caches of the loggers it tracks, which
+        # don't include this one: clear ours, or a level raised or lowered
+        # after the first record would be ignored.
+        self._cache.clear()
+
+
 def get_query_handler(logger: logging.Logger):
     """Return the query log handler attached to ``logger``, or None."""
     return next(
