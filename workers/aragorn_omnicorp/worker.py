@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -60,6 +61,13 @@ LMDB_BATCH_SIZE = 1000
 # disk-bound random LMDB lookups for very large queries, pushing latency from
 # seconds to 45 minutes-3 hours. Override via the env var if needed.
 OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 1_000_000))
+
+# How long the shared-count reads may run (#220). They are random LMDB reads,
+# up to one per curie pair, and the whole overlay runs under the pool's task
+# timeout (pool_task_timeout_sec, 300s): one that overran it was killed with
+# nothing applied. Past this budget the counts read so far are applied -- a
+# partial overlay -- and the cut is logged. 0 disables the budget.
+OMNICORP_TIME_BUDGET_SEC = float(os.environ.get("OMNICORP_TIME_BUDGET_SEC", 150))
 
 
 # Both LMDBs are opened lazily on first use so importing the worker (e.g. in
@@ -302,7 +310,12 @@ def generate_curie_pairs(
 
             auxgraph_ids = []
             for kedge_id in relevant_kedge_ids:
-                kedge = message["knowledge_graph"]["edges"][kedge_id]
+                kedge = message["knowledge_graph"]["edges"].get(kedge_id)
+                if kedge is None:
+                    # A binding to an edge the knowledge graph doesn't have
+                    # (C6-10) used to raise and abort the whole overlay.
+                    logger.warning(f"Edge binding to missing edge {kedge_id}")
+                    continue
                 auxgraph_ids.extend(edge_support_graphs(kedge))
 
             all_relevant_edge_ids = set()
@@ -431,7 +444,10 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
                 node_pub_counts[curie] = result["pmc"]
                 node_indices[curie] = int(result["index"])
 
-        add_node_pmid_counts(kgraph, node_pub_counts)
+        # Node counts are written last, with the pair counts (C6-10): they are
+        # what marks a message as overlaid (_already_overlaid), so writing
+        # them before a failure part way left a message that no retry would
+        # ever finish.
 
         end_node_time = datetime.now()
         logger.info(f"Node time: {end_node_time - start_node_time}")
@@ -467,6 +483,7 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
                 f"curie pairs meets/exceeds threshold {OMNICORP_MAX_CURIE_PAIRS}. "
                 "Returning message without literature co-occurrence overlay."
             )
+            add_node_pmid_counts(kgraph, node_pub_counts)
             message["knowledge_graph"] = kgraph
             message["results"] = answers
             logger.info("Omnicorp complete. Returning.")
@@ -475,8 +492,23 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
         keypairs = {make_key(x, node_indices): x for x in pair_to_answer.keys()}
         inputkeys = sorted(keypairs.keys())
         values = {}
+        budget_ends = (
+            time.monotonic() + OMNICORP_TIME_BUDGET_SEC
+            if OMNICORP_TIME_BUDGET_SEC > 0
+            else None
+        )
+        read = 0
 
         for batch in batches(inputkeys, LMDB_BATCH_SIZE):
+            if budget_ends is not None and time.monotonic() > budget_ends:
+                logger.warning(
+                    f"Omnicorp shared-count reads stopped at the "
+                    f"{OMNICORP_TIME_BUDGET_SEC:g}s budget after {read} of "
+                    f"{len(inputkeys)} curie pairs; applying a partial "
+                    "literature co-occurrence overlay."
+                )
+                break
+            read += len(batch)
             q_start = datetime.now()
             results = shared_count_query(batch)
             q_end = datetime.now()
@@ -492,6 +524,7 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
                     except Exception:
                         values[curie_pair] = 0
 
+        add_node_pmid_counts(kgraph, node_pub_counts)
         add_shared_pmid_counts(message, values, pair_to_answer)
 
         end_pair_time = datetime.now()
