@@ -36,6 +36,7 @@ from shepherd_utils.db import (
     encode_callback_body,
     save_encoded_message,
 )
+from shepherd_utils import completion
 from shepherd_utils.logger import (
     attach_query_handler,
     resolve_log_level,
@@ -553,13 +554,17 @@ class ClientDisconnected(Exception):
     """The caller of a sync query went away before it finished."""
 
 
+# Longest gap between a sync /query wait's own checks (see wait_for_query).
+SYNC_WAIT_MAX_INTERVAL_SEC = 2.0
+
+
 async def wait_for_query(
     query_id: str,
     logger: logging.Logger,
     timeout: float,
     request: Optional[Request] = None,
 ) -> Optional[tuple]:
-    """Poll until the query is COMPLETED; its state row, or None on timeout.
+    """Wait until the query is COMPLETED; its state row, or None on timeout.
 
     With ``request``, raises ``ClientDisconnected`` as soon as its caller is
     gone. Each poll takes a pooled connection, and a caller that timed out or
@@ -570,27 +575,33 @@ async def wait_for_query(
     itself keeps running; only this wait for it ends.
     """
     start = time.time()
-    now = start
-    while now <= start + timeout:
-        now = time.time()
+
+    async def _check():
         if request is not None and await request.is_disconnected():
             logger.info(
-                f"Client disconnected after {now - start:.0f}s; no longer "
-                f"waiting on query {query_id}."
+                f"Client disconnected after {time.time() - start:.0f}s; no "
+                f"longer waiting on query {query_id}."
             )
             raise ClientDisconnected()
-        # poll for completed status
         query_state = await get_query_state(query_id, logger)
-        if query_state is not None:
-            if query_state[9] == "COMPLETED":
-                return query_state
-        else:
-            # Debug, not warning: this fires every 0.5s while a query is still
-            # in flight (the row just isn't COMPLETED yet) and would otherwise
-            # flood the logs -- especially if the DB is unreachable.
+        if query_state is None:
+            # Debug, not warning: this fires on every check while a query is
+            # still in flight, and would flood the logs if the DB is down.
             logger.debug(f"Failed to get the query state of query id {query_id}")
-        await asyncio.sleep(0.5)
-    return None
+            return None
+        return query_state if query_state[9] == "COMPLETED" else None
+
+    # finish_query signals completion (shepherd_utils.completion), so this
+    # wakes as soon as the query is done instead of reading Postgres every
+    # 0.5s for the whole wait (#221). It still re-checks on its own, backing
+    # off to every 2s -- which also bounds how long a gone client is noticed.
+    return await completion.wait_for(
+        completion.DONE,
+        query_id,
+        _check,
+        timeout,
+        max_interval=min(SYNC_WAIT_MAX_INTERVAL_SEC, completion.MAX_INTERVAL_SEC),
+    )
 
 
 async def run_sync_query(

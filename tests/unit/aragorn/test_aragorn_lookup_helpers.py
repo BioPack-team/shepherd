@@ -250,7 +250,7 @@ def test_expand_aragorn_query_includes_direct_query_with_no_expansions(mocker):
     """Without any matching AMIE rule, expand_aragorn_query still emits a single
     direct (non-inferred) query."""
     mocker.patch(
-        "workers.aragorn_lookup.worker.json.load",
+        "workers.aragorn_lookup.worker._amie_expansions",
         return_value={},  # empty AMIE expansions
     )
     msg = copy.deepcopy(creative_query)
@@ -294,7 +294,7 @@ def test_expand_aragorn_query_appends_amie_rule_template(mocker):
     }
 
     mocker.patch(
-        "workers.aragorn_lookup.worker.json.load",
+        "workers.aragorn_lookup.worker._amie_expansions",
         return_value={
             json.dumps({"predicate": "biolink:treats"}): [{"template": rule_template}],
         },
@@ -330,7 +330,7 @@ def test_expand_aragorn_query_does_not_forward_top_level_log_level(mocker):
         }
     }
     mocker.patch(
-        "workers.aragorn_lookup.worker.json.load",
+        "workers.aragorn_lookup.worker._amie_expansions",
         return_value={
             json.dumps({"predicate": "biolink:treats"}): [{"template": rule_template}],
         },

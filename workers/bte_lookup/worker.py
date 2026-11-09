@@ -24,6 +24,7 @@ from shepherd_utils.db import (
     get_running_callbacks,
     remove_callback_id,
     save_message,
+    wait_for_lookups,
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -237,30 +238,16 @@ async def bte_lookup(task, logger: logging.Logger):
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
     MAX_QUERY_TIME = lookup_wait_seconds(message["parameters"])
-    start_time = time.time()
-    running_callback_ids = [""]
-    while time.time() - start_time < MAX_QUERY_TIME:
-        try:
-            # see if there are existing lookups going
-            running_callback_ids = await get_running_callbacks(query_id, logger)
-        except Exception:
-            # Brief backoff then retry the check rather than giving up
-            await asyncio.sleep(5)
-            continue
-        # fail now if the query data the callbacks merge into is gone
-        await abandon_lookup_if_data_lost(
-            query_id, response_id, running_callback_ids, logger
-        )
-        # if there are, continue to wait
-        if len(running_callback_ids) > 0:
-            await asyncio.sleep(1)
-            continue
-        # if there aren't, lookup is complete and we need to pass on to next workflow operation
-        if len(running_callback_ids) == 0:
-            logger.debug("Got all lookups back. Continuing...")
-            break
+    running_callback_ids = await wait_for_lookups(
+        query_id,
+        response_id,
+        MAX_QUERY_TIME,
+        logger,
+        get_running_callbacks,
+        abandon_lookup_if_data_lost,
+    )
 
-    if time.time() - start_time > MAX_QUERY_TIME:
+    if running_callback_ids:
         logger.warning(
             f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running...{running_callback_ids}"
         )

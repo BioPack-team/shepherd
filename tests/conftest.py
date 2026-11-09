@@ -166,3 +166,14 @@ def pytest_configure(config):
         "markers",
         "real_callback_dns: run without the offline_callback_dns stub",
     )
+
+
+@pytest.fixture(autouse=True)
+def fast_completion_checks(monkeypatch):
+    """Waiters re-check their state on a backoff from 0.5s (#221); tests that
+    don't send the completion signal shouldn't sit out real seconds. The
+    tests about the backoff itself set the real intervals back."""
+    from shepherd_utils import completion
+
+    monkeypatch.setattr(completion, "MIN_INTERVAL_SEC", 0.01)
+    monkeypatch.setattr(completion, "MAX_INTERVAL_SEC", 0.05)

@@ -1,6 +1,7 @@
 """Aragorn ARA module."""
 
 import asyncio
+import functools
 import copy
 import json
 import logging
@@ -24,6 +25,7 @@ from shepherd_utils.db import (
     get_running_callbacks,
     remove_callback_id,
     save_message,
+    wait_for_lookups,
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -148,6 +150,23 @@ async def run_async_lookup(
             )
 
 
+# How many lookup submissions this process has in flight at once, across
+# every task it runs (#221, C6-8). An inferred query fans out to up to ~34
+# lookups, each inserting its callback row, and a pod runs up to 100 tasks:
+# unbounded, that was thousands of concurrent inserts against a connection
+# pool of a few. aragorn_pathfinder bounds its own lookups the same way.
+MAX_LOOKUPS_IN_FLIGHT = max(1, settings.postgres_pool_max_size // 2)
+_lookup_slots: "asyncio.Semaphore | None" = None
+
+
+async def _bounded_lookup(client, expanded_message, query_id, logger):
+    global _lookup_slots
+    if _lookup_slots is None:
+        _lookup_slots = asyncio.Semaphore(MAX_LOOKUPS_IN_FLIGHT)
+    async with _lookup_slots:
+        return await run_async_lookup(client, expanded_message, query_id, logger)
+
+
 async def aragorn_lookup(task, logger: logging.Logger):
     """Do Aragorn lookup operation."""
     # given a task, get the message from the db
@@ -206,7 +225,7 @@ async def aragorn_lookup(task, logger: logging.Logger):
         ) as client:
             for expanded_message in expanded_messages:
                 requests.append(
-                    run_async_lookup(client, expanded_message, query_id, logger)
+                    _bounded_lookup(client, expanded_message, query_id, logger)
                 )
                 # Then we can retrieve all callback ids from query id to see which are still
                 # being looked up
@@ -241,30 +260,16 @@ async def aragorn_lookup(task, logger: logging.Logger):
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
     MAX_QUERY_TIME = lookup_wait_seconds(message["parameters"])
-    start_time = time.time()
-    running_callback_ids = [""]
-    while time.time() - start_time < MAX_QUERY_TIME:
-        try:
-            # see if there are existing lookups going
-            running_callback_ids = await get_running_callbacks(query_id, logger)
-        except Exception:
-            # Brief backoff then retry the check rather than giving up
-            await asyncio.sleep(5)
-            continue
-        # fail now if the query data the callbacks merge into is gone
-        await abandon_lookup_if_data_lost(
-            query_id, response_id, running_callback_ids, logger
-        )
-        # if there are, continue to wait
-        if len(running_callback_ids) > 0:
-            await asyncio.sleep(1)
-            continue
-        # if there aren't, lookup is complete and we need to pass on to next workflow operation
-        if len(running_callback_ids) == 0:
-            logger.debug("Got all lookups back. Continuing...")
-            break
+    running_callback_ids = await wait_for_lookups(
+        query_id,
+        response_id,
+        MAX_QUERY_TIME,
+        logger,
+        get_running_callbacks,
+        abandon_lookup_if_data_lost,
+    )
 
-    if time.time() - start_time > MAX_QUERY_TIME:
+    if running_callback_ids:
         logger.warning(
             f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running...{running_callback_ids}"
         )
@@ -341,6 +346,17 @@ def get_rule_key(
     return json.dumps(keydict, sort_keys=True)
 
 
+@functools.cache
+def _amie_expansions() -> dict:
+    """The AMIE rules, read once per process: the file is ~358 KB and used to
+    be re-read and re-parsed for every inferred query (#221, C6-8). Only read
+    from, never written."""
+    with open(
+        Path(__file__).parent / "rules_with_types_cleaned_finalized.json", "r"
+    ) as file:
+        return json.load(file)
+
+
 def expand_aragorn_query(input_message, logger: logging.Logger):
     """Given a query, split it into many related similar queries."""
     # Contract:
@@ -356,10 +372,7 @@ def expand_aragorn_query(input_message, logger: logging.Logger):
     qg = copy.deepcopy(input_message["message"]["query_graph"])
     for eid, edge in qg["edges"].items():
         del edge["knowledge_type"]
-    with open(
-        Path(__file__).parent / "rules_with_types_cleaned_finalized.json", "r"
-    ) as file:
-        AMIE_EXPANSIONS = json.load(file)
+    AMIE_EXPANSIONS = _amie_expansions()
     messages = [
         {
             "message": {"query_graph": qg},
