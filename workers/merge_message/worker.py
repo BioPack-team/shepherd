@@ -32,6 +32,7 @@ from shepherd_utils.db import (
     get_message_sync,
     get_ready_callbacks,
     get_response_size,
+    get_response_sizes,
     message_exists,
     remove_callback_id,
     save_logs,
@@ -96,8 +97,9 @@ def create_aux_graph(analysis):
     return aux_graph_id, aux_graph
 
 
-def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
-    """Create a new knowledge edge in the result message, with the aux graph ids as support."""
+def _inferred_edge(target, result_message, aux_graph_ids, answer):
+    """The knowledge edge Shepherd infers for ``answer``: the original query
+    edge's statement, supported by ``aux_graph_ids``."""
     # Find the subject, object, and predicate of the original query
     query_graph = result_message["message"]["query_graph"]
     # get the first key and value from the edges
@@ -120,8 +122,6 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
     # first set, as a KG edge's ``[{qualifier_type_id, qualifier_value}]``.
     qualifier_sets = qedge_qualifier_sets(qedge)
     qualifiers = qualifier_sets[0] if qualifier_sets else None
-    # Create a new knowledge edge
-    new_edge_id = str(uuid.uuid4())
     source = f"infores:shepherd-{target}"
     new_edge = {
         "subject": qnode_subject,
@@ -144,8 +144,63 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
     }
     if qualifiers:
         new_edge["qualifiers"] = qualifiers
-    result_message["message"]["knowledge_graph"]["edges"][new_edge_id] = new_edge
+    return new_edge
+
+
+def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
+    """Create a new knowledge edge in the result message, with the aux graph ids as support."""
+    new_edge_id = str(uuid.uuid4())
+    result_message["message"]["knowledge_graph"]["edges"][new_edge_id] = _inferred_edge(
+        target, result_message, aux_graph_ids, answer
+    )
     return new_edge_id
+
+
+def _statement(edge) -> tuple:
+    """What an edge asserts: subject, predicate, object and qualifiers."""
+    return (
+        edge.get("subject"),
+        edge.get("predicate"),
+        edge.get("object"),
+        orjson.dumps(edge.get("qualifiers") or [], option=orjson.OPT_SORT_KEYS),
+    )
+
+
+def _support_attribute(edge) -> Optional[dict]:
+    for attribute in edge.get("attributes") or []:
+        if attribute.get("attribute_type_id") == "biolink:support_graphs":
+            return attribute
+    return None
+
+
+def _earlier_inferred_edges(target, result_message, lookup_results) -> dict:
+    """The edges Shepherd already inferred for this answer in an earlier fold,
+    by the statement they make.
+
+    They are bound in the accumulated result for the answer, which reaches
+    ``merge_answer`` among the ``lookup`` results. Reusing one -- rather than
+    minting another edge with the same statement on every fold -- is what
+    makes the merged answer the same however its rule callbacks happened to
+    be batched, as in ARAGORN's reference merge, which folds them all at once
+    (#218, C4-5).
+    """
+    kg_edges = result_message["message"]["knowledge_graph"]["edges"]
+    source = f"infores:shepherd-{target}"
+    found = {}
+    for result in lookup_results:
+        for analysis in result.get("analyses") or []:
+            for edge_id in edge_binding_ids(analysis):
+                edge = kg_edges.get(edge_id)
+                if edge is None or _support_attribute(edge) is None:
+                    continue
+                if not any(
+                    s.get("resource_id") == source
+                    and s.get("resource_role") == "primary_knowledge_source"
+                    for s in edge.get("sources") or []
+                ):
+                    continue
+                found.setdefault(_statement(edge), edge_id)
+    return found
 
 
 def merge_answer(target, result_message, answer, results, qnode_ids):
@@ -178,7 +233,16 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
     # also unify that.   If we decide to pass rules along with the answers, we'll have to be a bit
     # more careful.
     lookup_edgesets = [get_edgeset(result) for result in results["lookup"]]
-    creative_edgesets = set()
+    earlier = _earlier_inferred_edges(target, result_message, results["lookup"])
+    kg_edges = result_message["message"]["knowledge_graph"]["edges"]
+    aux_graphs = result_message["message"].get("auxiliary_graphs") or {}
+    # A rule result an earlier fold already turned into support for this
+    # answer is a repeat, as it would be within one fold.
+    creative_edgesets = {
+        frozenset((aux_graphs.get(aux_id) or {}).get("edges") or [])
+        for edge_id in earlier.values()
+        for aux_id in _support_attribute(kg_edges[edge_id]).get("value") or []
+    }
     creative_results = []
     for result in results["creative"]:
         creative_edges = get_edgeset(result)
@@ -218,6 +282,16 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
     if len(aux_graph_ids) > 0:
         # only do this if there are creative results.  There could just be a lookup
         for nid in answer:
+            statement = _statement(
+                _inferred_edge(target, result_message, aux_graph_ids, nid)
+            )
+            existing_id = earlier.get(statement)
+            if existing_id is not None:
+                # Already inferred in an earlier fold (and bound through the
+                # lookup results below): add the new support to it.
+                support = _support_attribute(kg_edges[existing_id])
+                support["value"] = list(support.get("value") or []) + aux_graph_ids
+                continue
             knowledge_edge_id = add_knowledge_edge(
                 target, result_message, aux_graph_ids, nid
             )
@@ -447,11 +521,14 @@ def remove_promiscuous_knode_results(MAX_C, qnode, response):
         # MAX_C results)
         if max_count > MAX_C:
             still_going = True
-            # These are the indices of the results that we want to remove
-            mapped_result_indices = prom_counter[max_knode]
-            # Remove them from right to left, otherwise the indices change on you
-            for index in reversed(mapped_result_indices):
-                del response["message"]["results"][index]
+            # Rebuild the list without those results: deleting them one index
+            # at a time shifted the rest of the list on every delete (#218).
+            drop = set(prom_counter[max_knode])
+            response["message"]["results"] = [
+                result
+                for result_i, result in enumerate(response["message"]["results"])
+                if result_i not in drop
+            ]
 
 
 def filter_promiscuous_results(response, logger: logging.Logger):
@@ -491,83 +568,108 @@ def merge_messages(
     new_response: dict[str, Any],
     logger: logging.Logger,
 ):
-    pydantic_kgraph = {"nodes": {}, "edges": {}}
+    """Fold one callback's response into the accumulated ``response``."""
+    return merge_pass(target, original_query_graph, response, [new_response], logger)
+
+
+def _merge_aux_graphs(merged_aux: dict, src_aux: Optional[dict], logger) -> None:
+    """Fold ``src_aux`` into ``merged_aux`` in place. Reference adoption is
+    safe: the input messages are discarded after merging."""
+    if not src_aux:
+        return
+    for aux_id, aux_dict in src_aux.items():
+        existing = merged_aux.get(aux_id)
+        if existing is None:
+            merged_aux[aux_id] = aux_dict
+            continue
+        for key, val in aux_dict.items():
+            if key in existing:
+                if isinstance(existing[key], list):
+                    # combine both lists and then list/set it for uniqueness
+                    existing[key] = list(set(existing[key] + val))
+                else:
+                    logger.warning(f"Message had an invalid aux graph property: {key}")
+            else:
+                existing[key] = val
+
+
+def merge_pass(
+    target: str,
+    original_query_graph: dict[str, Any],
+    response: dict[str, Any],
+    new_responses: list[dict[str, Any]],
+    logger: logging.Logger,
+):
+    """Fold every callback of a merge pass into the accumulated ``response``.
+
+    Each fold used to rebuild the knowledge graph from scratch and regroup
+    and re-merge every accumulated result, so a query whose rule callbacks
+    arrived over many passes cost roughly callbacks x response size (#218,
+    C4-4). The knowledge graphs and aux graphs of the pass are now merged
+    into the accumulator in place, and the results are grouped and merged
+    once, at the end -- as ARAGORN's reference merge does with all of a
+    query's rule results.
+    """
     source = f"infores:shepherd-{target}"
-    filter_repeated_nodes(new_response, logger)
-    filter_promiscuous_results(new_response, logger)
-    for result_message in [response, new_response]:
-        result_kgraph = (
-            result_message["message"]["knowledge_graph"]
-            if result_message["message"].get("knowledge_graph") is not None
-            else {"nodes": {}, "edges": {}}
+    # Re-adopting the accumulated graph once a pass is what folding into a
+    # fresh one did: edges stored without the aggregator source gain it.
+    kgraph = merge_kgraph(
+        {"nodes": {}, "edges": {}},
+        response["message"].get("knowledge_graph") or {"nodes": {}, "edges": {}},
+        source,
+        logger,
+    )
+    merged_aux: dict = {}
+    _merge_aux_graphs(merged_aux, response["message"].get("auxiliary_graphs"), logger)
+
+    is_creative = "edges" in original_query_graph
+    answer_node_id = get_answer_node(original_query_graph) if is_creative else None
+    lookup_results = response["message"].get("results") or []
+    creative_results: list = []
+    last_response = None
+    for new_response in new_responses:
+        filter_repeated_nodes(new_response, logger)
+        filter_promiscuous_results(new_response, logger)
+        kgraph = merge_kgraph(
+            kgraph,
+            new_response["message"].get("knowledge_graph")
+            or {"nodes": {}, "edges": {}},
+            source,
+            logger,
         )
-        pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, source, logger)
-    # Construct the final result message, currently empty. There is no
-    # "logs" here: the query's logs live in the log store and are added when
-    # the response is delivered.
+        _merge_aux_graphs(
+            merged_aux, new_response["message"].get("auxiliary_graphs"), logger
+        )
+        if is_creative:
+            # The result with the direct lookup needs to be handled
+            # specially. It's the one with the lookup query graph.
+            if queries_equivalent(
+                new_response["message"]["query_graph"], original_query_graph
+            ):
+                lookup_results.extend(new_response["message"]["results"])
+            else:
+                creative_results.extend(new_response["message"].get("results") or [])
+        last_response = new_response
+
+    # Construct the final result message. There is no "logs" here: the
+    # query's logs live in the log store and are added when the response is
+    # delivered.
     result = {
         "message": {
             "query_graph": original_query_graph,
-            "knowledge_graph": pydantic_kgraph,
-            "results": [],
+            "knowledge_graph": kgraph,
+            "results": creative_results,
         },
     }
-    merged_aux = {}
-    for result_message in [response, new_response]:
-        src_aux = result_message["message"].get("auxiliary_graphs")
-        if not src_aux:
-            continue
-        # Reference adoption is safe: the input messages are discarded after
-        # merging, so nothing else is going to mutate these structures.
-        for aux_id, aux_dict in src_aux.items():
-            existing = merged_aux.get(aux_id)
-            if existing is None:
-                merged_aux[aux_id] = aux_dict
-                continue
-            for key, val in aux_dict.items():
-                if key in existing:
-                    if isinstance(existing[key], list):
-                        # combine both lists and then list/set it for uniqueness
-                        existing[key] = list(set(existing[key] + val))
-                    else:
-                        logger.warning(
-                            f"Message had an invalid aux graph property: {key}"
-                        )
-                else:
-                    existing[key] = val
     if merged_aux:
         result["message"]["auxiliary_graphs"] = merged_aux
 
-    # Determine type of message
-    if "edges" in original_query_graph:
-        # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
-        lookup_results = (
-            response["message"]["results"]
-            if response["message"].get("results") is not None
-            else []
-        )
-        is_direct_lookup = queries_equivalent(
-            new_response["message"]["query_graph"], original_query_graph
-        )
-        if is_direct_lookup:
-            lookup_results.extend(new_response["message"]["results"])
-        else:
-            result["message"]["results"].extend(
-                new_response["message"]["results"]
-                if new_response["message"].get("results") is not None
-                else []
-            )
-
-        answer_node_id = get_answer_node(original_query_graph)
+    if is_creative:
         if answer_node_id is None:
-            # This was a direct lookup outside of a creative query, just return it
-            merged_messages = new_response
-        else:
-            merged_messages = merge_results_by_node(
-                target, result, answer_node_id, lookup_results
-            )
-
-        return merged_messages
+            # A direct lookup outside of a creative query: the latest
+            # callback is the answer, as folding one at a time left it.
+            return last_response if last_response is not None else response
+        return merge_results_by_node(target, result, answer_node_id, lookup_results)
     elif "paths" in original_query_graph:
         # Pathfinder query: each callback is one of aragorn.pathfinder's edge
         # lookups, so only the knowledge graph accumulates here. The paths are
@@ -575,7 +677,7 @@ def merge_messages(
         _, og_path = next(iter(original_query_graph["paths"].items()))
         if og_path.get("subject") is None or og_path.get("object") is None:
             raise KeyError("Missing either subject or object from path.")
-        result["message"]["results"] = response["message"].get("results") or []
+        result["message"]["results"] = lookup_results
         return result
 
     raise TypeError("Unsupported query type.")
@@ -746,6 +848,7 @@ def merge_messages_by_ids(
         worker_logger.setLevel(query_level)
         merged: list[str] = []
         callback_log_entries: list[dict] = []
+        callback_responses: list[dict] = []
         for callback_id in callback_ids:
             callback_response = read_callback_response(callback_id, worker_logger)
             if callback_response is None:
@@ -755,16 +858,19 @@ def merge_messages_by_ids(
                     callback_response, callback_id, query_level, worker_logger
                 )
             )
-            accumulator = merge_messages(
-                target,
-                original_query_graph,
-                accumulator,
-                callback_response,
-                worker_logger,
-            )
+            callback_responses.append(callback_response)
             merged.append(callback_id)
 
         if merged:
+            # One fold for the whole pass (C4-4).
+            accumulator = merge_pass(
+                target,
+                original_query_graph,
+                accumulator,
+                callback_responses,
+                worker_logger,
+            )
+            del callback_responses
             save_response_sync(response_id, accumulator)
         # drain() hands back oldest-first, which is the order the parent's
         # handler.ingest wants. The retrieval logs describe work that happened
@@ -878,7 +984,7 @@ async def _fit_batch_to_budget(
     """Size a merge pass to ``max_response_size``, or say why it can't be run.
 
     Sizes are read from each blob's zstd frame header (``get_response_size``:
-    a few bytes, no load), so this costs one round trip per callback and never
+    a few bytes, no load), so this costs one pipelined round trip for the batch and never
     materializes anything. Returns ``(batch, None)`` with the longest prefix
     of ``ready`` whose uncompressed sizes fit alongside the accumulator within
     the cap -- always at least one callback, so a pass can only overshoot by a
@@ -895,8 +1001,7 @@ async def _fit_batch_to_budget(
         return [], _over_cap_reason("the accumulated response", accumulated, max_bytes)
     batch: list[str] = []
     total = accumulated
-    for callback_id in ready:
-        size = await get_response_size(callback_id)
+    for callback_id, size in zip(ready, await get_response_sizes(ready)):
         if size > max_bytes:
             return [], _over_cap_reason(f"callback {callback_id}", size, max_bytes)
         if batch and total + size > max_bytes:
@@ -908,6 +1013,33 @@ async def _fit_batch_to_budget(
         batch.append(callback_id)
         total += size
     return batch, None
+
+
+async def _debounce(response_id: str, lock_lost: asyncio.Event, logger) -> None:
+    """Wait up to ``merge_debounce_sec`` for a full pass of callbacks.
+
+    Returns early once ``merge_max_fold`` callbacks are ready (a pass can't
+    take more) or the lock is lost.
+    """
+    wait = float(settings.merge_debounce_sec)
+    if wait <= 0:
+        return
+    deadline = time.monotonic() + wait
+    fold = settings.merge_max_fold
+    while not lock_lost.is_set():
+        try:
+            ready = await get_ready_callbacks(response_id, logger)
+        except Exception:
+            return
+        if fold > 0 and len(ready) >= fold:
+            return
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        await asyncio.sleep(min(_DEBOUNCE_POLL_SEC, left))
+
+
+_DEBOUNCE_POLL_SEC = 0.2
 
 
 async def _drop_unwanted_callbacks(
@@ -1193,6 +1325,11 @@ async def poll_for_tasks():
                 if _too_many_crashes(crashes):
                     await _give_up(_crash_reason(crashes))
                     return
+
+                # Let more of the query's callbacks arrive before the first
+                # pass: every pass reloads and re-saves the whole accumulated
+                # response, so folding more per pass is fewer of them (#218).
+                await _debounce(response_id, lock_lost, logger)
 
                 lock_time = time.time()
                 # Bound before the try: the failure handler reports the batch

@@ -39,6 +39,7 @@ from shepherd_utils.db import (
 from shepherd_utils import completion
 from shepherd_utils.logger import (
     attach_query_handler,
+    transient_logger,
     resolve_log_level,
     setup_logging,
 )
@@ -56,6 +57,7 @@ from shepherd_utils.trapi import (
     query_log_level,
     query_parameters,
     validate_query,
+    wrap_stored_response,
 )
 from shepherd_utils.task_deadline import (
     TIMEOUT_STATUS,
@@ -408,7 +410,8 @@ async def run_query(
     level_number = resolve_log_level(
         query_log_level(query), resolve_log_level(settings.log_level)
     )
-    logger = logging.getLogger(f"shepherd.{query_id}")
+    # Unregistered, so it is freed with the request (#216).
+    logger = transient_logger(f"shepherd.{query_id}", logging.getLogger("shepherd"))
     logger.setLevel(level_number)
     attach_query_handler(logger)
 
@@ -869,7 +872,8 @@ async def callback(
     # have, so the rejection / parse-error paths below can persist their logs
     # too. The requested log level lives in the body -- which those paths never
     # parse -- so leave the logger at its inherited default until we have it.
-    logger = logging.getLogger(f"shepherd.{callback_id}")
+    # Unregistered, so it is freed with the request (#216).
+    logger = transient_logger(f"shepherd.{callback_id}", logging.getLogger("shepherd"))
     attach_query_handler(logger)
     max_bytes = settings.callback_max_request_size_bytes
     try:
@@ -1102,12 +1106,18 @@ async def get_query_response(
     logger = logging.getLogger("shepherd.get_query")
     logger.setLevel(level_number)
     attach_query_handler(logger)
-    response = await get_message(query_id, logger)
-    if response is None:
+    try:
+        # The stored bytes, not a decoded tree: decoding and re-encoding a
+        # multi-hundred-MB response held the event loop for every other
+        # request (C3-10). The envelope goes around them as finish_query's
+        # delivery does.
+        stored = await get_message(query_id, logger, raw=True)
+    except KeyError:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
     logs = await get_logs(query_id, logger)
     # A stored response carries no parameters (save_response); the ones to
     # repeat are its query's.
     parameters = await get_response_query_parameters(query_id, logger)
-    finalize_response(response, {"parameters": parameters}, logs)
-    return ORJSONResponse(content=response)
+    body = wrap_stored_response(stored, {"parameters": parameters}, logs)
+    del stored
+    return Response(content=body, media_type="application/json")

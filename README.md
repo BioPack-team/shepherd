@@ -403,8 +403,9 @@ A TRAPI response is held in memory as a Python object tree several times the
 size of its JSON, by every worker that touches it, and `merge_message` reloads
 the whole accumulated response on every pass. One big enough is OOM-killed and
 then retried on the next pod, which dies the same way. Two caps bound that, and
-both are **off by default** — set them per deployment (Helm) from the pod's
-memory limit:
+both default to **250M** — tune them per deployment (Helm) from the pod's
+memory limit (`0` turns a cap off; a value that doesn't parse also reads as
+`0`, and is logged as a warning):
 
 | Setting | Meaning |
 | --- | --- |
