@@ -386,8 +386,11 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 
     async def _run(task, logger):
         otel_carrier = inject_context()
-        await pool.run(
+        # Held no longer than the query can use the answer (#245).
+        await pool.run_within_budget(
             loop,
+            task[1],
+            "ARAX's pathfinder",
             arax_pathfinder_task,
             task[1]["query_id"],
             task[1]["response_id"],

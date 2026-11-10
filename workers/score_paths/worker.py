@@ -212,8 +212,14 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        entries = await pool.run(
-            loop, score_paths_task, response_id, logger.getEffectiveLevel()
+        # Held no longer than the query can use the answer (#245).
+        entries = await pool.run_within_budget(
+            loop,
+            task[1],
+            "Path scoring",
+            score_paths_task,
+            response_id,
+            logger.getEffectiveLevel(),
         )
         handler = get_query_handler(logger)
         if handler is not None and entries:

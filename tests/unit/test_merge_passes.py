@@ -310,7 +310,8 @@ async def test_a_callback_arriving_just_after_the_lock_joins_the_first_pass(
             except BaseException:
                 pass
 
-    assert passes == [["cb-1", "cb-2"]]
+    # one pass with both; the ready index is a set, so in no particular order
+    assert [sorted(batch) for batch in passes] == [["cb-1", "cb-2"]]
 
 
 # --- C4-8 ----------------------------------------------------------------------

@@ -1297,7 +1297,10 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        await pool.run(loop, aragorn_score, response_id, logger)
+        # Held no longer than the query can use the answer (#245).
+        await pool.run_within_budget(
+            loop, task[1], "ARAGORN's scoring", aragorn_score, response_id, logger
+        )
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
