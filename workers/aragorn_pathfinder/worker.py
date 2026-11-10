@@ -31,6 +31,7 @@ from shepherd_utils.db import (
     remove_callback_id,
     save_response,
     save_response_sync,
+    wait_for_lookups,
 )
 from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -362,27 +363,17 @@ async def wait_for_callbacks(
     query_id, response_id, max_query_time, logger: logging.Logger
 ):
     """Wait until every lookup's callback is merged, or the query times out."""
-    start_time = time.time()
-    running_callback_ids = [""]
     try:
-        while time.time() - start_time < max_query_time:
-            try:
-                running_callback_ids = await get_running_callbacks(query_id, logger)
-            except Exception:
-                # Brief backoff then retry the check rather than giving up
-                await asyncio.sleep(5)
-                continue
-            # fail now if the query data the callbacks merge into is gone
-            await abandon_lookup_if_data_lost(
-                query_id, response_id, running_callback_ids, logger
-            )
-            if len(running_callback_ids) > 0:
-                await asyncio.sleep(1)
-                continue
-            logger.debug("Got all lookups back. Continuing...")
-            break
+        running_callback_ids = await wait_for_lookups(
+            query_id,
+            response_id,
+            max_query_time,
+            logger,
+            get_running_callbacks,
+            abandon_lookup_if_data_lost,
+        )
 
-        if time.time() - start_time > max_query_time:
+        if running_callback_ids:
             logger.warning(
                 f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
             )

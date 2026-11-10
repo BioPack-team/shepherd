@@ -471,8 +471,10 @@ async def test_bte_lookup_timeout_triggers_cleanup_callbacks(redis_mock, mocker)
                 "edges": {"e0": {"subject": "a", "object": "b"}},
             }
         },
-        # Use a tiny but non-zero timeout. We patch time.time to control flow.
-        "parameters": {"timeout": 5},
+        # A tiny but non-zero timeout: the wait for callbacks
+        # (shepherd_utils.completion) measures it on the monotonic clock,
+        # which can't be faked without stopping the event loop too.
+        "parameters": {"timeout": 0.2},
     }
     mocker.patch.object(
         btel, "get_message", new_callable=mocker.AsyncMock, return_value=msg

@@ -15,6 +15,7 @@ import zstandard
 from psycopg import OperationalError
 from psycopg_pool import AsyncConnectionPool
 
+from . import completion
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
 from .trapi import (
@@ -1289,13 +1290,17 @@ async def remove_callback_id(
     for attempt in range(PG_RETRIES):
         try:
             async with timed_connection("remove_callback_id", logger) as conn:
-                await conn.execute(
+                cursor = await conn.execute(
                     """
-                DELETE FROM callbacks WHERE callback_id = %s
+                DELETE FROM callbacks WHERE callback_id = %s RETURNING query_id
                 """,
                     (callback_id,),
                 )
+                row = await cursor.fetchone()
                 await conn.commit()
+            if row is not None:
+                # Wake the lookup worker waiting on this query's callbacks.
+                await completion.signal(completion.CALLBACKS, row[0])
             break
         except OperationalError as e:
             if is_disk_full_error(e):
@@ -1410,6 +1415,7 @@ async def cleanup_callbacks(
                     (query_id,),
                 )
                 await conn.commit()
+            await completion.signal(completion.CALLBACKS, query_id)
             break
         except OperationalError as e:
             if is_disk_full_error(e):
@@ -1428,6 +1434,47 @@ async def cleanup_callbacks(
 
 class QueryDataLostError(KeyError):
     """A running query's query or response blob is gone from the data db."""
+
+
+async def wait_for_lookups(
+    query_id: str,
+    response_id: str,
+    max_wait: float,
+    logger: logging.Logger,
+    get_running=None,
+    abandon=None,
+) -> List[str]:
+    """Wait for every lookup callback of ``query_id`` to be merged.
+
+    Returns the callbacks still running: empty once all are back, else what
+    was outstanding when ``max_wait`` ran out. ``abandon_lookup_if_data_lost``
+    runs on every check, and its ``QueryDataLostError`` propagates.
+
+    Woken by ``completion.CALLBACKS`` whenever a callback row is removed, so
+    a lookup moves on as soon as its last callback is merged rather than on
+    the next one-second poll; it still re-checks on its own, backing off to
+    every few seconds (#221). The lookup workers pass their own module's
+    ``get_running_callbacks`` / ``abandon_lookup_if_data_lost``.
+    """
+    get_running = get_running or get_running_callbacks
+    abandon = abandon or abandon_lookup_if_data_lost
+    running: List[str] = [""]
+
+    async def _check():
+        nonlocal running
+        try:
+            running = await get_running(query_id, logger)
+        except Exception:
+            # Try again on the next check rather than giving up.
+            return None
+        # fail now if the query data the callbacks merge into is gone
+        await abandon(query_id, response_id, running, logger)
+        return True if len(running) == 0 else None
+
+    if await completion.wait_for(completion.CALLBACKS, query_id, _check, max_wait):
+        logger.debug("Got all lookups back. Continuing...")
+        return []
+    return running
 
 
 async def abandon_lookup_if_data_lost(
@@ -1910,6 +1957,8 @@ async def set_query_completed(
                         ),
                     )
                 await conn.commit()
+            # Wake whoever waits on this query (sync /query, ARAX streams).
+            await completion.signal(completion.DONE, query_id)
             break
         except OperationalError as e:
             if is_disk_full_error(e):

@@ -55,6 +55,7 @@ from shepherd_server.base_routes import (
 )
 from shepherd_server.aras import arax_status
 from shepherd_server.openapi import set_open_api_schema
+from shepherd_utils import completion
 from shepherd_utils.arax_progress import is_done, read_progress
 from shepherd_utils.config import settings
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -66,6 +67,11 @@ ARAX = FastAPI(title="Shepherd ARAX")
 # How often the streaming endpoint looks for new progress lines (ARAX's own
 # stream loop sleeps 0.2 s between checks)
 STREAM_POLL_SEC = 0.2
+# How often a stream reads its query's state from Postgres while relaying
+# progress (#221). The progress lines are cheap Redis reads and keep the 0.2s
+# cadence; the state read used to as well, one Postgres read per stream every
+# 0.2s. finish_query's completion signal wakes it sooner.
+STREAM_STATE_CHECK_SEC = 2.0
 # ARAX's stream heartbeat: after this long with nothing to send it emits a
 # "still progressing" DEBUG entry. The worker relays ARAX's own; this covers a
 # query that isn't ARAX's (a pathfinder query routed to arax.pathfinder).
@@ -211,10 +217,26 @@ async def stream_query_progress(
     ``allow_nan=False``).
     """
     start = time.time()
+    query_done = completion.signalled(completion.DONE, query_id)
+    await completion.ensure_listening()
+    try:
+        async for line in _relay_progress(
+            query_id, response_id, logger, timeout, query, start, query_done
+        ):
+            yield line
+    finally:
+        completion.release(completion.DONE, query_id, query_done)
+
+
+async def _relay_progress(
+    query_id, response_id, logger, timeout, query, start, query_done
+) -> AsyncIterator[str]:
+    """The body of ``stream_query_progress``; see there."""
     last_sent = start
     index = 0
     done = False
     finished = False
+    last_state_check = 0.0
     while not done:
         lines = await read_progress(response_id, index)
         for line in lines:
@@ -234,12 +256,15 @@ async def stream_query_progress(
             # As when ARAX's child is killed: the stream just ends
             logger.info("Query stream terminated by the client")
             return
-        query_state = await get_query_state(query_id, logger)
-        if query_state is not None and query_state[9] in TERMINAL_QUERY_STATES:
-            # One more read for lines pushed just before it finished
-            finished = True
-            continue
         now = time.time()
+        if query_done.is_set() or now - last_state_check >= STREAM_STATE_CHECK_SEC:
+            query_done.clear()
+            last_state_check = now
+            query_state = await get_query_state(query_id, logger)
+            if query_state is not None and query_state[9] in TERMINAL_QUERY_STATES:
+                # One more read for lines pushed just before it finished
+                finished = True
+                continue
         if now > start + timeout:
             logger.error("Query timed out")
             yield _error_line("Query timeout", status="TIMEOUT")
