@@ -60,6 +60,8 @@ from typing import Any, Iterable, Mapping, Optional, cast
 
 from functools import cache
 
+import orjson
+
 from pydantic import TypeAdapter, ValidationError
 from translator_tom import TRAPI_CONFIG
 from translator_tom.model_dicts import (
@@ -93,6 +95,7 @@ __all__ = [
     "query_log_level",
     "query_parameters",
     "validate_query",
+    "wrap_stored_response",
 ]
 
 #: Biolink Model version the TRAPI 2.0 models (and so Shepherd's responses) use.
@@ -525,6 +528,46 @@ def prune_response(response: dict[str, Any]) -> None:
 #: carried on the stored response (which starts life as a copy of the query)
 #: but are not Response properties.
 _QUERY_ONLY_MEMBERS = ("callback", "submitter", "log_level", "bypass_cache")
+
+
+def wrap_stored_response(
+    stored: bytes, query: "dict | None", logs: "list[dict]"
+) -> bytes:
+    """The TRAPI 2.0 Response delivered for ``stored``, without decoding it.
+
+    A stored response never carries the delivery envelope (see
+    ``shepherd_utils.trapi.prepare_stored_response``) and its content is
+    already valid 2.0, so the envelope -- ``schema_version``,
+    ``biolink_version``, the query's ``parameters`` (which 2.0 says the server
+    MUST repeat) -- is written in front of the stored members, and the logs
+    after them. ``logs`` are last so finish_query's ``_append_log_entry`` can extend them,
+    and absent when there are none (``Response.logs`` has a ``minItems`` of
+    1). One allocation of the payload's size; the slices are views. Anything
+    that is not a JSON object is returned untouched.
+    """
+    envelope: dict = {
+        "schema_version": SCHEMA_VERSION,
+        "biolink_version": BIOLINK_VERSION,
+    }
+    parameters = query_parameters(query)
+    if parameters:
+        envelope["parameters"] = parameters
+    head = orjson.dumps(envelope)
+    view = memoryview(stored)
+    # ``stored`` is one JSON object as orjson wrote it: no whitespace, so its
+    # members are everything between the outer braces.
+    if stored[:1] != b"{" or stored[-1:] != b"}":
+        # Not something a worker stored; deliver it untouched rather than
+        # guess at its structure.
+        return stored
+    members = view[1:-1]
+    parts = [memoryview(head)[:-1]]
+    if len(members):
+        parts += [b",", members]
+    if logs:
+        parts += [b',"logs":', orjson.dumps(logs)]
+    parts.append(b"}")
+    return b"".join(parts)
 
 
 def finalize_response(

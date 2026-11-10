@@ -303,7 +303,7 @@ async def test_intake_empty_logs_are_omitted(env, intake, redis_mock):
     would fail validation)."""
     intake["get_logs"].return_value = []
     await pm.ars_premerge(_intake_task(env), LOGGER)
-    first_save = env["save_message_data"].await_args_list[0].args[1]
+    first_save = env["saved"][0][1]
     assert "logs" not in first_save
     final = _final_status_update(env)
     assert (final["status"], final["code"]) == ("D", 200)
@@ -406,10 +406,19 @@ def intake(env, mocker):
             "timestamp": "2026-09-01T12:00:00.123456+00:00",
         }
     ]
+    # The ARA's response is read in the pool child, through the sync blob
+    # store (#217): serve it from there, and the child blobs as before.
+    fetch = mocker.MagicMock(return_value=env["data"])
+    child_blobs = pm.get_message_sync.side_effect
+
+    def _get_sync(pk):
+        if pk.startswith("resp"):
+            return fetch(pk)
+        return child_blobs(pk)
+
+    pm.get_message_sync.side_effect = _get_sync
     return {
-        "get_message": mocker.patch.object(
-            pm, "get_message", new_callable=AsyncMock, return_value=env["data"]
-        ),
+        "get_message": fetch,
         "get_logs": mocker.patch.object(
             pm, "get_logs", new_callable=AsyncMock, return_value=logs
         ),
@@ -430,7 +439,8 @@ async def test_intake_happy_path_premerges_and_merges(env, intake, redis_mock):
 
     # the raw payload was saved with the query's logs spliced in, and the
     # counts recorded before premerge -- exactly the server intake's order
-    first_save = env["save_message_data"].await_args_list[0].args[1]
+    # (the intake's save is the pool child's, so it is the first one there)
+    first_save = env["saved"][0][1]
     assert first_save["logs"][-len(intake["logs"]) :] == intake["logs"]
     counts = next(
         c.kwargs
@@ -469,7 +479,8 @@ async def test_intake_empty_results_terminal_without_merge(env, intake, redis_mo
     assert "result_count" not in final
     env["completion"].assert_awaited_once()
     assert await _merge_tasks() == []
-    assert env["saved"] == []
+    # stored by the intake, and nothing premerged
+    assert [pk for pk, _ in env["saved"]] == [str(env["child_pk"])]
 
 
 @pytest.mark.parametrize(
@@ -534,6 +545,7 @@ async def test_intake_duplicate_done_child_skips(env, intake, redis_mock):
     )
     env["update_message"].assert_not_awaited()
     env["save_message_data"].assert_not_awaited()
+    assert env["saved"] == []
     assert await _merge_tasks() == []
 
 
@@ -548,7 +560,7 @@ async def test_intake_redelivered_before_the_merge_resumes_at_premerge(
     await pm.ars_premerge(_intake_task(env), LOGGER)
 
     # the raw response is saved over the child's blob again before premerge
-    assert env["save_message_data"].await_count >= 1
+    assert env["saved"][0][0] == str(env["child_pk"])
     final = _final_status_update(env)
     assert final["status"] == "D"
     assert final["code"] == 200
@@ -569,6 +581,7 @@ async def test_intake_redelivered_after_the_hand_off_only_finishes_status(
     final = _final_status_update(env)
     assert final["status"] == "D"
     env["save_message_data"].assert_not_awaited()
+    assert env["saved"] == []
     assert await _merge_tasks() == []
     env["completion"].assert_awaited_once()
 
@@ -593,6 +606,7 @@ async def test_intake_redelivered_after_the_merge_only_finishes_status(
 
     assert _final_status_update(env)["status"] == "D"
     env["save_message_data"].assert_not_awaited()
+    assert env["saved"] == []
     assert await _merge_tasks() == []
 
 

@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Literal
 
@@ -20,6 +21,26 @@ _SIZE_UNITS = {
 }
 
 
+_warned_sizes: set = set()
+
+
+def _warn_unparseable_size(value) -> None:
+    """Say so, once per value, when a size setting can't be read.
+
+    An unparseable size reads as 0, which turns its limit off. A typo in a cap
+    such as ``MAX_RESPONSE_SIZE`` (C2-4) silently removed the protection it
+    was set for.
+    """
+    if value in _warned_sizes:
+        return
+    _warned_sizes.add(value)
+    logging.getLogger("shepherd.config").warning(
+        f"Size setting {value!r} is not a size Shepherd understands (e.g. "
+        "'250M', '512Mi', or a byte count); it reads as 0, which disables "
+        "the limit it sets."
+    )
+
+
 def parse_size_to_bytes(value: str) -> int:
     """Parse a size string into bytes.
 
@@ -34,6 +55,7 @@ def parse_size_to_bytes(value: str) -> int:
         r"\s*(\d+(?:\.\d+)?)\s*([kmgtp]i?)?b?\s*", str(value), re.IGNORECASE
     )
     if not m:
+        _warn_unparseable_size(value)
         return 0
     number, unit = m.group(1), (m.group(2) or "").lower()
     return int(float(number) * _SIZE_UNITS[unit])
@@ -118,7 +140,9 @@ class Settings(BaseSettings):
     # RESPONSE_TOO_LARGE (see shepherd_utils/response_limit.py): the query
     # ends with an empty response saying why rather than a partial one that
     # silently omits the rejected data.
-    callback_max_request_size: str = "0"
+    # 250M by default, as deployments run it (C2-4); off, a single oversized
+    # callback could OOM the server and every worker after it.
+    callback_max_request_size: str = "250M"
     # Maximum accepted request body for ``/{ara}/query`` and
     # ``/{ara}/asyncquery``. The body is buffered and parsed in the server
     # process, so an unbounded one ties up the event loop (and memory) for
@@ -368,7 +392,15 @@ class Settings(BaseSettings):
     # A breach never produces a partial answer -- the whole response is
     # discarded and the query finishes RESPONSE_TOO_LARGE with an empty
     # message saying so (shepherd_utils/response_limit.py).
-    max_response_size: str = "0"
+    # 250M by default, as deployments run it (C2-4).
+    max_response_size: str = "250M"
+    # How many *uncompressed* response bytes finish_query works on at once.
+    # Each task holds its response, plus a transient second copy while the
+    # delivery payload is built, for up to the whole callback retry ladder, so
+    # admitting tasks by count let a few large responses OOM the pod. A
+    # response larger than this budget still runs, alone. Accepts the same
+    # sizes as above; 0 admits by count only (TASK_LIMIT).
+    finish_query_inflight_bytes: str = "1G"
 
     # Graceful shutdown. On SIGTERM/SIGINT (Kubernetes sends SIGTERM on every
     # rollout, scale-down and node drain) a worker stops pulling new tasks and
@@ -444,6 +476,12 @@ class Settings(BaseSettings):
     # under pathological bursts; leftover ready callbacks are swept by the next
     # drain iteration. 0 disables the cap (fold everything ready in one pass).
     merge_max_fold: int = 25
+    # How long a merge_message worker that has just taken a query's lock waits
+    # for more of its callbacks before the first pass (stopping early once
+    # merge_max_fold are ready). Every pass reloads and re-saves the whole
+    # accumulated response, so folding more callbacks per pass means fewer
+    # passes; the cost is up to this much latency per query. 0 disables it.
+    merge_debounce_sec: float = 1.0
     # A merge that fails is retried by re-enqueueing its wake task. Space the
     # retries out (exponential from merge_retry_backoff, capped at
     # merge_retry_backoff_max) so a deterministic failure can't spin the worker,
@@ -709,6 +747,10 @@ class Settings(BaseSettings):
     def query_max_request_size_bytes(self) -> int:
         """Max accepted ``/query``/``/asyncquery`` body in bytes (0 disables)."""
         return parse_size_to_bytes(self.query_max_request_size)
+
+    @property
+    def finish_query_inflight_bytes_value(self) -> int:
+        return parse_size_to_bytes(self.finish_query_inflight_bytes)
 
     @property
     def max_response_size_bytes(self) -> int:
