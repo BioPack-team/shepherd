@@ -1,5 +1,6 @@
 """ARAGORN ranker and omnicorp hot paths (#220)."""
 
+import asyncio
 import copy
 import logging
 import time
@@ -201,34 +202,130 @@ def _co_occurrence_edges(message):
     ]
 
 
-def test_a_binding_to_a_missing_edge_does_not_abort_the_overlay(lmdb):
-    """C6-10: it raised KeyError after the node counts were written, so the
-    message read as overlaid and the pair overlay was never applied."""
-    message = omnicorp.omnicorp_overlay(_omnicorp_message(dangling=True), logger)
+def test_a_binding_to_a_missing_edge_fails_loudly(lmdb):
+    """C6-10: a binding to an edge the knowledge graph doesn't have is a
+    malformed message. It used to be logged and the overlay quietly skipped
+    (a catch-all swallowed the KeyError); now the overlay raises, so the query
+    fails rather than being scored without that evidence."""
+    with pytest.raises(ValueError, match="missing-edge"):
+        omnicorp.omnicorp_overlay(_omnicorp_message(dangling=True), logger)
 
-    assert _co_occurrence_edges(message)
 
-
-def test_a_failed_overlay_leaves_the_message_retryable(lmdb):
-    """N-2: a bad shared-counts value must not leave node counts behind -- they
-    mark the message overlaid, and no retry would ever add the pairs."""
+def test_a_failed_overlay_fails_and_leaves_the_message_retryable(lmdb):
+    """N-2: a bad shared-counts value used to be swallowed -- the query went on
+    as OK without literature support. It now fails, and leaves no node counts
+    behind, since they mark the message overlaid and would block a retry."""
     lmdb["fail"] = True
-    message = omnicorp.omnicorp_overlay(_omnicorp_message(), logger)
+    message = _omnicorp_message()
+
+    with pytest.raises(ValueError):
+        omnicorp.omnicorp_overlay(message, logger)
 
     assert not omnicorp._already_overlaid(message["message"]["knowledge_graph"])
 
 
-def test_shared_count_reads_stop_at_the_time_budget(lmdb, monkeypatch, caplog):
-    """C6-6: past the budget the counts read so far are applied (a partial
-    overlay) and the cut is logged, rather than overrunning the pool timeout
-    and applying nothing."""
-    monkeypatch.setattr(omnicorp, "LMDB_BATCH_SIZE", 1)
-    monkeypatch.setattr(omnicorp, "OMNICORP_TIME_BUDGET_SEC", 0.05, raising=False)
-    lmdb["slow"] = 0.1
+# --- the slot is held no longer than the query can use the answer -------------
 
-    with caplog.at_level(logging.WARNING):
-        message = omnicorp.omnicorp_overlay(_omnicorp_message(), logger)
 
-    assert len(lmdb["reads"]) == 1  # the first batch, then the budget ran out
-    assert _co_occurrence_edges(message)  # what was read is applied
-    assert "partial" in caplog.text
+class _Pool:
+    def __init__(self, error=None):
+        self.timeouts = []
+        self.error = error
+
+    async def run(self, loop, fn, *args, timeout=None):
+        self.timeouts.append(timeout)
+        if self.error:
+            raise self.error
+
+
+async def _process(task_fields, pool, monkeypatch):
+    """Run omnicorp's process_task, returning the error it ended the task with."""
+    from shepherd_utils import shared
+
+    failures = []
+
+    async def _failed(stream, group, task, _logger, error=None):
+        failures.append(error)
+
+    async def _wrapped(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(shared, "handle_task_failure", _failed)
+    monkeypatch.setattr(shared, "wrap_up_task", _wrapped)
+    monkeypatch.setattr(shared, "_guard_response_size", _wrapped)
+
+    class _Limiter:
+        def release(self):
+            pass
+
+    task = ("1-0", {"query_id": "q", "response_id": "r", **task_fields})
+    await omnicorp.process_task(
+        task, None, logger, _Limiter(), asyncio.get_running_loop(), pool
+    )
+    return failures[0] if failures else None
+
+
+async def test_the_slot_timeout_is_cut_to_the_query_budget(monkeypatch):
+    from shepherd_utils.config import settings
+    from shepherd_utils.task_deadline import DEADLINE_FIELD
+
+    monkeypatch.setattr(settings, "pool_task_timeout_sec", 300.0)
+    pool = _Pool()
+
+    await _process({DEADLINE_FIELD: f"{time.time() + 20:.3f}"}, pool, monkeypatch)
+
+    (timeout,) = pool.timeouts
+    assert 15 < timeout <= 20
+
+
+async def test_running_out_of_the_query_budget_ends_it_as_timeout(monkeypatch):
+    """An overlay cut short by the query's budget fails it as TIMEOUT -- not a
+    crash, and never a partial overlay."""
+    from shepherd_utils.query_errors import QueryTimedOut
+    from shepherd_utils.task_deadline import DEADLINE_FIELD
+
+    pool = _Pool(error=asyncio.TimeoutError("slot timed out"))
+
+    error = await _process(
+        {DEADLINE_FIELD: f"{time.time() + 20:.3f}"}, pool, monkeypatch
+    )
+
+    assert isinstance(error, QueryTimedOut)
+
+
+async def test_the_pool_ceiling_still_applies_when_the_budget_is_longer(monkeypatch):
+    from shepherd_utils.config import settings
+    from shepherd_utils.task_deadline import DEADLINE_FIELD
+
+    monkeypatch.setattr(settings, "pool_task_timeout_sec", 300.0)
+    pool = _Pool(error=asyncio.TimeoutError("slot timed out"))
+
+    error = await _process(
+        {DEADLINE_FIELD: f"{time.time() + 3600:.3f}"}, pool, monkeypatch
+    )
+
+    assert pool.timeouts == [300.0]
+    # the task overran its own ceiling: an error, not the query's TIMEOUT
+    assert isinstance(error, asyncio.TimeoutError)
+
+
+async def test_a_query_timeout_is_stored_as_timeout(redis_mock):
+    from shepherd_utils import shared
+    from shepherd_utils.query_errors import QueryTimedOut
+
+    task = (
+        "1-0",
+        {
+            "query_id": "q",
+            "response_id": "r",
+            "otel": "{}",
+            "metadata": "{}",
+        },
+    )
+    await shared.handle_task_failure(
+        "aragorn.omnicorp", "consumer", task, logger, error=QueryTimedOut("late")
+    )
+
+    (entry,) = await redis_mock["broker"].xrange("finish_query")
+    assert entry[1]["status"] == "TIMEOUT"
+    assert entry[1]["description"] == "late"

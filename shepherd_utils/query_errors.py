@@ -57,6 +57,18 @@ class QueryError(Exception):
             self.status_code = valid_error_code(status_code) or DEFAULT_ERROR_CODE
 
 
+class QueryTimedOut(QueryError):
+    """The query ran out of its time budget while this operation was running.
+
+    Ends the query as ``TIMEOUT`` (504 to a sync caller), the same status as a
+    query whose budget ran out between operations, rather than as a crash.
+    """
+
+    status_code = 504
+    #: The stored status; ``task_deadline.TIMEOUT_STATUS``.
+    query_status = "TIMEOUT"
+
+
 class UnsupportedQueryError(QueryError):
     """The ARA does not implement this kind of query (TRAPI's 501)."""
 

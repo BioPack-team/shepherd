@@ -252,3 +252,17 @@ async def test_the_timeout_starts_when_the_task_gets_a_slot():
         assert await second == "second"
     finally:
         pool.shutdown()
+
+
+async def test_a_per_call_timeout_tightens_the_pools():
+    """run(..., timeout=) cuts this call short of the pool's own ceiling."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    try:
+        started = loop.time()
+        with pytest.raises(asyncio.TimeoutError):
+            await pool.run(loop, _sleep, 30, timeout=1.0)
+        assert loop.time() - started < 20
+        assert await pool.run(loop, _echo, "after") == "after"
+    finally:
+        pool.shutdown()

@@ -153,19 +153,24 @@ class ProcessPoolManager:
                 self._free.put_nowait(index)
         return self._free
 
-    async def run(self, loop, fn, *args):
+    async def run(self, loop, fn, *args, timeout: Optional[float] = None):
         """Run ``fn(*args)`` in a free slot, self-healing on breakage or
-        timeout. Waits for a slot when all are busy."""
+        timeout. Waits for a slot when all are busy.
+
+        ``timeout`` tightens the pool's ``task_timeout`` for this call (the
+        shorter of the two applies), e.g. to the time its query has left.
+        """
         free = self._free_slots()
         index = await free.get()
         try:
-            return await self._run_in_slot(index, loop, fn, *args)
+            return await self._run_in_slot(index, loop, fn, *args, timeout=timeout)
         finally:
             free.put_nowait(index)
 
-    async def _run_in_slot(self, index: int, loop, fn, *args):
+    async def _run_in_slot(self, index: int, loop, fn, *args, timeout=None):
         executor = self._slots[index]
-        timeout = self._task_timeout
+        limits = [t for t in (self._task_timeout, timeout) if t and t > 0]
+        timeout = min(limits) if limits else None
 
         if not timeout or timeout <= 0:
             try:
