@@ -271,11 +271,13 @@ async def test_the_slot_timeout_is_cut_to_the_query_budget(monkeypatch):
 
     monkeypatch.setattr(settings, "pool_task_timeout_sec", 300.0)
     pool = _Pool()
+    started = time.time()
+    deadline = f"{started + 20:.3f}"  # as stamped: rounded to the millisecond
 
-    await _process({DEADLINE_FIELD: f"{time.time() + 20:.3f}"}, pool, monkeypatch)
+    await _process({DEADLINE_FIELD: deadline}, pool, monkeypatch)
 
     (timeout,) = pool.timeouts
-    assert 15 < timeout <= 20
+    assert 15 < timeout <= float(deadline) - started
 
 
 async def test_running_out_of_the_query_budget_ends_it_as_timeout(monkeypatch):
