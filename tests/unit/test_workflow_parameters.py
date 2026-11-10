@@ -208,6 +208,7 @@ async def test_a_bad_workflow_is_a_400_on_both_routes(intake):
 async def test_a_negative_timeout_does_not_cut_the_lookup_wait_short(monkeypatch):
     """TRAPI's negative timeout means "drop the server's default", not "wait
     for nothing": the lookup must still wait for its callbacks."""
+    from shepherd_utils import lookups
     from workers.aragorn_lookup import worker
 
     query = {
@@ -220,12 +221,12 @@ async def test_a_negative_timeout_does_not_cut_the_lookup_wait_short(monkeypatch
         "parameters": {"timeout": -1},
     }
     monkeypatch.setattr(worker, "get_message", AsyncMock(return_value=query))
-    monkeypatch.setattr(worker, "add_callback_id", AsyncMock())
+    monkeypatch.setattr(lookups, "add_callback_id", AsyncMock())
     running = AsyncMock(side_effect=[["cb"], []])
-    monkeypatch.setattr(worker, "get_running_callbacks", running)
-    monkeypatch.setattr(worker, "abandon_lookup_if_data_lost", AsyncMock())
+    monkeypatch.setattr(lookups, "get_running_callbacks", running)
+    monkeypatch.setattr(lookups, "abandon_lookup_if_data_lost", AsyncMock())
     cleanup = AsyncMock()
-    monkeypatch.setattr(worker, "cleanup_callbacks", cleanup)
+    monkeypatch.setattr(lookups, "cleanup_callbacks", cleanup)
     monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
 
     class _Client:
@@ -244,7 +245,7 @@ async def test_a_negative_timeout_does_not_cut_the_lookup_wait_short(monkeypatch
 
             return _R()
 
-    monkeypatch.setattr(worker.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(lookups.httpx, "AsyncClient", _Client)
 
     await worker.aragorn_lookup(
         ("1-0", {"query_id": "q1", "response_id": "r1", "otel": "{}"}), logger

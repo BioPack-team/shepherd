@@ -14,6 +14,8 @@ from math import inf, isclose
 
 import numpy as np
 import pytest
+
+from shepherd_utils import lookups as shared_lookups
 from translator_tom.v2_0 import AsyncQuery
 
 from shepherd_utils import data_download
@@ -602,10 +604,10 @@ async def run_on_backbone(mocker, graph_dir, query, pool):
         worker, "get_message", new_callable=mocker.AsyncMock, return_value=query
     )
     add_callback = mocker.patch.object(
-        worker, "add_callback_id", new_callable=mocker.AsyncMock
+        shared_lookups, "add_callback_id", new_callable=mocker.AsyncMock
     )
     mocker.patch.object(
-        worker,
+        shared_lookups,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
