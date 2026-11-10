@@ -34,7 +34,7 @@ from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
 from shepherd_utils.trapi import (
     binding_ids,
     edge_binding_ids,
@@ -590,19 +590,14 @@ async def poll_for_tasks():
         name="aragorn.omnicorp process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, pool)
-                )
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max_workers,
+        lambda *task_args: process_task(*task_args, loop, pool),
+        on_stop=pool.shutdown,
+    )
 
 
 if __name__ == "__main__":

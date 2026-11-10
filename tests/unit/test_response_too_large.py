@@ -411,7 +411,10 @@ async def _drive_merge(mocker, pool, task_fields):
         await asyncio.wait_for(done.wait(), timeout=5)
         raise asyncio.CancelledError
 
-    mocker.patch.object(merge_worker, "get_tasks", _one_task)
+    # the shared poll loop (run_poll_loop) reads it from shared
+    from shepherd_utils import shared
+
+    mocker.patch.object(shared, "get_tasks", _one_task)
     mocker.patch.object(merge_worker, "ProcessPoolManager", lambda *a, **k: pool)
     mocker.patch.object(merge_worker, "resolve_pool_workers", lambda *a, **k: 1)
     mocker.patch.object(merge_worker, "remove_callback_id", new=mocker.AsyncMock())

@@ -37,8 +37,8 @@ from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_log
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import (
+    run_poll_loop,
     filter_kgraph_orphans,
-    get_tasks,
     lookup_wait_seconds,
     run_task_lifecycle,
 )
@@ -654,17 +654,7 @@ async def poll_for_tasks():
         name="aragorn.pathfinder process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(STREAM, GROUP, CONSUMER, TASK_LIMIT, process_task)
 
 
 if __name__ == "__main__":

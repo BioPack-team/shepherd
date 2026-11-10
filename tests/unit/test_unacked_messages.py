@@ -336,7 +336,8 @@ async def test_a_merge_setup_error_releases_the_lock_and_retries(
         ), None, logging.getLogger("shepherd.test.setup"), _Limiter()
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(merge, "get_tasks", _one_task)
+    # the shared poll loop (run_poll_loop) reads it from shared
+    monkeypatch.setattr(shared, "get_tasks", _one_task)
     monkeypatch.setattr(merge, "ProcessPoolManager", _Pool)
     poller = asyncio.create_task(merge.poll_for_tasks())
     try:

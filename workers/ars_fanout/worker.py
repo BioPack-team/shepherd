@@ -36,7 +36,7 @@ from shepherd_utils.logger import get_worker_logger, resolve_log_level
 from shepherd_utils.task_deadline import deadline_field, query_deadline
 from shepherd_utils.trapi import query_log_level
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks
+from shepherd_utils.shared import run_poll_loop
 
 STREAM = "ars.fanout"
 GROUP = "consumer"
@@ -199,17 +199,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 
 async def poll_for_tasks():
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)
+    await run_poll_loop(STREAM, GROUP, CONSUMER, TASK_LIMIT, process_task)
 
 
 if __name__ == "__main__":
