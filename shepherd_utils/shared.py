@@ -894,7 +894,9 @@ async def handle_task_failure(
     """
     failure = {"status": error_status()}
     if isinstance(error, QueryError):
-        failure["status"] = error_status(error.status_code)
+        failure["status"] = getattr(error, "query_status", None) or error_status(
+            error.status_code
+        )
         failure["description"] = error.description
     logger.error("Sending task straight to finish_query.")
     # Enqueue the wrap-up before ACKing, strictly: ACKing first and then

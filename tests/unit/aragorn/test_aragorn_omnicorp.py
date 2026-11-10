@@ -300,14 +300,13 @@ def test_omnicorp_overlay_full_path(lmdb_envs):
     assert co_occurrence_edge_ids.issubset(set(aux_edge_ids))
 
 
-def test_omnicorp_overlay_skips_overlay_above_pair_threshold(lmdb_envs, monkeypatch):
-    """Queries at/above OMNICORP_MAX_CURIE_PAIRS return without the overlay.
-
-    The message below yields 3 curie pairs; with the threshold lowered to 2,
-    the per-pair shared-count overlay is skipped and no co-occurrence edges are
-    added. (Node article counts still run before the gate and are unaffected.)
+def test_omnicorp_overlay_has_no_pair_count_cutoff(lmdb_envs, monkeypatch):
+    """There is no curie-pair threshold above which the overlay is silently
+    skipped (#220): a query gets the whole overlay, or -- when it can't finish
+    within its time budget -- fails as TIMEOUT. This message yields 3 pairs;
+    the old cap, lowered to 2, would have returned it without the overlay.
     """
-    monkeypatch.setattr(worker, "OMNICORP_MAX_CURIE_PAIRS", 2)
+    assert not hasattr(worker, "OMNICORP_MAX_CURIE_PAIRS")
 
     in_message = {
         "message": {
@@ -351,18 +350,13 @@ def test_omnicorp_overlay_skips_overlay_above_pair_threshold(lmdb_envs, monkeypa
     logger = logging.getLogger(__name__)
     out = worker.omnicorp_overlay(copy.deepcopy(in_message), logger)
 
-    # No co-occurrence edges should be added when the overlay is skipped.
     co_occurrence_edges = [
         e
         for e in out["message"]["knowledge_graph"]["edges"].values()
         if e.get("predicate") == "biolink:occurs_together_in_literature_with"
     ]
-    assert co_occurrence_edges == []
-    # And no auxiliary graphs / support graphs should be wired up. TRAPI 2.0
-    # forbids an empty auxiliary_graphs object, so it must be absent.
-    assert "auxiliary_graphs" not in out["message"]
-    assert "support_graphs" not in out["message"]["results"][0]["analyses"][0]
-    assert "logs" not in out
+    assert co_occurrence_edges
+    assert worker._already_overlaid(out["message"]["knowledge_graph"])
 
 
 def test_omnicorp_overlay_skips_zero_shared_counts(lmdb_envs):

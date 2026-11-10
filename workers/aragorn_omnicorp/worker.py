@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -33,7 +34,9 @@ from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
+from shepherd_utils.query_errors import QueryTimedOut
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.task_deadline import get_deadline
 from shepherd_utils.trapi import (
     binding_ids,
     edge_binding_ids,
@@ -55,12 +58,18 @@ LOGGER = get_worker_logger(STREAM)
 # Matches the upstream `redis_batch_size`.
 LMDB_BATCH_SIZE = 1000
 
-# Hot fix: queries with at least this many curie pairs are returned without the
-# literature co-occurrence overlay. The per-pair shared-count reads degrade into
-# disk-bound random LMDB lookups for very large queries, pushing latency from
-# seconds to 45 minutes-3 hours. Override via the env var if needed.
-OMNICORP_MAX_CURIE_PAIRS = int(os.environ.get("OMNICORP_MAX_CURIE_PAIRS", 1_000_000))
+# The overlay is all or nothing, and an overlay that can't finish fails its
+# query loudly (#220): there is no curie-pair cap that silently returns a large
+# query without literature support, and no partial overlay whose content would
+# depend on how fast the disk was. What bounds a large query is time -- the
+# shorter of the pool's task timeout and what is left of the query's budget
+# (see process_task) -- after which the query ends as TIMEOUT.
 
+
+OVERLAY_TIMEOUT_DESCRIPTION = (
+    "The literature co-occurrence overlay (omnicorp) did not finish within "
+    "the query's time budget."
+)
 
 # Both LMDBs are opened lazily on first use so importing the worker (e.g. in
 # tests) does not require the live data files. Static datasets, so we open
@@ -274,12 +283,12 @@ def generate_curie_pairs(
 
     When ``max_pairs`` is set, generation stops as soon as that many distinct
     pairs have been collected and the (capped) mapping is returned early. The
-    overlay skips queries at/above ``OMNICORP_MAX_CURIE_PAIRS`` anyway, so there
-    is no point fully materializing the mapping first: a pathological query can
-    generate many millions of pairs (the per-analysis ``combinations`` is
-    O(n**2)), and allocating all of them before the caller's size check was a
-    primary source of the worker's memory blow-up. Bailing here bounds the
-    mapping at ~``max_pairs`` entries.
+    overlay itself passes no cap (#220): a query too big to overlay in time
+    times out instead.
+
+    A binding or support graph that points at something the message doesn't
+    have raises ``ValueError``: the message is malformed, and scoring its
+    answers without that evidence would quietly return a different answer.
     """
     pair_to_answer = defaultdict(set)
 
@@ -302,23 +311,31 @@ def generate_curie_pairs(
 
             auxgraph_ids = []
             for kedge_id in relevant_kedge_ids:
-                kedge = message["knowledge_graph"]["edges"][kedge_id]
+                kedge = message["knowledge_graph"]["edges"].get(kedge_id)
+                if kedge is None:
+                    raise ValueError(
+                        f"Result {ans_idx} binds edge {kedge_id}, which is not "
+                        "in the knowledge graph"
+                    )
                 auxgraph_ids.extend(edge_support_graphs(kedge))
 
             all_relevant_edge_ids = set()
+            aux_graphs = message.get("auxiliary_graphs") or {}
             for auxgraph_id in auxgraph_ids:
-                try:
-                    all_relevant_edge_ids.update(
-                        (message.get("auxiliary_graphs") or {})[auxgraph_id]["edges"]
+                if auxgraph_id not in aux_graphs:
+                    raise ValueError(
+                        f"Support graph {auxgraph_id} of result {ans_idx} is not "
+                        "in the auxiliary graphs"
                     )
-                except KeyError:
-                    logger.warning(f"Auxgraph id not found: {auxgraph_id}")
+                all_relevant_edge_ids.update(aux_graphs[auxgraph_id]["edges"])
 
             for edge_id in all_relevant_edge_ids:
-                try:
-                    edge = message["knowledge_graph"]["edges"][edge_id]
-                except KeyError:
-                    continue
+                edge = message["knowledge_graph"]["edges"].get(edge_id)
+                if edge is None:
+                    raise ValueError(
+                        f"A support graph of result {ans_idx} uses edge "
+                        f"{edge_id}, which is not in the knowledge graph"
+                    )
 
                 new_nonset_nodes.add(edge["subject"])
                 new_nonset_nodes.add(edge["object"])
@@ -416,92 +433,74 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
 
     dt_start = datetime.now()
 
-    try:
-        start_node_time = datetime.now()
+    # No catch-all here (#220): an overlay that fails -- a malformed message,
+    # an unreadable store, a value in the wrong format -- fails the task and
+    # its query, rather than returning the answers as if the overlay had run.
+    start_node_time = datetime.now()
 
-        keys = sorted(kgraph["nodes"].keys())
-        node_pub_counts = {}
-        node_indices = {}
+    keys = sorted(kgraph["nodes"].keys())
+    node_pub_counts = {}
+    node_indices = {}
 
-        for batch in batches(keys, LMDB_BATCH_SIZE):
-            results = curie_query(batch)
-            for curie, result in results.items():
-                if len(result) == 0:
-                    continue
-                node_pub_counts[curie] = result["pmc"]
-                node_indices[curie] = int(result["index"])
+    for batch in batches(keys, LMDB_BATCH_SIZE):
+        results = curie_query(batch)
+        for curie, result in results.items():
+            if len(result) == 0:
+                continue
+            node_pub_counts[curie] = result["pmc"]
+            node_indices[curie] = int(result["index"])
 
-        add_node_pmid_counts(kgraph, node_pub_counts)
+    # Node counts are written last, with the pair counts (C6-10): they are
+    # what marks a message as overlaid (_already_overlaid), so writing
+    # them before a failure part way left a message that no retry would
+    # ever finish.
 
-        end_node_time = datetime.now()
-        logger.info(f"Node time: {end_node_time - start_node_time}")
+    end_node_time = datetime.now()
+    logger.info(f"Node time: {end_node_time - start_node_time}")
 
-        start_pair_time = datetime.now()
+    start_pair_time = datetime.now()
 
-        qgraph_setnodes = set(
-            n
-            for n in qgraph["nodes"]
-            if (qgraph["nodes"][n].get("set_interpretation", None) or "BATCH")
-            != "BATCH"
-        )
+    qgraph_setnodes = set(
+        n
+        for n in qgraph["nodes"]
+        if (qgraph["nodes"][n].get("set_interpretation", None) or "BATCH") != "BATCH"
+    )
 
-        t1 = datetime.now()
-        # Cap generation at the skip threshold: if we hit it we bail out of the
-        # overlay below anyway, so there's no reason to keep allocating pairs.
-        pair_to_answer = generate_curie_pairs(
-            answers,
-            qgraph_setnodes,
-            node_pub_counts,
-            message,
-            logger,
-            max_pairs=OMNICORP_MAX_CURIE_PAIRS,
-        )
-        t2 = datetime.now()
-        logger.info(
-            f"generate_curie_pairs time: {t2 - t1}. Number of pairs: {len(pair_to_answer)}"
-        )
+    t1 = datetime.now()
+    pair_to_answer = generate_curie_pairs(
+        answers,
+        qgraph_setnodes,
+        node_pub_counts,
+        message,
+        logger,
+    )
+    t2 = datetime.now()
+    logger.info(
+        f"generate_curie_pairs time: {t2 - t1}. Number of pairs: {len(pair_to_answer)}"
+    )
 
-        if len(pair_to_answer) >= OMNICORP_MAX_CURIE_PAIRS:
-            logger.warning(
-                f"Skipping omnicorp shared-count overlay: {len(pair_to_answer)} "
-                f"curie pairs meets/exceeds threshold {OMNICORP_MAX_CURIE_PAIRS}. "
-                "Returning message without literature co-occurrence overlay."
-            )
-            message["knowledge_graph"] = kgraph
-            message["results"] = answers
-            logger.info("Omnicorp complete. Returning.")
-            return in_message
+    keypairs = {make_key(x, node_indices): x for x in pair_to_answer.keys()}
+    inputkeys = sorted(keypairs.keys())
+    values = {}
 
-        keypairs = {make_key(x, node_indices): x for x in pair_to_answer.keys()}
-        inputkeys = sorted(keypairs.keys())
-        values = {}
+    for batch in batches(inputkeys, LMDB_BATCH_SIZE):
+        q_start = datetime.now()
+        results = shared_count_query(batch)
+        q_end = datetime.now()
+        logger.debug(f"shared_count_query batch ({len(batch)}) time: {q_end - q_start}")
 
-        for batch in batches(inputkeys, LMDB_BATCH_SIZE):
-            q_start = datetime.now()
-            results = shared_count_query(batch)
-            q_end = datetime.now()
-            logger.debug(
-                f"shared_count_query batch ({len(batch)}) time: {q_end - q_start}"
-            )
+        for input, output in results.items():
+            if output is not None:
+                values[keypairs[input]] = int(output)
 
-            for input, output in results.items():
-                if output is not None:
-                    curie_pair = keypairs[input]
-                    try:
-                        values[curie_pair] = int(output)
-                    except Exception:
-                        values[curie_pair] = 0
+    add_node_pmid_counts(kgraph, node_pub_counts)
+    add_shared_pmid_counts(message, values, pair_to_answer)
 
-        add_shared_pmid_counts(message, values, pair_to_answer)
+    end_pair_time = datetime.now()
+    logger.info(f"Pair time: {end_pair_time - start_pair_time}")
 
-        end_pair_time = datetime.now()
-        logger.info(f"Pair time: {end_pair_time - start_pair_time}")
-
-        message["knowledge_graph"] = kgraph
-        message["results"] = answers
-
-    except Exception as e:
-        logger.exception(f"Aragorn-ranker/omnicorp exception {e}")
+    message["knowledge_graph"] = kgraph
+    message["results"] = answers
 
     if debug == "True":
         diff = datetime.now() - dt_start
@@ -561,7 +560,24 @@ async def process_task(
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        await pool.run(loop, aragorn_omnicorp, response_id, logger)
+        # Hold the slot no longer than the query can still use the answer
+        # (#220): the shorter of the pool's task timeout and what is left of
+        # the query's budget. A big overlay used to hold a slot for hours on
+        # slow disk; past the budget it now ends its query as TIMEOUT.
+        timeout, budget_bound = settings.pool_task_timeout_sec, False
+        deadline = get_deadline(task[1])
+        if deadline is not None:
+            left = deadline - time.time()
+            if left <= 0:
+                raise QueryTimedOut(OVERLAY_TIMEOUT_DESCRIPTION)
+            if not timeout or left < timeout:
+                timeout, budget_bound = left, True
+        try:
+            await pool.run(loop, aragorn_omnicorp, response_id, logger, timeout=timeout)
+        except asyncio.TimeoutError:
+            if budget_bound:
+                raise QueryTimedOut(OVERLAY_TIMEOUT_DESCRIPTION) from None
+            raise
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 

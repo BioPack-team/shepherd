@@ -437,9 +437,6 @@ services:
       # Broker-wedge self-heal window (default 300s). Lower it, then
       # `docker compose stop shepherd_broker`, to see the worker exit + restart.
       # BROKER_UNHEALTHY_EXIT_SEC: "30"
-      # Force the pair overlay to run even on huge queries (default 1_000_000),
-      # so a big message does the full memory-heavy work instead of being skipped.
-      # OMNICORP_MAX_CURIE_PAIRS: "1000000000"
     platform: linux/amd64
     build:
       context: .

@@ -1,7 +1,6 @@
 """Aragorn ARA scoring module."""
 
 import asyncio
-import copy
 import json
 import logging
 import math
@@ -431,6 +430,9 @@ class Ranker:
         # These are used to find numeric values of edges
         self.node_pubs = dict()
         self.edge_values = dict()
+        # The probes depend only on the query graph: computed once per ranker
+        # rather than once per answer (#220).
+        self._probes = None
 
     def rank(self, answers, jaccard_like=False):
         """Generate a sorted list and scores for a set of subgraphs."""
@@ -478,6 +480,12 @@ class Ranker:
         return answers
 
     def probes(self):
+        """The q_node pairs scoring measures between (cached per ranker)."""
+        if self._probes is None:
+            self._probes = self._find_probes()
+        return list(self._probes)
+
+    def _find_probes(self):
 
         # Identify Probes
         #################
@@ -612,43 +620,57 @@ class Ranker:
             ]
         )
 
-        # Now go through these edges
-        # Turn each value into an edge weight
-        # Then calculate the graph laplacian
-        laplacian = np.zeros((num_nodes, num_nodes))
+        # Turn each value into an edge weight and fill the weight matrix.
+        # Only node pairs joined by a q_edge or a k_edge carry a weight, so
+        # only those are visited: the loop used to go over every node pair in
+        # Python, and indexing edge_values_mat for each one created an entry
+        # per pair -- n**2 time and memory per analysis (#220). Each pair's
+        # weight is summed exactly as before, so scores are unchanged.
+        index = {node: i for i, node in enumerate(nodes)}
         weight_mat = np.zeros((num_nodes, num_nodes))  # For debugging
+        pairs = set()
+        for sub_r_node_id, by_object in edge_values_mat.items():
+            for obj_r_node_id in by_object:
+                pairs.add((sub_r_node_id, obj_r_node_id))
+        for qnode_pair in qedge_qnode_ids:
+            members = list(qnode_pair)
+            if len(members) == 1:
+                pairs.add((members[0], members[0]))
+            else:
+                pairs.add((members[0], members[1]))
+                pairs.add((members[1], members[0]))
 
-        # for each item in the weight matrix (edge weight between i and j)
-        for i, sub_r_node_id in enumerate(nodes):
-            for j, obj_r_node_id in enumerate(nodes):
-                # If these r_nodes correspond to q_nodes and there is a q_edge
-                # between then we set a default weight for this weight
-                # Otherwise we set the default weight to 0
-                # This ensures that bound q_edges (which match to provided
-                # k_edges) get a weight
-                edge_qnode_ids = frozenset((sub_r_node_id, obj_r_node_id))
+        for sub_r_node_id, obj_r_node_id in pairs:
+            i = index.get(sub_r_node_id)
+            j = index.get(obj_r_node_id)
+            if i is None or j is None:
+                continue
+            # If these r_nodes correspond to q_nodes and there is a q_edge
+            # between then we set a default weight for this weight
+            # Otherwise we set the default weight to 0
+            # This ensures that bound q_edges (which match to provided
+            # k_edges) get a weight
+            edge_qnode_ids = frozenset((sub_r_node_id, obj_r_node_id))
 
-                weight = (
-                    self.DEFAULT_WEIGHT if edge_qnode_ids in qedge_qnode_ids else 0.0
-                )
+            weight = self.DEFAULT_WEIGHT if edge_qnode_ids in qedge_qnode_ids else 0.0
 
-                for edge_id, edge in edge_values_mat[sub_r_node_id][
-                    obj_r_node_id
-                ].items():
-                    for source, properties in edge.items():
-                        for property, values in properties.items():
-                            w = values["weight"]
+            by_object = edge_values_mat.get(sub_r_node_id)
+            edges_here = by_object.get(obj_r_node_id) if by_object else None
+            for edge_id, edge in (edges_here or {}).items():
+                for source, properties in edge.items():
+                    for property, values in properties.items():
+                        w = values["weight"]
 
-                            if w >= 1:  # > as an emergency
-                                w = 0.9999999  # 1 causes numerical issues
+                        if w >= 1:  # > as an emergency
+                            w = 0.9999999  # 1 causes numerical issues
 
-                            # -1 / np.log(source_weighted) is our mapping from
-                            # a [0,1] weight to an admittance.
-                            # These admittances just add since they are all in
-                            # parallel which is equivalent to a noisy or.
-                            weight = weight + -1 / (np.log(w))
+                        # -1 / np.log(source_weighted) is our mapping from
+                        # a [0,1] weight to an admittance.
+                        # These admittances just add since they are all in
+                        # parallel which is equivalent to a noisy or.
+                        weight = weight + -1 / (np.log(w))
 
-                weight_mat[i, j] += weight  # For debugging
+            weight_mat[i, j] += weight  # For debugging
 
         # Using weight_mat you can calculate the laplacian
         # We could do this in the loop above, but let's be explicit
@@ -680,8 +702,13 @@ class Ranker:
         return laplacian[keep, :][:, keep], probe_inds, details
 
     def get_rgraph(self, result):
-        """Get "ranker" subgraph."""
-        answer = copy.deepcopy(result)
+        """Get "ranker" subgraph.
+
+        Built from local sets and lists: the whole result used to be deep-
+        copied, per answer, only so the scratch keys below didn't land on it
+        (#220). ``result`` is read, never written.
+        """
+        answer = result
 
         # All analyses share some common r_graph nodes. We can make those now
         r_graph_shared = dict()
@@ -706,7 +733,10 @@ class Ranker:
         # Result.analyses is optional in TRAPI 2.0.
         for anal in answer.get("analyses") or []:
             # Copy this list of globally bound nodes
-            anal_kg = copy.deepcopy(result_kg_shared)
+            anal_kg = {
+                "node_ids": _copy_set(result_kg_shared["node_ids"]),
+                "edge_ids": _copy_set(result_kg_shared["edge_ids"]),
+            }
 
             # Walk and find all edges in this analysis
             for eb_id, eb in (anal.get("edge_bindings") or {}).items():
@@ -735,7 +765,7 @@ class Ranker:
             # We need to find any additional support graphs
             # We will do that with this recursive function call
             # Since results_kg uses sets, things will not get duplicated
-            current_edge_ids = copy.deepcopy(anal_kg["edge_ids"])
+            current_edge_ids = _copy_set(anal_kg["edge_ids"])
             for edge_id in current_edge_ids:
                 anal_kg = get_edge_support_kg(
                     edge_id, self.kgraph, self.agraphs, anal_kg
@@ -749,24 +779,22 @@ class Ranker:
             # To make things simpler below it is helpful if will build a
             # complete list of additional nodes and edges that have been added
             # as part of support
-            anal["support_nodes"] = copy.deepcopy(anal_kg["node_ids"])
-            anal["support_edges"] = copy.deepcopy(anal_kg["edge_ids"])
+            support_nodes = _copy_set(anal_kg["node_ids"])
+            support_edges = _copy_set(anal_kg["edge_ids"])
 
             # remove support graph edges which are already in edge bindings
             # so they are not double-counted
             for eb_id, eb in (anal.get("edge_bindings") or {}).items():
                 for e_id in binding_ids(eb):
-                    if e_id in anal["support_edges"]:
-                        anal["support_edges"].remove(e_id)
+                    support_edges.discard(e_id)
 
             # same for nodes
             for nb_id, nb in (answer.get("node_bindings") or {}).items():
                 for n_id in binding_ids(nb):
-                    if n_id in anal["support_nodes"]:
-                        anal["support_nodes"].remove(n_id)
+                    support_nodes.discard(n_id)
 
             # It is also convenient to have a list of all edges that were bound
-            anal["bound_edges"] = anal_kg["edge_ids"] - anal["support_edges"]
+            bound_edges = anal_kg["edge_ids"] - support_edges
 
             # We need to build the r_graph which is a little different than the
             # analysis graph. In the list of nodes in the analysis we need to
@@ -782,12 +810,18 @@ class Ranker:
             # up the origin k_node ids in the nodes_map
 
             # First we copy over the shared nodes
-            anal_r_graph = copy.deepcopy(r_graph_shared)
+            anal_r_graph = {
+                "nodes": _copy_set(r_graph_shared["nodes"]),
+                "nodes_map": defaultdict(
+                    list,
+                    {k: list(v) for k, v in r_graph_shared["nodes_map"].items()},
+                ),
+            }
 
             # Add in support nodes to the r_graph
             # We will make an r_graph node
             # And a mapping to that r_graph node
-            for sn in anal["support_nodes"]:
+            for sn in support_nodes:
                 r_graph_node_id = f"support_node_{sn}"
                 anal_r_graph["nodes"].add(r_graph_node_id)
                 anal_r_graph["nodes_map"][sn].append(r_graph_node_id)
@@ -797,7 +831,7 @@ class Ranker:
             # We will use a tuple for these as a sparse matrix type of thing
             # Bound edges will go between non support nodes
             anal_r_graph["edges"] = set()
-            for e_id in anal["bound_edges"] | anal["support_edges"]:
+            for e_id in bound_edges | support_edges:
                 e = self.kgraph["edges"].get(e_id)
                 if not e:
                     self.logger.warning(f"Edge {e_id} not found in knowledge graph")
@@ -1111,6 +1145,14 @@ class Ranker:
         # Cache it
         self.edge_values[edge_id] = this_edge_vals
         return this_edge_vals
+
+
+def _copy_set(items: set) -> set:
+    """A copy of ``items`` built as ``copy.deepcopy`` built it (from a list),
+    so it iterates in the same order: the r_graph's node order is the
+    Laplacian's row order, and a different one changes scores in the last
+    bit."""
+    return set(list(items))
 
 
 def kirchhoff(L, probes):
