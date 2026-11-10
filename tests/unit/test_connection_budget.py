@@ -148,13 +148,14 @@ def _compose():
 
 
 def _pg_services(compose):
-    """Every service built from this repo except the datastores themselves:
-    each one opens a Postgres pool (get_tasks / the server run initialize_db)."""
+    """Every service built from this repo except the datastores themselves and
+    the build-only base image (#223 C11-5): each one opens a Postgres pool
+    (get_tasks / the server run initialize_db)."""
     return {
         name: service
         for name, service in compose["services"].items()
         if isinstance(service.get("build"), dict)
-        and name not in ("shepherd_db", "shepherd_broker")
+        and name not in ("shepherd_db", "shepherd_broker", "shepherd_base")
     }
 
 
