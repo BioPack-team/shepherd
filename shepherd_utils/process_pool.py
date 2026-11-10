@@ -41,11 +41,14 @@ import logging
 import multiprocessing
 import os
 import signal
+import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from typing import Callable, Optional
 
 from .otel import POOL_CHILD_ENV
+from .query_errors import QueryTimedOut
+from .task_deadline import get_deadline
 
 # Grace between SIGABRT (which makes the child's faulthandler dump its stack)
 # and the SIGKILL fallback, so the traceback has time to reach stderr.
@@ -66,6 +69,10 @@ def _init_pool_worker() -> None:
         level=logging.INFO,
         format="%(asctime)s [worker %(process)d] %(levelname)s %(name)s: %(message)s",
     )
+
+
+def _budget_description(step: str) -> str:
+    return f"{step} did not finish within the query's time budget."
 
 
 def _consume_future_exception(fut) -> None:
@@ -166,6 +173,33 @@ class ProcessPoolManager:
             return await self._run_in_slot(index, loop, fn, *args, timeout=timeout)
         finally:
             free.put_nowait(index)
+
+    async def run_within_budget(self, loop, task_fields, step: str, fn, *args):
+        """``run`` bounded by the query's remaining budget as well (#245).
+
+        A slot is held no longer than the task's query can still use the
+        answer: the shorter of the pool's ``task_timeout`` and the time left to
+        the query's deadline (``task_deadline``). Running out of the query's
+        budget -- before starting or part way -- raises ``QueryTimedOut``,
+        which ends the query as TIMEOUT with a description naming ``step``.
+        Overrunning the pool's own ceiling while the query still had time
+        stays a plain ``asyncio.TimeoutError``: the task itself was too slow.
+        A task without a deadline just gets ``run``.
+        """
+        deadline = get_deadline(task_fields)
+        if deadline is None:
+            return await self.run(loop, fn, *args)
+        left = deadline - time.time()
+        if left <= 0:
+            raise QueryTimedOut(_budget_description(step))
+        ceiling = self._task_timeout
+        budget_bound = not ceiling or ceiling <= 0 or left < ceiling
+        try:
+            return await self.run(loop, fn, *args, timeout=left)
+        except asyncio.TimeoutError:
+            if budget_bound:
+                raise QueryTimedOut(_budget_description(step)) from None
+            raise
 
     async def _run_in_slot(self, index: int, loop, fn, *args, timeout=None):
         executor = self._slots[index]

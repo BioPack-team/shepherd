@@ -225,90 +225,39 @@ def test_a_failed_overlay_fails_and_leaves_the_message_retryable(lmdb):
 
 
 # --- the slot is held no longer than the query can use the answer -------------
+# (the bound itself is ProcessPoolManager.run_within_budget, tested in
+# test_process_pool.py)
 
 
-class _Pool:
-    def __init__(self, error=None):
-        self.timeouts = []
-        self.error = error
-
-    async def run(self, loop, fn, *args, timeout=None):
-        self.timeouts.append(timeout)
-        if self.error:
-            raise self.error
-
-
-async def _process(task_fields, pool, monkeypatch):
-    """Run omnicorp's process_task, returning the error it ended the task with."""
+async def test_the_overlay_runs_within_its_querys_budget(monkeypatch):
     from shepherd_utils import shared
 
-    failures = []
+    calls = []
 
-    async def _failed(stream, group, task, _logger, error=None):
-        failures.append(error)
+    class _Pool:
+        async def run_within_budget(self, loop, task_fields, step, fn, *args):
+            calls.append((task_fields, step, fn, args))
 
-    async def _wrapped(*args, **kwargs):
+    async def _noop(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(shared, "handle_task_failure", _failed)
-    monkeypatch.setattr(shared, "wrap_up_task", _wrapped)
-    monkeypatch.setattr(shared, "_guard_response_size", _wrapped)
+    monkeypatch.setattr(shared, "wrap_up_task", _noop)
+    monkeypatch.setattr(shared, "_guard_response_size", _noop)
 
     class _Limiter:
         def release(self):
             pass
 
-    task = ("1-0", {"query_id": "q", "response_id": "r", **task_fields})
+    task = ("1-0", {"query_id": "q", "response_id": "r", "query_deadline": "1"})
     await omnicorp.process_task(
-        task, None, logger, _Limiter(), asyncio.get_running_loop(), pool
-    )
-    return failures[0] if failures else None
-
-
-async def test_the_slot_timeout_is_cut_to_the_query_budget(monkeypatch):
-    from shepherd_utils.config import settings
-    from shepherd_utils.task_deadline import DEADLINE_FIELD
-
-    monkeypatch.setattr(settings, "pool_task_timeout_sec", 300.0)
-    pool = _Pool()
-    started = time.time()
-    deadline = f"{started + 20:.3f}"  # as stamped: rounded to the millisecond
-
-    await _process({DEADLINE_FIELD: deadline}, pool, monkeypatch)
-
-    (timeout,) = pool.timeouts
-    assert 15 < timeout <= float(deadline) - started
-
-
-async def test_running_out_of_the_query_budget_ends_it_as_timeout(monkeypatch):
-    """An overlay cut short by the query's budget fails it as TIMEOUT -- not a
-    crash, and never a partial overlay."""
-    from shepherd_utils.query_errors import QueryTimedOut
-    from shepherd_utils.task_deadline import DEADLINE_FIELD
-
-    pool = _Pool(error=asyncio.TimeoutError("slot timed out"))
-
-    error = await _process(
-        {DEADLINE_FIELD: f"{time.time() + 20:.3f}"}, pool, monkeypatch
+        task, None, logger, _Limiter(), asyncio.get_running_loop(), _Pool()
     )
 
-    assert isinstance(error, QueryTimedOut)
-
-
-async def test_the_pool_ceiling_still_applies_when_the_budget_is_longer(monkeypatch):
-    from shepherd_utils.config import settings
-    from shepherd_utils.task_deadline import DEADLINE_FIELD
-
-    monkeypatch.setattr(settings, "pool_task_timeout_sec", 300.0)
-    pool = _Pool(error=asyncio.TimeoutError("slot timed out"))
-
-    error = await _process(
-        {DEADLINE_FIELD: f"{time.time() + 3600:.3f}"}, pool, monkeypatch
-    )
-
-    assert pool.timeouts == [300.0]
-    # the task overran its own ceiling: an error, not the query's TIMEOUT
-    assert isinstance(error, asyncio.TimeoutError)
+    ((task_fields, step, fn, args),) = calls
+    assert task_fields is task[1]
+    assert "omnicorp" in step
+    assert fn is omnicorp.aragorn_omnicorp
+    assert args[0] == "r"
 
 
 async def test_a_query_timeout_is_stored_as_timeout(redis_mock):

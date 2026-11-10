@@ -34,9 +34,7 @@ from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.query_errors import QueryTimedOut
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
-from shepherd_utils.task_deadline import get_deadline
 from shepherd_utils.trapi import (
     binding_ids,
     edge_binding_ids,
@@ -66,10 +64,8 @@ LMDB_BATCH_SIZE = 1000
 # (see process_task) -- after which the query ends as TIMEOUT.
 
 
-OVERLAY_TIMEOUT_DESCRIPTION = (
-    "The literature co-occurrence overlay (omnicorp) did not finish within "
-    "the query's time budget."
-)
+#: How a query that ran out of time here is told which step it was.
+OVERLAY_STEP = "The literature co-occurrence overlay (omnicorp)"
 
 # Both LMDBs are opened lazily on first use so importing the worker (e.g. in
 # tests) does not require the live data files. Static datasets, so we open
@@ -560,24 +556,11 @@ async def process_task(
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        # Hold the slot no longer than the query can still use the answer
-        # (#220): the shorter of the pool's task timeout and what is left of
-        # the query's budget. A big overlay used to hold a slot for hours on
-        # slow disk; past the budget it now ends its query as TIMEOUT.
-        timeout, budget_bound = settings.pool_task_timeout_sec, False
-        deadline = get_deadline(task[1])
-        if deadline is not None:
-            left = deadline - time.time()
-            if left <= 0:
-                raise QueryTimedOut(OVERLAY_TIMEOUT_DESCRIPTION)
-            if not timeout or left < timeout:
-                timeout, budget_bound = left, True
-        try:
-            await pool.run(loop, aragorn_omnicorp, response_id, logger, timeout=timeout)
-        except asyncio.TimeoutError:
-            if budget_bound:
-                raise QueryTimedOut(OVERLAY_TIMEOUT_DESCRIPTION) from None
-            raise
+        # Held no longer than the query can still use the answer (#220,
+        # #245): past the query's budget it ends as TIMEOUT.
+        await pool.run_within_budget(
+            loop, task[1], OVERLAY_STEP, aragorn_omnicorp, response_id, logger
+        )
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 

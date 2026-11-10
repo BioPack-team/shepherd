@@ -665,7 +665,10 @@ async def arax(task, logger: logging.Logger, loop=None, pool=None):
     if pool is None:
         summary = await loop.run_in_executor(None, arax_query_task, *args)
     else:
-        summary = await pool.run(loop, arax_query_task, *args)
+        # Held no longer than the query can use the answer (#245).
+        summary = await pool.run_within_budget(
+            loop, task[1], "ARAX", arax_query_task, *args
+        )
     http_status = summary["http_status"]
     span.set_attribute("arax.status_code", http_status)
     if summary.get("n_results") is not None:

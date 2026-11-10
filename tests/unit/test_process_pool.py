@@ -10,6 +10,7 @@ deadlock the worker.
 
 import asyncio
 import os
+import time
 
 from concurrent.futures.process import BrokenProcessPool
 
@@ -264,5 +265,72 @@ async def test_a_per_call_timeout_tightens_the_pools():
             await pool.run(loop, _sleep, 30, timeout=1.0)
         assert loop.time() - started < 20
         assert await pool.run(loop, _echo, "after") == "after"
+    finally:
+        pool.shutdown()
+
+
+# --- run_within_budget (#245) ------------------------------------------------
+
+
+def _fields(seconds_left):
+    from shepherd_utils.task_deadline import DEADLINE_FIELD
+
+    return {DEADLINE_FIELD: f"{time.time() + seconds_left:.3f}"}
+
+
+async def test_a_query_budget_shorter_than_the_pool_timeout_bounds_the_task():
+    """The task is cut off when its query's budget runs out and the query is
+    told so (TIMEOUT, naming the step), not held for the pool's full ceiling."""
+    from shepherd_utils.query_errors import QueryTimedOut
+
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    try:
+        started = loop.time()
+        with pytest.raises(QueryTimedOut) as raised:
+            await pool.run_within_budget(loop, _fields(1.0), "Test step", _sleep, 30)
+        assert loop.time() - started < 20
+        assert raised.value.query_status == "TIMEOUT"
+        assert raised.value.description.startswith("Test step")
+        # the slot was rebuilt and works
+        assert await pool.run(loop, _echo, "after") == "after"
+    finally:
+        pool.shutdown()
+
+
+async def test_the_pool_timeout_still_applies_when_the_budget_is_longer():
+    """A task slower than the pool's ceiling while its query still has time is
+    the task's failure, not the query's TIMEOUT."""
+    from shepherd_utils.query_errors import QueryTimedOut
+
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=1.0)
+    try:
+        with pytest.raises(asyncio.TimeoutError) as raised:
+            await pool.run_within_budget(loop, _fields(3600), "Test step", _sleep, 30)
+        assert not isinstance(raised.value, QueryTimedOut)
+    finally:
+        pool.shutdown()
+
+
+async def test_a_query_already_out_of_budget_is_not_started(mocker):
+    from shepherd_utils.query_errors import QueryTimedOut
+
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    run = mocker.spy(pool, "run")
+    try:
+        with pytest.raises(QueryTimedOut):
+            await pool.run_within_budget(loop, _fields(-1), "Test step", _echo, "x")
+        run.assert_not_called()
+    finally:
+        pool.shutdown()
+
+
+async def test_a_task_without_a_deadline_just_runs():
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    try:
+        assert await pool.run_within_budget(loop, {}, "Test step", _echo, "x") == "x"
     finally:
         pool.shutdown()
