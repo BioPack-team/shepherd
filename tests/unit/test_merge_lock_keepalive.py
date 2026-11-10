@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from shepherd_utils import shared
+
 from shepherd_utils import db
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,8 @@ async def _run_one_merge_task(merge, response_id, callback_id, pool_cls, done):
         yield task, None, logging.getLogger("shepherd.test.lock"), _Limiter()
         await asyncio.sleep(3600)
 
-    merge.get_tasks = _one_task
+    # the shared poll loop (run_poll_loop) reads it from shared
+    shared.get_tasks = _one_task
     merge.ProcessPoolManager = pool_cls
     poller = asyncio.create_task(merge.poll_for_tasks())
     try:
@@ -87,7 +90,7 @@ def merge_env(redis_mock, monkeypatch):
     monkeypatch.setattr(merge, "remove_lock", _remove_lock)
     monkeypatch.setattr(merge, "remove_callback_id", AsyncMock())
     monkeypatch.setattr(merge, "resolve_pool_workers", lambda limit, lg: 1)
-    monkeypatch.setattr(merge, "get_tasks", merge.get_tasks)
+    monkeypatch.setattr(shared, "get_tasks", shared.get_tasks)
     monkeypatch.setattr(merge, "ProcessPoolManager", merge.ProcessPoolManager)
     return merge, _setup
 

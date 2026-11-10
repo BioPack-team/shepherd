@@ -6,8 +6,10 @@ Two invariants, both learned the hard way, both pinned statically here.
 awaited ``process_task`` inline inside their ``poll_for_tasks`` ``async for``
 body, which serialized every task through their ProcessPoolExecutor (only one
 task ever ran at a time -- the same bug fixed in ``merge_message``). The
-corrected code dispatches each task with ``asyncio.create_task(process_task
-(...))``, matching the ``filter_results_top_n`` template.
+corrected code dispatches each task concurrently; since #223 (C5-4) that is
+the shared ``shepherd_utils.shared.run_poll_loop``, which every worker calls
+(its concurrency, cancellation and task references are tested in
+``test_poll_loop.py``).
 
 **Offload to a process pool, not a thread pool.** These workers' hot loops are
 mostly pure Python, so in a ``ThreadPoolExecutor`` they hold the GIL and starve
@@ -18,10 +20,8 @@ the pod outright. ``arax_pathfinder`` hit exactly this on ``asyncio.to_thread``
 and ``score_paths`` on a ``ThreadPoolExecutor``; both now use
 ``ProcessPoolManager``, which also brings the OOM self-heal and per-task timeout.
 
-``poll_for_tasks`` is an unbounded ``while True`` loop whose ``CancelledError``
-handler intentionally does not return (the shared worker template), so it can't
-be run to completion in a unit test; and these workers aren't importable outside
-their containers. So both invariants are pinned on the worker sources instead.
+These workers aren't importable outside their containers, so both invariants
+are pinned on the worker sources instead.
 """
 
 from pathlib import Path
@@ -54,10 +54,11 @@ def _poll_for_tasks_source(worker_file: str) -> str:
 def test_poll_for_tasks_dispatches_concurrently(worker_file):
     src = _poll_for_tasks_source(worker_file)
 
-    # Correct pattern: dispatch each task concurrently.
-    assert "asyncio.create_task(" in src, (
-        f"{worker_file}: poll_for_tasks must dispatch tasks with "
-        "asyncio.create_task(process_task(...)); found no create_task."
+    # Correct pattern: dispatch through the shared loop, which runs each task
+    # concurrently.
+    assert "run_poll_loop(" in src, (
+        f"{worker_file}: poll_for_tasks must dispatch tasks through "
+        "shared.run_poll_loop; found no run_poll_loop call."
     )
     # Serial bug shape: awaiting process_task inline in the loop body.
     assert "await process_task(" not in src, (
