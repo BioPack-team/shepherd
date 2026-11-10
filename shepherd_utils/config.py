@@ -118,6 +118,22 @@ class Settings(BaseSettings):
     # monitor's pg_connection_saturation threshold.
     postgres_pool_min_size: int = 2
     postgres_pool_max_size: int = 10
+    # Fleet connection budget (#223 C11-3). Hand-set per-process max sizes
+    # only add up while someone redoes the arithmetic above: scale a
+    # deployment's replicas and the fleet's ceiling walks past
+    # max_connections. With a budget set, each process instead takes
+    #     max size = budget x pool_shares / fleet_shares
+    # where ``postgres_pool_shares`` is this process's weight (the lookup
+    # workers and each server process take more) and ``postgres_fleet_shares``
+    # is the sum of every process's shares, replicas and server processes
+    # included. The deployment recomputes fleet_shares when it scales, and
+    # every pool shrinks to keep the fleet inside the budget. Keep the budget
+    # below max_connections minus superuser_reserved_connections, with room
+    # for the monitor, migrations and an operator's psql. 0 (the default)
+    # keeps the explicit postgres_pool_max_size.
+    postgres_connection_budget: int = 0
+    postgres_fleet_shares: int = 0
+    postgres_pool_shares: int = 1
     # Size of the Postgres data volume, set from the SAME Helm value that sizes
     # the PVC (e.g. "100Gi"). Lets the monitor compute how full the disk is and
     # alert before it fills. Empty disables the db-capacity alert.

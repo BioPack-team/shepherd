@@ -115,6 +115,20 @@ class Rule:
             v = snapshot["postgres"].get("connection_count", 0)
             if self.threshold is not None and v > self.threshold:
                 return f"pg connections {v} > {self.threshold}"
+        elif self.metric == "pg_connection_pct":
+            # Client backends as a percentage of what Postgres accepts, so the
+            # rule tracks max_connections instead of a hand-counted fleet.
+            pg = snapshot["postgres"]
+            usable = pg.get("usable_connections") or 0
+            if usable <= 0 or self.threshold is None:
+                return None
+            used = pg.get("client_connections", 0)
+            pct = 100.0 * used / usable
+            if pct > self.threshold:
+                return (
+                    f"pg connections {used}/{usable} ({pct:.0f}%) > "
+                    f"{self.threshold:g}% of max_connections"
+                )
         return None
 
     def _eval_payload_store_capacity(self, snapshot: Dict[str, Any]) -> Optional[str]:

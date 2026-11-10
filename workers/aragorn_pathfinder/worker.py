@@ -21,6 +21,7 @@ from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_search_graph
 from shepherd_utils.db import (
+    POOL_MAX_SIZE,
     new_id,
     abandon_lookup_if_data_lost,
     add_callback_id,
@@ -61,7 +62,7 @@ SEARCH_BUDGET_SEC = 5.0
 MIDDLE_CHUNK = 4096
 # Each lookup holds a Postgres connection while it registers its callback; half
 # the pool leaves the rest for the callback wait and the other queries.
-MAX_LOOKUPS_IN_FLIGHT = max(1, settings.postgres_pool_max_size // 2)
+MAX_LOOKUPS_IN_FLIGHT = max(1, POOL_MAX_SIZE // 2)
 SOURCE = "infores:shepherd-aragorn"
 ONTOLOGY_PREDICATES = {"biolink:subclass_of", "biolink:superclass_of"}
 

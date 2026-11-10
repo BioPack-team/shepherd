@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import orjson
 import redis
@@ -97,11 +97,38 @@ async def check_connection(conn):
     await conn.execute("SELECT 1")
 
 
+def pool_sizes(config=settings) -> Tuple[int, int]:
+    """This process's (min, max) Postgres pool size.
+
+    With a fleet connection budget (#223 C11-3) the max is this process's
+    share of it, ``budget x pool_shares // fleet_shares`` (at least 1), and
+    the min is capped at that max. Otherwise the explicit sizes.
+    """
+    budget = config.postgres_connection_budget
+    fleet = config.postgres_fleet_shares
+    if budget <= 0:
+        return config.postgres_pool_min_size, config.postgres_pool_max_size
+    if fleet <= 0:
+        raise ValueError(
+            "POSTGRES_CONNECTION_BUDGET is set but POSTGRES_FLEET_SHARES is not: "
+            "the budget can't be divided without the fleet's total shares"
+        )
+    if config.postgres_pool_shares > fleet:
+        raise ValueError(
+            f"POSTGRES_POOL_SHARES ({config.postgres_pool_shares}) exceeds "
+            f"POSTGRES_FLEET_SHARES ({fleet})"
+        )
+    max_size = max(1, budget * config.postgres_pool_shares // fleet)
+    return min(config.postgres_pool_min_size, max_size), max_size
+
+
+POOL_MIN_SIZE, POOL_MAX_SIZE = pool_sizes()
+
 pool = AsyncConnectionPool(
     conninfo=CONNINFO,
     timeout=settings.postgres_pool_timeout,
-    min_size=settings.postgres_pool_min_size,
-    max_size=settings.postgres_pool_max_size,
+    min_size=POOL_MIN_SIZE,
+    max_size=POOL_MAX_SIZE,
     max_idle=300,
     max_lifetime=3600,
     check=check_connection,
@@ -530,9 +557,45 @@ async def apply_schema_upgrades() -> None:
         await conn.commit()
 
 
+async def check_connection_budget() -> None:
+    """Log loudly when the fleet budget can't fit the server (#223 C11-3).
+
+    A budget over what Postgres accepts means the fleet can still exhaust
+    max_connections, which is the failure the budget exists to prevent.
+    """
+    logger = logging.getLogger("shepherd.db")
+    budget = settings.postgres_connection_budget
+    if budget <= 0:
+        return
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute(
+                "SELECT current_setting('max_connections')::int, "
+                "current_setting('superuser_reserved_connections')::int"
+            )
+            max_connections, reserved = await cur.fetchone()
+    except Exception as e:
+        logger.warning(f"Could not check the Postgres connection budget: {e}")
+        return
+    usable = max_connections - reserved
+    if budget > usable:
+        logger.error(
+            f"POSTGRES_CONNECTION_BUDGET ({budget}) exceeds what Postgres "
+            f"accepts ({max_connections} max_connections - {reserved} reserved "
+            f"= {usable}); the fleet can still run it out of connections"
+        )
+    else:
+        logger.info(
+            f"Postgres pool {POOL_MIN_SIZE}-{POOL_MAX_SIZE}: "
+            f"{settings.postgres_pool_shares}/{settings.postgres_fleet_shares} "
+            f"of a {budget}-connection budget ({usable} usable)"
+        )
+
+
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
+    await check_connection_budget()
     for attempt in range(PG_RETRIES):
         try:
             await apply_schema_upgrades()

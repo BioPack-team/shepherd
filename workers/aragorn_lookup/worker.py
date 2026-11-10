@@ -17,6 +17,7 @@ from opentelemetry.propagate import inject
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    POOL_MAX_SIZE,
     new_id,
     abandon_lookup_if_data_lost,
     add_callback_id,
@@ -155,7 +156,7 @@ async def run_async_lookup(
 # lookups, each inserting its callback row, and a pod runs up to 100 tasks:
 # unbounded, that was thousands of concurrent inserts against a connection
 # pool of a few. aragorn_pathfinder bounds its own lookups the same way.
-MAX_LOOKUPS_IN_FLIGHT = max(1, settings.postgres_pool_max_size // 2)
+MAX_LOOKUPS_IN_FLIGHT = max(1, POOL_MAX_SIZE // 2)
 _lookup_slots: "asyncio.Semaphore | None" = None
 
 
