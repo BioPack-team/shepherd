@@ -1,42 +1,28 @@
-# Use RENCI python base image
-FROM ghcr.io/translatorsri/renci-python-image:3.12.13
+# Built on the shared base (shepherd_base/Dockerfile): the Python image,
+# runtime settings and Shepherd's dependencies. Layers run from least to most
+# often changed, so a Shepherd code change rebuilds only the last few.
+FROM shepherd_base
 
-# Add image info
-LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
-
-ENV PYTHONHASHSEED=0
-
-# Release version (git tag), injected by .github/workflows/release.yml.
-# Reported in the worker heartbeat so the monitor can show which image
-# version each replica runs. Local builds default to "dev".
-ARG SHEPHERD_VERSION=dev
-ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
-# Enable faulthandler from interpreter startup so a SIGABRT dumps every thread's
-# traceback -- including during a spawned pool child's import phase, before the
-# pool initializer's faulthandler.enable() would run. Lets ProcessPoolManager's
-# SIGABRT-on-timeout capture a stuck child's stack even if it hangs in startup.
-ENV PYTHONFAULTHANDLER=1
-
-# set up requirements
-WORKDIR /app
-
-# make sure all is writeable for the nru USER later on
-RUN chmod -R 777 .
-
-# Install requirements
-COPY ./shepherd_utils ./shepherd_utils
-COPY ./pyproject.toml .
-RUN pip install .
+LABEL org.opencontainers.image.source=https://github.com/BioPack-team/shepherd
 
 COPY ./workers/arax_rank/requirements.txt .
 RUN pip install -r requirements.txt
 
-# switch to the non-root user (nru). defined in the base image
+# Shepherd's code; its dependencies are in the base already
+COPY ./pyproject.toml .
+COPY ./shepherd_utils ./shepherd_utils
+RUN pip install --no-deps .
+
+COPY ./workers/arax_rank .
+
+# Release version (git tag), injected by .github/workflows/release.yml.
+# Reported in the worker heartbeat so the monitor can show which image
+# version each replica runs. Local builds default to "dev". Declared last so
+# a new version doesn't invalidate the layers above.
+ARG SHEPHERD_VERSION=dev
+ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
+
+# the non-root user, defined in the RENCI base image
 USER nru
 
-# Copy in files
-COPY ./workers/arax_rank ./
-
-# Variables that can be overriden
 CMD ["python", "worker.py"]
-

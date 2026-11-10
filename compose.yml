@@ -21,6 +21,18 @@
 # compose.override.yml (`cpus: 0` / `mem_limit: 0` means unlimited).
 
 services:
+  # The shared base image (shepherd_base/Dockerfile) every Shepherd image is
+  # built on, through `additional_contexts` -- compose builds it first. It is
+  # never run: the `base` profile keeps it out of `up`.
+  shepherd_base:
+    image: shepherd_base
+    build:
+      context: .
+      dockerfile: shepherd_base/Dockerfile
+      args:
+        PYTHON_IMAGE: ${SHEPHERD_PYTHON_IMAGE:-ghcr.io/translatorsri/renci-python-image:3.12.13}
+    profiles: [base]
+
   shepherd_server:
     container_name: shepherd_server
     cpus: 3
@@ -51,6 +63,8 @@ services:
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -147,6 +161,8 @@ services:
     build:
       context: .
       dockerfile: workers/monitor/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -180,6 +196,8 @@ services:
     build:
       context: .
       dockerfile: workers/merge_message/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -198,6 +216,8 @@ services:
     build:
       context: .
       dockerfile: workers/sort_results_score/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -215,6 +235,8 @@ services:
     build:
       context: .
       dockerfile: workers/filter_results_top_n/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -232,6 +254,8 @@ services:
     build:
       context: .
       dockerfile: workers/filter_kgraph_orphans/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -250,6 +274,8 @@ services:
     build:
       context: .
       dockerfile: workers/finish_query/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
       CALLBACK_ALLOWED_HOSTS: *callback_allowed_hosts
@@ -268,6 +294,8 @@ services:
     build:
       context: .
       dockerfile: workers/filter_analyses_top_n/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -284,6 +312,8 @@ services:
     build:
       context: .
       dockerfile: workers/score_paths/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -306,6 +336,8 @@ services:
     build:
       context: .
       dockerfile: workers/example_ara/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -321,6 +353,8 @@ services:
     build:
       context: .
       dockerfile: workers/example_lookup/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -336,6 +370,8 @@ services:
     build:
       context: .
       dockerfile: workers/example_score/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -356,6 +392,8 @@ services:
     build:
       context: .
       dockerfile: workers/aragorn/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -373,6 +411,8 @@ services:
     build:
       context: .
       dockerfile: workers/aragorn_lookup/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
       # Lookup fan-out issues far more concurrent DB ops than the default
@@ -399,6 +439,8 @@ services:
     build:
       context: .
       dockerfile: workers/aragorn_pathfinder/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -441,6 +483,8 @@ services:
     build:
       context: .
       dockerfile: workers/aragorn_omnicorp/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -463,6 +507,8 @@ services:
     build:
       context: .
       dockerfile: workers/aragorn_score/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -490,6 +536,8 @@ services:
     build:
       context: .
       dockerfile: workers/arax/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -513,6 +561,8 @@ services:
     build:
       context: .
       dockerfile: workers/arax_pathfinder/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -540,6 +590,8 @@ services:
     build:
       context: .
       dockerfile: workers/arax_rank/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -559,6 +611,8 @@ services:
     build:
       context: .
       dockerfile: workers/bte/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -577,6 +631,8 @@ services:
     build:
       context: .
       dockerfile: workers/bte_lookup/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
       # same lookup fan-out profile as aragorn_lookup (see its note)
@@ -601,6 +657,8 @@ services:
     build:
       context: .
       dockerfile: workers/sipr/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -623,6 +681,8 @@ services:
     build:
       context: .
       dockerfile: workers/ars_fanout/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
       ARS_PAYLOAD_DIR: /app/ars_payloads
@@ -644,6 +704,8 @@ services:
     build:
       context: .
       dockerfile: workers/ars_premerge/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
       ARS_PAYLOAD_DIR: /app/ars_payloads
@@ -665,6 +727,8 @@ services:
     build:
       context: .
       dockerfile: workers/ars_merge/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
       ARS_PAYLOAD_DIR: /app/ars_payloads
@@ -686,6 +750,8 @@ services:
     build:
       context: .
       dockerfile: workers/ars_watchdog/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
       ARS_PAYLOAD_DIR: /app/ars_payloads
@@ -707,6 +773,8 @@ services:
     build:
       context: .
       dockerfile: workers/ars_notify/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
