@@ -7,7 +7,6 @@ import os
 import time
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 from itertools import pairwise
 from math import isfinite
 from pathlib import Path
@@ -15,24 +14,17 @@ from typing import Optional
 
 import httpx
 import numpy as np
-from opentelemetry.propagate import inject
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_search_graph
 from shepherd_utils.db import (
-    new_id,
-    abandon_lookup_if_data_lost,
-    add_callback_id,
-    cleanup_callbacks,
     get_message,
     get_message_sync,
-    get_running_callbacks,
-    remove_callback_id,
     save_response,
     save_response_sync,
-    wait_for_lookups,
 )
+from shepherd_utils.lookups import submit_lookups, wait_for_callbacks
 from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -59,9 +51,6 @@ SEARCH_GRAPH_DIR = settings.pathfinder_search_graph_dir
 MAX_PATHS = 12000
 SEARCH_BUDGET_SEC = 5.0
 MIDDLE_CHUNK = 4096
-# Each lookup holds a Postgres connection while it registers its callback; half
-# the pool leaves the rest for the callback wait and the other queries.
-MAX_LOOKUPS_IN_FLIGHT = max(1, settings.postgres_pool_max_size // 2)
 SOURCE = "infores:shepherd-aragorn"
 ONTOLOGY_PREDICATES = {"biolink:subclass_of", "biolink:superclass_of"}
 
@@ -71,18 +60,6 @@ NODE_INDEX: dict[str, int] = {}
 POOL: Optional[ProcessPoolManager] = None
 # Per-child CSR, memory-mapped on first use so the pool children share one copy.
 _search_graphs: dict = {}
-
-
-@dataclass
-class AsyncResponse:
-    status_code: int
-    success: bool
-    callback_id: str
-    error: Optional[str] = None
-    # True when the submission was sent but we never heard the ACK. The
-    # retrieval service may well be running the lookup and will POST the
-    # callback later, so the callback id must be kept.
-    in_flight: bool = False
 
 
 def load_search_graph(graph_dir: str):
@@ -278,109 +255,6 @@ def edge_lookups(node_paths, source, target, parameters):
         pairs = [list(hop) for hop in sorted(hops)]
         lookups.append(one_hop(near, far, {**parameters, "pairs": pairs}, False))
     return lookups
-
-
-async def run_async_lookup(
-    client: httpx.AsyncClient,
-    message: dict,
-    query_id: str,
-    logger: logging.Logger,
-) -> AsyncResponse:
-    """Return an async lookup response with callback id."""
-    callback_id = new_id()
-    with tracer.start_as_current_span("aragorn.pathfinder.lookup") as span:
-        span.set_attribute("callback.id", callback_id)
-        lookup_carrier = {}
-        inject(lookup_carrier)
-        await add_callback_id(query_id, callback_id, json.dumps(lookup_carrier), logger)
-
-        message["callback"] = f"{settings.callback_host}/aragorn/callback/{callback_id}"
-        logger.debug(
-            f"[{callback_id}] Sending edge lookup to {settings.kg_retrieval_url}"
-        )
-        try:
-            response = await client.post(settings.kg_retrieval_url, json=message)
-            return AsyncResponse(
-                status_code=response.status_code,
-                success=response.status_code == 200,
-                callback_id=callback_id,
-            )
-        except httpx.ReadTimeout as e:
-            span.record_exception(e)
-            return AsyncResponse(
-                status_code=500,
-                success=False,
-                callback_id=callback_id,
-                error=f"{type(e).__name__}: no ACK within {client.timeout.read}s",
-                in_flight=True,
-            )
-        except Exception as e:
-            span.record_exception(e)
-            return AsyncResponse(
-                status_code=500,
-                success=False,
-                callback_id=callback_id,
-                error=f"{type(e).__name__}: {e}",
-            )
-
-
-async def send_lookups(lookups, query_id, logger: logging.Logger):
-    """Send the lookups, ``MAX_LOOKUPS_IN_FLIGHT`` at a time, dropping the
-    callbacks of any that failed."""
-    in_flight = asyncio.Semaphore(MAX_LOOKUPS_IN_FLIGHT)
-
-    async def send(client, lookup):
-        async with in_flight:
-            return await run_async_lookup(client, lookup, query_id, logger)
-
-    async with httpx.AsyncClient(
-        timeout=settings.kg_retrieval_submit_timeout
-    ) as client:
-        responses = await asyncio.gather(
-            *(send(client, lookup) for lookup in lookups),
-            return_exceptions=True,
-        )
-    for response in responses:
-        if isinstance(response, Exception):
-            logger.error(
-                f"Failed to do lookup and unable to remove callback id: {response}"
-            )
-        elif not response.success:
-            if response.in_flight:
-                logger.warning(
-                    f"[{response.callback_id}] Lookup submitted but not "
-                    f"acknowledged, waiting for its callback anyway: {response.error}"
-                )
-                continue
-            logger.error(
-                f"[{response.callback_id}] Failed to do lookup, removing callback "
-                f"id: {response.error}"
-            )
-            await remove_callback_id(response.callback_id, logger)
-
-
-async def wait_for_callbacks(
-    query_id, response_id, max_query_time, logger: logging.Logger
-):
-    """Wait until every lookup's callback is merged, or the query times out."""
-    try:
-        running_callback_ids = await wait_for_lookups(
-            query_id,
-            response_id,
-            max_query_time,
-            logger,
-            get_running_callbacks,
-            abandon_lookup_if_data_lost,
-        )
-
-        if running_callback_ids:
-            logger.warning(
-                f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
-            )
-            logger.warning(f"Running callbacks: {running_callback_ids}")
-            await cleanup_callbacks(query_id, logger)
-    except asyncio.CancelledError:
-        logger.warning("Cancelled while waiting for callbacks")
 
 
 def build_paths(message, plan, logger: logging.Logger):
@@ -585,7 +459,14 @@ async def shadowfax(task, logger: logging.Logger) -> str:
 
     lookups = edge_lookups(node_paths, source, target, lookup_parameters)
     logger.info(f"Sending {len(lookups)} edge lookups to {settings.kg_retrieval_url}")
-    await send_lookups(lookups, query_id, logger)
+    await submit_lookups(
+        lookups,
+        query_id,
+        "aragorn",
+        logger,
+        span_name="aragorn.pathfinder.lookup",
+        log_level=logging.DEBUG,
+    )
     await wait_for_callbacks(
         query_id, response_id, lookup_wait_seconds(parameters), logger
     )

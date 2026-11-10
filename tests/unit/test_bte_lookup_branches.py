@@ -22,12 +22,16 @@ import pytest
 from shepherd_utils import shared
 from shepherd_utils.db import save_message
 from workers.bte_lookup import worker as btel
-from workers.bte_lookup.worker import (
-    AsyncResponse,
-    bte_lookup,
-    process_task,
-    run_async_lookup,
-)
+from shepherd_utils import lookups as lk
+from shepherd_utils.lookups import AsyncResponse
+from shepherd_utils.query_errors import QueryError
+from workers.bte_lookup.worker import bte_lookup, process_task
+
+
+async def run_async_lookup(client, message, query_id, logger):
+    # moved to shepherd_utils.lookups (#223 C9-5); bte's callback route
+    return await lk.run_async_lookup(client, message, query_id, "bte", logger)
+
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +61,7 @@ async def _store_query_data():
 
 @pytest.mark.asyncio
 async def test_run_async_lookup_returns_success_on_200(redis_mock, mocker):
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     fake_response = mocker.Mock()
     fake_response.status_code = 200
@@ -73,7 +77,7 @@ async def test_run_async_lookup_returns_success_on_200(redis_mock, mocker):
 
 @pytest.mark.asyncio
 async def test_run_async_lookup_returns_failure_on_non_200(redis_mock, mocker):
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     fake_response = mocker.Mock()
     fake_response.status_code = 500
@@ -89,7 +93,7 @@ async def test_run_async_lookup_returns_failure_on_non_200(redis_mock, mocker):
 async def test_run_async_lookup_returns_500_when_post_raises(redis_mock, mocker):
     """A network exception is caught and surfaced as a 500 ``AsyncResponse``
     with the error string populated."""
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     client = mocker.Mock()
     client.post = mocker.AsyncMock(side_effect=httpx.ConnectError("boom"))
@@ -105,7 +109,7 @@ async def test_run_async_lookup_returns_500_when_post_raises(redis_mock, mocker)
 async def test_run_async_lookup_read_timeout_is_in_flight(redis_mock, mocker):
     """A read timeout means the submission was sent but not ACKed: the service
     may still deliver the callback, so the response is flagged in_flight."""
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     client = mocker.Mock()
     client.timeout.read = 100.0
@@ -122,7 +126,7 @@ async def test_run_async_lookup_read_timeout_is_in_flight(redis_mock, mocker):
 @pytest.mark.asyncio
 async def test_run_async_lookup_connect_timeout_is_not_in_flight(redis_mock, mocker):
     """A connect timeout never reached the service, so nothing is coming back."""
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     client = mocker.Mock()
     client.post = mocker.AsyncMock(side_effect=httpx.ConnectTimeout(""))
@@ -137,7 +141,7 @@ async def test_run_async_lookup_connect_timeout_is_not_in_flight(redis_mock, moc
 async def test_run_async_lookup_writes_callback_url_into_message(redis_mock, mocker):
     """The function mutates the supplied message to include a callback URL
     routed back to the BTE callback endpoint."""
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     fake_response = mocker.Mock()
     fake_response.status_code = 200
@@ -188,13 +192,13 @@ async def test_bte_lookup_inferred_fans_out_via_expand_bte_query(redis_mock, moc
     ]
     mocker.patch.object(btel, "expand_bte_query", return_value=expanded)
     mock_run = mocker.patch.object(
-        btel,
+        lk,
         "run_async_lookup",
         new_callable=mocker.AsyncMock,
         return_value=AsyncResponse(status_code=200, success=True, callback_id="cb-1"),
     )
     mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
@@ -241,7 +245,7 @@ async def test_bte_lookup_inferred_removes_failed_callback_ids(redis_mock, mocke
         ],
     )
     mocker.patch.object(
-        btel,
+        lk,
         "run_async_lookup",
         new_callable=mocker.AsyncMock,
         return_value=AsyncResponse(
@@ -249,15 +253,19 @@ async def test_bte_lookup_inferred_removes_failed_callback_ids(redis_mock, mocke
         ),
     )
     mock_remove = mocker.patch.object(
-        btel, "remove_callback_id", new_callable=mocker.AsyncMock
+        lk, "remove_callback_id", new_callable=mocker.AsyncMock
     )
     mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
-    await bte_lookup(_make_task(), logger)
+    # the only lookup was rejected: the query fails (502) rather than
+    # waiting on nothing and reporting an empty answer
+    with pytest.raises(QueryError, match="All 1 lookup") as e:
+        await bte_lookup(_make_task(), logger)
+    assert e.value.status_code == 502
     mock_remove.assert_awaited_once_with("failed-cb", logger)
 
 
@@ -300,7 +308,7 @@ async def test_bte_lookup_inferred_keeps_in_flight_callback_ids(redis_mock, mock
         ],
     )
     mocker.patch.object(
-        btel,
+        lk,
         "run_async_lookup",
         new_callable=mocker.AsyncMock,
         side_effect=[
@@ -317,10 +325,10 @@ async def test_bte_lookup_inferred_keeps_in_flight_callback_ids(redis_mock, mock
         ],
     )
     mock_remove = mocker.patch.object(
-        btel, "remove_callback_id", new_callable=mocker.AsyncMock
+        lk, "remove_callback_id", new_callable=mocker.AsyncMock
     )
     mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
@@ -368,21 +376,22 @@ async def test_bte_lookup_inferred_logs_exception_responses(redis_mock, mocker):
     )
     # run_async_lookup raises -> gather captures and returns exception.
     mocker.patch.object(
-        btel,
+        lk,
         "run_async_lookup",
         new_callable=mocker.AsyncMock,
         side_effect=RuntimeError("boom"),
     )
     mock_remove = mocker.patch.object(
-        btel, "remove_callback_id", new_callable=mocker.AsyncMock
+        lk, "remove_callback_id", new_callable=mocker.AsyncMock
     )
     mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
-    await bte_lookup(_make_task(), logger)
+    with pytest.raises(QueryError, match="RuntimeError: boom"):
+        await bte_lookup(_make_task(), logger)
     assert not mock_remove.called
 
 
@@ -407,7 +416,7 @@ async def test_bte_lookup_polling_loop_iterates_until_callbacks_drain(
     mocker.patch.object(
         btel, "get_message", new_callable=mocker.AsyncMock, return_value=msg
     )
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
     mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
@@ -415,7 +424,7 @@ async def test_bte_lookup_polling_loop_iterates_until_callbacks_drain(
     )
     # First call: in-progress; second call: drained.
     running = mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         side_effect=[[("running",)], []],
@@ -443,14 +452,14 @@ async def test_bte_lookup_polling_loop_retries_after_db_error(redis_mock, mocker
     mocker.patch.object(
         btel, "get_message", new_callable=mocker.AsyncMock, return_value=msg
     )
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
     mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
         return_value=mocker.Mock(status_code=200),
     )
     running = mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         side_effect=[RuntimeError("pg dead"), []],
@@ -479,7 +488,7 @@ async def test_bte_lookup_timeout_triggers_cleanup_callbacks(redis_mock, mocker)
     mocker.patch.object(
         btel, "get_message", new_callable=mocker.AsyncMock, return_value=msg
     )
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
     mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
@@ -487,28 +496,16 @@ async def test_bte_lookup_timeout_triggers_cleanup_callbacks(redis_mock, mocker)
     )
     # Always say there's a callback in progress.
     mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[("still-running",)],
     )
     await _store_query_data()
 
-    # Patch time.time so the loop goes through one iteration and then exceeds
-    # the 5s timeout. We can't predict exactly how many ``time.time`` calls
-    # the worker makes, so use an iterator that returns "late" forever after
-    # the first two calls.
-    def _fake_time():
-        yield 0
-        yield 0.1
-        while True:
-            yield 100
-
-    gen = _fake_time()
-    mocker.patch.object(btel.time, "time", side_effect=lambda: next(gen))
     mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
     mock_cleanup = mocker.patch.object(
-        btel, "cleanup_callbacks", new_callable=mocker.AsyncMock
+        lk, "cleanup_callbacks", new_callable=mocker.AsyncMock
     )
     await bte_lookup(_make_task(), logger)
     assert mock_cleanup.called
@@ -533,14 +530,14 @@ async def test_bte_lookup_non_infer_branch_writes_callback_url(redis_mock, mocke
     mocker.patch.object(
         btel, "get_message", new_callable=mocker.AsyncMock, return_value=msg
     )
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
     mock_post = mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
         return_value=mocker.Mock(status_code=200),
     )
     mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
@@ -570,14 +567,14 @@ async def test_bte_lookup_adds_default_submitter_when_missing(redis_mock, mocker
     mocker.patch.object(
         btel, "get_message", new_callable=mocker.AsyncMock, return_value=msg
     )
-    mocker.patch.object(btel, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
     mock_post = mocker.patch(
         "httpx.AsyncClient.post",
         new_callable=mocker.AsyncMock,
         return_value=mocker.Mock(status_code=200),
     )
     mocker.patch.object(
-        btel,
+        lk,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],

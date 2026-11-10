@@ -1,31 +1,19 @@
 """BTE ARA module."""
 
 import asyncio
+import functools
 import json
 import logging
-import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from string import Template
 from typing import Any, Dict, Optional
 
-import httpx
-from opentelemetry.propagate import inject
 from pydantic import BaseModel, parse_obj_as
 
 from shepherd_utils.config import settings
-from shepherd_utils.db import (
-    new_id,
-    abandon_lookup_if_data_lost,
-    add_callback_id,
-    cleanup_callbacks,
-    get_message,
-    get_running_callbacks,
-    remove_callback_id,
-    save_message,
-    wait_for_lookups,
-)
+from shepherd_utils.db import get_message
+from shepherd_utils.lookups import submit_lookups, wait_for_callbacks
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.query_errors import UnsupportedQueryError
@@ -86,79 +74,10 @@ def examine_query(message):
     return infer, question_node, answer_node, pathfinder
 
 
-@dataclass
-class AsyncResponse:
-    status_code: int
-    success: bool
-    callback_id: str
-    error: Optional[str] = None
-    # True when the submission was sent but we never heard the ACK. The
-    # retrieval service may well be running the lookup and will POST the
-    # callback later, so the callback id must be kept or the results will be
-    # rejected on arrival. False means the request never reached the service.
-    in_flight: bool = False
-
-
-async def run_async_lookup(
-    client: httpx.AsyncClient,
-    message: dict,
-    query_id: str,
-    logger: logging.Logger,
-) -> AsyncResponse:
-    """Return an async lookup response with callback id."""
-    callback_id = new_id()
-    with tracer.start_as_current_span("bte.lookup") as span:
-        span.set_attribute("callback.id", callback_id)
-        lookup_carrier = {}
-        inject(lookup_carrier)
-        # Put callback UID and query ID in postgres
-        await add_callback_id(query_id, callback_id, json.dumps(lookup_carrier), logger)
-
-        message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
-
-        # INFO, and tagged with the callback id: this is the head of the trail
-        # for one retrieval, and the callback handler, the retrieval's own logs
-        # and the merge all carry the same tag on the way back.
-        logger.info(
-            f"[{callback_id}] Sending lookup query to {settings.kg_retrieval_url}"
-        )
-        try:
-            response = await client.post(
-                settings.kg_retrieval_url,
-                json=message,
-            )
-            return AsyncResponse(
-                status_code=response.status_code,
-                success=response.status_code == 200,
-                callback_id=callback_id,
-            )
-        except httpx.ReadTimeout as e:
-            # The request went out and the service just didn't ACK in time.
-            # It has the query and the callback URL, so treat it as still
-            # running rather than failed.
-            span.record_exception(e)
-            return AsyncResponse(
-                status_code=500,
-                success=False,
-                callback_id=callback_id,
-                error=f"{type(e).__name__}: no ACK within {client.timeout.read}s",
-                in_flight=True,
-            )
-        except Exception as e:
-            span.record_exception(e)
-            return AsyncResponse(
-                status_code=500,
-                success=False,
-                callback_id=callback_id,
-                error=f"{type(e).__name__}: {e}",
-            )
-
-
 async def bte_lookup(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
-    otel = task[1]["otel"]
     message = await get_message(query_id, logger)
     parameters = message.get("parameters") or {}
     parameters["timeout"] = parameters.get("timeout", settings.lookup_timeout)
@@ -178,84 +97,20 @@ async def bte_lookup(task, logger: logging.Logger):
         raise UnsupportedQueryError("BTE does not support Pathfinder type queries.")
 
     if not infer:
-        # Put callback UID and query ID in postgres
-        callback_id = new_id()
-        await add_callback_id(query_id, callback_id, otel, logger)
-        message["callback"] = f"{settings.callback_host}/bte/callback/{callback_id}"
-
-        logger.info(
-            f"[{callback_id}] Sending lookup query to {settings.kg_retrieval_url}"
-        )
-        with tracer.start_as_current_span("bte.lookup") as span:
-            span.set_attribute("callback.id", callback_id)
-            async with httpx.AsyncClient(
-                timeout=settings.kg_retrieval_submit_timeout
-            ) as client:
-                await client.post(
-                    settings.kg_retrieval_url,
-                    json=message,
-                )
+        # C6-3: the plain lookup goes through the same submission as the
+        # expanded ones, so a rejected POST is an error rather than a silent
+        # wait on a callback that never comes.
+        lookups = [message]
     else:
-        expanded_messages = expand_bte_query(message, logger)
-        # with open("debug/expanded_messages.json", "w", encoding="utf-8") as f:
-        #     json.dump(expanded_messages, f, indent=2)
-        logger.info(f"Expanded to {len(expanded_messages)} messages")
-        requests = []
-        # send all messages to retriever
-        async with httpx.AsyncClient(
-            timeout=settings.kg_retrieval_submit_timeout
-        ) as client:
-            for expanded_message in expanded_messages:
-                requests.append(
-                    run_async_lookup(client, expanded_message, query_id, logger)
-                )
-                # Then we can retrieve all callback ids from query id to see which are still
-                # being looked up
-            # fire all the lookups at the same time
-            responses = await asyncio.gather(*requests, return_exceptions=True)
-
-            for response in responses:
-                if isinstance(response, Exception):
-                    logger.error(
-                        f"Failed to do lookup and unable to remove callback id: {response}"
-                    )
-                elif isinstance(response, AsyncResponse):
-                    if response.success:
-                        continue
-                    if response.in_flight:
-                        logger.warning(
-                            f"[{response.callback_id}] Lookup submitted but not "
-                            f"acknowledged, waiting for its callback anyway: "
-                            f"{response.error}"
-                        )
-                        continue
-                    logger.error(
-                        f"[{response.callback_id}] Failed to do lookup, "
-                        f"removing callback id: {response.error}"
-                    )
-                    await remove_callback_id(response.callback_id, logger)
-                else:
-                    logger.error(
-                        f"Failed to do lookup and unable to remove callback id: {response}"
-                    )
+        lookups = expand_bte_query(message, logger)
+        logger.info(f"Expanded to {len(lookups)} messages")
+    await submit_lookups(lookups, query_id, "bte", logger, span_name=STREAM)
 
     # this worker might have a timeout set for if the lookups don't finish within a certain
     # amount of time
-    MAX_QUERY_TIME = lookup_wait_seconds(message["parameters"])
-    running_callback_ids = await wait_for_lookups(
-        query_id,
-        response_id,
-        MAX_QUERY_TIME,
-        logger,
-        get_running_callbacks,
-        abandon_lookup_if_data_lost,
+    await wait_for_callbacks(
+        query_id, response_id, lookup_wait_seconds(message["parameters"]), logger
     )
-
-    if running_callback_ids:
-        logger.warning(
-            f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running...{running_callback_ids}"
-        )
-        await cleanup_callbacks(query_id, logger)
 
 
 class TemplateGroup(BaseModel):
@@ -314,6 +169,32 @@ def get_params(
     )
 
 
+# C9-5: the template groups, the template index and every template's text are
+# read once per process. Each inferred query used to re-read and re-parse
+# template_groups.json, walk the templates directory and re-read each matched
+# template file.
+@functools.cache
+def _template_groups() -> list:
+    with open(
+        Path(__file__).parent / "template_groups.json", "r", encoding="utf-8"
+    ) as file:
+        return parse_obj_as(list[TemplateGroup], json.load(file))
+
+
+@functools.cache
+def _template_paths() -> dict:
+    return {
+        path.name: path
+        for path in (Path(__file__).parent / "templates").rglob("*.json")
+    }
+
+
+@functools.cache
+def _template(path: Path) -> Template:
+    with open(path, "r", encoding="utf-8") as file:
+        return Template(file.read())
+
+
 def match_templates(
     subject_type: Optional[str],
     object_type: Optional[str],
@@ -334,15 +215,8 @@ def match_templates(
     if predicate is not None:
         predicates.add(predicate.removeprefix("biolink:"))
 
-    with open(
-        Path(__file__).parent / "template_groups.json", "r", encoding="utf-8"
-    ) as file:
-        templateGroups = parse_obj_as(list[TemplateGroup], json.load(file))
-
-    template_paths = {
-        path.name: path
-        for path in (Path(__file__).parent / "templates").rglob("*.json")
-    }
+    templateGroups = _template_groups()
+    template_paths = _template_paths()
 
     matched_paths: set[Path] = set()
     for group in templateGroups:
@@ -381,8 +255,7 @@ def fill_templates(
 ) -> list[Dict]:
     filled_templates: list[Dict] = []
     for path in paths:
-        with open(path, "r", encoding="utf-8") as file:
-            template = Template(file.read())
+        template = _template(path)
         if subject_curie:
             qs = template.substitute(
                 source=subject_key,

@@ -165,25 +165,32 @@ def test_the_rules_are_read_once(monkeypatch):
 
 async def test_lookup_submissions_are_bounded_per_process(monkeypatch):
     """An inferred query fans out to ~34 lookups, each inserting a callback
-    row; they all went out at once, from every task in the pod."""
-    from workers.aragorn_lookup import worker as lookup
+    row; they all went out at once, from every task in the pod. The bound now
+    lives in the shared submission (#223 C9-5), so it covers every lookup
+    worker."""
+    from shepherd_utils import lookups
 
-    monkeypatch.setattr(lookup, "MAX_LOOKUPS_IN_FLIGHT", 3)
-    monkeypatch.setattr(lookup, "_lookup_slots", None)
+    monkeypatch.setattr(lookups, "MAX_LOOKUPS_IN_FLIGHT", 3)
+    monkeypatch.setattr(lookups, "_lookup_slots", None)
     running = 0
     peak = 0
 
-    async def _lookup(client, message, query_id, _logger):
+    async def _lookup(client, message, query_id, ara, _logger, *args):
         nonlocal running, peak
         running += 1
         peak = max(peak, running)
         await asyncio.sleep(0.02)
         running -= 1
 
-    monkeypatch.setattr(lookup, "run_async_lookup", _lookup)
+    monkeypatch.setattr(lookups, "run_async_lookup", _lookup)
 
     await asyncio.gather(
-        *(lookup._bounded_lookup(None, {}, f"q{i % 2}", logger) for i in range(20))
+        *(
+            lookups._bounded_lookup(
+                None, {}, f"q{i % 2}", "aragorn", logger, "lookup", 20
+            )
+            for i in range(20)
+        )
     )
 
     assert peak == 3
