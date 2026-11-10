@@ -1,7 +1,6 @@
 """Sort results based on score worker."""
 
 import asyncio
-import json
 import logging
 import uuid
 from shepherd_utils.db import (
@@ -10,8 +9,8 @@ from shepherd_utils.db import (
     get_query_state,
 )
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
-from shepherd_utils.trapi import operation_parameters
 from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.local_ops import apply_local_steps
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
@@ -24,51 +23,13 @@ LOGGER = get_worker_logger(STREAM)
 
 
 async def sort_results_score(task, logger: logging.Logger):
-    # given a task, get the message from the db
+    """Sort the results by score, then run any local steps that follow
+    (shepherd_utils.local_ops) on the same loaded message."""
     response_id = task[1]["response_id"]
-    workflow = json.loads(task[1]["workflow"])
-    # The response-size guard that used to sit here now runs for every worker
-    # in run_task_lifecycle, before the worker function is called.
+    # The response-size guard runs for every worker in run_task_lifecycle,
+    # before the worker function is called.
     message = await get_message(response_id, logger)
-    results = message["message"].get("results", [])
-    current_op = workflow[0]
-    aord = operation_parameters(current_op).get("ascending_or_descending", "descending")
-    reverse = aord == "descending"
-    # Sort in place (list.sort, not sorted()) throughout. The decoded response is
-    # already by far the largest object in memory, so allocating a second copy of
-    # the results list -- and of every result's analyses list -- is wasted peak
-    # memory on exactly the payloads big enough to be a problem. ``results`` is
-    # the same list object as message["message"]["results"], so sorting it in
-    # place reorders the message too.
-    # TRAPI 2.0: ``Result.analyses`` is optional (minItems 1 when present).
-    for result in results:
-        if not result.get("analyses"):
-            continue
-        result["analyses"].sort(
-            key=lambda x: x.get("score", 0),
-            reverse=reverse,
-        )
-    if reverse:
-        results.sort(
-            key=lambda x: (
-                x["analyses"][0].get("score", 0) if x.get("analyses") else 0
-            ),
-            reverse=reverse,
-        )
-    else:
-        results.sort(
-            key=lambda x: (
-                x["analyses"][-1].get("score", 0) if x.get("analyses") else 0
-            ),
-            reverse=reverse,
-        )
-    # Reattach so the key exists even when the response arrived without a
-    # ``results`` field (get returned the default []); this is a rebind of the
-    # same list object, not a copy.
-    message["message"]["results"] = results
-    logger.info("Returning sorted results.")
-
-    # save merged message back to db
+    apply_local_steps(STREAM, task, message, logger)
     await save_response(response_id, message, logger)
 
 

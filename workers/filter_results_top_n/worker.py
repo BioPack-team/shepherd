@@ -1,13 +1,12 @@
 """Filter Results Top N Worker."""
 
 import asyncio
-import json
 import logging
 import uuid
 from shepherd_utils.db import get_message, save_response, get_query_state
 from shepherd_utils.shared import get_tasks, run_task_lifecycle
-from shepherd_utils.trapi import operation_parameters
 from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.local_ops import apply_local_steps
 from shepherd_utils.otel import setup_tracer
 
 # Queue name
@@ -20,26 +19,11 @@ LOGGER = get_worker_logger(STREAM)
 
 
 async def filter_results_top_n(task, logger: logging.Logger):
-    # given a task, get the message from the db
+    """Keep the top results, then run any local steps that follow
+    (shepherd_utils.local_ops) on the same loaded message."""
     response_id = task[1]["response_id"]
-    workflow = json.loads(task[1]["workflow"])
     message = await get_message(response_id, logger)
-    results = message["message"].get("results", [])
-    current_op = workflow[0]
-    n = operation_parameters(current_op).get("max_results", 500)
-
-    # Truncate in place (del results[n:]) rather than binding a results[:n]
-    # slice: the slice would allocate a second list and, worse, ``results`` would
-    # keep the dropped results (and everything they reference) alive until the
-    # function returns -- i.e. through the save. Deleting the tail drops those
-    # references now so they can be freed before we re-encode the message.
-    del results[n:]
-    # Rebind so the key exists even if the response arrived without a results
-    # field (get returned the default []); this is a rebind, not a copy.
-    message["message"]["results"] = results
-    logger.info("Returning filtered results.")
-
-    # save merged message back to db
+    apply_local_steps(STREAM, task, message, logger)
     await save_response(response_id, message, logger)
 
 
