@@ -237,8 +237,14 @@ async def test_a_timeout_does_not_kill_the_task_beside_it():
 async def test_the_timeout_starts_when_the_task_gets_a_slot():
     """Waiting for a busy slot doesn't count against a task's timeout."""
     loop = asyncio.get_running_loop()
-    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=2.0)
+    # Warmed up and waited for: spawning the child on the first task's clock
+    # could push it past 2s on a loaded CI runner, which isn't what this test
+    # is about.
+    pool = ProcessPoolManager(
+        max_workers=1, name="test pool", task_timeout=2.0, warmup=_noop
+    )
     try:
+        await _until_spawned(pool, 1)
         first = asyncio.ensure_future(pool.run(loop, _slow_echo, "first"))
         await asyncio.sleep(0.1)
         second = asyncio.ensure_future(pool.run(loop, _slow_echo, "second"))

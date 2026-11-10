@@ -56,6 +56,7 @@ from shepherd_utils.trapi import (
     query_log_level,
     query_parameters,
     validate_query,
+    wrap_stored_response,
 )
 from shepherd_utils.task_deadline import (
     TIMEOUT_STATUS,
@@ -1094,12 +1095,18 @@ async def get_query_response(
     logger = logging.getLogger("shepherd.get_query")
     logger.setLevel(level_number)
     attach_query_handler(logger)
-    response = await get_message(query_id, logger)
-    if response is None:
+    try:
+        # The stored bytes, not a decoded tree: decoding and re-encoding a
+        # multi-hundred-MB response held the event loop for every other
+        # request (C3-10). The envelope goes around them as finish_query's
+        # delivery does.
+        stored = await get_message(query_id, logger, raw=True)
+    except KeyError:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
     logs = await get_logs(query_id, logger)
     # A stored response carries no parameters (save_response); the ones to
     # repeat are its query's.
     parameters = await get_response_query_parameters(query_id, logger)
-    finalize_response(response, {"parameters": parameters}, logs)
-    return ORJSONResponse(content=response)
+    body = wrap_stored_response(stored, {"parameters": parameters}, logs)
+    del stored
+    return Response(content=body, media_type="application/json")

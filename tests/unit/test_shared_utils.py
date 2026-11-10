@@ -616,7 +616,9 @@ def _lifecycle_task():
 
 
 @pytest.mark.asyncio
-async def test_run_task_lifecycle_success_wraps_up_and_releases(mocker):
+async def test_run_task_lifecycle_success_wraps_up_and_releases(mocker, redis_mock):
+    # redis_mock: the response-size guard reads the data store (on by default
+    # since #217).
     worker_fn = mocker.AsyncMock()
     mock_wrap = mocker.patch.object(
         shared, "wrap_up_task", new_callable=mocker.AsyncMock

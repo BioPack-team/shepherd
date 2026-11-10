@@ -81,7 +81,6 @@ from shepherd_utils.query_errors import (
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import (
     get_logs,
-    get_message,
     get_message_sync,
     save_logs,
     save_message_sync,
@@ -247,9 +246,46 @@ async def intake_internal_response(fields, logger: logging.Logger):
     if mesg.get("ref"):
         # so the finally-block log flush lands under the query's parent
         fields["parent_pk"] = str(mesg["ref"])
+    # the endpoint receives the payload with the query's logs already
+    # spliced in by finish_query; they are spliced in here instead (in the
+    # pool child, with the payload)
     try:
-        data = await get_message(response_id, logger)
+        logs = await get_logs(response_id, logger)
     except Exception as e:
+        logger.warning(f"Intake: proceeding without logs for {response_id}: {e}")
+        logs = []
+
+    # How the ARA query ended (finish_query passes it along). One whose
+    # operation failed is what an HTTP ARA answering non-200 is to
+    # upstream: the child errors with that code -- 501 when the ARA's
+    # worker said it doesn't do this kind of query (BTE on Pathfinder),
+    # 500 for a plain failure -- instead of reading as a clean Done with
+    # no results. Deliveries from before this field existed carry none.
+    ara_status = fields.get("ara_status")
+    failed_code = None
+    if is_error_status(ara_status):
+        failed_code = status_error_code(ara_status) or DEFAULT_ERROR_CODE
+    # broker deliveries carry no tr_ars.message.status
+    status = "E" if failed_code is not None else "D"
+    agent_name = str(mesg.get("agent"))
+    inforesid = aras.inforesid_for(agent_name)
+    parent = await ars_db.get_message_row(mesg["ref"]) if mesg.get("ref") else None
+
+    # The callback endpoint's guard order: dup-Done, repeated results, errored
+    # child. Decided from the rows alone, before the payload is touched, so
+    # the pool child knows whether to store it over the child's blob.
+    plan = await _intake_plan(mesg, parent)
+    try:
+        # Decoding, the log splice, the result count and the score stats all
+        # run in the pool child: a multi-MB response is never resident here.
+        result_length, result_stat = await _run_intake_in_pool(
+            response_id,
+            child_pk,
+            logs,
+            plan == "store",
+            failed_code is None,
+        )
+    except KeyError as e:
         # finish_query only hands over a response the ARA pipeline finished,
         # so a missing blob means it was lost (e.g. Redis restarted and
         # reloaded an older snapshot), not that it is still coming. Nothing
@@ -261,38 +297,14 @@ async def intake_internal_response(fields, logger: logging.Logger):
             return None
         await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
         return None
+    except Exception as e:
+        logger.error(f"Intake failed for {child_pk}: {e}", exc_info=True)
+        await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
+        return None
     try:
-        # the endpoint receives the payload with the query's logs already
-        # spliced in by finish_query; splice them here instead
-        try:
-            logs = await get_logs(response_id, logger)
-            data.pop("logs", None)
-            if logs:
-                # Response.logs has minItems 1 in TRAPI 2.0: absent when empty
-                data["logs"] = logs
-        except Exception as e:
-            logger.warning(f"Intake: proceeding without logs for {response_id}: {e}")
-
-        # How the ARA query ended (finish_query passes it along). One whose
-        # operation failed is what an HTTP ARA answering non-200 is to
-        # upstream: the child errors with that code -- 501 when the ARA's
-        # worker said it doesn't do this kind of query (BTE on Pathfinder),
-        # 500 for a plain failure -- instead of reading as a clean Done with
-        # no results. Deliveries from before this field existed carry none.
-        ara_status = fields.get("ara_status")
-        failed_code = None
-        if is_error_status(ara_status):
-            failed_code = status_error_code(ara_status) or DEFAULT_ERROR_CODE
-        # broker deliveries carry no tr_ars.message.status
-        status = "E" if failed_code is not None else "D"
-        res = get_safe(data, "message", "results")
-        agent_name = str(mesg.get("agent"))
-        inforesid = aras.inforesid_for(agent_name)
-        parent = await ars_db.get_message_row(mesg["ref"]) if mesg.get("ref") else None
         if parent is None:
             logger.error(f"Intake: unknown parent for child {child_pk}")
             return None
-        result_length = len(res) if res is not None else None
         await notify_subscribers(
             parent,
             {
@@ -308,43 +320,37 @@ async def intake_internal_response(fields, logger: logging.Logger):
             f"received msg from agent: {inforesid} with parent pk: "
             f"{mesg['ref']} and result: {result_length}"
         )
-        # the callback endpoint's guard order: dup-Done, repeated results,
-        # errored child -- all skips here (there is no HTTP answer to give)
-        if mesg["status"] == "D":
+        if plan == "skip_done":
             logger.info(f"Intake: {child_pk} already has results; skipping")
             return None
-        if mesg.get("result_count") is not None and mesg["result_count"] > 0:
-            # Intake records the count before the premerge runs, so a
-            # redelivery of this task (its worker died part way) lands here
-            # too. Skipping it left the child Running until the watchdog
-            # timed it out, and its results never merged.
-            if mesg["status"] != "R":
-                logger.info(f"Intake: {child_pk} already has a response; skipping")
-                return None
-            if await _handed_to_merge(parent, mesg):
-                # Premerge and the hand-off to the merge are done; only the
-                # child's own status flip was lost.
-                logger.warning(
-                    f"Intake: {child_pk} was already handed to the merge; "
-                    "finishing its status"
-                )
-                updated = await ars_db.update_message(child_pk, status=status, code=200)
-                await ars_db.persist_data_copy(child_pk, logger)
-                if updated and updated["status"] in ("D", "S", "E", "U"):
-                    await lifecycle.check_parent_completion(mesg["ref"], logger)
-                return None
-            # Resume at the premerge. The response is saved over the child's
-            # blob again below, so a premerge the dead worker had already
-            # applied to it is not applied twice.
-            logger.warning(f"Intake: {child_pk} was redelivered; resuming its premerge")
-        if mesg["status"] == "E":
+        if plan == "skip_terminal":
+            logger.info(f"Intake: {child_pk} already has a response; skipping")
+            return None
+        if plan == "finish_status":
+            # Premerge and the hand-off to the merge are done; only the
+            # child's own status flip was lost.
+            logger.warning(
+                f"Intake: {child_pk} was already handed to the merge; "
+                "finishing its status"
+            )
+            updated = await ars_db.update_message(child_pk, status=status, code=200)
+            await ars_db.persist_data_copy(child_pk, logger)
+            if updated and updated["status"] in ("D", "S", "E", "U"):
+                await lifecycle.check_parent_completion(mesg["ref"], logger)
+            return None
+        if plan == "skip_errored":
             logger.info(f"Intake: {child_pk} already errored; response rejected")
             return None
+        if mesg.get("result_count"):
+            # Resuming: the response was stored over the child's blob again,
+            # so a premerge the dead worker had already applied to it is not
+            # applied twice.
+            logger.warning(f"Intake: {child_pk} was redelivered; resuming its premerge")
         if failed_code is not None:
             # Terminal inline: a failed query's results (if any made it into
             # the response before the failure) are not merged, as upstream
-            # would not merge a non-200 answer. The query's logs, already on
-            # ``data``, carry the worker's reason.
+            # would not merge a non-200 answer. The query's logs, stored with
+            # the response, carry the worker's reason.
             logger.info(
                 f"Intake: {child_pk} ARA query ended {ara_status}"
                 + (
@@ -354,7 +360,6 @@ async def intake_internal_response(fields, logger: logging.Logger):
                 )
                 + f"; child errored with code {failed_code}"
             )
-            await ars_db.save_message_data(child_pk, data, logger)
             updated = await ars_db.update_message(
                 child_pk, status="E", code=failed_code
             )
@@ -362,11 +367,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
             if updated and updated["status"] in ("D", "S", "E", "U"):
                 await lifecycle.check_parent_completion(mesg["ref"], logger)
             return None
-        if res is not None and result_length > 0:
-            result_stat = await asyncio.to_thread(ScoreStatCalc, res)
-            await ars_db.save_message_data(
-                child_pk, data, logger, raise_on_failure=True
-            )
+        if result_length:
             await ars_db.update_message(
                 child_pk, result_count=result_length, result_stat=result_stat
             )
@@ -376,9 +377,8 @@ async def intake_internal_response(fields, logger: logging.Logger):
             fields["status"] = status
             return True
         # no results: terminal inline, nothing to premerge or validate
-        await ars_db.save_message_data(child_pk, data, logger)
         updates = {"status": status, "code": 200}
-        if res is None:
+        if result_length is None:
             updates["result_count"] = 0
         updated = await ars_db.update_message(child_pk, **updates)
         await ars_db.persist_data_copy(child_pk, logger)
@@ -387,8 +387,62 @@ async def intake_internal_response(fields, logger: logging.Logger):
         return None
     except Exception as e:
         logger.error(f"Intake failed for {child_pk}: {e}", exc_info=True)
-        await _terminal_error(child_pk, mesg.get("ref"), mesg, data, logger)
+        await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
         return None
+
+
+async def _intake_plan(mesg, parent) -> str:
+    """What an intake does with the response, from the child's row alone.
+
+    ``store`` saves it over the child's blob and carries on; the rest leave
+    the blob alone: ``skip_done`` / ``skip_terminal`` / ``skip_errored`` are
+    the endpoint's guards, and ``finish_status`` is a redelivery whose
+    premerge and merge hand-off already happened.
+    """
+    if mesg["status"] == "D":
+        return "skip_done"
+    if mesg.get("result_count") is not None and mesg["result_count"] > 0:
+        # Intake records the count before the premerge runs, so a redelivery
+        # of this task (its worker died part way) lands here too. Skipping it
+        # left the child Running until the watchdog timed it out.
+        if mesg["status"] != "R":
+            return "skip_terminal"
+        if parent is not None and await _handed_to_merge(parent, mesg):
+            return "finish_status"
+        return "store"
+    if mesg["status"] == "E":
+        return "skip_errored"
+    return "store"
+
+
+def intake_in_child(response_id, child_pk, logs, save, score):
+    """Pool-side intake: load the ARA's response, splice in the query's logs,
+    count its results and, when ``save``, store it under the child's pk.
+
+    Returns ``(result_count, result_stat)``: the count is None when the
+    response has no results list, and the stats are only computed for a
+    stored response with results whose query didn't fail (``score``).
+    Raises KeyError when the response blob is gone.
+    """
+    data = get_message_sync(str(response_id))
+    data.pop("logs", None)
+    if logs:
+        # Response.logs has minItems 1 in TRAPI 2.0: absent when empty
+        data["logs"] = logs
+    res = get_safe(data, "message", "results")
+    result_length = len(res) if res is not None else None
+    result_stat = ScoreStatCalc(res) if save and score and result_length else None
+    if save:
+        save_message_sync(str(child_pk), data)
+    return result_length, result_stat
+
+
+async def _run_intake_in_pool(response_id, child_pk, logs, save, score):
+    """Indirection for tests; production runs intake_in_child in the pool."""
+    args = (str(response_id), str(child_pk), logs, save, score)
+    if _pool is not None and _loop is not None:
+        return await _pool.run(_loop, intake_in_child, *args)
+    return await asyncio.to_thread(intake_in_child, *args)
 
 
 async def _handed_to_merge(parent, mesg) -> bool:
