@@ -52,8 +52,8 @@ from shepherd_utils.response_limit import (
     get_too_large_reason,
 )
 from shepherd_utils.shared import (
+    run_poll_loop,
     filter_kgraph_orphans,
-    get_tasks,
     merge_kgraph,
     on_graceful_shutdown,
 )
@@ -1498,29 +1498,12 @@ async def poll_for_tasks():
             await save_logs(response_id, logger)
             limiter.release()
 
-    inflight = set()
-    while True:
-        try:
-            # Dispatch each wake task concurrently. Distinct queries never share
-            # a lock, so their merges run in parallel on the process pool; the
-            # task_limiter semaphore (sized to max_workers) bounds concurrency.
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                t = asyncio.create_task(
-                    process_query(task, parent_ctx, logger, limiter)
-                )
-                inflight.add(t)
-                t.add_done_callback(inflight.discard)
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-            for t in inflight:
-                t.cancel()
-            pool.shutdown()
-            return
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    # Each wake task runs concurrently. Distinct queries never share a lock,
+    # so their merges run in parallel on the process pool; the task limiter
+    # (sized to max_workers) bounds concurrency.
+    await run_poll_loop(
+        STREAM, GROUP, CONSUMER, max_workers, process_query, on_stop=pool.shutdown
+    )
 
 
 if __name__ == "__main__":

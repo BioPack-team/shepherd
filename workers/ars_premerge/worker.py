@@ -88,7 +88,7 @@ from shepherd_utils.db import (
 from shepherd_utils.logger import get_worker_logger, transient_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks
+from shepherd_utils.shared import run_poll_loop
 
 STREAM = "ars.premerge"
 GROUP = "consumer"
@@ -586,19 +586,9 @@ async def poll_for_tasks():
         task_timeout=settings.pool_task_timeout_sec,
         warmup=_warm_pool_child if settings.pool_prewarm else None,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-            _pool.shutdown()
-            return
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)
+    await run_poll_loop(
+        STREAM, GROUP, CONSUMER, max_workers, process_task, on_stop=_pool.shutdown
+    )
 
 
 if __name__ == "__main__":

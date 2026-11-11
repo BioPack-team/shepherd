@@ -71,11 +71,11 @@ async def test_shadowfax_happy_path_builds_paths(redis_mock, mocker, pool):
         return_value=_pathfinder_message(),
     )
     mock_add_cb = mocker.patch(
-        "workers.aragorn_pathfinder.worker.add_callback_id",
+        "shepherd_utils.lookups.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.aragorn_pathfinder.worker.get_running_callbacks",
+        "shepherd_utils.lookups.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
@@ -158,11 +158,11 @@ async def test_shadowfax_sends_its_own_lookup_parameters(redis_mock, mocker):
         return_value=msg,
     )
     mocker.patch(
-        "workers.aragorn_pathfinder.worker.add_callback_id",
+        "shepherd_utils.lookups.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.aragorn_pathfinder.worker.get_running_callbacks",
+        "shepherd_utils.lookups.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
@@ -204,11 +204,11 @@ async def test_shadowfax_sends_valid_trapi_2_query(redis_mock, mocker):
         return_value=msg,
     )
     mocker.patch(
-        "workers.aragorn_pathfinder.worker.add_callback_id",
+        "shepherd_utils.lookups.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.aragorn_pathfinder.worker.get_running_callbacks",
+        "shepherd_utils.lookups.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )

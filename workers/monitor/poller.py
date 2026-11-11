@@ -296,11 +296,20 @@ async def _collect_postgres() -> Dict[str, Any]:
             snapshot["callbacks_pending"] = int(row[0] or 0)
             snapshot["oldest_callback_age_sec"] = float(row[1] or 0)
 
-            cur = await conn.execute(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-            )
+            # This database's backends, and every client backend against the
+            # server's usable limit: max_connections is server-wide, and the
+            # superuser-reserved slots are not the fleet's to use (#223 C11-3).
+            cur = await conn.execute("""
+                SELECT count(*) FILTER (WHERE datname = current_database()),
+                       count(*) FILTER (WHERE backend_type = 'client backend'),
+                       current_setting('max_connections')::int
+                         - current_setting('superuser_reserved_connections')::int
+                FROM pg_stat_activity
+                """)
             row = await cur.fetchone()
             snapshot["connection_count"] = int(row[0] or 0)
+            snapshot["client_connections"] = int(row[1] or 0)
+            snapshot["usable_connections"] = int(row[2] or 0)
         _note_pg_reachable()
     except Exception as e:
         _note_pg_unreachable(e)

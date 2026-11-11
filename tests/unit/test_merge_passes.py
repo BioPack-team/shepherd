@@ -295,7 +295,10 @@ async def test_a_callback_arriving_just_after_the_lock_joins_the_first_pass(
         await asyncio.sleep(0.3)
         await db.add_ready_callback(response_id, "cb-2", logger)
 
-    monkeypatch.setattr(merge, "get_tasks", _one_task)
+    # the shared poll loop (run_poll_loop) reads it from shared
+    from shepherd_utils import shared
+
+    monkeypatch.setattr(shared, "get_tasks", _one_task)
     monkeypatch.setattr(merge, "ProcessPoolManager", _Pool)
     late = asyncio.ensure_future(_late_callback())
     poller = asyncio.create_task(merge.poll_for_tasks())

@@ -56,7 +56,7 @@ async def test_ars_dispatch_issues_full_width_ids(monkeypatch, redis_mock):
 
 
 async def test_lookup_callback_ids_are_full_width(monkeypatch):
-    from workers.aragorn_lookup import worker as lookup
+    from shepherd_utils import lookups as lookup
 
     registered = []
 
@@ -72,6 +72,6 @@ async def test_lookup_callback_ids_are_full_width(monkeypatch):
 
             return _R()
 
-    await lookup.run_async_lookup(_Client(), {"message": {}}, "q1", logger)
+    await lookup.run_async_lookup(_Client(), {"message": {}}, "q1", "aragorn", logger)
 
     assert len(registered) == 1 and _is_full_uuid(registered[0])
