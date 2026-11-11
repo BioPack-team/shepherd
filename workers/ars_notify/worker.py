@@ -42,7 +42,7 @@ from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import save_logs
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, on_graceful_shutdown
+from shepherd_utils.shared import on_graceful_shutdown, run_poll_loop
 
 STREAM = "ars.notify"
 GROUP = "consumer"
@@ -216,18 +216,9 @@ async def poll_for_tasks():
     # loop, so the CancelledError branch below never ran there, and every
     # delivery still in flight was dropped. Flush them in that drain too.
     on_graceful_shutdown(_drain_on_shutdown)
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-            await drain_deliveries(timeout=settings.ars_notify_drain_sec)
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)
+    await run_poll_loop(
+        STREAM, GROUP, CONSUMER, TASK_LIMIT, process_task, on_stop=_drain_on_shutdown
+    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Shared Shepherd Utility Functions."""
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -831,6 +832,59 @@ async def get_tasks(
             # Poll returned nothing (idle): free the reserved slot. Nothing was
             # dispatched, so the in-flight count is untouched.
             task_limiter.release_slot()
+
+
+async def run_poll_loop(
+    stream: str,
+    group: str,
+    consumer: str,
+    task_limit: int,
+    handler,
+    on_stop=None,
+) -> None:
+    """Every worker's poll loop: dispatch each task to ``handler`` until cancelled.
+
+    ``handler(task, parent_ctx, logger, limiter)`` returns the coroutine that
+    runs one task; each runs as its own asyncio task, referenced here until it
+    finishes. The loops this replaces (#223, C5-4) were copied into every
+    worker, and two things were wrong with the copies:
+
+    - they called ``asyncio.create_task`` without keeping the task, and the
+      event loop holds only a weak reference to a running task, so one could
+      be garbage-collected part way through;
+    - ``except CancelledError`` fell through into ``while True``, so the loop
+      could never be cancelled.
+
+    On cancellation the in-flight tasks are cancelled, ``on_stop`` runs (a
+    plain or async callable: shutting down a process pool, flushing pending
+    deliveries) and the loop returns. Any other error is logged and the loop
+    resumes after a short back-off. A graceful shutdown (SIGTERM) still ends
+    inside ``get_tasks``, which drains the in-flight tasks and exits.
+    """
+    poll_logger = logging.getLogger(f"shepherd.{stream}")
+    inflight: set = set()
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                stream, group, consumer, task_limit
+            ):
+                running = asyncio.create_task(
+                    handler(task, parent_ctx, logger, limiter)
+                )
+                inflight.add(running)
+                running.add_done_callback(inflight.discard)
+        except asyncio.CancelledError:
+            poll_logger.info("Poll loop cancelled, shutting down.")
+            for running in list(inflight):
+                running.cancel()
+            if on_stop is not None:
+                stopped = on_stop()
+                if inspect.isawaitable(stopped):
+                    await stopped
+            return
+        except Exception as e:
+            poll_logger.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
 
 
 async def wrap_up_task(

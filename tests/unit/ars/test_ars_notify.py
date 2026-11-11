@@ -266,7 +266,8 @@ async def test_a_graceful_shutdown_flushes_deliveries_in_flight(monkeypatch):
         await shared._drain_and_exit(asyncio.Semaphore(1), 1, LOGGER)
         yield  # pragma: no cover
 
-    monkeypatch.setattr(notify_worker, "get_tasks", _get_tasks)
+    # the shared poll loop (run_poll_loop) reads it from shared
+    monkeypatch.setattr(shared, "get_tasks", _get_tasks)
     with pytest.raises(SystemExit):
         await notify_worker.poll_for_tasks()
 
