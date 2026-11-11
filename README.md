@@ -66,6 +66,17 @@ The Translator ARS services (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_wat
 - `docker compose --profile ars up --build`, or
 - set `COMPOSE_PROFILES=ars` in your `.env` to always include them.
 
+Every Shepherd image builds on one shared base image, `shepherd_base/Dockerfile`: the Python
+image, runtime settings and Shepherd's dependencies (read from `pyproject.toml`), but no Shepherd
+code. Compose builds it first on its own. A code change then rebuilds only each image's last few
+layers, and only a `pyproject.toml` change reinstalls the dependencies. To build one image without
+compose, build and tag the base first:
+
+```
+docker build -f shepherd_base/Dockerfile -t shepherd_base .
+docker build -f workers/merge_message/Dockerfile -t merge_message .
+```
+
 Every service in `compose.yml` carries prod-matching CPU / memory limits (see the header of
 `compose.yml` for why), so the stack needs a machine (or Docker Desktop VM) with at least 6 CPUs.
 To lift them locally, override `cpus` / `mem_limit` (0 = unlimited) in a gitignored
@@ -515,7 +526,7 @@ Creating a brand new ARA is fairly straightforward. Here are the steps to create
   - Within the `example_score` funciton in that file, replace the contents with your ARA's scoring logic.
 - If you have other custom operations you want to perform that are in your `workflow` above, pick a similar folder to copy and adjust the code inside to fit your needs.
 - If you want to use shared workers (i.e. `workers/sort_results_score`, `workers/filter_results_top_n`), you don't need to do anything other than include them in your workflow. They will automatically pick up your query and pass it along like your other operations.
-- Open the `compose.yml` file in the root directory, and for each ARA folder you created, add a `service` (or copy an existing one), and make sure that the `container_name` and `build/dockerfile` reflect you worker names and the path to your worker Dockerfile
+- Open the `compose.yml` file in the root directory, and for each ARA folder you created, add a `service` (or copy an existing one), and make sure that the `container_name` and `build/dockerfile` reflect you worker names and the path to your worker Dockerfile (keep the copied `build/additional_contexts` entry: worker Dockerfiles build `FROM shepherd_base`)
 - Run Shepherd with `docker compose up --build`
 
 ### Testing your ARA

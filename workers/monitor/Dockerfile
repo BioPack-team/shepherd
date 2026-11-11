@@ -1,42 +1,34 @@
-FROM ghcr.io/translatorsri/renci-python-image:3.12.13
+# Built on the shared base (shepherd_base/Dockerfile): the Python image,
+# runtime settings and Shepherd's dependencies. Layers run from least to most
+# often changed, so a Shepherd code change rebuilds only the last few.
+FROM shepherd_base
 
-LABEL org.opencontainers.image.source https://github.com/BioPack-team/shepherd
+LABEL org.opencontainers.image.source=https://github.com/BioPack-team/shepherd
 
-ENV PYTHONHASHSEED=0
-
-# Release version (git tag), injected by .github/workflows/release.yml.
-# Reported in the worker heartbeat so the monitor can show which image
-# version each replica runs. Local builds default to "dev".
-ARG SHEPHERD_VERSION=dev
-ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
-
-# Make the ``workers`` package resolvable for ``python -m workers.monitor.worker``
-# regardless of the working directory the runtime launches the container with.
-# ``python -m`` only adds the *current* working directory to sys.path, so without
-# this an environment that overrides the working dir fails with
-# "No module named 'workers'".
+# The monitor runs as the workers.monitor package from /app.
 ENV PYTHONPATH=/app
-
-WORKDIR /app
-
-RUN chmod -R 777 .
-
-COPY ./shepherd_utils ./shepherd_utils
-COPY ./pyproject.toml .
-RUN pip install .
 
 COPY ./workers/monitor/requirements.txt .
 RUN pip install -r requirements.txt
 
-USER nru
+# Shepherd's code; its dependencies are in the base already
+COPY ./pyproject.toml .
+COPY ./shepherd_utils ./shepherd_utils
+RUN pip install --no-deps .
 
-# Package the worker so ``workers.monitor.worker:APP`` resolves under uvicorn.
 COPY ./workers/__init__.py ./workers/__init__.py
 COPY ./workers/monitor ./workers/monitor
-
-# Default alert config; mountable via volume to override without rebuilding.
 COPY ./workers/monitor/monitor_alerts.yaml /app/monitor_alerts.yaml
 
-EXPOSE 5440
+# Release version (git tag), injected by .github/workflows/release.yml.
+# Reported in the worker heartbeat so the monitor can show which image
+# version each replica runs. Local builds default to "dev". Declared last so
+# a new version doesn't invalidate the layers above.
+ARG SHEPHERD_VERSION=dev
+ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
 
+# the non-root user, defined in the RENCI base image
+USER nru
+
+EXPOSE 5440
 CMD ["python", "-m", "workers.monitor.worker"]
