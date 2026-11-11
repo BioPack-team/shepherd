@@ -569,7 +569,7 @@ async def test_wrap_up_task_does_not_pop_for_entry_worker(redis_mock):
     assert [op["id"] for op in workflow] == ["real_op", "next_op"]
 
 
-def _workflow_task(workflow, otel="{}"):
+def _workflow_task(workflow, otel="{}", **fields):
     return [
         "msg-otel",
         {
@@ -579,8 +579,16 @@ def _workflow_task(workflow, otel="{}"):
             "log_level": "20",
             "otel": otel,
             "metadata": "{}",
+            **fields,
         },
     ]
+
+
+def _is_under(carrier: str, span) -> bool:
+    ctx = span.get_span_context()
+    return json.loads(carrier)["traceparent"].startswith(
+        f"00-{ctx.trace_id:032x}-{ctx.span_id:016x}-"
+    )
 
 
 @pytest.mark.asyncio
@@ -596,10 +604,38 @@ async def test_an_entry_worker_parents_its_operations_under_its_own_span(redis_m
         await wrap_up_task("entry_stream", "consumer", task, logger)
 
     next_task = await get_task("real_op", "consumer", "test", logger)
-    ctx = span.get_span_context()
-    assert json.loads(next_task[1]["otel"])["traceparent"].startswith(
-        f"00-{ctx.trace_id:032x}-{ctx.span_id:016x}-"
-    )
+    assert _is_under(next_task[1]["otel"], span)
+    assert next_task[1]["otel_rooted"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_an_entry_worker_that_is_its_own_operation_still_parents(redis_mock):
+    """ARAX does the whole job itself and names itself as the one operation;
+    its finish_query belongs under it all the same."""
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    task = _workflow_task([{"id": "arax"}], otel=json.dumps({"traceparent": "x"}))
+
+    with tracer.start_as_current_span("arax") as span:
+        await wrap_up_task("arax", "consumer", task, logger)
+
+    next_task = await get_task("finish_query", "consumer", "test", logger)
+    assert _is_under(next_task[1]["otel"], span)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_entry_worker_parents_its_finish_query(redis_mock):
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    task = _workflow_task([{"id": "real_op"}], otel=json.dumps({"traceparent": "x"}))
+
+    with tracer.start_as_current_span("entry_stream") as span:
+        await handle_task_failure("entry_stream", "consumer", task, logger)
+
+    next_task = await get_task("finish_query", "consumer", "test", logger)
+    assert _is_under(next_task[1]["otel"], span)
 
 
 @pytest.mark.asyncio
@@ -610,7 +646,9 @@ async def test_an_operation_hands_on_the_carrier_it_was_given(redis_mock):
 
     tracer = TracerProvider().get_tracer(__name__)
     otel = json.dumps({"traceparent": "from-the-entry-worker"})
-    task = _workflow_task([{"id": "stream_a"}, {"id": "stream_b"}], otel=otel)
+    task = _workflow_task(
+        [{"id": "stream_a"}, {"id": "stream_b"}], otel=otel, otel_rooted="1"
+    )
 
     with tracer.start_as_current_span("stream_a"):
         await wrap_up_task("stream_a", "consumer", task, logger)
