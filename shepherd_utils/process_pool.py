@@ -34,6 +34,16 @@ the loop wedges, the heartbeat stops, and the pod looks alive while doing nothin
 and never recovering. Spawn launches children via ``fork_exec`` (C level), which
 does not run the Python at-fork handlers, so rebuilding the pool in-process is
 safe.
+
+Children are recycled here, not by ``ProcessPoolExecutor(max_tasks_per_child=)``.
+On CPython 3.12 that option can leave an executor with no child at all: when the
+child exits at its task limit the executor only spawns a replacement if it holds
+no "idle worker" token, and those tokens drift out of step with the real
+children (a warmup call, or concurrent submissions, leave a stale one). The
+executor then believes it has an idle child, spawns nothing, and every task
+queued on it waits until ``task_timeout`` kills it (gh-115634, fixed in 3.13 by
+``_replace_dead_worker``). Counting a slot's tasks and swapping in a fresh
+executor at the limit never relies on that path.
 """
 
 import asyncio
@@ -132,6 +142,8 @@ class ProcessPoolManager:
         # exists, so setting it here cannot suppress the parent's tracing.
         os.environ[POOL_CHILD_ENV] = "1"
         self._slots = [self._new_executor() for _ in range(self._max_workers)]
+        # Tasks each slot's current executor has run, for recycling.
+        self._task_counts = [0] * self._max_workers
         # Free slot indexes; created on first use, inside the running loop.
         self._free: Optional[asyncio.Queue] = None
 
@@ -141,8 +153,6 @@ class ProcessPoolManager:
             "mp_context": self._ctx,
             "initializer": _init_pool_worker,
         }
-        if self._max_tasks_per_child and self._max_tasks_per_child > 0:
-            kwargs["max_tasks_per_child"] = self._max_tasks_per_child
         executor = ProcessPoolExecutor(**kwargs)
         if self._warmup is not None:
             try:
@@ -208,10 +218,15 @@ class ProcessPoolManager:
 
         if not timeout or timeout <= 0:
             try:
-                return await loop.run_in_executor(executor, fn, *args)
+                result = await loop.run_in_executor(executor, fn, *args)
             except BrokenProcessPool:
                 await self._replace(index, executor, "its child died or was OOM-killed")
                 raise
+            except BaseException:
+                self._count_task(index, executor)
+                raise
+            self._count_task(index, executor)
+            return result
 
         future = loop.run_in_executor(executor, fn, *args)
         try:
@@ -232,10 +247,34 @@ class ProcessPoolManager:
             )
 
         try:
-            return future.result()
+            result = future.result()
         except BrokenProcessPool:
             await self._replace(index, executor, "its child died or was OOM-killed")
             raise
+        except BaseException:
+            self._count_task(index, executor)
+            raise
+        self._count_task(index, executor)
+        return result
+
+    def _count_task(self, index: int, executor: ProcessPoolExecutor) -> None:
+        """Count a finished task against slot ``index``; at
+        ``max_tasks_per_child`` swap in a fresh executor and let the old,
+        now idle, child exit."""
+        limit = self._max_tasks_per_child
+        if not limit or limit <= 0 or self._slots[index] is not executor:
+            return
+        self._task_counts[index] += 1
+        if self._task_counts[index] < limit:
+            return
+        self._slots[index] = self._new_executor()
+        self._task_counts[index] = 0
+        try:
+            # Its only child is idle (the slot ran one task at a time), so it
+            # exits on the shutdown sentinel; don't block the loop on it.
+            executor.shutdown(wait=False)
+        except Exception:
+            pass
 
     async def _kill_children(self, executor: ProcessPoolExecutor) -> None:
         """Force-terminate any live children of ``executor``, capturing stacks.
@@ -290,6 +329,7 @@ class ProcessPoolManager:
         except Exception:
             pass
         self._slots[index] = self._new_executor()
+        self._task_counts[index] = 0
 
     def shutdown(self) -> None:
         """Tear every slot's executor down (best effort)."""

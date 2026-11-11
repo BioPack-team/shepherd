@@ -334,3 +334,46 @@ async def test_a_task_without_a_deadline_just_runs():
         assert await pool.run_within_budget(loop, {}, "Test step", _echo, "x") == "x"
     finally:
         pool.shutdown()
+
+
+# --- recycling children at max_tasks_per_child ----------------------------
+
+
+def _pid(_):
+    return os.getpid()
+
+
+async def test_children_recycle_at_max_tasks_per_child_with_warmup():
+    """A slot's child is replaced after ``max_tasks_per_child`` tasks, and the
+    slot keeps running tasks afterwards. With a warmup call this is the case
+    where CPython 3.12's own ``max_tasks_per_child`` leaves the executor with
+    no child, so the next task hangs until the timeout."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(
+        max_workers=1,
+        max_tasks_per_child=2,
+        name="test pool",
+        task_timeout=20,
+        warmup=_noop,
+    )
+    try:
+        pids = [await pool.run(loop, _pid, None) for _ in range(6)]
+    finally:
+        pool.shutdown()
+    assert pids[0] == pids[1] and pids[2] == pids[3] and pids[4] == pids[5]
+    assert len({pids[0], pids[2], pids[4]}) == 3
+
+
+async def test_concurrent_tasks_keep_running_across_recycles():
+    """Many concurrent tasks over few slots, recycling often, all finish."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(
+        max_workers=2, max_tasks_per_child=3, name="test pool", task_timeout=20
+    )
+    try:
+        results = await asyncio.gather(
+            *(pool.run(loop, _echo, value) for value in range(20))
+        )
+    finally:
+        pool.shutdown()
+    assert results == list(range(20))
