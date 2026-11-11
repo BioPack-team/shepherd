@@ -13,7 +13,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
 
 from opentelemetry import trace
 from opentelemetry.context.context import Context
-from opentelemetry.propagate import extract
+from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import Status, StatusCode
 
 from .broker import (
@@ -887,6 +887,26 @@ async def run_poll_loop(
             await asyncio.sleep(5)  # back off before retrying
 
 
+def _entry_span_carrier(otel: str) -> str:
+    """The trace carrier an entry worker hands its query's operations.
+
+    Every operation in a workflow is handed the same carrier, so they all show
+    up as siblings under one span. That carrier used to be whatever the query
+    arrived with -- the intake span. Fine while one request ran one ARA, but
+    under the ARS one intake span fans out to several ARAs, and their
+    operations all landed under it, interleaved, with nothing tying an
+    operation to its ARA: each ARA's own span was an empty leaf beside them.
+
+    An entry worker (``aragorn``, ``bte``, ...) is the one worker per query
+    that isn't itself an operation in the workflow, so its span is the natural
+    parent: hand on *its* context, and the ARA's operations nest under the
+    ARA. Falls back to ``otel`` when there is no span to hand on (tracing off).
+    """
+    carrier: dict = {}
+    inject(carrier)
+    return json.dumps(carrier) if carrier else otel
+
+
 async def wrap_up_task(
     stream: str,
     group: str,
@@ -895,11 +915,14 @@ async def wrap_up_task(
 ):
     """Call the next task and mark this one as complete."""
     workflow = json.loads(task[1]["workflow"])
+    otel = task[1]["otel"]
     # remove the operation we just did
     if stream == workflow[0]["id"]:
         # make sure the worker is in the workflow
         # for entry workers, they won't match and we'll do the first operation
         workflow.pop(0)
+    else:
+        otel = _entry_span_carrier(otel)
     # grab the next operation in the list
     if len(workflow) > 0:
         next_op = workflow[0]["id"]
@@ -913,7 +936,7 @@ async def wrap_up_task(
             "response_id": task[1]["response_id"],
             "workflow": json.dumps(workflow),
             "log_level": task[1].get("log_level", 20),
-            "otel": task[1]["otel"],
+            "otel": otel,
             "metadata": task[1]["metadata"],
             # The budget is measured from intake, so it travels with the query
             # rather than restarting at each operation.

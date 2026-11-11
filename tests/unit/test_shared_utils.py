@@ -569,6 +569,67 @@ async def test_wrap_up_task_does_not_pop_for_entry_worker(redis_mock):
     assert [op["id"] for op in workflow] == ["real_op", "next_op"]
 
 
+def _workflow_task(workflow, otel="{}"):
+    return [
+        "msg-otel",
+        {
+            "query_id": "q1",
+            "response_id": "r1",
+            "workflow": json.dumps(workflow),
+            "log_level": "20",
+            "otel": otel,
+            "metadata": "{}",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_entry_worker_parents_its_operations_under_its_own_span(redis_mock):
+    """The ARA's operations nest under the ARA's span, not the intake span
+    every ARA of an ARS query shares."""
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    task = _workflow_task([{"id": "real_op"}], otel=json.dumps({"traceparent": "x"}))
+
+    with tracer.start_as_current_span("entry_stream") as span:
+        await wrap_up_task("entry_stream", "consumer", task, logger)
+
+    next_task = await get_task("real_op", "consumer", "test", logger)
+    ctx = span.get_span_context()
+    assert json.loads(next_task[1]["otel"])["traceparent"].startswith(
+        f"00-{ctx.trace_id:032x}-{ctx.span_id:016x}-"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_operation_hands_on_the_carrier_it_was_given(redis_mock):
+    """Operations stay siblings: each passes the entry worker's carrier along
+    rather than nesting the next operation under itself."""
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    otel = json.dumps({"traceparent": "from-the-entry-worker"})
+    task = _workflow_task([{"id": "stream_a"}, {"id": "stream_b"}], otel=otel)
+
+    with tracer.start_as_current_span("stream_a"):
+        await wrap_up_task("stream_a", "consumer", task, logger)
+
+    next_task = await get_task("stream_b", "consumer", "test", logger)
+    assert next_task[1]["otel"] == otel
+
+
+@pytest.mark.asyncio
+async def test_an_entry_worker_without_a_span_keeps_the_carrier(redis_mock):
+    otel = json.dumps({"traceparent": "from-intake"})
+    task = _workflow_task([{"id": "real_op"}], otel=otel)
+
+    await wrap_up_task("entry_stream", "consumer", task, logger)
+
+    next_task = await get_task("real_op", "consumer", "test", logger)
+    assert next_task[1]["otel"] == otel
+
+
 @pytest.mark.asyncio
 async def test_handle_task_failure_routes_to_finish_query_with_error_status(redis_mock):
     task = [
