@@ -9,6 +9,8 @@
 #               | db_capacity | redis_eviction | stuck_pending
 #               | payload_store_capacity
 #   metric:     for type=threshold: xlen | callbacks_pending | pg_connection_count
+#               | pg_connection_pct (client backends, % of max_connections
+#               less the superuser-reserved slots)
 #   stream:     redis stream name (for xlen / queue_pending / stuck_pending;
 #               stuck_pending scans all streams when omitted)
 #   worker:     worker type name (for heartbeat_lost)
@@ -133,19 +135,18 @@ rules:
 
   # Postgres health: connection saturation.
   #
-  # This counts backends on the database, so it has to clear the fleet's IDLE
-  # FLOOR -- every container holds POSTGRES_POOL_MIN_SIZE connections open for
-  # its whole life -- or it fires around the clock on a healthy system. With
-  # the full compose topology (including the `ars` profile; 29 DB-connecting
-  # containers: 26 at the default min 2, the two lookup workers at 10, the
-  # server at 3) that floor is ~75, and the
-  # all-pools-saturated ceiling is ~330 against max_connections=400. 250 sits
-  # well clear of the floor and of normal load while still warning before the
-  # cap. Recheck both numbers when workers are added or pool sizes change.
+  # Client backends as a share of what Postgres accepts (max_connections less
+  # superuser_reserved_connections), read live from the server (#223 C11-3).
+  # It used to be a raw count (250) that had to be recomputed by hand against
+  # the fleet's idle floor and max_connections whenever workers, pool sizes or
+  # replicas changed. The idle floor (every process holds its pool's min size
+  # open) is ~20% of max_connections on the compose topology, so 80% fires on
+  # load, not at rest, and still ahead of the point where new connections
+  # start being refused.
   - name: pg_connection_saturation
     type: threshold
-    metric: pg_connection_count
-    threshold: 250
+    metric: pg_connection_pct
+    threshold: 80
     duration: 1m
     severity: warning
 

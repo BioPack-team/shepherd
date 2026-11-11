@@ -33,6 +33,7 @@ from opentelemetry.propagate import inject
 
 from .config import settings
 from .db import (
+    POOL_MAX_SIZE,
     abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
@@ -50,8 +51,9 @@ tracer = trace.get_tracer(__name__)
 # registers its callback; half the pool leaves the rest for the callback wait
 # and the other queries. An inferred query fans out to dozens of lookups and a
 # pod runs up to 100 tasks, so unbounded that was thousands of concurrent
-# inserts against a pool of a few.
-MAX_LOOKUPS_IN_FLIGHT = max(1, settings.postgres_pool_max_size // 2)
+# inserts against a pool of a few. POOL_MAX_SIZE is this process's pool,
+# derived from the fleet connection budget when one is set (#223 C11-3).
+MAX_LOOKUPS_IN_FLIGHT = max(1, POOL_MAX_SIZE // 2)
 _lookup_slots: Optional[asyncio.Semaphore] = None
 _slots_loop: Optional[asyncio.AbstractEventLoop] = None
 

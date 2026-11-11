@@ -20,6 +20,26 @@
 # To run without limits locally, override them in a gitignored
 # compose.override.yml (`cpus: 0` / `mem_limit: 0` means unlimited).
 
+# Postgres connection budget (#223 C11-3). Every process's pool max is its
+# share of one fleet-wide budget -- budget x POSTGRES_POOL_SHARES /
+# POSTGRES_FLEET_SHARES -- instead of a hand-set size per container, so the
+# fleet stays inside max_connections (400, see shepherd_db) however it is
+# scaled. 360 leaves 37 of the 397 usable connections (3 are
+# superuser-reserved) for migrations, psql and slack.
+#
+# FLEET_SHARES is the sum of every DB-connecting process's shares with the
+# `ars` profile on: 24 workers and the monitor at 1, the two lookup workers at
+# 3, and the server's 4 uvicorn processes (WEB_CONCURRENCY) at 1 each -- 35,
+# so 10 connections a share. Without the profile the fleet is 30 shares and
+# the pools are simply sized conservatively. Adding a DB-connecting service or
+# changing a share means changing this total;
+# tests/unit/test_connection_budget.py checks it against this file. In a
+# deployment, compute it from the replica counts, so scaling a deployment
+# shrinks every pool instead of overrunning max_connections.
+x-postgres-budget: &postgres_budget
+  POSTGRES_CONNECTION_BUDGET: 360
+  POSTGRES_FLEET_SHARES: 35
+
 services:
   shepherd_server:
     container_name: shepherd_server
@@ -27,16 +47,13 @@ services:
     mem_limit: 5g
     platform: linux/amd64
     environment:
+      <<: *postgres_budget
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
       # The server handles every client request (sync-query status polling,
-      # /callback lookups) so it needs more aggregate Postgres capacity than
-      # the workers' default of 10. These sizes are PER PROCESS and the
-      # server runs WEB_CONCURRENCY=4 uvicorn workers (see its Dockerfile),
-      # so the container's worst case is 4 x 10 = 40 connections. Budget:
-      # each process has its own pool, so keep (sum of pool max sizes) under
-      # Postgres max_connections below.
+      # /callback lookups). Pools are PER PROCESS and the server runs
+      # WEB_CONCURRENCY=4 uvicorn workers (see its Dockerfile), so it holds 4
+      # of the fleet's shares (x-postgres-budget above): 4 x 10 connections.
       POSTGRES_POOL_MIN_SIZE: 3
-      POSTGRES_POOL_MAX_SIZE: 10
       # Durable ARS payloads live in files on a volume every ARS process
       # shares (the server reads them; ars_fanout/premerge/merge write them;
       # ars_watchdog evicts them), not in Postgres. See
@@ -142,6 +159,8 @@ services:
       - ./data/redisinsight:/db
   shepherd_monitor:
     container_name: shepherd_monitor
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 2g
     build:
@@ -174,6 +193,8 @@ services:
   ########## Shared Workers
   merge_message:
     container_name: merge_message
+    environment:
+      <<: *postgres_budget
     cpus: 2
     mem_limit: 5g
     platform: linux/amd64
@@ -192,6 +213,8 @@ services:
       - ./.env:/app/.env
   sort_results_score:
     container_name: sort_results_score
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
@@ -209,6 +232,8 @@ services:
       - ./.env:/app/.env
   filter_results_top_n:
     container_name: filter_results_top_n
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
@@ -226,6 +251,8 @@ services:
       - ./.env:/app/.env
   filter_kgraph_orphans:
     container_name: filter_kgraph_orphans
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
@@ -252,6 +279,7 @@ services:
       dockerfile: workers/finish_query/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       CALLBACK_ALLOWED_HOSTS: *callback_allowed_hosts
     depends_on:
       shepherd_db:
@@ -263,6 +291,8 @@ services:
       - ./.env:/app/.env
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     build:
@@ -279,6 +309,8 @@ services:
       - ./.env:/app/.env
   score_paths:
     container_name: score_paths
+    environment:
+      <<: *postgres_budget
     cpus: 6
     mem_limit: 22g
     build:
@@ -302,6 +334,8 @@ services:
   ######### Example ARA
   example_ara:
     container_name: example_ara
+    environment:
+      <<: *postgres_budget
     platform: linux/amd64
     build:
       context: .
@@ -317,6 +351,8 @@ services:
       - ./.env:/app/.env
   example_lookup:
     container_name: example_lookup
+    environment:
+      <<: *postgres_budget
     platform: linux/amd64
     build:
       context: .
@@ -332,6 +368,8 @@ services:
       - ./.env:/app/.env
   example_score:
     container_name: example_score
+    environment:
+      <<: *postgres_budget
     platform: linux/amd64
     build:
       context: .
@@ -350,6 +388,8 @@ services:
   ######### ARAGORN
   aragorn:
     container_name: aragorn
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
@@ -375,13 +415,15 @@ services:
       dockerfile: workers/aragorn_lookup/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       # Lookup fan-out issues far more concurrent DB ops than the default
       # 10-connection pool: at 40 concurrent queries the pool queued ~4k
       # requests (2,620s cumulative wait vs 739s of actual DB work) and
-      # acquisitions timed out. Postgres allows 400 connections fleet-wide,
-      # so the hot lookup workers get server-sized pools.
+      # acquisitions timed out, so the hot lookup workers take a larger
+      # share of the fleet's connection budget.
       POSTGRES_POOL_MIN_SIZE: 10
-      POSTGRES_POOL_MAX_SIZE: 30
+      # three shares of the fleet budget (x-postgres-budget): 30 connections
+      POSTGRES_POOL_SHARES: 3
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -393,6 +435,8 @@ services:
       - ./.env:/app/.env
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
@@ -416,6 +460,8 @@ services:
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
+    environment:
+      <<: *postgres_budget
     cpus: 2 # -> pool sizes to 2; confirm via the "process pool sized to 2 worker(s)" startup log
     mem_limit: 6g # -> a child exceeding this is cgroup-OOM-killed (kernel), parent survives
     # Robustness-test knobs: uncomment per test (see scripts/seed_omnicorp.py).
@@ -457,6 +503,8 @@ services:
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
+    environment:
+      <<: *postgres_budget
     cpus: 4
     mem_limit: 10g
     platform: linux/amd64
@@ -483,6 +531,7 @@ services:
     cpus: 4
     mem_limit: 12g
     environment:
+      <<: *postgres_budget
       # ARAX puts no ceiling on a query, and Expand waits up to 120 s per hop,
       # so the shared 300 s default would kill slow multi-hop queries.
       POOL_TASK_TIMEOUT_SEC: "900"
@@ -508,6 +557,8 @@ services:
       - ./arax_dbs:/app/arax_dbs
   arax_pathfinder:
     container_name: arax_pathfinder
+    environment:
+      <<: *postgres_budget
     cpus: 6
     mem_limit: 22g
     build:
@@ -535,6 +586,8 @@ services:
 
   arax_rank:
     container_name: arax_rank
+    environment:
+      <<: *postgres_budget
     cpus: 4
     mem_limit: 10g
     build:
@@ -553,6 +606,8 @@ services:
 ######### BTE
   bte:
     container_name: bte
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
@@ -579,9 +634,11 @@ services:
       dockerfile: workers/bte_lookup/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       # same lookup fan-out profile as aragorn_lookup (see its note)
       POSTGRES_POOL_MIN_SIZE: 10
-      POSTGRES_POOL_MAX_SIZE: 30
+      # three shares of the fleet budget (x-postgres-budget): 30 connections
+      POSTGRES_POOL_SHARES: 3
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -595,6 +652,8 @@ services:
 ######### SIPR
   sipr:
     container_name: sipr
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 2g
     platform: linux/amd64
@@ -625,6 +684,7 @@ services:
       dockerfile: workers/ars_fanout/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -646,6 +706,7 @@ services:
       dockerfile: workers/ars_premerge/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -667,6 +728,7 @@ services:
       dockerfile: workers/ars_merge/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -688,6 +750,7 @@ services:
       dockerfile: workers/ars_watchdog/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -701,6 +764,8 @@ services:
 
   ars_notify:
     container_name: ars_notify
+    environment:
+      <<: *postgres_budget
     cpus: 0.5
     mem_limit: 1g
     profiles: [ars]
