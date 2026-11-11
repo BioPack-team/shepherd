@@ -72,6 +72,7 @@ SHEPHERD_HOSTS = {
     "dev": "https://shepherd.renci.org",
     "ci": "https://shepherd.ci.transltr.io",
     "test": "https://shepherd.test.transltr.io",
+    "prod": "https://shepherd.transltr.io",
 }
 SHEPHERD_ARAS = ("aragorn", "arax", "bte")
 
@@ -282,6 +283,7 @@ MVP2_CHEMICALS = [
     "CHEBI:85078",
     "CHEBI:167574",
     "CHEBI:41879",
+    "CHEBI:142437",
 ]
 
 PATHFINDER_PAIRS = [
