@@ -31,7 +31,11 @@ from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_omnicorp_lmdb
 from shepherd_utils.db import get_message_sync, save_response_sync
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import (
+    get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
@@ -511,7 +515,7 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     return in_message
 
 
-def aragorn_omnicorp(response_id: str, logger: logging.Logger) -> None:
+def aragorn_omnicorp(response_id: str, log_level: int = logging.INFO) -> list[dict]:
     """Process-pool entrypoint: load, overlay, and save entirely in the child.
 
     Only the small ``response_id`` string crosses the process-pool boundary; the
@@ -521,20 +525,27 @@ def aragorn_omnicorp(response_id: str, logger: logging.Logger) -> None:
     resident several times over -- across the parent event loop, the pickle
     buffers, and the child -- which is what pushed this worker into OOM. Reading
     and writing here keeps the payload off the parent's heap entirely.
+
+    The task's logger can't cross the boundary either (it isn't picklable), so
+    the child logs at the task's ``log_level`` through its own logger and
+    returns the formatted records, oldest-first, for the parent to fold into
+    the query's logs.
     """
-    message = get_message_sync(response_id)
+    with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
+        message = get_message_sync(response_id)
 
-    workflow = None
-    if "workflow" in message:
-        workflow = message["workflow"]
-        del message["workflow"]
+        workflow = None
+        if "workflow" in message:
+            workflow = message["workflow"]
+            del message["workflow"]
 
-    response = omnicorp_overlay(message, logger)
+        response = omnicorp_overlay(message, logger)
 
-    if workflow is not None:
-        response["workflow"] = workflow
+        if workflow is not None:
+            response["workflow"] = workflow
 
-    save_response_sync(response_id, response)
+        save_response_sync(response_id, response)
+        return query_log_handler.drain()
 
 
 async def process_task(
@@ -558,9 +569,15 @@ async def process_task(
         response_id = task[1]["response_id"]
         # Held no longer than the query can still use the answer (#220,
         # #245): past the query's budget it ends as TIMEOUT.
-        await pool.run_within_budget(
-            loop, task[1], OVERLAY_STEP, aragorn_omnicorp, response_id, logger
+        entries = await pool.run_within_budget(
+            loop,
+            task[1],
+            OVERLAY_STEP,
+            aragorn_omnicorp,
+            response_id,
+            logger.getEffectiveLevel(),
         )
+        ingest_query_logs(logger, entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 

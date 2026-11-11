@@ -7,8 +7,11 @@ test_process_pool.py); this checks each worker goes through it with its task.
 import asyncio
 import importlib
 import logging
+import pickle
 
 import pytest
+
+from shepherd_utils.logger import transient_logger
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,7 @@ class _Pool:
 
     async def run_within_budget(self, loop, task_fields, step, fn, *args):
         self.calls.append((task_fields, step, fn))
+        self.args = args
         return []
 
 
@@ -69,8 +73,11 @@ async def test_the_worker_runs_within_its_querys_budget(
         {"query_id": "q", "response_id": "r", "query_deadline": "1", "otel": "{}"},
     )
 
+    # A task's real logger: unregistered, so it can't be pickled into a child.
+    task_logger = transient_logger("shepherd.test.task", logger)
+
     await worker.process_task(
-        task, None, logger, _Limiter(), asyncio.get_running_loop(), pool
+        task, None, task_logger, _Limiter(), asyncio.get_running_loop(), pool
     )
 
     assert failures == []
@@ -78,3 +85,5 @@ async def test_the_worker_runs_within_its_querys_budget(
     assert task_fields is task[1]
     assert step
     assert fn is getattr(worker, task_fn)
+    # everything handed to the child has to survive the process boundary
+    pickle.dumps(pool.args)

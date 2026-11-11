@@ -15,7 +15,11 @@ from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_embeddings
 from shepherd_utils.db import get_message_sync, save_response_sync
-from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
+from shepherd_utils.logger import (
+    get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
@@ -185,20 +189,10 @@ def score_paths_task(response_id: str, log_level: int = logging.INFO) -> list[di
     the parent to fold into the query's logs -- the child can't reach the
     parent's query log handler itself.
     """
-    # logging.getLogger hands back the same object for the whole life of the
-    # child, so attach a call-scoped handler and remove it in finally --
-    # otherwise handlers accumulate across the child's successive tasks and one
-    # query's logs leak into the next.
-    query_log_handler = QueryLogger().log_handler
-    logger = get_worker_logger(f"{STREAM}.worker.{os.getpid()}")
-    logger.setLevel(log_level)
-    logger.addHandler(query_log_handler)
-    try:
+    with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
         _ensure_scoring_state(logger)
         score_paths(response_id, logger)
         return query_log_handler.drain()
-    finally:
-        logger.removeHandler(query_log_handler)
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):
@@ -221,9 +215,7 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
             response_id,
             logger.getEffectiveLevel(),
         )
-        handler = get_query_handler(logger)
-        if handler is not None and entries:
-            handler.ingest(entries)
+        ingest_query_logs(logger, entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 

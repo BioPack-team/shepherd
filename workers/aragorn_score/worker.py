@@ -13,7 +13,11 @@ import numpy as np
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_response_sync
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import (
+    get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
@@ -1232,7 +1236,7 @@ def get_edge_support_kg(edge_id, kg, aux_graphs, edge_kg=None):
     return edge_kg
 
 
-def aragorn_score(response_id: str, logger: logging.Logger) -> None:
+def aragorn_score(response_id: str, log_level: int = logging.INFO) -> list[dict]:
     """Process-pool entrypoint: load, score, and save entirely in the child.
 
     Only the small ``response_id`` string crosses the process-pool boundary; the
@@ -1243,44 +1247,51 @@ def aragorn_score(response_id: str, logger: logging.Logger) -> None:
     pickle buffers, and the child. Reading and writing here keeps the payload
     off the parent's heap entirely. When there are no results to score the
     message is saved back unchanged.
+
+    The task's logger can't cross the boundary either (it isn't picklable), so
+    the child logs at the task's ``log_level`` through its own logger and
+    returns the formatted records, oldest-first, for the parent to fold into
+    the query's logs.
     """
-    in_message = get_message_sync(response_id)
+    with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
+        in_message = get_message_sync(response_id)
 
-    # these timestamps are causing json serialization issues so here we
-    # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
-    # empty list is never created.
-    for log in in_message.get("logs") or []:
-        log["timestamp"] = str(log["timestamp"])
+        # these timestamps are causing json serialization issues so here we
+        # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
+        # empty list is never created.
+        for log in in_message.get("logs") or []:
+            log["timestamp"] = str(log["timestamp"])
 
-    message = in_message["message"]
-    if ("results" not in message) or (message["results"] is None):
-        # No results to weight; save unchanged and abort.
-        logger.info("No results to score. Saving unscored.")
+        message = in_message["message"]
+        if ("results" not in message) or (message["results"] is None):
+            # No results to weight; save unchanged and abort.
+            logger.info("No results to score. Saving unscored.")
+            save_response_sync(response_id, in_message)
+            return query_log_handler.drain()
+
+        # get a reference to the results
+        answers = message["results"]
+
+        try:
+            # resistance distance ranking
+            pr = Ranker(message, logger)
+
+            # rank the answers. there should be a score for each bound result after this
+            # TODO: is this right?
+            jaccard_like = False
+            answers = pr.rank(answers, jaccard_like=jaccard_like)
+
+            # save the results
+            message["results"] = answers
+        except Exception as e:
+            # put the error in the response
+            logger.exception(f"Aragorn-ranker/score exception {e}")
+            # save any log entries
+            # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
+
+        logger.info("Score complete. Saving.")
         save_response_sync(response_id, in_message)
-        return
-
-    # get a reference to the results
-    answers = message["results"]
-
-    try:
-        # resistance distance ranking
-        pr = Ranker(message, logger)
-
-        # rank the answers. there should be a score for each bound result after this
-        # TODO: is this right?
-        jaccard_like = False
-        answers = pr.rank(answers, jaccard_like=jaccard_like)
-
-        # save the results
-        message["results"] = answers
-    except Exception as e:
-        # put the error in the response
-        logger.exception(f"Aragorn-ranker/score exception {e}")
-        # save any log entries
-        # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
-
-    logger.info("Score complete. Saving.")
-    save_response_sync(response_id, in_message)
+        return query_log_handler.drain()
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):
@@ -1298,9 +1309,15 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
     async def _run(task, logger):
         response_id = task[1]["response_id"]
         # Held no longer than the query can use the answer (#245).
-        await pool.run_within_budget(
-            loop, task[1], "ARAGORN's scoring", aragorn_score, response_id, logger
+        entries = await pool.run_within_budget(
+            loop,
+            task[1],
+            "ARAGORN's scoring",
+            aragorn_score,
+            response_id,
+            logger.getEffectiveLevel(),
         )
+        ingest_query_logs(logger, entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 

@@ -62,7 +62,7 @@ def _score(monkeypatch, message):
     saved = {}
     monkeypatch.setattr(score, "get_message_sync", lambda rid: message)
     monkeypatch.setattr(score, "save_response_sync", lambda rid, m: saved.update(m))
-    score.aragorn_score("r1", logger)
+    score.aragorn_score("r1", logging.INFO)
     return saved["message"]["results"]
 
 
