@@ -260,8 +260,9 @@ async def test_intake_does_not_decode_the_response_in_the_worker(
 
     final = update.await_args_list[-1].kwargs
     assert (final["status"], final["code"]) == ("D", 200)
-    # stored under the child, as the ARA sent it (no query logs spliced in)
-    assert stored == {"child-1": {"message": {"results": []}}}
+    # nothing is written: the child's payload is the ARA's response itself,
+    # and a response with no results has nothing to premerge for the merge
+    assert stored == {}
 
 
 # --- C2-4: size settings --------------------------------------------------------

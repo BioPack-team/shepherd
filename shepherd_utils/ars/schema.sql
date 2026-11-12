@@ -50,16 +50,6 @@ CREATE INDEX IF NOT EXISTS idx_ars_message_agent ON ars_message (agent, ts);
 ALTER TABLE ars_message ADD COLUMN IF NOT EXISTS data_size BIGINT;
 CREATE INDEX IF NOT EXISTS idx_ars_message_stored ON ars_message (ref)
   WHERE data IS NOT NULL OR data_size IS NOT NULL;
--- The response id of the ARA query a child message was dispatched as. With a
--- cold store configured the child's own (premerged) payload is not kept
--- durably: once its Redis copy has expired, the child is served from the
--- archive finish_query wrote for that response
--- (shepherd_utils/response_archive.py). NULL for parents, merged versions
--- and children dispatched before this column existed.
--- idx_ars_message_ara_response doubles as its schema-upgrade marker.
-ALTER TABLE ars_message ADD COLUMN IF NOT EXISTS ara_response_id UUID;
-CREATE INDEX IF NOT EXISTS idx_ars_message_ara_response ON ars_message (ara_response_id)
-  WHERE ara_response_id IS NOT NULL;
 -- Payloads that do stay in Postgres are large TOAST values: vacuum the TOAST
 -- table early so space freed by retention is reused instead of growing it.
 ALTER TABLE ars_message SET (toast.autovacuum_vacuum_scale_factor = 0.02);

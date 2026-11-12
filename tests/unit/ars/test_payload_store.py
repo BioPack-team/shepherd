@@ -126,7 +126,9 @@ async def test_reads_come_from_the_file_once_redis_expires(store, pg, redis_copy
 
     assert await ars_db.load_message_bytes(pk, LOGGER) == PAYLOAD
     assert await ars_db.load_message_data(pk, LOGGER) == {"message": {"results": []}}
-    assert pg["sql"] == []  # Postgres never consulted
+    # no payload is read from Postgres (only the row lookup that tells an
+    # ARA child from any other message)
+    assert not any("SELECT data" in sql for sql, _ in pg["sql"])
 
 
 async def test_copies_written_before_the_directory_was_set_stay_readable(

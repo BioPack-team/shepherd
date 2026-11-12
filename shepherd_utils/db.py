@@ -461,8 +461,6 @@ ARS_CACHE_SCHEMA_MARKER_INDEX = "idx_ars_response_cache_source"
 ARS_AGENT_SCHEMA_MARKER_INDEX = "idx_ars_message_agent"
 # ars_message.data_size (durable payloads off Postgres, size-based retention).
 ARS_PAYLOAD_SCHEMA_MARKER_INDEX = "idx_ars_message_stored"
-# ars_message.ara_response_id (a child's pointer to its ARA's archived response).
-ARS_ARA_RESPONSE_SCHEMA_MARKER_INDEX = "idx_ars_message_ara_response"
 
 
 async def _migrate_ars_registry(conn) -> None:
@@ -533,7 +531,6 @@ async def apply_schema_upgrades() -> None:
             ARS_CACHE_SCHEMA_MARKER_INDEX,
             ARS_AGENT_SCHEMA_MARKER_INDEX,
             ARS_PAYLOAD_SCHEMA_MARKER_INDEX,
-            ARS_ARA_RESPONSE_SCHEMA_MARKER_INDEX,
         ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",

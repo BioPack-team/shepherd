@@ -358,11 +358,16 @@ every ARS message keeps a durable copy in Postgres.
   tree gets `REDIS_HOT_TTL`: long enough for clients still polling it. A
   later read comes from the cold store and re-warms Redis for the same
   window.
-- **ARS children.** A child's premerged payload is not kept durably. After
-  the hot window a child is served from its ARA's archived response: the
-  ARA's own answer, without the ARS's source stamping, score normalization
-  or node annotation. A child whose ARA never answered keeps a small durable
-  copy of its own.
+- **ARS children.** A child and its ARA's response are one entry: the
+  child's pk is the response id its ARA's query was given. The ARS never
+  writes it. A child's payload is the ARA's own answer, as the ARA would
+  deliver it (with the query's parameters and logs, without the ARS's score
+  normalization or node annotation), read from Redis while hot and from the
+  archive afterwards; a child that is still running has no payload yet.
+  What premerge makes of a child is the merge's working copy
+  (`ars:premerged:<pk>`), deleted once the merge has attempted it. A child
+  whose ARA never answered keeps a small durable copy of whatever its entry
+  held.
 - **Merged versions.** Only the newest keeps a durable copy; each new one
   drops the copy of the version it supersedes. Earlier entries in
   `merged_versions_list` are readable only while the tree is hot.

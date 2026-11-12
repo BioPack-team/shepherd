@@ -46,6 +46,7 @@ import zstandard
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars import payload_store
 from shepherd_utils.config import settings
+from shepherd_utils.trapi import wrap_stored_response
 
 ARCHIVE_ATTEMPTS = 3
 # The most the archive write may hold up the worker finishing a query,
@@ -275,3 +276,38 @@ async def load_archive(response_id: Any, logger: logging.Logger) -> Optional[Arc
     except Exception as e:
         logger.error(f"Could not read the archive of {response_id}: {e}")
         return None
+
+
+async def load_delivered_response(
+    response_id: str, logger: logging.Logger
+) -> Optional[bytes]:
+    """A query's response as it is delivered -- a TRAPI Response: the stored
+    response with the query's ``parameters`` and logs -- as JSON bytes,
+    never parsed. From Redis while the response is there, from its archive
+    once it is not; None when it is in neither.
+
+    This is what an ARS child serves as its payload (the child and its
+    ARA's response are one entry), so it reads the same whether the
+    response is still hot or long archived.
+    """
+    try:
+        stored = await shepherd_db.get_message(response_id, logger, raw=True)
+    except KeyError:
+        stored = None
+    except Exception as e:
+        logger.warning(f"Redis read failed for response {response_id}: {e}")
+        stored = None
+    if stored is not None:
+        logs = await shepherd_db.get_logs(response_id, logger)
+        parameters = await shepherd_db.get_response_query_parameters(
+            response_id, logger
+        )
+        return await asyncio.to_thread(
+            wrap_stored_response, stored, {"parameters": parameters}, logs
+        )
+    archive = await load_archive(response_id, logger)
+    if archive is None:
+        return None
+    return await asyncio.to_thread(
+        wrap_stored_response, archive.response, archive.query, archive.logs
+    )

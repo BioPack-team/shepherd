@@ -46,17 +46,18 @@ tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
 
-async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
-    """Persist a child transition; run the completion check when terminal."""
-    if payload is not None:
-        await ars_db.save_message_data(child_pk, payload, logger)
+async def _finalize_child(child_pk, parent_pk, updates, logger):
+    """Persist a child transition; run the completion check when terminal.
+
+    Nothing is saved under the child: its entry in the data store is its
+    ARA's response, which only the ARA's pipeline writes."""
     updated = await ars_db.update_message(child_pk, **updates)
     if updated and updated["status"] in ("D", "S", "E", "U"):
         await ars_db.persist_data_copy(child_pk, logger)
         await lifecycle.check_parent_completion(parent_pk, logger)
 
 
-async def dispatch(ara: aras.ARA, child_pk, parent, data, logger, response_id=None):
+async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
     """Enqueue the query on the ARA's worker stream.
 
     Persists the same query record ``POST /{ara}/asyncquery`` would have,
@@ -67,8 +68,10 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger, response_id=No
     callback = handoff_callback_url(child_pk)
     data["callback"] = callback
     query_id = shepherd_db.new_id()
-    if response_id is None:
-        response_id = shepherd_db.new_id()
+    # The child IS the ARA's response: one id, one entry in the data store.
+    # The ARA's pipeline writes it, finish_query seals and archives it, and
+    # the ARS serves it as the child's payload without ever writing it.
+    response_id = str(child_pk)
     # TRAPI 2.0: the client's log level is parameters.log_level
     level_number = resolve_log_level(
         query_log_level(data), resolve_log_level(settings.log_level)
@@ -101,16 +104,12 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger, response_id=No
             exc_info=True,
         )
         await _finalize_child(
-            child_pk, parent["id"], data, {"status": "E", "code": 500}, logger
+            child_pk, parent["id"], {"status": "E", "code": 500}, logger
         )
 
 
 async def send_to_ara(ara: aras.ARA, parent, parent_data, logger):
     """tasks.send_message, one ARA: create the child, dispatch the query."""
-    # The response id the ARA's query will be given, recorded on the child
-    # from the start: once the child's own Redis copy has expired, it is
-    # served from the archive finish_query writes for that response.
-    response_id = shepherd_db.new_id()
     child = await ars_db.create_message(
         agent=ara.agent,
         status="Running",
@@ -118,10 +117,9 @@ async def send_to_ara(ara: aras.ARA, parent, parent_data, logger):
         name=parent.get("name", ""),
         ref=parent["id"],
         params=parent.get("params"),
-        ara_response_id=response_id,
     )
     data = copy.deepcopy(parent_data) if parent_data else {}
-    await dispatch(ara, child["id"], parent, data, logger, response_id=response_id)
+    await dispatch(ara, child["id"], parent, data, logger)
 
 
 async def ars_fanout(task, logger: logging.Logger):

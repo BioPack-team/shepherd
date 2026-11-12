@@ -525,26 +525,18 @@ Behavioral deviations:
     `PAYLOAD_S3_BUCKET` is set). Upstream keeps every message's payload in
     MySQL for good. With a cold store configured the port keeps, durably,
     only the parent's query, the final merged version, and the archive
-    `finish_query` writes of each ARA's response. Three things read
+    `finish_query` writes of each ARA's response. Two things read
     differently once a tree's Redis copies have expired (`REDIS_HOT_TTL`
-    after it completes):
-    - **an ARA child's payload is the ARA's own response**, as the ARA would
-      have delivered it (its response with the query's `parameters` and
-      logs), not the premerged one: no normalized scores, no node
-      annotations, and any nulls or phantom support graphs premerge
-      removed are back (it no longer stamps an infores on edge sources at
-      all, deviation 21). The child's row points at the
-      response (`ars_message.ara_response_id`) and is served from its
-      archive. A child whose ARA never answered keeps a durable copy of its
-      own, as before;
+    after it completes); what a child serves is deviation 22 and does not
+    depend on the store:
     - **a superseded merged version has no payload** (`fields.data: null`,
       as item 11): each new merged version that finishes Done drops the
       durable copy of the one it supersedes, so `merged_versions_list`
       entries other than the last resolve only while the tree is hot;
     - **a merge cannot be rebuilt from the cold store**: the premerged
       children it folded are gone.
-    Without a cold store nothing changes: every message keeps a durable
-    copy in Postgres, and its Redis copy for `REDIS_TTL`.
+    Without a cold store every message keeps a durable copy in Postgres,
+    and its Redis copy for `REDIS_TTL`.
 21. **Premerge leaves an ARA's answer as sent, and reports what is wrong
     with it** (post-parity change, #258). The de-federated ARS only
     premerges the answers of ARAs this deployment hosts, so what upstream
@@ -554,27 +546,20 @@ Behavioral deviations:
       received the payload with the query's logs spliced in; the intake
       used to read them from the query's log list and splice them in the
       same way. Nothing used them there: the merge folds only each child's
-      `message`, and the logs stay in the query's log list. A child read
-      while hot is its premerged response without `logs`; once a tree's
-      Redis copies expire, a child is served from its ARA's archived
-      response, which does carry them (deviation 20). The only `logs` a
-      child's payload can now carry are the ARS's own entries (the
-      "Internal ARS Server Error" of a failed child, a node annotation
-      failure).
+      `message`, and the logs stay in the query's log list. The premerged
+      copy carries none; a child, when read, is served with them
+      (deviation 22).
     - **one load, one save.** Intake and premerge were two pool calls,
       each decoding and re-encoding the multi-MB response. They are one:
       the pool child loads the ARA's response once, counts its results and
       computes the score statistics, runs the premerge stages, and saves
-      once under the child's pk. The intake state machine is unchanged
+      once, as the merge's working copy (deviation 22). The intake state machine is unchanged
       (guards, the `ara_response_complete` notification, the counts
       before the hand-off, the terminal shapes); the notification now
       follows the premerge stages instead of preceding them. A premerge
       stage failure still ends E/500 after the notification and the
-      counts, over the payload as far as the stages got (upstream's
-      generic handler saved the data it was holding). A delivery that ends
-      at intake (no results, a failed ARA query) still stores the response
-      under the child once, as the ARA sent it. A redelivery premerges
-      again from the ARA's response, and every stage is idempotent.
+      counts. A redelivery premerges again from the ARA's response, and
+      every stage is idempotent.
     - **null stripping is reported, and slated for removal.** TRAPI 2.0
       forbids nulls, so a null is an ARA bug; but Shepherd's own response
       pruning is targeted, not recursive, so a deep null can survive it.
@@ -608,6 +593,34 @@ Behavioral deviations:
     Tests: `tests/unit/ars/test_ars_premerge.py` (single load/save, no
     logs, redelivery, each report on and off, reaching the query's logs),
     `test_upstream_bugfixes.py`, `test_golden_parity.py`.
+22. **An ARA child is its ARA's response** (post-parity change, #252,
+    depends on #257). Upstream gave each child its own payload: the ARA's
+    answer after the ARS had premerged it. Here a child's pk is the
+    response id its ARA's query is dispatched with, so the child and the
+    ARA's response are one entry in the data store. The ARA's pipeline
+    writes it, `finish_query` seals it before handing it over, and the ARS
+    never writes it.
+    - **a child's payload is the ARA's answer as the ARA would deliver
+      it**: its response with the query's `parameters` and logs, a TRAPI
+      2.0 Response, without anything premerge does (no normalized scores,
+      no node annotations; nulls and phantom support graphs are as sent).
+      It reads the same from Redis while the response is hot and from
+      `finish_query`'s archive afterwards.
+    - **a child has no payload until it is terminal** (`fields.data: null`
+      while Running): until then its entry holds a response the ARA is
+      still building. Upstream showed the query it had been sent.
+    - **the premerged form is the merge's working copy**, stored beside the
+      child (`ars:premerged:<pk>`), saved only when the response validated,
+      and deleted once the merge has attempted the child. It is never
+      served. A redelivered intake always starts again from the sealed
+      response.
+    - **the "Internal ARS Server Error" log entry** of a child that ends
+      E/500 is written to the ARS query's logs, not into the child's
+      payload, which the ARS does not write. The child's status and code
+      are unchanged.
+    - **a child whose dispatch failed** has whatever its ARA's query got as
+      far as storing (its initial, empty response, or nothing), not a copy
+      of the query.
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 

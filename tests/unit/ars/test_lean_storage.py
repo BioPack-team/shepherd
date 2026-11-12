@@ -1,16 +1,20 @@
-"""Keeping Redis to what is hot (#252, stage 2).
+"""An ARS child is its ARA's response, and Redis is kept to what is hot (#252).
 
-With a cold store configured, the ARS keeps less durably and lets go of its
-Redis copies sooner:
+A child's pk is the response id its ARA's query was dispatched with, so the
+child and the response are one entry in the data store. The ARS never writes
+it: a child's payload is the ARA's own answer, as the ARA would deliver it,
+read from Redis while it is hot and from finish_query's archive afterwards --
+the same bytes either way. What premerge makes of a child is the merge's
+working copy, kept beside it and deleted once the merge has attempted it.
 
-* an ARA child gets no durable copy of its own -- it points at the archive
-  finish_query wrote for its ARA's response, and is served from it once its
-  Redis copy has expired;
+With a cold store configured, the ARS also keeps less durably and lets go of
+its Redis copies sooner:
+
+* an ARA child gets no durable copy of its own (the archive is that copy),
+  unless its ARA never answered;
 * only the newest merged version keeps a durable copy;
 * a finished tree's Redis copies are left ``redis_hot_ttl`` to live, and a
   read from a durable copy re-warms Redis for only that long.
-
-Without a store, none of it applies.
 """
 
 import logging
@@ -23,6 +27,7 @@ import zstandard
 
 import shepherd_utils.db as shepherd_db
 from shepherd_utils import response_archive
+from shepherd_utils.ars import aras
 from shepherd_utils.ars import db as ars_db
 from shepherd_utils.ars import lifecycle, payload_store
 from shepherd_utils.config import settings
@@ -51,18 +56,20 @@ def no_store(monkeypatch):
 
 @pytest.fixture
 def pg(monkeypatch):
-    """Mock pool. ``pointers`` maps a message pk to its ara_response_id;
-    no message has a payload left in Postgres. Records the SQL run."""
-    state = {"pointers": {}, "sql": []}
+    """Mock pool. ``rows`` maps a message pk to its (status, agent, ref);
+    ``data`` maps a pk to a payload still in Postgres. Records the SQL run."""
+    state = {"rows": {}, "data": {}, "sql": []}
 
     async def _execute(sql, params=None):
         state["sql"].append((sql, params))
         cur = MagicMock()
         row = None
-        if "SELECT ara_response_id" in sql:
-            row = (state["pointers"].get(params[0]),)
+        if "SELECT status, agent, ref" in sql:
+            row = state["rows"].get(params[0])
+        elif "SELECT data IS NOT NULL" in sql:
+            row = (params[0] in state["data"],)
         elif "SELECT data" in sql:
-            row = (None,)
+            row = (state["data"].get(params[0]),)
         cur.fetchone = AsyncMock(return_value=row)
         return cur
 
@@ -73,6 +80,13 @@ def pg(monkeypatch):
     pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
     monkeypatch.setattr(shepherd_db, "pool", pool)
     return state
+
+
+def _child(pg, status="D"):
+    """An ARA child row: a message under a parent, recorded under its ARA."""
+    pk = uuid.uuid4()
+    pg["rows"][pk] = (status, "ara-shepherd-aragorn", uuid.uuid4())
+    return pk
 
 
 def _archive(response_id):
@@ -87,6 +101,19 @@ def _archive(response_id):
     payload_store.write(response_id, blob, payload_store.ARA)
 
 
+async def _hot(redis_mock, monkeypatch, response_id):
+    """Put ``response_id`` in Redis as its ARA's pipeline leaves it: the
+    stored response under the id, the logs in the log list, and the query's
+    parameters where the lookup finds them."""
+    await shepherd_db.save_response(str(response_id), dict(RESPONSE), LOGGER)
+    await shepherd_db._append_logs(str(response_id), LOGS)
+    monkeypatch.setattr(
+        shepherd_db,
+        "get_response_query_parameters",
+        AsyncMock(return_value=QUERY["parameters"]),
+    )
+
+
 # --- which children keep a durable copy --------------------------------------
 
 
@@ -95,36 +122,27 @@ def persist(mocker):
     return mocker.patch.object(ars_db, "persist_data_copy", new_callable=AsyncMock)
 
 
-def _child(pointer=True):
-    return {"id": uuid.uuid4(), "ara_response_id": uuid.uuid4() if pointer else None}
-
-
 async def test_a_child_whose_ara_answered_keeps_no_copy_of_its_own(store, persist):
-    await ars_db.persist_child_copy(_child(), LOGGER)
+    """The archive finish_query wrote, under the child's own id, is it."""
+    await ars_db.persist_child_copy({"id": uuid.uuid4()}, LOGGER)
     persist.assert_not_awaited()
 
 
-async def test_a_child_with_no_answer_to_point_at_keeps_its_copy(store, persist):
-    """Its ARA's response never arrived (or was lost): the archive has
-    nothing for it, so the child's own payload is all there is."""
-    child = _child()
+async def test_a_child_whose_ara_never_answered_keeps_its_copy(store, persist):
+    """No answer means no archive: whatever the child's entry holds is all
+    there is."""
+    child = {"id": uuid.uuid4()}
     await ars_db.persist_child_copy(child, LOGGER, have_response=False)
     persist.assert_awaited_once_with(child["id"], LOGGER)
 
 
-async def test_a_child_from_before_the_pointer_keeps_its_copy(store, persist):
-    child = _child(pointer=False)
-    await ars_db.persist_child_copy(child, LOGGER)
-    persist.assert_awaited_once_with(child["id"], LOGGER)
-
-
 async def test_without_a_store_every_child_keeps_its_copy(no_store, persist):
-    child = _child()
+    child = {"id": uuid.uuid4()}
     await ars_db.persist_child_copy(child, LOGGER)
     persist.assert_awaited_once_with(child["id"], LOGGER)
 
 
-# --- a child read after its Redis copy has expired ---------------------------
+# --- a child's payload is its ARA's response ---------------------------------
 
 
 @pytest.fixture
@@ -137,13 +155,14 @@ def expired(monkeypatch):
     return rewarm
 
 
-async def test_a_child_is_served_from_its_aras_archived_response(store, pg, expired):
-    """What comes back is the ARA's own answer as it would have delivered
-    it -- its response with the query's parameters and logs -- as an
-    ordinary TRAPI Response, on every read path."""
-    child_pk, response_id = uuid.uuid4(), uuid.uuid4()
-    pg["pointers"][child_pk] = response_id
-    _archive(response_id)
+async def test_a_hot_child_is_served_as_its_ara_would_deliver_it(
+    store, pg, redis_mock, monkeypatch
+):
+    """The child's entry is the ARA's stored response; what a client gets
+    is that response with the query's parameters and logs -- an ordinary
+    TRAPI Response -- on every read path."""
+    child_pk = _child(pg)
+    await _hot(redis_mock, monkeypatch, child_pk)
 
     data = await ars_db.load_message_data(child_pk, LOGGER)
     assert data["message"] == RESPONSE["message"]
@@ -154,15 +173,45 @@ async def test_a_child_is_served_from_its_aras_archived_response(store, pg, expi
     raw = await ars_db.load_message_bytes(child_pk, LOGGER)
     assert orjson.loads(raw) == data
     compressed = await ars_db.load_message_compressed(child_pk, LOGGER)
-    # ?compress hands clients one zstd frame of the response, not the archive
     assert response_archive.split_frames(compressed) == [raw]
     assert await ars_db.message_has_data(child_pk)
-    expired.assert_not_awaited()  # not re-warmed: it is only being looked at
 
 
-async def test_a_child_whose_archive_is_gone_has_no_data(store, pg, expired):
-    child_pk = uuid.uuid4()
-    pg["pointers"][child_pk] = uuid.uuid4()
+async def test_a_child_reads_the_same_hot_and_cold(store, pg, redis_mock, monkeypatch):
+    """From Redis while the response is there, from its archive once it is
+    not: the same bytes, so a client cannot tell which it got."""
+    child_pk = _child(pg)
+    await _hot(redis_mock, monkeypatch, child_pk)
+    _archive(child_pk)
+
+    hot = await ars_db.load_message_bytes(child_pk, LOGGER)
+    await shepherd_db.data_db_client.flushdb()
+    await shepherd_db.logs_db_client.flushdb()
+    cold = await ars_db.load_message_bytes(child_pk, LOGGER)
+
+    assert hot is not None and cold == hot
+    assert await ars_db.message_has_data(child_pk)
+
+
+async def test_reading_a_child_never_writes_its_entry(store, pg, expired):
+    """The entry is the ARA's, and sealed: a cold read is not re-warmed
+    into it."""
+    child_pk = _child(pg)
+    _archive(child_pk)
+
+    assert await ars_db.load_message_bytes(child_pk, LOGGER) is not None
+    assert await ars_db.load_message_data(child_pk, LOGGER) is not None
+    assert await ars_db.load_message_compressed(child_pk, LOGGER) is not None
+    expired.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", ["R", "W"])
+async def test_a_child_has_no_payload_until_it_is_terminal(
+    store, pg, redis_mock, monkeypatch, status
+):
+    """Until then the entry holds a response its ARA is still building."""
+    child_pk = _child(pg, status=status)
+    await _hot(redis_mock, monkeypatch, child_pk)
 
     assert await ars_db.load_message_data(child_pk, LOGGER) is None
     assert await ars_db.load_message_bytes(child_pk, LOGGER) is None
@@ -170,27 +219,94 @@ async def test_a_child_whose_archive_is_gone_has_no_data(store, pg, expired):
     assert not await ars_db.message_has_data(child_pk)
 
 
-async def test_a_message_that_points_nowhere_has_no_data(store, pg, expired):
-    """A superseded merged version, say: no durable copy and no pointer."""
-    assert await ars_db.load_message_bytes(uuid.uuid4(), LOGGER) is None
-    assert not await ars_db.message_has_data(uuid.uuid4())
+async def test_an_errored_child_still_serves_its_aras_response(
+    store, pg, redis_mock, monkeypatch
+):
+    child_pk = _child(pg, status="E")
+    await _hot(redis_mock, monkeypatch, child_pk)
+    assert (await ars_db.load_message_data(child_pk, LOGGER))["logs"] == LOGS
 
 
-async def test_a_childs_own_durable_copy_wins_over_the_archive(store, pg, expired):
-    child_pk, response_id = uuid.uuid4(), uuid.uuid4()
-    pg["pointers"][child_pk] = response_id
-    _archive(response_id)
-    payload_store.write(child_pk, zstandard.compress(b'{"own":"copy"}'))
+async def test_a_child_with_nothing_left_has_no_data(store, pg, expired):
+    child_pk = _child(pg)
 
-    assert await ars_db.load_message_bytes(child_pk, LOGGER) == b'{"own":"copy"}'
-
-
-async def test_without_a_store_the_archive_is_never_consulted(no_store, pg, expired):
-    child_pk = uuid.uuid4()
-    pg["pointers"][child_pk] = uuid.uuid4()
-
+    assert await ars_db.load_message_data(child_pk, LOGGER) is None
     assert await ars_db.load_message_bytes(child_pk, LOGGER) is None
-    assert not any("ara_response_id" in sql for sql, _ in pg["sql"])
+    assert await ars_db.load_message_compressed(child_pk, LOGGER) is None
+    assert not await ars_db.message_has_data(child_pk)
+
+
+async def test_a_child_whose_ara_never_answered_reads_its_own_copy(store, pg, expired):
+    """No archive, but the copy it kept: served as a TRAPI Response too."""
+    child_pk = _child(pg, status="E")
+    payload_store.write(child_pk, zstandard.compress(b'{"message":{"results":[]}}'))
+
+    data = await ars_db.load_message_data(child_pk, LOGGER)
+    assert data["message"] == {"results": []}
+    assert data["schema_version"] and "logs" not in data
+    assert await ars_db.message_has_data(child_pk)
+
+
+async def test_without_a_store_a_child_reads_its_copy_from_postgres(
+    no_store, pg, expired
+):
+    child_pk = _child(pg)
+    pg["data"][child_pk] = zstandard.compress(b'{"message":{"results":[]}}')
+
+    data = await ars_db.load_message_data(child_pk, LOGGER)
+    assert data["message"] == {"results": []}
+    assert await ars_db.message_has_data(child_pk)
+
+
+async def test_a_merged_version_is_not_read_as_a_child(store, pg, redis_mock):
+    """It is under the parent too, but it is the ARS's own message: its
+    entry is its payload, served as stored."""
+    merged_pk = uuid.uuid4()
+    pg["rows"][merged_pk] = ("D", aras.MERGE_AGENT, uuid.uuid4())
+    await shepherd_db.data_db_client.set(
+        str(merged_pk), zstandard.compress(b'{"message":{"merged":true}}')
+    )
+
+    assert await ars_db.load_message_bytes(merged_pk, LOGGER) == (
+        b'{"message":{"merged":true}}'
+    )
+
+
+async def test_a_failed_row_lookup_reads_the_message_as_it_is_stored(
+    store, redis_mock, monkeypatch
+):
+    pool = MagicMock()
+    pool.connection.side_effect = RuntimeError("postgres is down")
+    monkeypatch.setattr(shepherd_db, "pool", pool)
+    pk = uuid.uuid4()
+    await shepherd_db.data_db_client.set(str(pk), zstandard.compress(b'{"a":1}'))
+
+    assert await ars_db.load_message_bytes(pk, LOGGER) == b'{"a":1}'
+
+
+# --- the merge's working copy ------------------------------------------------
+
+
+async def test_the_premerged_copy_lives_beside_the_child_not_in_it(redis_mock):
+    child_pk = uuid.uuid4()
+    key = ars_db.premerged_key(child_pk)
+    assert key != str(child_pk) and str(child_pk) in key
+    await shepherd_db.data_db_client.set(str(child_pk), b"the ARA's response")
+    await shepherd_db.data_db_client.set(key, b"premerged")
+
+    await ars_db.discard_premerged(child_pk, LOGGER)
+
+    assert await shepherd_db.data_db_client.get(key) is None
+    assert await shepherd_db.data_db_client.get(str(child_pk)) == b"the ARA's response"
+
+
+async def test_discarding_a_premerged_copy_never_fails(monkeypatch):
+    monkeypatch.setattr(
+        shepherd_db.data_db_client,
+        "delete",
+        AsyncMock(side_effect=ConnectionError("redis is down")),
+    )
+    await ars_db.discard_premerged(uuid.uuid4(), LOGGER)
 
 
 # --- how long a re-warmed payload stays in Redis -----------------------------

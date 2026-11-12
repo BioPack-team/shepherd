@@ -26,10 +26,10 @@ The premerge stages, in order (``_premerge_stages``):
     parallel per response rather than under the parent's merge lock
     (ars_merge then skips the stage). A failed annotation is logged on the
     response and its nodes are left unannotated -- the response still merges.
-See docs/ARS_PARITY_REGISTER.md, deviations 14, 18, 19 and 21.
+See docs/ARS_PARITY_REGISTER.md, deviations 14, 18, 19, 21 and 22.
 
 Outcomes, exactly as upstream's view produced them:
-  - success           -> premerged payload saved under the child, the child
+  - success           -> premerged working copy saved for the merge, the child
                          recorded as merge-ready and ars.merge woken (ara-
                          agents), child flips to D/200 (or the status carried
                          on the task), parent completion check
@@ -52,22 +52,30 @@ The work on the response itself is pure-Python CPU over a multi-MB dict, so
 it runs in a process pool, and in ONE pool call per delivery
 (``intake_in_child``): the pool child loads the ARA's response by id once,
 counts its results and computes the score statistics, runs the premerge
-stages when the response is headed for the merge, and saves it once under
-the child's pk. Only the counts, the verdict and the stage reports cross
-IPC (the same pattern as ars_merge and merge_message), and nothing large is
-ever resident in this process. A delivery that ends at intake (no results,
-a failed ARA query) still has its response saved under the child, as the
-ARA sent it. A task that already names a ``child_pk`` (no intake) premerges
-the child's stored payload in place (``premerge_in_child``).
+stages when the response is headed for the merge, and saves the result once
+as the merge's working copy. Only the counts, the verdict and the stage
+reports cross IPC (the same pattern as ars_merge and merge_message), and
+nothing large is ever resident in this process. A task that already names a
+``child_pk`` (no intake) premerges that child's response the same way
+(``premerge_in_child``).
+
+The ARS never writes a child's own entry. A child's pk is the response id
+its ARA's query was dispatched with, so the child and the ARA's response
+are one entry in the data store: the ARA's pipeline writes it and
+finish_query seals it before handing it over, so what is read here is
+final. What premerge makes of it is stored beside it
+(``ars_db.premerged_key``) for the fold to read, saved only when the
+response validated, and deleted once the merge has attempted the child. A
+redelivery therefore always starts again from the ARA's response as sent.
 
 The stage reports are logged in the pool child through a
 ``pool_task_logger`` and folded into the task's query logs here
 (``ingest_query_logs``), so they reach the ARS query's stored logs.
 
-The child's payload carries no query logs: they are in the query's log list
-already, and the merge folds only each child's ``message``. Once a tree's
-Redis copies expire, a child is served from its ARA's archived response,
-which does carry them (ars_db._load_archived).
+The premerged copy carries no query logs: the merge folds only each child's
+``message``. A child's payload, when a client asks for it, is its ARA's
+response with the query's parameters and logs, read at that moment from
+Redis or from the archive (ars_db._load_child).
 """
 
 import asyncio
@@ -239,14 +247,14 @@ def premerge_in_child(
     annotate=False,
     log_level=logging.INFO,
 ) -> Dict[str, Any]:
-    """Pool-side premerge of a payload already stored under the child (a
-    task that names a ``child_pk``; a delivery goes through
-    ``intake_in_child``): fetch it by pk, process it in place, write it back.
+    """Pool-side premerge for a task that names a ``child_pk`` (a delivery
+    goes through ``intake_in_child``): fetch the child's response by pk,
+    process it, and save the result as the merge's working copy.
 
     Returns ``{"valid": verdict, "logs": [...]}``, the logs being the stage
-    reports for the worker to fold into the query's logs. The processed
-    payload is saved whether or not it validates, as upstream saved the
-    (already premerged) data on both branches of its view. ``annotate``
+    reports for the worker to fold into the query's logs. The working copy
+    is saved only when the response validated: nothing reads the premerged
+    form of a response that is not going to the merge. ``annotate``
     adds node annotations to a response that validated. ``otel_carrier`` is
     the parent's span context; the stage span starts under it (see
     shepherd_utils.otel.setup_pool_child_tracer).
@@ -265,7 +273,10 @@ def premerge_in_child(
                 data, child_pk, agent_name, inforesid, do_validate, annotate, report
             )
             span.set_attribute("premerge.annotate", bool(annotate and valid))
-            save_message_sync(str(child_pk), data)
+            if valid:
+                # the merge's working copy; the child's own entry (its
+                # ARA's response, as sent) is not touched
+                save_message_sync(ars_db.premerged_key(child_pk), data)
             span.set_attribute("premerge.valid", valid)
         logs = handler.drain()
     return {"valid": valid, "logs": logs}
@@ -302,46 +313,21 @@ async def _run_premerge_in_pool(
     return await asyncio.to_thread(premerge_in_child, *args)
 
 
-def _row_timestamp(updated_at) -> str:
-    """The row's updated_at as an RFC 3339 log timestamp (TRAPI 2.0).
+async def _terminal_error(child_pk, parent_pk, mesg, logger, have_response=True):
+    """Upstream's generic callback handler: the child ends E/500.
 
-    Upstream wrote ``str(updated_at)`` -- a space-separated datetime, or
-    ``"None"`` for a row without one -- neither a valid 2.0 LogEntry
-    timestamp. Falls back to now."""
-    if isinstance(updated_at, datetime.datetime):
-        return log_timestamp(updated_at)
-    if isinstance(updated_at, str) and updated_at:
-        try:
-            return log_timestamp(datetime.datetime.fromisoformat(updated_at))
-        except ValueError:
-            pass
-    return log_timestamp()
-
-
-async def _terminal_error(child_pk, parent_pk, mesg, data, logger, have_response=True):
-    """Upstream's generic callback handler: E/500 + the log entry.
-
-    ``data`` may be None when the failure happened in the pool child (the
-    payload was never resident here); the stored blob is loaded to carry
-    the log entry, as upstream appended it to the payload it was holding.
-    ``have_response`` is False when the ARA's response never reached the
-    ARS, so the child has no archived response to be read from later and
-    keeps a durable copy of its own (``ars_db.persist_child_copy``).
+    Upstream also appended an "Internal ARS Server Error" log entry to the
+    payload it was holding. A child's payload here is its ARA's response,
+    which the ARS never writes, so the entry goes to the ARS query's logs
+    instead; the child's status and code say the rest. ``have_response`` is
+    False when the ARA's response never reached the ARS, so there is no
+    archive of it and the child keeps a durable copy of whatever its entry
+    holds (``ars_db.persist_child_copy``).
     """
-    if data is None:
-        data = await ars_db.load_message_data(child_pk, logger)
-    if not isinstance(data, dict):
-        data = {}
-    log_entry = {
-        "message": "Internal ARS Server Error",
-        "timestamp": _row_timestamp(mesg.get("updated_at")),
-        "level": "ERROR",
-    }
-    if isinstance(data.get("logs"), list):
-        data["logs"].append(log_entry)
-    else:
-        data["logs"] = [log_entry]
-    await ars_db.save_message_data(child_pk, data, logger)
+    logger.error(
+        f"Internal ARS Server Error: child {child_pk} ({mesg.get('agent')}) "
+        "ended E/500"
+    )
     await ars_db.update_message(child_pk, status="E", code=500)
     await ars_db.persist_child_copy(mesg, logger, have_response=have_response)
     await lifecycle.check_parent_completion(parent_pk, logger)
@@ -355,8 +341,8 @@ async def intake_internal_response(fields, logger: logging.Logger):
     guards, counts, notification, and terminal shapes, minus the HTTP
     answers nobody read).
 
-    On the result-bearing path the response is premerged and saved under
-    the child pk in the same pool call; this fills the standard premerge
+    On the result-bearing path the response is premerged, and the result
+    saved for the merge, in the same pool call; this fills the standard premerge
     task fields into ``fields`` and returns ``{"valid": verdict}`` so
     ``ars_premerge`` hands the child on (or fails it) in this same task.
     Every other outcome is handled here and returns None.
@@ -393,7 +379,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
 
     # The callback endpoint's guard order: dup-Done, repeated results, errored
     # child. Decided from the rows alone, before the payload is touched, so
-    # the pool child knows whether to store it over the child's blob.
+    # the pool child knows whether this delivery is to be processed.
     plan = await _intake_plan(mesg, parent)
     # A stored response that will reach the premerge (it has results, which
     # only the pool child knows) is premerged in the same pool call, so it is
@@ -433,12 +419,12 @@ async def intake_internal_response(fields, logger: logging.Logger):
             # already terminal (e.g. the watchdog got there first)
             return None
         await _terminal_error(
-            child_pk, mesg.get("ref"), mesg, None, logger, have_response=False
+            child_pk, mesg.get("ref"), mesg, logger, have_response=False
         )
         return None
     except Exception as e:
         logger.error(f"Intake failed for {child_pk}: {e}", exc_info=True)
-        await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
+        await _terminal_error(child_pk, mesg.get("ref"), mesg, logger)
         return None
     # the premerge stage reports, into this query's logs
     ingest_query_logs(logger, outcome.get("logs"))
@@ -485,9 +471,9 @@ async def intake_internal_response(fields, logger: logging.Logger):
             logger.info(f"Intake: {child_pk} already errored; response rejected")
             return None
         if mesg.get("result_count"):
-            # Resuming: the premerge ran again from the ARA's own response,
-            # not over the child's blob, so whatever the dead worker had
-            # already applied is not applied twice.
+            # Resuming: the premerge ran again from the ARA's own response
+            # (sealed, so exactly as it was), and whatever the dead worker
+            # had already applied is not applied twice.
             logger.warning(f"Intake: {child_pk} was redelivered; resuming its premerge")
         if failed_code is not None:
             # Terminal inline: a failed query's results (if any made it into
@@ -516,12 +502,12 @@ async def intake_internal_response(fields, logger: logging.Logger):
                 child_pk, result_count=result_length, result_stat=result_stat
             )
             if outcome.get("error") is not None:
-                # The premerge stages failed in the pool child (the payload,
-                # as far as they got, is saved under the child): upstream's
-                # generic handler, after the notification and the counts, as
-                # when premerge was a pool call of its own.
+                # The premerge stages failed in the pool child (nothing was
+                # saved for the merge): upstream's generic handler, after
+                # the notification and the counts, as when premerge was a
+                # pool call of its own.
                 logger.error(f"premerge failed for {child_pk}: {outcome['error']}")
-                await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
+                await _terminal_error(child_pk, mesg.get("ref"), mesg, logger)
                 return None
             fields["child_pk"] = str(child_pk)
             fields["agent_name"] = agent_name
@@ -539,15 +525,15 @@ async def intake_internal_response(fields, logger: logging.Logger):
         return None
     except Exception as e:
         logger.error(f"Intake failed for {child_pk}: {e}", exc_info=True)
-        await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
+        await _terminal_error(child_pk, mesg.get("ref"), mesg, logger)
         return None
 
 
 async def _intake_plan(mesg, parent) -> str:
     """What an intake does with the response, from the child's row alone.
 
-    ``store`` saves it over the child's blob and carries on; the rest leave
-    the blob alone: ``skip_done`` / ``skip_terminal`` / ``skip_errored`` are
+    ``store`` processes it (counts, premerge) and carries on; the rest
+    leave it alone: ``skip_done`` / ``skip_terminal`` / ``skip_errored`` are
     the endpoint's guards, and ``finish_status`` is a redelivery whose
     premerge and merge hand-off already happened.
     """
@@ -576,23 +562,23 @@ def intake_in_child(
     otel_carrier=None,
     log_level=logging.INFO,
 ) -> Dict[str, Any]:
-    """Pool-side intake (and premerge): load the ARA's response once, count
-    its results and, when ``save``, store it under the child's pk once.
+    """Pool-side intake (and premerge): load the ARA's response once and
+    count its results. ``save`` says this delivery is being processed (the
+    intake plan is ``store``); nothing is ever written to the response
+    itself, which is the child's own entry.
 
     ``premerge`` (``{agent_name, inforesid, do_validate, annotate}``, or
-    None) asks for the premerge stages to run on a response with results
-    before it is stored, so the response is decoded and encoded once rather
-    than once per stage. A stored response that is not premerged (no
-    results, a failed query, no premerge asked for) is stored as the ARA
-    sent it.
+    None) asks for the premerge stages to run on a response with results,
+    in the same pass, so the response is decoded once. The premerged result
+    is saved as the merge's working copy (``ars_db.premerged_key``) when it
+    validates; otherwise nothing is saved.
 
     Returns ``{result_count, result_stat, valid, error, logs}``: the count
     is None when the response has no results list; the stats are only
     computed for a stored response with results whose query didn't fail
     (``score``), from its scores as sent; ``valid`` is the premerge verdict
     (None when no premerge ran); ``error`` describes a premerge stage
-    failure, in which case the payload is stored as far as the stages got
-    (as upstream's generic handler saved the data it was holding); ``logs``
+    failure, in which case nothing is saved; ``logs``
     are the stage reports for the worker to fold into the query's logs.
     Raises KeyError when the response blob is gone.
     """
@@ -634,6 +620,10 @@ def intake_in_child(
                         "premerge.annotate", bool(premerge["annotate"] and valid)
                     )
                     span.set_attribute("premerge.valid", valid)
+                    if valid:
+                        # the merge's working copy; the child's own entry
+                        # (this response, as the ARA sent it) is not touched
+                        save_message_sync(ars_db.premerged_key(child_pk), data)
                 except Exception as e:
                     # Caught rather than raised, so the intake's own steps
                     # (the notification, the counts) still happen before the
@@ -644,7 +634,6 @@ def intake_in_child(
                     )
                     outcome["error"] = f"{type(e).__name__}: {e}"
             outcome["logs"] = handler.drain()
-    save_message_sync(str(child_pk), data)
     return outcome
 
 
@@ -742,7 +731,7 @@ async def ars_premerge(task, logger: logging.Logger):
             )
         except Exception as e:
             logger.error(f"premerge failed for {child_pk}: {e}", exc_info=True)
-            await _terminal_error(child_pk, parent_pk, mesg, None, logger)
+            await _terminal_error(child_pk, parent_pk, mesg, logger)
             return
         # the premerge stage reports, into this query's logs
         ingest_query_logs(logger, outcome.get("logs"))
@@ -761,7 +750,9 @@ async def ars_premerge(task, logger: logging.Logger):
                     f"Could not hand {child_pk} to the merge worker: {e}",
                     exc_info=True,
                 )
-                await _terminal_error(child_pk, parent_pk, mesg, None, logger)
+                # nothing will ever read the working copy now
+                await ars_db.discard_premerged(child_pk, logger)
+                await _terminal_error(child_pk, parent_pk, mesg, logger)
                 return
         updated = await ars_db.update_message(child_pk, status=status, code=200)
         await ars_db.persist_child_copy(mesg, logger)

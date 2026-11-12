@@ -310,6 +310,27 @@ async def test_drain_folds_every_ready_child_in_arrival_order(env, redis_mock):
     assert await _merge_tasks() == []
 
 
+async def test_a_childs_premerged_copy_is_deleted_once_the_merge_has_attempted_it(
+    env, redis_mock
+):
+    """#252: the premerged form is the merge's working copy, not the child's
+    payload. Once the child is folded -- or the fold has failed -- nothing
+    reads it again; the child's own entry (its ARA's response) stays."""
+    import shepherd_utils.db as shepherd_db
+
+    for child in (env["child_pk"], env["child2_pk"]):
+        await shepherd_db.data_db_client.set(str(child), b"the ARA's response")
+        await shepherd_db.data_db_client.set(ars_db.premerged_key(child), b"premerged")
+    env["run_merge"].side_effect = [_outcome(), RuntimeError("fold failed")]
+    await _ready(env, env["child_pk"], env["child2_pk"])
+
+    await merge_worker.ars_merge(_task(env), LOGGER)
+
+    for child in (env["child_pk"], env["child2_pk"]):
+        assert await shepherd_db.data_db_client.get(ars_db.premerged_key(child)) is None
+        assert await shepherd_db.data_db_client.get(str(child)) is not None
+
+
 async def test_lock_busy_acks_without_reenqueue(env, redis_mock):
     """A worker that loses the parent's lock does nothing: its child is in
     the index and the holder drains it. No re-enqueue, no wait."""
@@ -442,13 +463,13 @@ def test_merge_in_child_folds_messages(sync_blobs):
     current_pk = "22222222-2222-2222-2222-222222222222"
     new_pk = "33333333-3333-3333-3333-333333333333"
 
-    shepherd_db.save_message_sync(child_pk, aragorn)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), aragorn)
     stats = merge_worker.merge_in_child(None, child_pk, current_pk)
     first = shepherd_db.get_message_sync(current_pk)
     assert first["message"]["results"] == aragorn["message"]["results"]
     assert stats["results"] == 2
 
-    shepherd_db.save_message_sync(child_pk, arax)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), arax)
     stats = merge_worker.merge_in_child(
         current_pk, child_pk, new_pk, {"log_level": "DEBUG"}
     )
@@ -520,9 +541,9 @@ def test_merge_in_child_resolves_knowledge_level_conflicts(sync_blobs):
     current_pk = "22222222-2222-2222-2222-222222222222"
     child_pk = "11111111-1111-1111-1111-111111111111"
     new_pk = "33333333-3333-3333-3333-333333333333"
-    shepherd_db.save_message_sync(child_pk, aragorn)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), aragorn)
     merge_worker.merge_in_child(None, child_pk, current_pk)
-    shepherd_db.save_message_sync(child_pk, arax)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), arax)
     merge_worker.merge_in_child(current_pk, child_pk, new_pk)
     merged = shepherd_db.get_message_sync(new_pk)
     e1 = merged["message"]["knowledge_graph"]["edges"]["e1"]
@@ -711,7 +732,9 @@ def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):
     shepherd_db = sync_blobs
     child_pk = "11111111-1111-1111-1111-111111111111"
     new_pk = "33333333-3333-3333-3333-333333333333"
-    shepherd_db.save_message_sync(child_pk, load_corpus("response_aragorn.json"))
+    shepherd_db.save_message_sync(
+        ars_db.premerged_key(child_pk), load_corpus("response_aragorn.json")
+    )
 
     outcome = merge_worker.merge_and_postprocess_in_child(
         None,
@@ -747,7 +770,9 @@ def test_merge_and_postprocess_in_child_final_save_failure_is_422(
 ):
     shepherd_db = sync_blobs
     child_pk = "11111111-1111-1111-1111-111111111111"
-    shepherd_db.save_message_sync(child_pk, load_corpus("response_aragorn.json"))
+    shepherd_db.save_message_sync(
+        ars_db.premerged_key(child_pk), load_corpus("response_aragorn.json")
+    )
     real_save = merge_worker.save_message_sync
     calls = {"n": 0}
 

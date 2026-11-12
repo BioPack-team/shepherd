@@ -111,7 +111,9 @@ def _fold(current_pk, child_pk) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     part is the newcomer; when a merged version already exists its
     ``message`` part is folded in via mergeMessages, otherwise the newcomer
     becomes the first merged version. Returns (merged dict, stats)."""
-    to_merge = get_message_sync(str(child_pk))["message"]
+    # the child's premerged working copy, not the child's own entry (which
+    # is its ARA's response, as sent)
+    to_merge = get_message_sync(ars_db.premerged_key(child_pk))["message"]
     t_to_merge = TranslatorMessage(to_merge)
     if current_pk is not None:
         current = get_message_sync(str(current_pk))["message"]
@@ -632,6 +634,8 @@ async def ars_merge(task, logger: logging.Logger):
                     # attempted once, whatever happened: a child the merge
                     # cannot take must not wedge the drain
                     await ars_db.clear_ready_child(parent_pk, child_pk, logger)
+                    # and its premerged working copy has no reader left
+                    await ars_db.discard_premerged(child_pk, logger)
     finally:
         keepalive.cancel()
         try:
