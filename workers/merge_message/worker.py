@@ -1345,9 +1345,7 @@ async def poll_for_tasks():
                     while True:
                         too_large = None
                         async with pool.slot() as slot:
-                            ready, too_large = await _next_batch(
-                                response_id, logger
-                            )
+                            ready, too_large = await _next_batch(response_id, logger)
                             if ready and too_large is None:
                                 await bump_merge_crashes(response_id)
                                 _PASSES_IN_FLIGHT.add(response_id)
