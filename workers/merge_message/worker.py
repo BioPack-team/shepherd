@@ -76,6 +76,11 @@ STREAM = "merge_message"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
+# In-flight wake tasks per pool child. Enough that one child's next pass is
+# queued while its current one runs, and lock losers can ack without waiting
+# behind merges; few enough that, with several replicas, one pod doesn't pull
+# backlog it can't start on while another pod sits idle.
+TASKS_PER_POOL_CHILD = 2
 # Task field carrying how many times this wake task's merge has failed in a
 # row. See _reenqueue_wake_task.
 MERGE_ATTEMPT_FIELD = "merge_attempt"
@@ -1052,31 +1057,30 @@ async def _fit_batch_to_budget(
     return batch, None
 
 
-async def _debounce(response_id: str, lock_lost: asyncio.Event, logger) -> None:
-    """Wait up to ``merge_debounce_sec`` for a full pass of callbacks.
+async def _next_batch(
+    response_id: str, logger: logging.Logger
+) -> tuple[list[str], Optional[str]]:
+    """The callbacks for this query's next merge pass.
 
-    Returns early once ``merge_max_fold`` callbacks are ready (a pass can't
-    take more) or the lock is lost.
+    Returns ``(batch, None)`` -- an empty batch when nothing (wanted) is ready
+    -- or ``([], reason)`` when the query has to be failed as too large. Read
+    with a pool child already claimed, so the batch is as fresh as it can be.
     """
-    wait = float(settings.merge_debounce_sec)
-    if wait <= 0:
-        return
-    deadline = time.monotonic() + wait
-    fold = settings.merge_max_fold
-    while not lock_lost.is_set():
-        try:
-            ready = await get_ready_callbacks(response_id, logger)
-        except Exception:
-            return
-        if fold > 0 and len(ready) >= fold:
-            return
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return
-        await asyncio.sleep(min(_DEBOUNCE_POLL_SEC, left))
-
-
-_DEBOUNCE_POLL_SEC = 0.2
+    ready = await get_ready_callbacks(response_id, logger)
+    if not ready:
+        return [], None
+    if settings.merge_max_fold > 0:
+        ready = ready[: settings.merge_max_fold]
+    ready = await _drop_unwanted_callbacks(response_id, ready, logger)
+    if not ready:
+        # Nothing wanted in this slice. Stop rather than re-read: if clearing
+        # the stale entries failed they would come straight back and the drain
+        # would spin. The post-drain check kicks one wake for anything still
+        # ready.
+        return [], None
+    # Size the pass to the response budget; a batch that can't fit means the
+    # query is failed, not trimmed.
+    return await _fit_batch_to_budget(response_id, ready, logger)
 
 
 async def _drop_unwanted_callbacks(
@@ -1213,11 +1217,10 @@ async def _uncount_interrupted_passes() -> None:
 
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
-    # Size by the pod's actual CPU allocation (cgroup limit), not os.cpu_count()
-    # which reports the whole node's cores. This one value drives both the pool
-    # and the in-flight task limit below: each merge runs a child that loads the
-    # growing response blob, so pool size == concurrency bounds peak memory.
-    # POOL_MAX_WORKERS overrides.
+    # Size the pool by the pod's actual CPU allocation (cgroup limit), not
+    # os.cpu_count() which reports the whole node's cores. Each merge runs a
+    # child that loads the growing response blob, so the pool size is what
+    # bounds CPU and peak memory. POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
     LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     on_graceful_shutdown(_uncount_interrupted_passes)
@@ -1374,11 +1377,6 @@ async def poll_for_tasks():
                     await _give_up(_crash_reason(crashes))
                     return
 
-                # Let more of the query's callbacks arrive before the first
-                # pass: every pass reloads and re-saves the whole accumulated
-                # response, so folding more per pass is fewer of them (#218).
-                await _debounce(response_id, lock_lost, logger)
-
                 lock_time = time.time()
                 # Bound before the try: the failure handler reports the batch
                 # that failed, and get_ready_callbacks itself can raise.
@@ -1386,56 +1384,49 @@ async def poll_for_tasks():
                 # Drain the query to empty: one load + one save per iteration.
                 # Re-reading the set each pass sweeps up callbacks that arrived
                 # while we were merging, so the holder does all of this query's
-                # ready work.
+                # ready work. Nothing waits for more callbacks: each pass first
+                # claims a pool child and only then reads its batch, so
+                # whatever landed while the previous pass ran, or while this
+                # task queued for a free child, joins it. Batching comes from
+                # time the worker spends busy, never from time it idles.
                 try:
                     while True:
-                        ready = await get_ready_callbacks(response_id, logger)
-                        if not ready:
-                            break
-                        if settings.merge_max_fold > 0:
-                            ready = ready[: settings.merge_max_fold]
-                        ready = await _drop_unwanted_callbacks(
-                            response_id, ready, logger
-                        )
-                        if not ready:
-                            # Nothing wanted in this slice. Stop rather than
-                            # re-read: if clearing the stale entries failed
-                            # they would come straight back and this loop
-                            # would spin. The post-drain check below kicks
-                            # one wake for anything still ready.
-                            break
-                        # Size the pass to the response budget; a batch that
-                        # can't fit means the query is failed, not trimmed.
-                        ready, too_large = await _fit_batch_to_budget(
-                            response_id, ready, logger
-                        )
+                        too_large = None
+                        async with pool.slot() as slot:
+                            ready, too_large = await _next_batch(response_id, logger)
+                            if ready and too_large is None:
+                                await bump_merge_crashes(response_id)
+                                _PASSES_IN_FLIGHT.add(response_id)
+                                try:
+                                    merged, merge_logs = await slot.run(
+                                        loop,
+                                        merge_messages_by_ids,
+                                        target,
+                                        query_id,
+                                        response_id,
+                                        ready,
+                                        log_level,
+                                    )
+                                except (BrokenProcessPool, asyncio.TimeoutError):
+                                    # The child died or was killed: leave the
+                                    # crash count in place for the next
+                                    # attempt to read.
+                                    raise
+                                except Exception:
+                                    # The child came back with a Python error.
+                                    # That isn't a crash; the task-field retry
+                                    # counter in _handle_merge_failure owns
+                                    # that case.
+                                    await clear_merge_crashes(response_id)
+                                    raise
+                                finally:
+                                    _PASSES_IN_FLIGHT.discard(response_id)
+                        # Out of the slot before any follow-up Redis work.
                         if too_large is not None:
                             await _give_up(too_large)
                             return
-                        await bump_merge_crashes(response_id)
-                        _PASSES_IN_FLIGHT.add(response_id)
-                        try:
-                            merged, merge_logs = await pool.run(
-                                loop,
-                                merge_messages_by_ids,
-                                target,
-                                query_id,
-                                response_id,
-                                ready,
-                                log_level,
-                            )
-                        except (BrokenProcessPool, asyncio.TimeoutError):
-                            # The child died or was killed: leave the crash
-                            # count in place for the next attempt to read.
-                            raise
-                        except Exception:
-                            # The child came back with a Python error. That
-                            # isn't a crash; the task-field retry counter in
-                            # _handle_merge_failure owns that case.
-                            await clear_merge_crashes(response_id)
-                            raise
-                        finally:
-                            _PASSES_IN_FLIGHT.discard(response_id)
+                        if not ready:
+                            break
                         await clear_merge_crashes(response_id)
                         _ingest_merge_logs(logger, merge_logs)
                         await _clear_batch(response_id, ready, logger)
@@ -1453,7 +1444,7 @@ async def poll_for_tasks():
                             )
                             break
                 except BrokenProcessPool:
-                    # pool.run already swapped in a fresh executor. If this
+                    # The slot already swapped in a fresh executor. If this
                     # response has now crashed the merge too many times, fail
                     # it here rather than handing it to yet another pod;
                     # otherwise release the lock and retry the batch. Counted
@@ -1563,10 +1554,22 @@ async def poll_for_tasks():
             limiter.release()
 
     # Each wake task runs concurrently. Distinct queries never share a lock,
-    # so their merges run in parallel on the process pool; the task limiter
-    # (sized to max_workers) bounds concurrency.
+    # so their merges run in parallel on the process pool, which alone bounds
+    # the CPU- and memory-heavy work (pool.slot waits for a free child). The
+    # in-flight task limit is deliberately larger than the pool: part of a
+    # task's life is not pool work -- Redis round trips, and lock losers that
+    # just ack. Capping in-flight tasks at the pool size let those hold the
+    # slots while the pool sat idle. The parent only handles callback ids, so
+    # the extra tasks cost no memory. It stays a small multiple of the pool,
+    # though: every task in flight here is one other replicas can't take.
+    # The TASK_LIMIT env var overrides.
     await run_poll_loop(
-        STREAM, GROUP, CONSUMER, max_workers, process_query, on_stop=pool.shutdown
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max_workers * TASKS_PER_POOL_CHILD,
+        process_query,
+        on_stop=pool.shutdown,
     )
 
 
