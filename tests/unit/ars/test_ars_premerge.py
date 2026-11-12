@@ -737,3 +737,36 @@ async def test_premerge_mode_skips_invalid_and_non_ara_responses(
     del env["data"]["message"]["results"][0]["node_bindings"]
     await pm.ars_premerge(_task(env), LOGGER)
     env["annotator"].annotate_curie_list.assert_not_awaited()
+
+
+# --- #252 stage 2: which children keep a durable copy ------------------------
+
+
+@pytest.fixture
+def cold_store(env, tmp_path, monkeypatch):
+    """A cold store is configured and the child points at its ARA's response."""
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    env["child_row"]["ara_response_id"] = uuid.uuid4()
+
+
+async def test_a_premerged_child_keeps_no_durable_copy(env, cold_store, redis_mock):
+    """Its ARA's answer is in the archive finish_query wrote, and the child
+    is served from that once its Redis copy expires."""
+    await pm.ars_premerge(_task(env), LOGGER)
+
+    assert _final_status_update(env)["status"] == "D"
+    env["persist_data_copy"].assert_not_awaited()
+    env["completion"].assert_awaited_once()
+
+
+async def test_a_child_whose_response_was_lost_keeps_its_copy(
+    env, intake, cold_store, redis_mock
+):
+    """Nothing reached the ARS, so there may be no archive to point at: the
+    child's own payload (its query and the error) is all there is."""
+    intake["get_message"].side_effect = KeyError("gone")
+
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+
+    assert _final_status_update(env)["status"] == "E"
+    env["persist_data_copy"].assert_awaited_once_with(env["child_pk"], LOGGER)

@@ -20,14 +20,16 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import orjson
 import zstandard
 from psycopg.types.json import Jsonb
 
 import shepherd_utils.db as shepherd_db
+from shepherd_utils import response_archive
 from shepherd_utils.config import settings
+from shepherd_utils.trapi import wrap_stored_response
 
 from . import aras, payload_store
 from .statuses import coerce_code, to_letter, validate_letter
@@ -49,6 +51,7 @@ MESSAGE_COLUMNS = (
     "merged_version",
     "merged_versions_list",
     "params",
+    "ara_response_id",
 )
 _MESSAGE_SELECT = ", ".join(f"m.{c}" for c in MESSAGE_COLUMNS)
 
@@ -91,6 +94,7 @@ async def create_message(
     ref: Optional[Union[str, uuid.UUID]] = None,
     params: Optional[Dict[str, Any]] = None,
     message_id: Optional[Union[str, uuid.UUID]] = None,
+    ara_response_id: Optional[Union[str, uuid.UUID]] = None,
 ) -> Dict[str, Any]:
     """Insert a message row. Mirrors Message.create + the post_save coercion:
     the long status name maps to its letter and the code is coerced
@@ -102,8 +106,9 @@ async def create_message(
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         cur = await conn.execute(
             f"""
-            INSERT INTO ars_message (id, name, code, status, agent, ref, params)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO ars_message
+              (id, name, code, status, agent, ref, params, ara_response_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING {_MESSAGE_SELECT.replace("m.", "")}
             """,
             (
@@ -114,6 +119,7 @@ async def create_message(
                 agent,
                 uuid.UUID(str(ref)) if ref else None,
                 _jsonb(params),
+                uuid.UUID(str(ara_response_id)) if ara_response_id else None,
             ),
         )
         row = await cur.fetchone()
@@ -201,8 +207,9 @@ async def update_message(
     for key in ("result_stat", "merged_versions_list", "params"):
         if key in values:
             values[key] = _jsonb(values[key])
-    if "merged_version" in values and values["merged_version"] is not None:
-        values["merged_version"] = uuid.UUID(str(values["merged_version"]))
+    for key in ("merged_version", "ara_response_id"):
+        if values.get(key) is not None:
+            values[key] = uuid.UUID(str(values[key]))
     sets = ", ".join(f"{k} = %s" for k in values)
     where = "id = %s"
     params = [*values.values(), uuid.UUID(str(message_id))]
@@ -568,6 +575,54 @@ async def clear_subscriptions(message_id: Union[str, uuid.UUID]) -> None:
 # ---------------------------------------------------------------------------
 
 
+# With a cold store configured (``lean``), the durable set is smaller and the
+# hot one shorter-lived:
+#   - a child's own (premerged) payload gets no durable copy. Once its Redis
+#     copy has expired the child is served from the archive finish_query
+#     wrote for its ARA's response (``ars_message.ara_response_id``) -- the
+#     ARA's answer as it gave it, not as premerge rewrote it;
+#   - only the newest merged version keeps a durable copy
+#     (``drop_durable_copy`` removes the one it supersedes);
+#   - when a tree completes, every Redis copy in it is left ``redis_hot_ttl``
+#     to live (``expire_hot_copies``), and a read that falls back to the
+#     durable copy re-warms Redis for only that long.
+# Without one, nothing changes: every message keeps a durable copy in
+# Postgres and its Redis copy for ``redis_ttl``.
+# ---------------------------------------------------------------------------
+
+
+def lean() -> bool:
+    """Whether a cold store is configured, and so Redis is kept to what is
+    hot (see above)."""
+    return payload_store.enabled()
+
+
+def rewarm_ttl() -> int:
+    """How long a payload read back from its durable copy stays in Redis."""
+    if lean():
+        return max(1, min(int(settings.redis_hot_ttl), int(settings.redis_ttl)))
+    return int(settings.redis_ttl)
+
+
+async def expire_hot_copies(
+    message_ids: Iterable[Union[str, uuid.UUID]], logger: logging.Logger
+) -> None:
+    """Leave these messages' Redis copies ``redis_hot_ttl`` to live: their
+    tree has finished, and whatever is kept of it is in the cold store.
+    A no-op without one. Best-effort -- a copy this misses simply lives out
+    its ``redis_ttl``."""
+    if not lean():
+        return
+    ttl = rewarm_ttl()
+    try:
+        async with shepherd_db.data_db_client.pipeline(transaction=False) as pipe:
+            for message_id in message_ids:
+                pipe.expire(str(message_id), ttl)
+            await pipe.execute()
+    except Exception as e:
+        logger.warning(f"Could not shorten the Redis TTL of finished messages: {e}")
+
+
 async def save_message_data(
     message_id: Union[str, uuid.UUID],
     payload: Any,
@@ -781,6 +836,79 @@ async def persist_data_copy(
     )
 
 
+async def persist_child_copy(
+    child: Dict[str, Any], logger: logging.Logger, have_response: bool = True
+) -> None:
+    """``persist_data_copy`` for an ARA child going terminal.
+
+    With a cold store, a child whose ARA answered needs no copy of its own:
+    finish_query archived that answer, and the child's row points at it
+    (``ara_response_id``). A child that never got an answer (``have_response``
+    False: the dispatch failed, or the response was lost) or that predates
+    the pointer has nothing else to be read from, so it keeps a copy -- a
+    small one, the query it was sent."""
+    if lean() and have_response and child.get("ara_response_id") is not None:
+        return
+    await persist_data_copy(child["id"], logger)
+
+
+async def drop_durable_copy(
+    message_id: Union[str, uuid.UUID], logger: logging.Logger
+) -> None:
+    """Remove a message's durable copy (a merged version a newer one has
+    superseded). Its row and its Redis copy stay. Best-effort."""
+    pk = uuid.UUID(str(message_id))
+    try:
+        if payload_store.enabled():
+            await asyncio.to_thread(payload_store.delete, pk)
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+            await conn.execute(
+                "UPDATE ars_message SET data = NULL, data_size = NULL WHERE id = %s",
+                (pk,),
+            )
+            await conn.commit()
+    except Exception as e:
+        logger.warning(f"Could not drop the durable copy of {message_id}: {e}")
+
+
+async def _archived_response_id(
+    message_id: Union[str, uuid.UUID],
+) -> Optional[uuid.UUID]:
+    """The ARA response a child message points at, if any."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "SELECT ara_response_id FROM ars_message WHERE id = %s",
+            (uuid.UUID(str(message_id)),),
+        )
+        row = await cur.fetchone()
+    return row[0] if row is not None and row[0] is not None else None
+
+
+async def _load_archived(
+    message_id: Union[str, uuid.UUID], logger: logging.Logger
+) -> Optional[bytes]:
+    """A child's payload from its ARA's archived response: the response as
+    the ARA would have delivered it (its stored form, with the query's
+    parameters and logs), as JSON bytes. None when the message points at no
+    archive, or the archive is gone. Never re-warmed into Redis: this is a
+    finished answer being looked at, and assembling it is cheap."""
+    if not lean():
+        return None
+    try:
+        response_id = await _archived_response_id(message_id)
+        if response_id is None:
+            return None
+        archive = await response_archive.load_archive(str(response_id), logger)
+        if archive is None:
+            return None
+        return await asyncio.to_thread(
+            wrap_stored_response, archive.response, archive.query, archive.logs
+        )
+    except Exception as e:
+        logger.error(f"Archived response read failed for {message_id}: {e}")
+        return None
+
+
 async def _load_durable(
     message_id: Union[str, uuid.UUID], logger: logging.Logger
 ) -> Optional[bytes]:
@@ -829,14 +957,32 @@ async def load_message_data(
         return await asyncio.to_thread(shepherd_db.decode_message, blob)
     stored = await _load_durable(message_id, logger)
     if stored is None:
-        return None
+        archived = await _load_archived(message_id, logger)
+        if archived is None:
+            return None
+        return await asyncio.to_thread(orjson.loads, archived)
     payload = await asyncio.to_thread(_decompress_payload, stored)
     # Re-warm Redis so subsequent reads are cheap again.
+    await _rewarm(message_id, stored, payload, logger)
+    return payload
+
+
+async def _rewarm(
+    message_id: Union[str, uuid.UUID],
+    stored: bytes,
+    payload: Any,
+    logger: logging.Logger,
+) -> None:
+    """Put a payload read from its durable copy back in Redis, for
+    ``rewarm_ttl``. Best-effort."""
     try:
-        await shepherd_db.save_message(str(message_id), payload, logger)
+        if stored[:4] == ZSTD_MAGIC:
+            blob = stored  # the same frame Redis normally holds
+        else:
+            blob = await asyncio.to_thread(shepherd_db.encode_message, payload)
+        await shepherd_db.data_db_client.set(str(message_id), blob, ex=rewarm_ttl())
     except Exception:
         pass
-    return payload
 
 
 async def load_message_bytes(
@@ -860,7 +1006,7 @@ async def load_message_bytes(
         return await asyncio.to_thread(shepherd_db.decompress_zstd, blob)
     stored = await _load_durable(message_id, logger)
     if stored is None:
-        return None
+        return await _load_archived(message_id, logger)
     try:
         raw = await asyncio.to_thread(_decompress_payload_bytes, stored)
     except Exception as e:
@@ -869,7 +1015,7 @@ async def load_message_bytes(
     if stored[:4] == ZSTD_MAGIC:
         try:  # re-warm with the same zstd frame Redis normally holds
             await shepherd_db.data_db_client.set(
-                str(message_id), stored, ex=settings.redis_ttl
+                str(message_id), stored, ex=rewarm_ttl()
             )
         except Exception:
             pass
@@ -897,11 +1043,14 @@ async def load_message_compressed(
         logger.warning(f"Redis read failed for {message_id}: {e}")
     stored = await _load_durable(message_id, logger)
     if stored is None:
-        return None
+        archived = await _load_archived(message_id, logger)
+        if archived is None:
+            return None
+        return await asyncio.to_thread(zstandard.compress, archived)
     if stored[:4] == ZSTD_MAGIC:
         try:  # re-warm with the same frame Redis normally holds
             await shepherd_db.data_db_client.set(
-                str(message_id), stored, ex=settings.redis_ttl
+                str(message_id), stored, ex=rewarm_ttl()
             )
         except Exception:
             pass
@@ -930,9 +1079,20 @@ async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
                 (uuid.UUID(str(message_id)),),
             )
             row = await cur.fetchone()
-        return bool(row and row[0])
+        if row and row[0]:
+            return True
     except Exception:
         return False
+    if lean():
+        try:
+            response_id = await _archived_response_id(message_id)
+            if response_id is not None:
+                return await asyncio.to_thread(
+                    payload_store.exists, response_id, payload_store.ARA
+                )
+        except Exception:
+            pass
+    return False
 
 
 # ---------------------------------------------------------------------------

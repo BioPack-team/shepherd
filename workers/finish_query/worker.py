@@ -32,7 +32,11 @@ from shepherd_utils.db import (
     save_logs,
     set_query_completed,
 )
-from shepherd_utils.response_archive import archive_query, capture_response
+from shepherd_utils.response_archive import (
+    archive_query,
+    capture_response,
+    release_hot_copies,
+)
 from shepherd_utils.response_limit import (
     TOO_LARGE_STATUS,
     fail_response_too_large,
@@ -664,9 +668,12 @@ async def finish_query(task, logger: logging.Logger):
     if archive_blob is not None:
         # After the flush above, so the archived logs include this worker's.
         # Best-effort and bounded in time: it never fails the task.
-        await archive_query(
+        if await archive_query(
             query_id, response_id, archive_blob, status, description, logger
-        )
+        ):
+            # The cold copy exists, so Redis only has to hold this query
+            # while it is hot.
+            await release_hot_copies(query_id, response_id, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):

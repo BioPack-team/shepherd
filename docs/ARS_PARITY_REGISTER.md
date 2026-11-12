@@ -190,7 +190,7 @@ Infrastructure substitutions (behavior-preserving by definition):
 | Upstream | Port |
 |---|---|
 | Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.notify`) + the `ars_watchdog` loop |
-| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` (or an object in `PAYLOAD_S3_BUCKET`) when set, else `ars_message.data` bytea |
+| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` (or an object in `PAYLOAD_S3_BUCKET`) when set, else `ars_message.data` bytea. With a cold store set, only the query, the newest merged version and each ARA's archived response are kept (deviation 20) |
 | `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent, lock-and-drain: `ars_premerge` records each validated child in a merge-ready index and wakes `ars.merge`; the worker that wins the parent's lock folds every ready child in arrival order and a loser simply acks (the semaphore column is still maintained for envelope parity; see deviation 17) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
 | self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |
@@ -517,6 +517,29 @@ Behavioral deviations:
     `ars_premerge` / `ars_merge` pool children at startup, so the first
     response a fresh worker handles no longer pays the spawn's module
     re-import (~1.2-1.5s each, in both workers).
+20. **With a cold store, Redis holds only what is hot** (post-parity
+    change, #252; applies only when `ARS_PAYLOAD_DIR` or
+    `PAYLOAD_S3_BUCKET` is set). Upstream keeps every message's payload in
+    MySQL for good. With a cold store configured the port keeps, durably,
+    only the parent's query, the final merged version, and the archive
+    `finish_query` writes of each ARA's response. Three things read
+    differently once a tree's Redis copies have expired (`REDIS_HOT_TTL`
+    after it completes):
+    - **an ARA child's payload is the ARA's own response**, as the ARA would
+      have delivered it (its response with the query's `parameters` and
+      logs), not the premerged one: no infores stamped on edge sources, no
+      normalized scores, no node annotations. The child's row points at the
+      response (`ars_message.ara_response_id`) and is served from its
+      archive. A child whose ARA never answered keeps a durable copy of its
+      own, as before;
+    - **a superseded merged version has no payload** (`fields.data: null`,
+      as item 11): each new merged version that finishes Done drops the
+      durable copy of the one it supersedes, so `merged_versions_list`
+      entries other than the last resolve only while the tree is hot;
+    - **a merge cannot be rebuilt from the cold store**: the premerged
+      children it folded are gone.
+    Without a cold store nothing changes: every message keeps a durable
+    copy in Postgres, and its Redis copy for `REDIS_TTL`.
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 

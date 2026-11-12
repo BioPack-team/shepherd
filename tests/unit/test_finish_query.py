@@ -570,3 +570,95 @@ async def test_a_query_someone_else_finished_is_not_archived_again(redis_mock, m
     )
 
     assert [event[0] for event in events] == ["save_logs"]
+
+
+@pytest.mark.asyncio
+async def test_an_archived_query_is_left_only_the_hot_window_in_redis(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    """#252 stage 2: once the cold copy exists, the query's Redis copies --
+    query, response and logs -- only have to last while they are hot."""
+    import uuid
+
+    from shepherd_utils.config import settings
+    from shepherd_utils import db
+
+    logger = logging.getLogger(__name__)
+    query_id, response_id = str(uuid.uuid4()), str(uuid.uuid4())
+    await db.save_message(query_id, {"message": {}}, logger)
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    await db._append_logs(response_id, [{"message": "looked up"}])
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "redis_hot_ttl", 1800)
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": query_id, "response_id": response_id}], logger
+    )
+
+    assert 0 < await db.data_db_client.ttl(query_id) <= 1800
+    assert 0 < await db.data_db_client.ttl(response_id) <= 1800
+    assert 0 < await db.logs_db_client.ttl(response_id) <= 1800
+
+
+@pytest.mark.asyncio
+async def test_a_query_that_could_not_be_archived_keeps_its_redis_ttl(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    """Until the archive exists Redis is the only place the response can be
+    read, so a failed archive write leaves the full ``redis_ttl``."""
+    import uuid
+
+    from shepherd_utils.ars import payload_store
+    from shepherd_utils.config import settings
+    from shepherd_utils import db, response_archive
+
+    logger = logging.getLogger(__name__)
+    response_id = str(uuid.uuid4())
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "redis_hot_ttl", 1800)
+    monkeypatch.setattr(response_archive.asyncio, "sleep", mocker.AsyncMock())
+    mocker.patch.object(payload_store, "write", side_effect=OSError("disk full"))
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}], logger
+    )
+
+    assert await db.data_db_client.ttl(response_id) > 1800
+
+
+@pytest.mark.asyncio
+async def test_without_a_store_a_finished_query_keeps_its_redis_ttl(
+    redis_mock, mocker, monkeypatch
+):
+    import uuid
+
+    from shepherd_utils.config import settings
+    from shepherd_utils import db
+
+    logger = logging.getLogger(__name__)
+    response_id = str(uuid.uuid4())
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    monkeypatch.setattr(settings, "ars_payload_dir", "")
+    monkeypatch.setattr(settings, "payload_s3_bucket", "")
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}], logger
+    )
+
+    assert await db.data_db_client.ttl(response_id) > 1800

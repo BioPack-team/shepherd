@@ -553,6 +553,12 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
         final_updates["result_stat"] = outcome["result_stat"]
     await ars_db.update_message(new_pk, skip_coercion=False, **final_updates)
     await ars_db.persist_data_copy(new_pk, logger)
+    if ars_db.lean() and current_pk is not None and final_updates["status"] == "D":
+        # Only the newest merged version is kept in the cold store. The one
+        # this fold superseded stays in Redis for as long as the tree is
+        # hot, for a client reading it from merged_versions_list. A version
+        # that did not finish cleanly supersedes nothing.
+        await ars_db.drop_durable_copy(current_pk, logger)
 
     if result_count is not None:
         # Carry the merge's result count up to the parent. Nothing used to

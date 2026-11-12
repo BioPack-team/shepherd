@@ -45,6 +45,7 @@ import zstandard
 
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars import payload_store
+from shepherd_utils.config import settings
 
 ARCHIVE_ATTEMPTS = 3
 # The most the archive write may hold up the worker finishing a query,
@@ -194,6 +195,27 @@ async def archive_query(
     except Exception as e:
         logger.error(f"Could not archive {response_id}: {e}")
         return False
+
+
+async def release_hot_copies(
+    query_id: str, response_id: str, logger: logging.Logger
+) -> None:
+    """Leave an archived query's Redis copies -- its query, its response and
+    its logs -- ``redis_hot_ttl`` to live instead of the rest of
+    ``redis_ttl``. Only call it once ``archive_query`` has answered True:
+    until the archive exists, Redis is the only place the response can be
+    read. The window is for whoever picks the response up next (the ARS's
+    intake, a sync caller) and for a redelivery of that hand-off.
+    Best-effort."""
+    ttl = max(1, min(int(settings.redis_hot_ttl), int(settings.redis_ttl)))
+    try:
+        async with shepherd_db.data_db_client.pipeline(transaction=False) as pipe:
+            pipe.expire(query_id, ttl)
+            pipe.expire(response_id, ttl)
+            await pipe.execute()
+        await shepherd_db.logs_db_client.expire(response_id, ttl)
+    except Exception as e:
+        logger.warning(f"Could not shorten the Redis TTL of {response_id}: {e}")
 
 
 def split_frames(blob: bytes) -> List[bytes]:

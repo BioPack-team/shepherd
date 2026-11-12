@@ -64,6 +64,7 @@ def env(mocker, redis_mock):
             "ref": kw.get("ref"),
             "result_count": None,
             "params": kw.get("params"),
+            "ara_response_id": kw.get("ara_response_id"),
         }
         children[kw["agent"]] = child
         return child
@@ -140,6 +141,9 @@ async def test_fanout_creates_a_child_per_enabled_ara(env):
         assert ara is not None
         child = env["children"][ara.agent]
         assert callback_url == handoff_callback_url(child["id"])
+        # the child points at the response its ARA will produce, so it can
+        # be served from that response's archive later (#252)
+        assert child["ara_response_id"] == response_id
         assert saved_query["callback"] == callback_url
         assert saved_query["message"] == QUERY["message"]
 

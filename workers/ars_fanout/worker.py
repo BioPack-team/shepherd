@@ -56,7 +56,7 @@ async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
         await lifecycle.check_parent_completion(parent_pk, logger)
 
 
-async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
+async def dispatch(ara: aras.ARA, child_pk, parent, data, logger, response_id=None):
     """Enqueue the query on the ARA's worker stream.
 
     Persists the same query record ``POST /{ara}/asyncquery`` would have,
@@ -67,7 +67,8 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
     callback = handoff_callback_url(child_pk)
     data["callback"] = callback
     query_id = shepherd_db.new_id()
-    response_id = shepherd_db.new_id()
+    if response_id is None:
+        response_id = shepherd_db.new_id()
     # TRAPI 2.0: the client's log level is parameters.log_level
     level_number = resolve_log_level(
         query_log_level(data), resolve_log_level(settings.log_level)
@@ -106,6 +107,10 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
 
 async def send_to_ara(ara: aras.ARA, parent, parent_data, logger):
     """tasks.send_message, one ARA: create the child, dispatch the query."""
+    # The response id the ARA's query will be given, recorded on the child
+    # from the start: once the child's own Redis copy has expired, it is
+    # served from the archive finish_query writes for that response.
+    response_id = shepherd_db.new_id()
     child = await ars_db.create_message(
         agent=ara.agent,
         status="Running",
@@ -113,9 +118,10 @@ async def send_to_ara(ara: aras.ARA, parent, parent_data, logger):
         name=parent.get("name", ""),
         ref=parent["id"],
         params=parent.get("params"),
+        ara_response_id=response_id,
     )
     data = copy.deepcopy(parent_data) if parent_data else {}
-    await dispatch(ara, child["id"], parent, data, logger)
+    await dispatch(ara, child["id"], parent, data, logger, response_id=response_id)
 
 
 async def ars_fanout(task, logger: logging.Logger):

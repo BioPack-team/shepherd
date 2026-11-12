@@ -198,12 +198,15 @@ def _row_timestamp(updated_at) -> str:
     return log_timestamp()
 
 
-async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
+async def _terminal_error(child_pk, parent_pk, mesg, data, logger, have_response=True):
     """Upstream's generic callback handler: E/500 + the log entry.
 
     ``data`` may be None when the failure happened in the pool child (the
     payload was never resident here); the stored blob is loaded to carry
     the log entry, as upstream appended it to the payload it was holding.
+    ``have_response`` is False when the ARA's response never reached the
+    ARS, so the child has no archived response to be read from later and
+    keeps a durable copy of its own (``ars_db.persist_child_copy``).
     """
     if data is None:
         data = await ars_db.load_message_data(child_pk, logger)
@@ -220,7 +223,7 @@ async def _terminal_error(child_pk, parent_pk, mesg, data, logger):
         data["logs"] = [log_entry]
     await ars_db.save_message_data(child_pk, data, logger)
     await ars_db.update_message(child_pk, status="E", code=500)
-    await ars_db.persist_data_copy(child_pk, logger)
+    await ars_db.persist_child_copy(mesg, logger, have_response=have_response)
     await lifecycle.check_parent_completion(parent_pk, logger)
 
 
@@ -295,7 +298,9 @@ async def intake_internal_response(fields, logger: logging.Logger):
         if mesg["status"] in ("D", "E"):
             # already terminal (e.g. the watchdog got there first)
             return None
-        await _terminal_error(child_pk, mesg.get("ref"), mesg, None, logger)
+        await _terminal_error(
+            child_pk, mesg.get("ref"), mesg, None, logger, have_response=False
+        )
         return None
     except Exception as e:
         logger.error(f"Intake failed for {child_pk}: {e}", exc_info=True)
@@ -334,7 +339,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
                 "finishing its status"
             )
             updated = await ars_db.update_message(child_pk, status=status, code=200)
-            await ars_db.persist_data_copy(child_pk, logger)
+            await ars_db.persist_child_copy(mesg, logger)
             if updated and updated["status"] in ("D", "S", "E", "U"):
                 await lifecycle.check_parent_completion(mesg["ref"], logger)
             return None
@@ -363,7 +368,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
             updated = await ars_db.update_message(
                 child_pk, status="E", code=failed_code
             )
-            await ars_db.persist_data_copy(child_pk, logger)
+            await ars_db.persist_child_copy(mesg, logger)
             if updated and updated["status"] in ("D", "S", "E", "U"):
                 await lifecycle.check_parent_completion(mesg["ref"], logger)
             return None
@@ -381,7 +386,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
         if result_length is None:
             updates["result_count"] = 0
         updated = await ars_db.update_message(child_pk, **updates)
-        await ars_db.persist_data_copy(child_pk, logger)
+        await ars_db.persist_child_copy(mesg, logger)
         if updated and updated["status"] in ("D", "S", "E", "U"):
             await lifecycle.check_parent_completion(mesg["ref"], logger)
         return None
@@ -529,7 +534,7 @@ async def ars_premerge(task, logger: logging.Logger):
                 await _terminal_error(child_pk, parent_pk, mesg, None, logger)
                 return
         updated = await ars_db.update_message(child_pk, status=status, code=200)
-        await ars_db.persist_data_copy(child_pk, logger)
+        await ars_db.persist_child_copy(mesg, logger)
         if updated and updated["status"] in ("D", "S", "E", "U"):
             await lifecycle.check_parent_completion(parent_pk, logger)
     else:
@@ -537,7 +542,7 @@ async def ars_premerge(task, logger: logging.Logger):
             f"Validation problem found for agent {agent_name} with pk {parent_pk}"
         )
         await ars_db.update_message(child_pk, status="E", code=422)
-        await ars_db.persist_data_copy(child_pk, logger)
+        await ars_db.persist_child_copy(mesg, logger)
         if parent is not None:
             await notify_subscribers(
                 parent,

@@ -308,6 +308,18 @@ class Settings(BaseSettings):
     # the working set; the broker's ``volatile-ttl`` eviction policy then drops
     # the oldest (nearest-expiry) blobs first if the cap is still reached.
     redis_ttl: int = 259200  # 3 days
+    # With a cold store configured (ars_payload_dir / payload_s3_bucket),
+    # Redis only has to hold a payload while it is hot: finished ARA
+    # responses are archived there and finished ARS trees keep their final
+    # merged result there. Once that copy exists, the Redis copies -- a
+    # finished query's query, response and logs; every payload of a finished
+    # ARS tree -- are given this TTL (seconds) instead of the rest of
+    # ``redis_ttl``. It only has to cover the ARS picking a finished response
+    # up, a redelivery of that hand-off, and clients still polling a tree
+    # that has just completed; reads after it come from the cold store, and
+    # re-warm Redis for this long. ``redis_ttl`` stays the TTL of everything
+    # still in flight, and of everything when no cold store is configured.
+    redis_hot_ttl: int = 1800  # 30 minutes
 
     # Cap on the number of log entries kept per query. Each query's logs are a
     # Redis list that every stage appends to, and every reader -- finish_query

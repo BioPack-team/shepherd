@@ -29,6 +29,7 @@ from shepherd_utils.db import (
     clear_ready_callback,
     get_existing_callback_ids,
     get_merge_crashes,
+    delete_messages,
     get_message_sync,
     get_ready_callbacks,
     get_response_size,
@@ -895,16 +896,26 @@ def merge_messages_by_id(
     return bool(merged)
 
 
-async def _clear_batch(response_id, callback_ids, logger):
-    """Drop a processed batch from the ready index and callbacks table.
+async def _clear_batch(response_id, callback_ids, logger, keep_payloads=False):
+    """Drop a processed batch from the ready index and callbacks table, and
+    delete its payloads.
 
     Every callback we attempted is removed (not just the ones that merged)
     so a callback whose payload has vanished can't wedge the drain loop.
+    ``keep_payloads`` leaves the payloads in the data store (until their
+    TTL) for a batch being given up on as unmergeable: they are the evidence
+    of what could not be merged.
     """
     await asyncio.gather(
         *(clear_ready_callback(response_id, cb, logger) for cb in callback_ids)
     )
     await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
+    # A callback's payload is read once, by the fold that just ran; what it
+    # carried is in the response now. Deleted last, so a crash before this
+    # leaves a payload nobody reads rather than an index entry with nothing
+    # behind it.
+    if not keep_payloads:
+        await delete_messages(callback_ids, logger)
 
 
 async def _handle_merge_failure(task, response_id, ready, logger):
@@ -936,7 +947,7 @@ async def _handle_merge_failure(task, response_id, ready, logger):
             f"discarding {len(ready)} unmergeable callback(s): "
             f"{', '.join(ready)}"
         )
-        await _clear_batch(response_id, ready, logger)
+        await _clear_batch(response_id, ready, logger, keep_payloads=True)
         # Counter reset: the poison batch is gone, so whatever else is
         # ready deserves a clean run of attempts.
         await _reenqueue_wake_task(task, logger)

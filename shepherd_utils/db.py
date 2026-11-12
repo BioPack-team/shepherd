@@ -461,6 +461,8 @@ ARS_CACHE_SCHEMA_MARKER_INDEX = "idx_ars_response_cache_source"
 ARS_AGENT_SCHEMA_MARKER_INDEX = "idx_ars_message_agent"
 # ars_message.data_size (durable payloads off Postgres, size-based retention).
 ARS_PAYLOAD_SCHEMA_MARKER_INDEX = "idx_ars_message_stored"
+# ars_message.ara_response_id (a child's pointer to its ARA's archived response).
+ARS_ARA_RESPONSE_SCHEMA_MARKER_INDEX = "idx_ars_message_ara_response"
 
 
 async def _migrate_ars_registry(conn) -> None:
@@ -531,6 +533,7 @@ async def apply_schema_upgrades() -> None:
             ARS_CACHE_SCHEMA_MARKER_INDEX,
             ARS_AGENT_SCHEMA_MARKER_INDEX,
             ARS_PAYLOAD_SCHEMA_MARKER_INDEX,
+            ARS_ARA_RESPONSE_SCHEMA_MARKER_INDEX,
         ]
         cursor = await conn.execute(
             "SELECT count(*) FROM pg_class WHERE relkind = 'i' AND relname = ANY(%s)",
@@ -794,6 +797,18 @@ async def save_response(
     """
     kwargs.setdefault("raise_on_failure", True)
     await save_message(response_id, prepare_stored_response(response), logger, **kwargs)
+
+
+async def delete_messages(message_ids: List[str], logger: logging.Logger) -> None:
+    """Delete stored payloads that nothing will read again (a query's
+    callback payloads, once folded into its response). Best-effort: one this
+    misses simply lives out its TTL."""
+    if not message_ids:
+        return
+    try:
+        await data_db_client.delete(*message_ids)
+    except Exception as e:
+        logger.warning(f"Failed to delete {len(message_ids)} stored payloads: {e}")
 
 
 class ResponseTooLargeError(Exception):

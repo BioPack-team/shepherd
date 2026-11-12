@@ -167,6 +167,12 @@ async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> Non
         # its key. No-op otherwise.
         if updated is not None:
             await cache.on_parent_complete(updated, task_logger)
+        # The tree is finished and what is kept of it is in the cold store:
+        # its Redis copies only need to outlast clients still reading it.
+        members = [parent_pk] + [child["id"] for child in children]
+        if updated is not None and updated.get("merged_version") is not None:
+            members.append(updated["merged_version"])
+        await ars_db.expire_hot_copies(members, task_logger)
     elif parent["status"] == "E":
         await ars_db.clear_subscriptions(parent_pk)
         await cache.on_parent_failed(parent, task_logger)

@@ -344,6 +344,37 @@ logged, and the query is delivered regardless. It needs the store configured
 for `finish_query` as well as the server (the same volume mounted, or the
 same bucket settings); with no store configured, nothing is archived.
 
+##### What stays in Redis
+
+With a store configured, Redis only holds a payload while it is hot. Without
+one, none of this applies: every payload stays in Redis for `REDIS_TTL` and
+every ARS message keeps a durable copy in Postgres.
+
+- **A finished query.** Once `finish_query` has archived it, its query,
+  response and logs are left `REDIS_HOT_TTL` (default 30 minutes) in Redis
+  instead of the rest of `REDIS_TTL`. If the archive write failed they keep
+  the full `REDIS_TTL`, since Redis is then the only copy.
+- **A finished ARS tree.** When the parent completes, every Redis copy in the
+  tree gets `REDIS_HOT_TTL`: long enough for clients still polling it. A
+  later read comes from the cold store and re-warms Redis for the same
+  window.
+- **ARS children.** A child's premerged payload is not kept durably. After
+  the hot window a child is served from its ARA's archived response: the
+  ARA's own answer, without the ARS's source stamping, score normalization
+  or node annotation. A child whose ARA never answered keeps a small durable
+  copy of its own.
+- **Merged versions.** Only the newest keeps a durable copy; each new one
+  drops the copy of the version it supersedes. Earlier entries in
+  `merged_versions_list` are readable only while the tree is hot.
+- **Lookup callbacks.** A callback's payload is deleted as soon as it has
+  been folded into its query's response (this one applies with or without a
+  store). A batch given up on as unmergeable keeps its payloads until
+  `REDIS_TTL`, as evidence.
+
+`REDIS_TTL` (default 3 days) remains the TTL of anything still in flight or
+never finished. With a store configured it can be lowered to a few hours: it
+only has to outlast the longest query.
+
 The ARS watchdog keeps it bounded, always working on whole finished trees
 (a parent with every child and merged version under it) so a tree is never
 left half there, and never touching retained trees:
