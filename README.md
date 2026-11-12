@@ -257,6 +257,11 @@ every merged version), or `off`. Nodes that already carry a
 configured by its own environment variables (`SERVICE_PROVIDER_API_HOST`,
 `ANNOTATOR_QUERY_BACKEND`), set on the `ars_premerge` and `ars_merge`
 containers.
+Each merged version's results are ordered by weighted Reciprocal Rank
+Fusion of the hosted ARAs' own rankings (Aragorn 0.9, ARAX 0.1, as
+upstream), configured on the `ars_merge` container by upstream's variables:
+`ARS_RRF_ENABLED` (default `true`), `ARS_RRF_ARAGORN_WEIGHT` (ARAX gets the
+rest) and `ARS_RRF_C` (default 40).
 
 The ARS is **de-federated**: it talks only to the ARAs this same Shepherd
 deployment hosts (`shepherd_utils/ars/aras.py` -- Aragorn, ARAX, BTE), and

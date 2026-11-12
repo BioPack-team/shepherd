@@ -1,10 +1,14 @@
 """Pre-merge processing of arriving ARA responses.
 
-Ported from NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/utils.py:
-get_safe, add_attribute, add_log_entry, scrub_null_attributes,
-normalizeScores, ScoreStatCalc, normalize_scores,
-remove_phantom_support_graphs, pre_merge_process, appraise_confidence,
-get_confidence.
+Ported from NCATSTranslator/Relay @ 84a66c1 tr_sys/tr_ars/utils.py:
+get_safe, add_attribute, add_log_entry, normalizeScores, ScoreStatCalc,
+normalize_scores, remove_phantom_support_graphs, pre_merge_process,
+appraise_confidence, get_confidence.
+
+Upstream no longer calls ``pre_merge_process`` or
+``remove_phantom_support_graphs`` on an arriving response (Relay PR #898),
+and neither does the ars_premerge worker. They are kept, with their goldens,
+as the record of what upstream's functions do.
 
 ``decorate_edges_with_infores`` is gone: the ARS no longer stamps its ARA's
 infores on edge sources, it reports the edges that lack it
@@ -46,6 +50,22 @@ def get_safe(element, *keys):
         except KeyError:
             return None
     return None
+
+
+def response_results(data):
+    """The results an arriving ARA response is counted and merged by.
+
+    Upstream's callback (Relay PRs #894/#895): a response whose knowledge
+    graph has no nodes counts as having no results (``[]``), whatever its
+    results list says -- a Pathfinder answer could come back with a
+    "result" and an empty graph, which broke post-processing. Otherwise the
+    response's results list, or None when it has none.
+    """
+    res = get_safe(data, "message", "results")
+    nodes = get_safe(data, "message", "knowledge_graph", "nodes")
+    if not nodes:
+        res = []
+    return res
 
 
 def add_log_entry(data, log_tuple):
@@ -121,49 +141,34 @@ def edges_missing_infores(data, inforesid):
 
 
 def ScoreStatCalc(results):
+    """Summary statistics of the results' ``ordering_components.confidence``
+    (Relay PR #891 moved them off the analyses' scores). A result without
+    an ordering_components dict, or without a confidence, contributes
+    nothing; fewer than two confidences give ``{}``."""
     stat = {}
-    scoreList = []
+    confidence_list = []
     if results is not None and len(results) > 0:
         for res in results:
-            if (
-                "analyses" in res.keys()
-                and res["analyses"] != []
-                and res["analyses"] is not None
-            ):
-                score = None
-                if len(res["analyses"]) > 1:
-                    temp_score = []
-                    for analysis in res["analyses"]:
-                        if "score" in analysis.keys() and analysis["score"] is not None:
-                            temp_score.append(analysis["score"])
-                    if len(temp_score) > 0:
-                        score = statistics.mean(temp_score)
-                    else:
-                        score = None
-
-                elif len(res["analyses"]) == 1:
-                    if "score" in res["analyses"][0]:
-                        score = res["analyses"][0]["score"]
-                    else:
-                        score = None
-
-                if score is not None:
-                    scoreList.append(score)
-            else:
-                # TRAPI 2.0 makes Result.analyses optional (and forbids an
-                # empty list), so a result without analyses is ordinary: it
-                # has no score to contribute. Upstream (1.5, analyses
-                # required) abandoned the whole batch here.
+            ordering_components = res.get("ordering_components")
+            if not isinstance(ordering_components, dict):
+                logger.debug("Result has no valid ordering_components dictionary")
                 continue
 
+            confidence = ordering_components.get("confidence")
+
+            if confidence is not None:
+                confidence_list.append(confidence)
+            else:
+                logger.debug("Result doesnt have confidence field")
+
         try:
-            if len(scoreList) <= 1:
+            if len(confidence_list) <= 1:
                 return stat
-            stat["median"] = statistics.median(scoreList)
-            stat["mean"] = statistics.mean(scoreList)
-            stat["stdev"] = statistics.stdev(scoreList)
-            stat["minimum"] = min(scoreList)
-            stat["maximum"] = max(scoreList)
+            stat["median"] = statistics.median(confidence_list)
+            stat["mean"] = statistics.mean(confidence_list)
+            stat["stdev"] = statistics.stdev(confidence_list)
+            stat["minimum"] = min(confidence_list)
+            stat["maximum"] = max(confidence_list)
         except Exception as e:
             logger.error(f"Error in calculating statistics: {e}")
             return stat
@@ -312,8 +317,9 @@ def pre_merge_process(data, key, agent_name, inforesid):
 
 
 def appraise_confidence(results):
-    """Compute ordering_components locally; replaced the external Appraiser
-    call in post_process (Relay PR #884)."""
+    """Compute ordering_components locally (replaced the external Appraiser
+    call in post_process, Relay PR #884) and order the results by
+    confidence, highest first (Relay PR #891)."""
     for result in results:
         confidence = get_confidence(result)
         result["ordering_components"] = {
@@ -321,6 +327,12 @@ def appraise_confidence(results):
             "clinical_evidence": 0.0,
             "novelty": 0.0,
         }
+    # highest confidence first (Relay PR #891); a stable sort, so ties keep
+    # their merged order
+    results.sort(
+        key=lambda result: result["ordering_components"]["confidence"],
+        reverse=True,
+    )
 
 
 def get_confidence(result):

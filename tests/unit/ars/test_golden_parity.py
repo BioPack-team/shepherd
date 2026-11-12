@@ -34,6 +34,7 @@ import pytest
 
 from shepherd_utils.ars import merge as ars_merge
 from shepherd_utils.ars import premerge as ars_premerge
+from shepherd_utils.ars import ranker_fusion
 from shepherd_utils.ars import scoring as ars_scoring
 from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
 from shepherd_utils.ars.trapi import validate
@@ -243,6 +244,56 @@ def test_appraise_confidence_parity(case):
     else:
         ars_premerge.appraise_confidence(results)
         assert_parity(jsonable(results), golden["output"])
+
+
+def _run_rrf(case, config):
+    weights = case["weights"] or config["weights"]
+    c_value = case["c"] if case["c"] is not None else config["c_value"]
+    data = {"message": {"results": copy.deepcopy(case["results"])}}
+    summary = ranker_fusion.apply_weighted_rrf(
+        data, copy.deepcopy(case["rankers"]), weights, c_value
+    )
+    return summary, data
+
+
+def _tags(data):
+    return [r["tag"] for r in data["message"]["results"]]
+
+
+def test_ranker_fusion_default_config_parity(monkeypatch):
+    """Relay PR #897's defaults: on, Aragorn 0.9 / ARAX 0.1, c = 40."""
+    for var in ("ARS_RRF_ENABLED", "ARS_RRF_ARAGORN_WEIGHT", "ARS_RRF_C"):
+        monkeypatch.delenv(var, raising=False)
+    assert ranker_fusion.get_config() == GOLDENS["ranker_fusion_default_config"]
+
+
+@pytest.mark.parametrize(
+    "case", load("ranker_fusion_cases.json"), ids=lambda c: c["name"]
+)
+def test_ranker_fusion_parity(case):
+    """apply_weighted_rrf over TRAPI 2.0 bindings ({ids}) reproduces what
+    upstream's did over the same results in 1.5 form."""
+    golden = next(g for g in GOLDENS["ranker_fusion"] if g["name"] == case["name"])
+    summary, data = _run_rrf(case, GOLDENS["ranker_fusion_default_config"])
+    assert_parity(jsonable(summary), golden["summary"])
+    # order is the point: assert it exactly (assert_parity falls back to an
+    # unordered comparison for lists)
+    assert _tags(data) == _tags(golden["output"])
+    assert_parity(jsonable(data), golden["output"])
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads((CORPUS / "trapi15/ranker_fusion_cases.json").read_text()),
+    ids=lambda c: c["name"],
+)
+def test_ranker_fusion_still_reads_trapi15_bindings(case):
+    """The port reads upstream's 1.5 binding lists too, with the same result."""
+    relay = json.loads((FIXTURES / "ars_goldens/goldens_trapi15.json").read_text())
+    golden = next(g for g in relay["ranker_fusion"] if g["name"] == case["name"])
+    summary, data = _run_rrf(case, relay["ranker_fusion_default_config"])
+    assert summary == golden["summary"]
+    assert data == golden["output"]
 
 
 def test_remove_phantom_parity():

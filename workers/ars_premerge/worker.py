@@ -14,13 +14,10 @@ The premerge stages, in order (``_premerge_stages``):
   - explicit nulls are stripped (TRAPI 2.0 has none) and, when there were
     any, reported as a WARNING on the query -- the first step of removing
     the stage (see ``_strip_and_report_nulls``)
-  - edges whose sources do not name the ARA's infores are reported as a
-    WARNING; upstream stamped the infores onto them, the port leaves an
-    ARA's provenance as sent
-  - scores are normalized (pre_merge_process)
-  - when validating: support_graphs attributes naming an auxiliary graph the
-    response does not contain are removed, and reported as an ERROR, then
-    the response is validated
+  - when validating: the response is validated, as sent. Upstream no
+    longer runs pre_merge_process (score normalization) or
+    remove_phantom_support_graphs here (Relay PR #898), and neither does
+    the port
   - with ``ars_annotation_mode = "premerge"``, a validated ``ara-``
     response's nodes are annotated (shepherd_utils.ars.annotate), in
     parallel per response rather than under the parent's merge lock
@@ -94,10 +91,8 @@ from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.ars.premerge import (
     ScoreStatCalc,
     add_log_entry,
-    get_safe,
     log_timestamp,
-    pre_merge_process,
-    remove_phantom_support_graphs,
+    response_results,
 )
 from shepherd_utils.ars.statuses import coerce_status
 from shepherd_utils.ars.trapi import count_stripped_nulls, validate
@@ -163,16 +158,6 @@ def _annotate_in_child(data, agent_name, child_pk) -> None:
         )
 
 
-#: How many example ids a premerge report names; the count is always exact.
-REPORT_EXAMPLES = 5
-
-
-def _examples(ids) -> str:
-    ids = list(ids)
-    shown = ", ".join(str(i) for i in ids[:REPORT_EXAMPLES])
-    return shown + (", ..." if len(ids) > REPORT_EXAMPLES else "")
-
-
 def _strip_and_report_nulls(data, child_pk, agent_name, inforesid, report) -> None:
     """Strip the response's explicit nulls, reporting them if there were any.
 
@@ -204,35 +189,10 @@ def _premerge_stages(
     query's logs. Raises on a stage failure.
     """
     _strip_and_report_nulls(data, child_pk, agent_name, inforesid, report)
-    missing_infores = pre_merge_process(data, str(child_pk), agent_name, inforesid)
-    if missing_infores:
-        # Upstream stamped the ARA's infores onto these edges. A hosted ARA
-        # is expected to name itself on every edge it returns, so the port
-        # leaves the provenance as sent and says so.
-        report.warning(
-            f"ARA {agent_name} ({inforesid}): {len(missing_infores)} knowledge "
-            f"graph edge(s) in child {child_pk} do not name {inforesid} in "
-            f"their sources (e.g. {_examples(missing_infores)}); left as sent"
-        )
-    if do_validate:
-        phantoms = remove_phantom_support_graphs(data)
-        if phantoms:
-            # Removed so the merge (which joins edges to auxiliary graphs)
-            # still works, but a dangling support graph means the ARA lost
-            # part of its own answer: loud, so it gets fixed at the source.
-            missing_aux = list(
-                dict.fromkeys(aux for ids in phantoms.values() for aux in ids)
-            )
-            report.error(
-                f"ARA {agent_name} ({inforesid}): {len(phantoms)} edge(s) in "
-                f"child {child_pk} name support graphs the response does not "
-                f"contain (edges e.g. {_examples(phantoms)}; missing auxiliary "
-                f"graphs e.g. {_examples(missing_aux)}); those support_graphs "
-                "attributes were removed"
-            )
-        valid = validate(data)
-    else:
-        valid = True
+    # Upstream no longer runs pre_merge_process (score normalization) or
+    # remove_phantom_support_graphs on an arriving response (Relay PR #898):
+    # the response goes to validation, and on to the merge, as sent.
+    valid = validate(data) if do_validate else True
     if annotate and valid:
         _annotate_in_child(data, agent_name, child_pk)
     return bool(valid)
@@ -583,7 +543,7 @@ def intake_in_child(
     Raises KeyError when the response blob is gone.
     """
     data = get_message_sync(str(response_id))
-    res = get_safe(data, "message", "results")
+    res = response_results(data)
     result_length = len(res) if res is not None else None
     result_stat = ScoreStatCalc(res) if save and score and result_length else None
     outcome = {

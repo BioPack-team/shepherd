@@ -236,6 +236,43 @@ async def test_completion_nonempty(orchestration):
     orchestration["clear_subscriptions"].assert_awaited_once()
 
 
+async def test_last_merged_completed_carries_the_merged_versions_result_stat(
+    orchestration,
+):
+    """Relay PR #899: last_merged_completed carries ``results_stat``, the
+    final merged version's result_stat (its results' confidence stats)."""
+    stat = {"median": 0.5, "mean": 0.5, "stdev": 0.3, "minimum": 0.2, "maximum": 0.8}
+    parent = orchestration["parent"]
+    parent["merged_version"] = "m1"
+    rows = {
+        str(orchestration["parent_pk"]): parent,
+        "m1": {"id": "m1", "result_stat": stat},
+    }
+    orchestration["get_message_row"].side_effect = lambda pk: rows.get(str(pk))
+    orchestration["get_children"].return_value = [
+        _child("D", "ara-aragorn", result_count=5),
+        _child("D", "ars-ars-agent", result_count=5),
+    ]
+    await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
+
+    first_fields = orchestration["notify"].await_args_list[0].args[1]
+    assert first_fields["event_type"] == "last_merged_completed"
+    assert first_fields["results_stat"] == stat
+
+
+async def test_last_merged_completed_without_a_readable_merged_version(
+    orchestration,
+):
+    """No merged version to read: ``results_stat`` is None (JSON null)."""
+    orchestration["get_children"].return_value = [
+        _child("D", "ara-aragorn", result_count=5),
+        _child("D", "ars-ars-agent", result_count=5),
+    ]
+    await lifecycle.check_parent_completion(orchestration["parent_pk"], LOGGER)
+    first_fields = orchestration["notify"].await_args_list[0].args[1]
+    assert first_fields["results_stat"] is None
+
+
 async def test_completion_empty_synthesizes_merged_message(orchestration):
     """P-LC-2: zero counts -> an empty merged message is created from the
     parent's data with results/kg/aux emptied; parent D/200; NO unsubscribe
@@ -389,6 +426,25 @@ async def test_replay_done_parent_emits_last_merged_then_admin(replay_env):
     }
     assert all(_json.loads(t[1]["client_pks"]) == ["7"] for t in replay_env)
     assert all(t[1]["message_pk"] == str(parent["id"]) for t in replay_env)
+
+
+async def test_replay_carries_the_merged_versions_result_stat(replay_env, mocker):
+    """The replayed last_merged_completed carries ``results_stat`` as the
+    live one does (Relay PR #899)."""
+    stat = {"median": 0.4, "mean": 0.4, "stdev": 0.1, "minimum": 0.3, "maximum": 0.5}
+    mocker.patch.object(
+        notify_mod.ars_db,
+        "get_message_row",
+        new_callable=AsyncMock,
+        return_value={"id": "m2", "result_stat": stat},
+    )
+    parent = _done_parent([["m1", "ara-aragorn"], ["m2", "ara-arax"]])
+    parent["merged_version"] = "m2"
+    await notify_mod.replay_completion(parent, 7, LOGGER)
+    first = _json.loads(replay_env[0][1]["fields"])
+    assert first["event_type"] == "last_merged_completed"
+    assert first["results_stat"] == stat
+    notify_mod.ars_db.get_message_row.assert_awaited_once_with("m2")
 
 
 async def test_replay_empty_completion_emits_only_admin(replay_env):
