@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -142,6 +142,42 @@ class Settings(BaseSettings):
     redis_host: str = "shepherd_broker"
     redis_port: int = 6379
     redis_password: str = "supersecretpassword"
+    # Shepherd uses Redis for four jobs -- the broker (task streams,
+    # heartbeats), data (payloads while hot), locks and logs -- which by
+    # default all live on ``redis_host``, in databases 0-3. Each can be given
+    # a Redis of its own (shepherd_utils/redis_clients.py), so the small,
+    # latency-critical broker and locks stop sharing a command thread and a
+    # ``maxmemory`` with multi-megabyte payload transfers. Unset, a role uses
+    # ``redis_host``; with a host of its own, its port and password default to
+    # ``redis_port`` / ``redis_password``. A role keeps its database number
+    # wherever it lives. EVERY process must be given the same values.
+    redis_broker_host: str = ""
+    redis_broker_port: Optional[int] = None
+    redis_broker_password: Optional[str] = None
+    redis_data_host: str = ""
+    redis_data_port: Optional[int] = None
+    redis_data_password: Optional[str] = None
+    redis_lock_host: str = ""
+    redis_lock_port: Optional[int] = None
+    redis_lock_password: Optional[str] = None
+    redis_logs_host: str = ""
+    redis_logs_port: Optional[int] = None
+    redis_logs_password: Optional[str] = None
+    # Redis Sentinel (#201). With both set, clients ask these Sentinels
+    # ("host:26379,host2:26379"; the port defaults to 26379) for the current
+    # primary of ``redis_sentinel_master`` instead of connecting to
+    # ``redis_host``, and follow it across a failover. A role with a Redis of
+    # its own names its master with ``redis_<role>_sentinel_master`` (watched
+    # by the same Sentinels), which takes precedence over ``redis_<role>_host``.
+    # ``redis_sentinel_password`` is for Sentinels that themselves require
+    # auth; the Redis password is ``redis_password`` as usual.
+    redis_sentinels: str = ""
+    redis_sentinel_master: str = ""
+    redis_sentinel_password: str = ""
+    redis_broker_sentinel_master: str = ""
+    redis_data_sentinel_master: str = ""
+    redis_lock_sentinel_master: str = ""
+    redis_logs_sentinel_master: str = ""
 
     lookup_timeout: int = 210
     callback_host: str = "http://host.docker.internal:5439"
@@ -300,14 +336,30 @@ class Settings(BaseSettings):
     jaeger_port: int = 4317
 
     # TTL (seconds) for every payload we stash in Redis: the query/response
-    # blobs, each per-callback blob, the ready-callback set, and the logs. We
-    # deliberately keep callbacks around after a query finishes so the
-    # ``/response`` endpoint can serve them for debugging, but that made Redis
-    # accumulate ~14 days of finished-query blobs under load and hit its
-    # ``maxmemory`` cap. 3 days keeps recent queries debuggable while bounding
-    # the working set; the broker's ``volatile-ttl`` eviction policy then drops
-    # the oldest (nearest-expiry) blobs first if the cap is still reached.
-    redis_ttl: int = 259200  # 3 days
+    # blobs, each per-callback blob, the ready-callback set, and the logs.
+    # It only has to outlast the longest query (minutes): finished work is
+    # read from the cold store (see ``redis_hot_ttl`` below), so what this
+    # governs is how long something that never finished -- a query that was
+    # abandoned, a response whose archive write failed -- stays in Redis for
+    # someone to look at. The default suits a local stack, where Redis shares
+    # a laptop's memory; a deployment sets its own. Without a cold store
+    # configured this is also how long a finished response stays readable at
+    # all, so such a deployment wants it much longer (it used to be 3 days).
+    # The broker's ``volatile-ttl`` eviction policy drops the oldest
+    # (nearest-expiry) blobs first if the cap is still reached.
+    redis_ttl: int = 14400  # 4 hours
+    # With a cold store configured (ars_payload_dir / payload_s3_bucket),
+    # Redis only has to hold a payload while it is hot: finished ARA
+    # responses are archived there and finished ARS trees keep their final
+    # merged result there. Once that copy exists, the Redis copies -- a
+    # finished query's query, response and logs; every payload of a finished
+    # ARS tree -- are given this TTL (seconds) instead of the rest of
+    # ``redis_ttl``. It only has to cover the ARS picking a finished response
+    # up, a redelivery of that hand-off, and clients still polling a tree
+    # that has just completed; reads after it come from the cold store, and
+    # re-warm Redis for this long. ``redis_ttl`` stays the TTL of everything
+    # still in flight, and of everything when no cold store is configured.
+    redis_hot_ttl: int = 1800  # 30 minutes
 
     # Cap on the number of log entries kept per query. Each query's logs are a
     # Redis list that every stage appends to, and every reader -- finish_query
@@ -580,6 +632,25 @@ class Settings(BaseSettings):
     # in Kubernetes). Empty keeps payloads in Postgres. Payloads already in
     # Postgres stay readable either way.
     ars_payload_dir: str = ""
+    # The same store in an S3 bucket instead of a directory (and with both
+    # set, the bucket is used). Objects keep the directory layout as their
+    # keys, under payload_s3_prefix. Credentials and region come from the
+    # standard AWS chain (the pod's IAM role). payload_s3_endpoint_url is for
+    # an S3-compatible service such as MinIO. A bucket has no capacity, so the
+    # disk-pressure eviction below never runs against it.
+    payload_s3_bucket: str = ""
+    payload_s3_prefix: str = ""
+    payload_s3_endpoint_url: str = ""
+    # The store also archives every ARA response as its pipeline finished it
+    # (shepherd_utils/response_archive.py): finish_query writes it, with the
+    # query and its logs in the same object, for direct and ARS-originated
+    # queries alike, and GET /response/{id} falls back to it once the Redis
+    # copy has expired. Days the archive of a directly submitted query is
+    # kept; the ARS watchdog purges older ones hourly. The archive of a query
+    # the ARS dispatched belongs to its ARS tree instead and is kept and
+    # dropped with it (ars_data_retention_days, the retain flag, the cache). 0 keeps them until disk pressure evicts them.
+    # Nothing is archived unless a store is configured above.
+    ara_response_retention_days: int = 30
     # Disk-pressure eviction on that volume (shepherd_utils/ars/retention.py).
     # Once it is this full, the watchdog evicts the payloads of whole finished
     # trees, oldest first, until it is back under the low mark. Trees backing
@@ -708,6 +779,44 @@ class Settings(BaseSettings):
     # that footprint against the limit and fires on whichever is higher. Empty
     # disables the footprint check.
     redis_memory_limit: str = ""
+    # ``redis_memory_limit`` describes the Redis that serves the broker role.
+    # A role given a Redis of its own (``redis_<role>_host`` /
+    # ``_sentinel_master``) runs in another container with another limit; set
+    # that container's limit here to get the same footprint check for it.
+    # Empty skips the footprint check for that instance (its data-vs-maxmemory
+    # check still runs). Ignored for a role that shares the broker's Redis.
+    redis_data_memory_limit: str = ""
+    redis_lock_memory_limit: str = ""
+    redis_logs_memory_limit: str = ""
+    # Replication alerting (#201), per Redis instance. A no-op for an instance
+    # that has never reported a connected replica (the single-server default).
+    # An instance with fewer connected replicas than it has had, a replica
+    # still syncing, or one lagging past either threshold below, must stay
+    # that way this long before the monitor alerts (and be healthy this long
+    # before it reports recovery), so a replica reconnecting after a blip is
+    # silent.
+    monitor_redis_replica_grace_sec: float = 60.0
+    # A replica lags when the primary last heard from it more than this many
+    # seconds ago (INFO ``slaveN`` ``lag``; healthy is 0-1) ...
+    monitor_redis_replica_lag_sec: float = 30.0
+    # ... or when it is this many bytes of replication stream behind the
+    # primary: what a failover right now would lose. Sized above a burst of
+    # multi-megabyte payloads in transit. 0 disables the byte check.
+    monitor_redis_replica_lag_bytes: int = 268435456  # 256 MiB
+    # Each instance's write rate is the growth of INFO ``total_net_input_bytes``
+    # per second, smoothed over about this long (an exponential moving
+    # average) so one burst between two polls doesn't swing it.
+    monitor_redis_write_rate_window_sec: float = 60.0
+    # Eviction window (#201): maxmemory / write rate, i.e. how long a newly
+    # written key survives once the instance is at its cap and evicting
+    # oldest-first. The monitor alerts when an instance at or above
+    # ``..._near_cap_pct`` percent of maxmemory has a window shorter than
+    # ``..._min_sec``. 0 (the default) derives the minimum from the longest
+    # query budget, ``ars_timeout_merge_sec`` x ``..._safety_factor``: below
+    # that, eviction takes the payloads of queries that are still running.
+    monitor_redis_eviction_window_min_sec: float = 0.0
+    monitor_redis_eviction_window_safety_factor: float = 2.0
+    monitor_redis_eviction_window_near_cap_pct: float = 90.0
     # Postgres availability alerting. Same debounce idea as the broker: Postgres
     # must stay unreachable this long before the single ``postgres_down`` alert
     # fires, so a transient query timeout doesn't trip it. No recovery-grace

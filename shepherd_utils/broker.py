@@ -2,68 +2,39 @@
 
 import asyncio
 import logging
-import socket
 import time
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
+from . import redis_clients
 from .config import settings
 
-
-def _keepalive_options() -> dict:
-    """TCP keepalive tuning so a dead broker connection is detected in ~tens of
-    seconds instead of relying on Linux's 2-hour default keepalive idle time.
-
-    Without these, a half-open connection -- the broker pod moved, or a stateful
-    firewall/conntrack entry silently dropped the flow -- is only noticed via the
-    per-command ``socket_timeout``, and reconnecting keeps hitting the same dead
-    endpoint. Probing the peer actively lets the kernel tear the socket down so
-    redis-py rebuilds it against a live endpoint. Only options the running
-    platform defines are included (``TCP_KEEPIDLE`` and friends are Linux-only;
-    macOS spells it ``TCP_KEEPALIVE``), so importing this on a dev laptop or in
-    CI doesn't raise. Net effect on Linux: ~30s idle + 3 failed probes 10s apart
-    => a dead connection is reaped in ~60s.
-    """
-    opts = {}
-    if hasattr(socket, "TCP_KEEPIDLE"):
-        opts[socket.TCP_KEEPIDLE] = 30
-    if hasattr(socket, "TCP_KEEPINTVL"):
-        opts[socket.TCP_KEEPINTVL] = 10
-    if hasattr(socket, "TCP_KEEPCNT"):
-        opts[socket.TCP_KEEPCNT] = 3
-    return opts
-
-
+# Kept under their old names for callers and tests; the tuning itself lives
+# with the rest of the client construction (redis_clients.keepalive_options).
+_keepalive_options = redis_clients.keepalive_options
 _KEEPALIVE_OPTIONS = _keepalive_options()
 
-broker_redis_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=0,
-    password=settings.redis_password,
+# Which Redis each of these talks to -- one shared server by default, a Redis
+# per role or a Sentinel-managed primary when configured -- is decided in
+# shepherd_utils/redis_clients.py.
+broker_redis_pool = redis_clients.async_pool(
+    redis_clients.BROKER,
     max_connections=10,
     timeout=30,
     socket_timeout=7,  # Needs to be greater than get_task xgroupread timeout
     socket_connect_timeout=10,
-    socket_keepalive=True,
-    socket_keepalive_options=_KEEPALIVE_OPTIONS,
     health_check_interval=30,
     decode_responses=True,
     retry_on_timeout=True,
 )
 
-lock_redis_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=2,
-    password=settings.redis_password,
+lock_redis_pool = redis_clients.async_pool(
+    redis_clients.LOCK,
     max_connections=10,
     timeout=30,
     socket_timeout=5,
     socket_connect_timeout=10,
-    socket_keepalive=True,
-    socket_keepalive_options=_KEEPALIVE_OPTIONS,
     health_check_interval=30,
     decode_responses=True,
     retry_on_timeout=True,

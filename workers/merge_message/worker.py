@@ -24,15 +24,18 @@ from shepherd_utils.broker import (
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import (
+    ResponseSealedError,
     bump_merge_crashes,
     clear_merge_crashes,
     clear_ready_callback,
     get_existing_callback_ids,
     get_merge_crashes,
+    delete_messages,
     get_message_sync,
     get_ready_callbacks,
     get_response_size,
     get_response_sizes,
+    is_response_sealed,
     message_exists,
     remove_callback_id,
     save_logs,
@@ -900,16 +903,50 @@ def merge_messages_by_id(
     return bool(merged)
 
 
-async def _clear_batch(response_id, callback_ids, logger):
-    """Drop a processed batch from the ready index and callbacks table.
+async def _clear_batch(response_id, callback_ids, logger, keep_payloads=False):
+    """Drop a processed batch from the ready index and callbacks table, and
+    delete its payloads.
 
     Every callback we attempted is removed (not just the ones that merged)
     so a callback whose payload has vanished can't wedge the drain loop.
+    ``keep_payloads`` leaves the payloads in the data store (until their
+    TTL) for a batch being given up on as unmergeable: they are the evidence
+    of what could not be merged.
     """
     await asyncio.gather(
         *(clear_ready_callback(response_id, cb, logger) for cb in callback_ids)
     )
     await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
+    # A callback's payload is read once, by the fold that just ran; what it
+    # carried is in the response now. Deleted last, so a crash before this
+    # leaves a payload nobody reads rather than an index entry with nothing
+    # behind it.
+    if not keep_payloads:
+        await delete_messages(callback_ids, logger)
+
+
+async def _drop_callbacks_of_finished_query(
+    callback_id: str, error: ResponseSealedError, logger
+) -> None:
+    """Stand down for a query that finished while its callbacks waited.
+
+    Its response is sealed (``seal_response``): it was delivered as it stood,
+    and nothing merged now could change that. The ready callbacks are
+    dropped, payloads and all, rather than retried: a retry would only be
+    refused again, and as a merge failure it would back off, re-enqueue and
+    finally log the batch as unmergeable. One WARNING, in this worker's
+    output.
+    """
+    logger.warning(f"[{callback_id}] {STREAM}: {error}; dropping its ready callbacks.")
+    try:
+        orphans = await get_ready_callbacks(error.response_id, logger)
+        await _clear_batch(error.response_id, orphans, logger)
+    except Exception as e:
+        # They age out of the ready index with the query's other keys.
+        logger.error(
+            f"[{callback_id}] Failed to drop the ready callbacks of "
+            f"{error.response_id}: {e}"
+        )
 
 
 async def _handle_merge_failure(task, response_id, ready, logger):
@@ -941,7 +978,7 @@ async def _handle_merge_failure(task, response_id, ready, logger):
             f"discarding {len(ready)} unmergeable callback(s): "
             f"{', '.join(ready)}"
         )
-        await _clear_batch(response_id, ready, logger)
+        await _clear_batch(response_id, ready, logger, keep_payloads=True)
         # Counter reset: the poison batch is gone, so whatever else is
         # ready deserves a clean run of attempts.
         await _reenqueue_wake_task(task, logger)
@@ -1224,6 +1261,9 @@ async def poll_for_tasks():
         # Whether this task holds the query's lock and hasn't released it yet;
         # the catch-all below uses it to clean up after an unexpected error.
         holding = False
+        # Whether the query turned out to be finished already (its response
+        # sealed). Its logs were delivered and archived; nothing is added.
+        finished = False
 
         async def _release_lock() -> None:
             nonlocal holding
@@ -1264,6 +1304,14 @@ async def poll_for_tasks():
                 keepalive = asyncio.create_task(
                     _keep_lock_alive(response_id, lock_lost, logger)
                 )
+                # The query may have finished already (failed, timed out, or
+                # finished by its lookup while these callbacks waited): its
+                # response is then sealed, and a pass would load it, fold
+                # into it and have the save refused. Stop before all that.
+                # The seal check on the save covers a query that finishes
+                # during the pass.
+                if await is_response_sealed(response_id):
+                    raise ResponseSealedError(response_id)
                 # Sanity check: if the original query or the response it
                 # accumulates into is gone (e.g. lost when Redis restarted and
                 # reloaded an older snapshot), every ready callback for it is
@@ -1412,6 +1460,10 @@ async def poll_for_tasks():
                     span.set_attribute("merge.drained_callbacks", drained)
                     await _handle_merge_failure(task, response_id, ready, logger)
                     return
+                except ResponseSealedError:
+                    # The query finished during the pass and the save was
+                    # refused; handled below, not retried as a failure.
+                    raise
                 except Exception:
                     logger.error(
                         f"[{callback_id}] Error merging messages: "
@@ -1445,6 +1497,17 @@ async def poll_for_tasks():
                         "post-drain; kicking one wake task."
                     )
                     await _reenqueue_wake_task(task, logger)
+        except ResponseSealedError as e:
+            finished = True
+            if holding:
+                try:
+                    await _release_lock()
+                except Exception as release_error:
+                    logger.error(
+                        f"[{callback_id}] Failed to release the merge lock: "
+                        f"{release_error}"
+                    )
+            await _drop_callbacks_of_finished_query(callback_id, e, logger)
         except Exception as e:
             logger.error(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
@@ -1486,7 +1549,8 @@ async def poll_for_tasks():
             # them here (keyed by response_id, the key finish_query reads) so the
             # parent's own lines *and* the folded-in merge-child logs make it
             # into the query's log list.
-            await save_logs(response_id, logger)
+            if not finished:
+                await save_logs(response_id, logger)
             limiter.release()
 
     # Each wake task runs concurrently. Distinct queries never share a lock,

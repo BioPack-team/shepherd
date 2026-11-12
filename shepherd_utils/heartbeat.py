@@ -450,13 +450,10 @@ class Heartbeat:
         try:
             # Lazy import so the sync client doesn't get created at module
             # import time inside workers that never receive a signal.
-            import redis as sync_redis
+            from shepherd_utils import redis_clients
 
-            client = sync_redis.Redis(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                db=0,
-                password=settings.redis_password,
+            client = redis_clients.sync_client(
+                redis_clients.BROKER,
                 socket_timeout=2,
                 socket_connect_timeout=2,
             )

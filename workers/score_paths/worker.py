@@ -14,7 +14,11 @@ import torch
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_embeddings
-from shepherd_utils.db import get_message_sync, save_response_sync
+from shepherd_utils.db import (
+    ResponseSealedError,
+    get_message_sync,
+    save_response_sync,
+)
 from shepherd_utils.logger import (
     get_worker_logger,
     ingest_query_logs,
@@ -159,6 +163,9 @@ def score_paths(response_id, logger):
         try:
             save_response_sync(response_id, message)
             break
+        except ResponseSealedError:
+            # The query has finished; retrying cannot change that.
+            raise
         except Exception as e:
             if attempt < 4:
                 logger.warning(

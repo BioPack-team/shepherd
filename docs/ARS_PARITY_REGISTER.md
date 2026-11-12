@@ -178,7 +178,8 @@ are valid TOM 2.0 Responses.
 - **Upstream error-behavior parity** — a failed merge fold ends the shell
   merge child at once (E/500) instead of leaving it Running for the
   watchdog; see divergence 6. The crash-and-drop behaviors this
-  row used to list (`decorate_edges_with_infores`'s UnboundLocalError,
+  row used to list (`decorate_edges_with_infores`'s UnboundLocalError --
+  the function itself is gone since deviation 21 --
   `normalizeScores`'s IndexError, the `node_bindings` for/else, the
   `attributes`/`analyses` early returns) are **no longer reproduced** — see
   "Deliberate divergences from upstream" below.
@@ -190,7 +191,7 @@ Infrastructure substitutions (behavior-preserving by definition):
 | Upstream | Port |
 |---|---|
 | Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.notify`) + the `ars_watchdog` loop |
-| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` when set, else `ars_message.data` bytea |
+| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` (or an object in `PAYLOAD_S3_BUCKET`) when set, else `ars_message.data` bytea. With a cold store set, only the query, the newest merged version and each ARA's archived response are kept (deviation 20) |
 | `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent, lock-and-drain: `ars_premerge` records each validated child in a merge-ready index and wakes `ars.merge`; the worker that wins the parent's lock folds every ready child in arrival order and a loser simply acks (the semaphore column is still maintained for envelope parity; see deviation 17) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
 | self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |
@@ -261,7 +262,8 @@ Behavioral deviations:
     oldest first and cache-backed last, when the payload volume passes
     `ars_payload_evict_high_pct`. A message whose payload was dropped reads
     exactly as one past the age window (item 11). Retained trees are never
-    touched.
+    touched. A tree's payloads include the archives of its children's ARA
+    responses (deviation 22), which are kept and dropped with it.
 11. **Payload inclusion in envelopes**: a single message GET loads its
     payload from the blob store, and one evicted from Redis with no durable
     copy renders `fields.data: null` (upstream MySQL always had it inline).
@@ -372,8 +374,8 @@ Behavioral deviations:
     as upstream records an HTTP ARA answering non-200, instead of the
     clean D/200 with no results it used to read as; an intake whose response
     blob is missing leaves the child Running for the watchdog (the shape
-    of a callback that never arrived); a `get_logs` failure delivers the
-    response without spliced logs; and a submit with no enabled ARA
+    of a callback that never arrived); the child's payload carries no
+    query logs (deviation 21); and a submit with no enabled ARA
     completes empty at fan-out time instead of sitting Running forever.
     Schema: `ars_message.actor` (FK) became `ars_message.agent` (the
     agent name), and the `ars_agent`/`ars_channel`/`ars_actor` tables are
@@ -442,11 +444,12 @@ Behavioral deviations:
       null member (not descending into free-form `value`s) before
       pre-merge processing, validated or not, so a null on an optional
       member is harmless, a null on a required member fails as a missing
-      one, and nothing downstream ever carries a null. Forbidden empty
-      containers (`analyses: []`, `ids: []`, `logs: []`,
+      one, and nothing downstream ever carries a null (each strip is now
+      reported, and the step slated for removal: deviation 21). Forbidden
+      empty containers (`analyses: []`, `ids: []`, `logs: []`,
       `upstream_resource_ids: []` ...) are **not** repaired: they fail
-      validation (E/422), as the 2.0 schema says. The intake omits `logs`
-      when the query logged nothing rather than setting `logs: []`.
+      validation (E/422), as the 2.0 schema says. The intake adds no
+      `logs` to the child's payload at all (deviation 21).
     - **Merge**: node bindings union `ids` per query node; the result map
       keys on single-id bindings (upstream: single-element binding lists).
       **KL/AT conflict policy**: upstream turned any conflicting scalar
@@ -473,7 +476,8 @@ Behavioral deviations:
       `auxiliary_graphs`, no query-only members like `workflow` /
       `submitter`) instead of the re-saved query with components emptied.
       `add_attribute` (node annotations) and the edge self-source
-      (`_self_source`) no longer emit null / empty members; the blocklist
+      (`_self_source`, removed since with the infores stamping, deviation
+      21) no longer emit null / empty members; the blocklist
       drops a binding's removed ids and removes the analysis when none
       remain (upstream could leave an empty binding list), and drops an
       emptied `support_graphs` / `auxiliary_graphs`. Log entries the ARS
@@ -517,6 +521,107 @@ Behavioral deviations:
     `ars_premerge` / `ars_merge` pool children at startup, so the first
     response a fresh worker handles no longer pays the spawn's module
     re-import (~1.2-1.5s each, in both workers).
+20. **With a cold store, Redis holds only what is hot** (post-parity
+    change, #252; applies only when `ARS_PAYLOAD_DIR` or
+    `PAYLOAD_S3_BUCKET` is set). Upstream keeps every message's payload in
+    MySQL for good. With a cold store configured the port keeps, durably,
+    only the parent's query, the final merged version, and the archive
+    `finish_query` writes of each ARA's response. Two things read
+    differently once a tree's Redis copies have expired (`REDIS_HOT_TTL`
+    after it completes); what a child serves is deviation 22 and does not
+    depend on the store:
+    - **a superseded merged version has no payload** (`fields.data: null`,
+      as item 11): each new merged version that finishes Done drops the
+      durable copy of the one it supersedes, so `merged_versions_list`
+      entries other than the last resolve only while the tree is hot;
+    - **a merge cannot be rebuilt from the cold store**: the premerged
+      children it folded are gone.
+    Without a cold store every message keeps a durable copy in Postgres,
+    and its Redis copy for `REDIS_TTL`.
+21. **Premerge leaves an ARA's answer as sent, and reports what is wrong
+    with it** (post-parity change, #258). The de-federated ARS only
+    premerges the answers of ARAs this deployment hosts, so what upstream
+    patched up in every federated ARA's answer is now either unnecessary
+    or a bug to fix in the ARA:
+    - **no query logs in the child's payload.** Upstream's callback
+      received the payload with the query's logs spliced in; the intake
+      used to read them from the query's log list and splice them in the
+      same way. Nothing used them there: the merge folds only each child's
+      `message`, and the logs stay in the query's log list. The premerged
+      copy carries none; a child, when read, is served with them
+      (deviation 22).
+    - **one load, one save.** Intake and premerge were two pool calls,
+      each decoding and re-encoding the multi-MB response. They are one:
+      the pool child loads the ARA's response once, counts its results and
+      computes the score statistics, runs the premerge stages, and saves
+      once, as the merge's working copy (deviation 22). The intake state machine is unchanged
+      (guards, the `ara_response_complete` notification, the counts
+      before the hand-off, the terminal shapes); the notification now
+      follows the premerge stages instead of preceding them. A premerge
+      stage failure still ends E/500 after the notification and the
+      counts. A redelivery premerges again from the ARA's response, and
+      every stage is idempotent.
+    - **null stripping is reported, and slated for removal.** TRAPI 2.0
+      forbids nulls, so a null is an ARA bug; but Shepherd's own response
+      pruning is targeted, not recursive, so a deep null can survive it.
+      Premerge still strips them all (deviation 18), and when it removes
+      any it logs one WARNING on the ARS query naming the ARA, the child
+      and the count. Once those stay quiet the step goes.
+    - **the ARA's infores is no longer stamped on edge sources.** Upstream
+      (`decorate_edges_with_infores`) appended a retrieval source for the
+      ARA to every edge whose `sources` did not name it, and made the ARA
+      the primary source of an edge with none. The port leaves sources as
+      sent and logs one WARNING on the query with the ARA, the child, the
+      number of such edges and a few example edge ids
+      (`edges_missing_infores`). An edge with no sources at all is no
+      longer repaired, so it now fails validation (E/422) as the 2.0
+      schema says. Merged edges no longer gain an `aggregator_knowledge_source`
+      for the ARA that returned them; goldens `decorate/*`,
+      `premerged_inputs.aragorn...e3.sources` and
+      `merge_pipeline_ab...e3.sources` are declared divergences.
+    - **phantom support graphs are removed loudly.** A
+      `biolink:support_graphs` edge attribute naming an auxiliary graph the
+      response does not contain is still removed (so the merge works), and
+      now also logged as one ERROR on the query with the ARA, the child,
+      the number of edges affected and example edge and auxiliary graph
+      ids. A response with support-graph attributes but no
+      `auxiliary_graphs` at all now has them removed (and reported) too;
+      upstream skipped the pass with a debug line and merged the dangling
+      references.
+    The reports are logged in the pool child and folded into the task's
+    query logs, so they reach the ARS query's stored logs. Score
+    normalization, TRAPI validation and node annotation are unchanged.
+    Tests: `tests/unit/ars/test_ars_premerge.py` (single load/save, no
+    logs, redelivery, each report on and off, reaching the query's logs),
+    `test_upstream_bugfixes.py`, `test_golden_parity.py`.
+22. **An ARA child is its ARA's response** (post-parity change, #252,
+    depends on #257). Upstream gave each child its own payload: the ARA's
+    answer after the ARS had premerged it. Here a child's pk is the
+    response id its ARA's query is dispatched with, so the child and the
+    ARA's response are one entry in the data store. The ARA's pipeline
+    writes it, `finish_query` seals it before handing it over, and the ARS
+    never writes it.
+    - **a child's payload is the ARA's answer as the ARA would deliver
+      it**: its response with the query's `parameters` and logs, a TRAPI
+      2.0 Response, without anything premerge does (no normalized scores,
+      no node annotations; nulls and phantom support graphs are as sent).
+      It reads the same from Redis while the response is hot and from
+      `finish_query`'s archive afterwards.
+    - **a child has no payload until it is terminal** (`fields.data: null`
+      while Running): until then its entry holds a response the ARA is
+      still building. Upstream showed the query it had been sent.
+    - **the premerged form is the merge's working copy**, stored beside the
+      child (`ars:premerged:<pk>`), saved only when the response validated,
+      and deleted once the merge has attempted the child. It is never
+      served. A redelivered intake always starts again from the sealed
+      response.
+    - **the "Internal ARS Server Error" log entry** of a child that ends
+      E/500 is written to the ARS query's logs, not into the child's
+      payload, which the ARS does not write. The child's status and code
+      are unchanged.
+    - **a child whose dispatch failed** has whatever its ARA's query got as
+      far as storing (its initial, empty response, or nothing), not a copy
+      of the query.
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 
@@ -534,8 +639,8 @@ bug is deviation 18.
 
 | Upstream | Port |
 |---|---|
-| `decorate_edges_with_infores` read `has_primary`, only ever assigned inside its loop → `UnboundLocalError` on any non-empty `sources` with no `primary_knowledge_source`, failing the whole callback | `has_primary` is initialized; the agent adds itself as primary, which is what the unreachable branch intended |
-| `decorate_edges_with_infores` shared ONE `self_source` dict across the whole graph, so the last edge to need a role rewrote the role of every earlier edge | a fresh source dict per edge (`_self_source`) |
+| `decorate_edges_with_infores` read `has_primary`, only ever assigned inside its loop → `UnboundLocalError` on any non-empty `sources` with no `primary_knowledge_source`, failing the whole callback | moot: the port no longer stamps the infores at all (deviation 21); `edges_missing_infores` only reports such edges. (It used to initialize `has_primary` and add the agent as primary.) |
+| `decorate_edges_with_infores` shared ONE `self_source` dict across the whole graph, so the last edge to need a role rewrote the role of every earlier edge | moot, as above (it used to build a fresh source dict per edge) |
 | `normalizeScores` ranked only score-bearing results but popped one rank per RESULT → `IndexError` on any mixed response, after misassigning the ranks it did hand out | each rank goes to the result it was computed from; unscored results get no `normalized_score` |
 | `remove_blocked` bound `nodes_to_remove` / `edges_to_remove` / `aux_graphs_to_remove` / `results_to_remove` inside conditional branches and read them unconditionally → `UnboundLocalError` on any response without `auxiliary_graphs` (an ordinary shape), without a knowledge graph, or with a null `edges` map | every accumulator bound up front |
 | `remove_blocked`'s pathfinder branch raised `UnboundLocalError` on an empty `path_bindings` | the removal loop is inside the per-path loop, so there is nothing to leave unbound |
@@ -551,6 +656,7 @@ bug is deviation 18.
 | `mergeDicts` keyed a list of objects on `resource_id` / `qualifier_type_id` and dropped every object carrying neither — from **both** sides, since it replaced the merged list with the keyed map's values — so a list of objects of any other shape merged to `[]` | unkeyed objects are carried through, deduped, after the keyed ones; the keyed path is unchanged |
 | `TranslatorMessage.to_dict` emitted `"results": {}` for a message with no results | `[]`, as TRAPI requires (and, in 2.0, an absent query graph / knowledge graph / auxiliary graphs is omitted rather than emitted as `{}`) |
 | `remove_blocked` pruned pathfinder `path_bindings` for only the last path id (its removal loop was dedented out of the per-path loop and shadowed the dict with its own values) | every path id is pruned |
+| `remove_phantom_support_graphs` skipped the whole pass (a debug line only) when the response had no `auxiliary_graphs`, so every `biolink:support_graphs` reference in it -- all dangling -- went on into the merge; where it did remove one, it did so silently | a missing `auxiliary_graphs` is read as empty, so those references are removed too, and every removal is reported as an ERROR on the query (deviation 21) |
 | `remove_blocked` matched analysis-level `support_graphs` (aux graph ids) against removed EDGE ids — never a match — so support graphs that really had gone away stayed on the analysis | matched against removed aux graph ids |
 | The notification `stats` block keyed off the parent's `result_count`, which nothing ever set, and counted aux graphs from a `data` argument no caller passed — so stats were never attached, and would have read 0 if they had been | `ars_merge` carries the merge's result count up to the parent after post-processing; the aux count comes from the `params.stats` the merge already recorded |
 

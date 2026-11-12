@@ -79,6 +79,62 @@ async def test_an_unknown_response_is_404(redis_mock):
     assert response.status_code == 404
 
 
+async def test_a_response_gone_from_redis_is_served_from_the_archive(
+    redis_mock, monkeypatch, tmp_path
+):
+    """#252: finish_query archives every finished query in the cold store,
+    and the route falls back to that copy -- with the logs and the query's
+    parameters it carries -- once Redis has let go. The client gets an
+    ordinary TRAPI Response, not the archive's three parts."""
+    import uuid
+
+    from shepherd_utils import response_archive
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    query_id, response_id = str(uuid.uuid4()), str(uuid.uuid4())
+    await db.save_message(
+        query_id, {"message": {}, "parameters": {"log_level": "DEBUG"}}, logger
+    )
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    await db._append_logs(response_id, [{"message": "hi", "level": "INFO"}])
+    blob = await response_archive.capture_response(response_id, logger)
+    assert await response_archive.archive_query(
+        query_id, response_id, blob, "OK", None, logger
+    )
+    await db.data_db_client.flushdb()
+    await db.logs_db_client.flushdb()
+    lookup = AsyncMock(return_value={})
+    monkeypatch.setattr(base_routes, "get_response_query_parameters", lookup)
+
+    response = await base_routes.get_query_response(response_id)
+
+    assert response.status_code == 200
+    body = orjson.loads(response.body)
+    assert list(body) == [
+        "schema_version",
+        "biolink_version",
+        "parameters",
+        "message",
+        "logs",
+    ]
+    assert body["parameters"] == {"log_level": "DEBUG"}
+    assert body["message"] == {"results": []}
+    assert body["logs"] == [{"message": "hi", "level": "INFO"}]
+    lookup.assert_not_called()  # the archive carries its own query
+
+
+async def test_an_id_that_is_not_a_uuid_is_still_404_with_a_store(
+    redis_mock, monkeypatch, tmp_path
+):
+    from shepherd_utils.config import settings
+
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    for bad in ("no-such-response", "..%2F..%2Fetc%2Fpasswd"):
+        response = await base_routes.get_query_response(bad)
+        assert response.status_code == 404
+
+
 # --- C5-3: finish_query admits by bytes ---------------------------------------
 
 
@@ -182,7 +238,6 @@ async def test_intake_does_not_decode_the_response_in_the_worker(
     mocker.patch.object(ars_db, "persist_data_copy", AsyncMock())
     mocker.patch.object(pm, "notify_subscribers", AsyncMock())
     mocker.patch.object(pm.lifecycle, "check_parent_completion", AsyncMock())
-    mocker.patch.object(pm, "get_logs", AsyncMock(return_value=[]))
     # Anything decoding the response in the worker process fails the test.
     mocker.patch.object(
         pm, "get_message", AsyncMock(side_effect=AssertionError), create=True
@@ -194,7 +249,7 @@ async def test_intake_does_not_decode_the_response_in_the_worker(
     mocker.patch.object(
         pm,
         "get_message_sync",
-        side_effect=lambda pk: {"message": {"results": []}, "logs": [1]},
+        side_effect=lambda pk: {"message": {"results": []}},
     )
     mocker.patch.object(
         pm, "save_message_sync", side_effect=lambda pk, data: stored.update({pk: data})
@@ -205,8 +260,9 @@ async def test_intake_does_not_decode_the_response_in_the_worker(
 
     final = update.await_args_list[-1].kwargs
     assert (final["status"], final["code"]) == ("D", 200)
-    # stored under the child, with the (empty) query logs spliced in
-    assert stored == {"child-1": {"message": {"results": []}}}
+    # nothing is written: the child's payload is the ARA's response itself,
+    # and a response with no results has nothing to premerge for the merge
+    assert stored == {}
 
 
 # --- C2-4: size settings --------------------------------------------------------

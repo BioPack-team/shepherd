@@ -389,3 +389,276 @@ async def test_finish_query_gives_up_on_a_long_postgres_outage(redis_mock, mocke
             logging.getLogger(__name__),
         )
     mock_post.assert_not_called()
+
+
+# --- the archive of finished responses (#252) --------------------------------
+
+
+def _archive_spies(mocker, events):
+    """Record the order finish_query captures, hands off, saves logs and
+    archives in."""
+
+    async def _capture(response_id, logger):
+        events.append(("capture_response", response_id))
+        return b"compressed response"
+
+    async def _archive(query_id, response_id, blob, status, description, logger):
+        events.append(("archive_query", query_id, response_id, blob, status))
+        return True
+
+    async def _save_logs(response_id, logger):
+        events.append(("save_logs", response_id))
+
+    async def _add_task(stream, *args, **kwargs):
+        events.append(("add_task", stream))
+
+    mocker.patch("workers.finish_query.worker.capture_response", side_effect=_capture)
+    mocker.patch("workers.finish_query.worker.archive_query", side_effect=_archive)
+    mocker.patch("workers.finish_query.worker.save_logs", side_effect=_save_logs)
+    return _add_task
+
+
+@pytest.mark.asyncio
+async def test_the_response_is_captured_before_the_ars_is_handed_it(redis_mock, mocker):
+    """The ARS's premerge processes the response it is handed, so the bytes
+    to archive are read first; the archive itself is written last, once this
+    worker has flushed its own logs."""
+    import uuid
+
+    from shepherd_utils.ars.handoff import handoff_callback_url
+
+    response_id = str(uuid.uuid4())
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, handoff_callback_url(uuid.uuid4())],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+    events = []
+    add_task = _archive_spies(mocker, events)
+    mocker.patch("workers.finish_query.worker.add_task", side_effect=add_task)
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}],
+        logging.getLogger(__name__),
+    )
+
+    assert events == [
+        ("capture_response", response_id),
+        ("add_task", "ars.premerge"),
+        ("save_logs", response_id),
+        ("archive_query", "test", response_id, b"compressed response", "OK"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_direct_query_is_archived_the_same_way(redis_mock, mocker):
+    response_id = "test_response"
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    completed = mocker.patch("workers.finish_query.worker.set_query_completed")
+    events = []
+    _archive_spies(mocker, events)
+
+    await finish_query(
+        [
+            "test",
+            {"query_id": "test", "response_id": response_id, "status": "ERROR"},
+        ],
+        logging.getLogger(__name__),
+    )
+
+    assert [event[0] for event in events] == [
+        "capture_response",
+        "save_logs",
+        "archive_query",
+    ]
+    assert events[-1][-1] == "ERROR"  # how the query ended is archived with it
+    completed.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_archive_write_does_not_stop_the_delivery(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    """The store is down for the whole query: it is still handed to the ARS
+    and completed."""
+    import uuid
+
+    from shepherd_utils.ars import payload_store
+    from shepherd_utils.ars.handoff import handoff_callback_url
+    from shepherd_utils.broker import get_task
+    from shepherd_utils.config import settings
+    from shepherd_utils import db, response_archive
+
+    logger = logging.getLogger(__name__)
+    response_id = str(uuid.uuid4())
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    monkeypatch.setattr(response_archive.asyncio, "sleep", mocker.AsyncMock())
+    write = mocker.patch.object(
+        payload_store, "write", side_effect=OSError("No space left on device")
+    )
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, handoff_callback_url(uuid.uuid4())],
+    )
+    completed = mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}], logger
+    )
+
+    assert write.call_count == response_archive.ARCHIVE_ATTEMPTS
+    assert await get_task("ars.premerge", "consumer", "t", logger) is not None
+    completed.assert_called_once_with("test", "OK", logger)
+
+
+@pytest.mark.asyncio
+async def test_a_finished_query_lands_in_the_store_whole(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    """Response, query and logs in one object -- and the response and query
+    are never decoded on the way."""
+    import uuid
+
+    from shepherd_utils.config import settings
+    from shepherd_utils import db, response_archive
+
+    logger = logging.getLogger(__name__)
+    query_id, response_id = str(uuid.uuid4()), str(uuid.uuid4())
+    query = {"message": {}, "parameters": {"log_level": "DEBUG"}}
+    await db.save_message(query_id, query, logger)
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    await db._append_logs(
+        response_id, [{"timestamp": "2026-01-01T00:00:00Z", "message": "looked up"}]
+    )
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+    decode = mocker.spy(db, "decompress_frame")
+
+    await finish_query(
+        ["test", {"query_id": query_id, "response_id": response_id}], logger
+    )
+
+    decode.assert_not_called()
+    archive = await response_archive.load_archive(response_id, logger)
+    assert orjson.loads(archive.response) == {"message": {"results": []}}
+    assert archive.query == query
+    assert archive.status == "OK"
+    assert [entry["message"] for entry in archive.logs] == ["looked up"]
+
+
+@pytest.mark.asyncio
+async def test_a_query_someone_else_finished_is_not_archived_again(redis_mock, mocker):
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + ["test_response", None],
+    )
+    mocker.patch("workers.finish_query.worker._wait_for_claim", return_value=False)
+    events = []
+    _archive_spies(mocker, events)
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": "test_response"}],
+        logging.getLogger(__name__),
+    )
+
+    assert [event[0] for event in events] == ["save_logs"]
+
+
+@pytest.mark.asyncio
+async def test_an_archived_query_is_left_only_the_hot_window_in_redis(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    """#252 stage 2: once the cold copy exists, the query's Redis copies --
+    query, response and logs -- only have to last while they are hot."""
+    import uuid
+
+    from shepherd_utils.config import settings
+    from shepherd_utils import db
+
+    logger = logging.getLogger(__name__)
+    query_id, response_id = str(uuid.uuid4()), str(uuid.uuid4())
+    await db.save_message(query_id, {"message": {}}, logger)
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    await db._append_logs(response_id, [{"message": "looked up"}])
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "redis_hot_ttl", 1800)
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": query_id, "response_id": response_id}], logger
+    )
+
+    assert 0 < await db.data_db_client.ttl(query_id) <= 1800
+    assert 0 < await db.data_db_client.ttl(response_id) <= 1800
+    assert 0 < await db.logs_db_client.ttl(response_id) <= 1800
+
+
+@pytest.mark.asyncio
+async def test_a_query_that_could_not_be_archived_keeps_its_redis_ttl(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    """Until the archive exists Redis is the only place the response can be
+    read, so a failed archive write leaves the full ``redis_ttl``."""
+    import uuid
+
+    from shepherd_utils.ars import payload_store
+    from shepherd_utils.config import settings
+    from shepherd_utils import db, response_archive
+
+    logger = logging.getLogger(__name__)
+    response_id = str(uuid.uuid4())
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "redis_hot_ttl", 1800)
+    monkeypatch.setattr(response_archive.asyncio, "sleep", mocker.AsyncMock())
+    mocker.patch.object(payload_store, "write", side_effect=OSError("disk full"))
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}], logger
+    )
+
+    assert await db.data_db_client.ttl(response_id) > 1800
+
+
+@pytest.mark.asyncio
+async def test_without_a_store_a_finished_query_keeps_its_redis_ttl(
+    redis_mock, mocker, monkeypatch
+):
+    import uuid
+
+    from shepherd_utils.config import settings
+    from shepherd_utils import db
+
+    logger = logging.getLogger(__name__)
+    response_id = str(uuid.uuid4())
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    monkeypatch.setattr(settings, "ars_payload_dir", "")
+    monkeypatch.setattr(settings, "payload_s3_bucket", "")
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}], logger
+    )
+
+    assert await db.data_db_client.ttl(response_id) > 1800

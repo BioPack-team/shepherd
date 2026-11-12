@@ -5,6 +5,12 @@ On every snapshot the engine evaluates each rule against the snapshot. A rule
 that has been firing continuously for at least ``duration`` seconds emits an
 alert. Cooldown state (``alert:cooldown:{rule}``) lives in Redis so we don't
 re-notify on every tick.
+
+Redis is watched per instance (see ``redis_instances``): by default there is
+one, and its alerts are named as they always were (``redis_memory_high``).
+When roles have been moved onto Redis servers of their own, every instance is
+evaluated with its own state, and the alerts of an instance other than the
+broker role's carry its name (``redis_memory_high@shepherd_data:6379``).
 """
 
 import asyncio
@@ -13,6 +19,7 @@ import logging
 import smtplib
 import ssl
 import time
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +29,8 @@ import yaml
 
 from shepherd_utils.broker import broker_client
 from shepherd_utils.config import settings
+
+from . import redis_instances
 
 logger = logging.getLogger("shepherd.monitor.alerts")
 
@@ -66,9 +75,60 @@ class Rule:
         # in the current "violation streak" so we can require ``duration`` of
         # continuous breach before alerting.
         self._first_fired_at: Optional[float] = None
+        # The same streak for each further thing a rule watches separately
+        # (a ``redis_eviction`` rule watches every Redis instance), keyed by
+        # the scope ``checks`` gives it. One instance's streak ending must not
+        # end another's.
+        self._scoped_first_fired_at: Dict[str, float] = {}
 
-    def reset_streak(self) -> None:
-        self._first_fired_at = None
+    def reset_streak(self, scope: str = "") -> None:
+        if scope:
+            self._scoped_first_fired_at.pop(scope, None)
+        else:
+            self._first_fired_at = None
+
+    def streak_started_at(self, now: float, scope: str = "") -> float:
+        """When the current breach of ``scope`` began (now, if it just did)."""
+        if scope:
+            return self._scoped_first_fired_at.setdefault(scope, now)
+        if self._first_fired_at is None:
+            self._first_fired_at = now
+        return self._first_fired_at
+
+    def checks(
+        self, snapshot: Dict[str, Any]
+    ) -> List[Tuple[str, str, Optional[str], Optional[str], Dict[str, Any]]]:
+        """Everything this rule evaluates on a snapshot, as ``(scope, alert
+        name, detail, message, extra event fields)``; ``detail`` is None where
+        the rule isn't breached.
+
+        Nearly every rule is one check under its own name. A ``redis_eviction``
+        rule is one per Redis instance: the broker role's under the rule's
+        name, as ever, and each other instance under ``<name>@<instance>``
+        with a streak and a cooldown of its own, so eviction on the data Redis
+        alerts even while the broker's alert is in its cooldown (and the
+        other way round).
+        """
+        if self.kind != "redis_eviction":
+            detail = self.evaluate(snapshot)
+            return [("", self.name, detail, self.message or detail, {})]
+        found = []
+        for view in redis_instances.views(snapshot):
+            detail = self._redis_eviction_detail(view)
+            message = self.message or detail
+            if detail and self.message and view.named:
+                # a configured message can't know which instance it is about
+                message = f"{self.message} ({detail})"
+            found.append(
+                (
+                    view.suffix,
+                    view.rule(self.name),
+                    detail,
+                    message,
+                    view.event_fields(),
+                )
+            )
+        return found
 
     def evaluate(self, snapshot: Dict[str, Any]) -> Optional[str]:
         """Return a human-readable detail string if the rule is currently breached."""
@@ -190,16 +250,26 @@ class Rule:
         has been reached and blobs are being shed" signal -- distinct from the
         percentage warning above, which is a lead indicator. ``threshold``
         defaults to 0 (any eviction); raise it to ignore trivial churn.
+
+        This is the broker role's instance; ``checks`` covers the others.
         """
-        redis = snapshot.get("redis", {})
-        delta = redis.get("evicted_keys_delta", 0)
+        return self._redis_eviction_detail(redis_instances.primary_view(snapshot))
+
+    def _redis_eviction_detail(self, view: "redis_instances.View") -> Optional[str]:
+        """The eviction breach of one Redis instance, or None."""
+        delta = view.stats.get("evicted_keys_delta", 0) or 0
         floor = float(self.threshold) if self.threshold is not None else 0.0
-        if delta > floor:
+        if delta <= floor:
+            return None
+        if view.named:
             return (
-                f"Redis evicted {delta} key(s) in the last interval -- broker is "
-                "at its maxmemory cap and shedding data"
+                f"Redis{view.tag} evicted {delta} key(s) in the last interval "
+                "-- it is at its maxmemory cap and shedding data"
             )
-        return None
+        return (
+            f"Redis evicted {delta} key(s) in the last interval -- broker is "
+            "at its maxmemory cap and shedding data"
+        )
 
     def _eval_stuck_pending(self, snapshot: Dict[str, Any]) -> Optional[str]:
         """Fire when a consumer is holding tasks it hasn't acked for too long.
@@ -265,12 +335,122 @@ def load_rules(path: str) -> List[Rule]:
     return rules
 
 
-# (what the alert calls it, the INFO field holding its last status)
-_PERSISTENCE_STATUSES = (
-    ("AOF write", "aof_last_write_status"),
-    ("AOF rewrite", "aof_last_bgrewrite_status"),
-    ("snapshot", "rdb_last_bgsave_status"),
-)
+def _persistence_failures(redis: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    """What is wrong with an instance's persistence, as ``(what, what it
+    means, severity)``. The three failures INFO reports are not equally bad,
+    and the alert has to say which one it is (#201):
+
+    * a failed AOF *write* is the one that loses data: Redis is accepting
+      writes it is not putting on disk;
+    * a failed AOF *rewrite* (the background compaction) loses nothing: the
+      existing file is still being appended to, it just keeps growing until
+      a rewrite succeeds or the disk fills;
+    * a failed RDB snapshot leaves the last good snapshot as what a restart
+      comes back from -- which only matters without an AOF -- and makes Redis
+      refuse writes while ``stop-writes-on-bgsave-error`` is on (its default).
+    """
+    failures = []
+    if redis.get("aof_last_write_status") == "err":
+        failures.append(
+            (
+                "AOF write failing",
+                "writes are not being persisted, so a restart loses everything "
+                "written since the last successful write",
+                "critical",
+            )
+        )
+    if redis.get("aof_last_bgrewrite_status") == "err":
+        failures.append(
+            (
+                "AOF rewrite failed",
+                "no data lost yet, but the AOF will keep growing until a "
+                "rewrite succeeds",
+                "warning",
+            )
+        )
+    if redis.get("rdb_last_bgsave_status") == "err":
+        if redis.get("aof_enabled"):
+            means = "the append-only file still holds the data"
+        else:
+            means = "a restart loses everything written since the last good snapshot"
+        failures.append(
+            (
+                "RDB snapshot failed",
+                f"{means}, and Redis refuses writes while this lasts if "
+                "stop-writes-on-bgsave-error is on (its default)",
+                "critical",
+            )
+        )
+    return failures
+
+
+_SEVERITY_RANK = {"warning": 1, "critical": 2}
+
+
+class _Held:
+    """A yes/no condition that only counts once it has held for a grace
+    period, in both directions: on for the grace before it alerts, off for
+    the grace before it clears. One per alert per Redis instance."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self._changed_at: Optional[float] = None
+
+    def update(self, observed: bool, now: float, grace: float) -> Optional[bool]:
+        """Feed one observation. Returns True on the tick the condition
+        becomes active, False on the tick it clears, None otherwise."""
+        if observed == self.active:
+            self._changed_at = None
+            return None
+        if self._changed_at is None:
+            self._changed_at = now
+        if (now - self._changed_at) < grace:
+            return None
+        self.active = observed
+        self._changed_at = None
+        return observed
+
+
+@dataclass
+class _MemoryState:
+    """One Redis instance's memory-pressure state (see handle_redis_memory)."""
+
+    level: str = "ok"
+    candidate: str = "ok"
+    candidate_since: float = 0.0
+    last_alerted_at: float = 0.0
+
+
+@dataclass
+class _ReplicationState:
+    """One Redis instance's replication state (see handle_redis_replication)."""
+
+    # The most connected replicas this instance has had since the monitor
+    # started. 0 means it has never had one, and nothing here alerts.
+    expected: int = 0
+    lost: _Held = field(default_factory=_Held)
+    # Whether the current loss has already alerted as total (critical), so a
+    # partial loss that becomes total alerts once more.
+    lost_all_alerted: bool = False
+    lagging: _Held = field(default_factory=_Held)
+
+
+def eviction_window_min_sec() -> float:
+    """The shortest eviction window that is still safe: the longest a query
+    may run, times a safety factor, unless configured outright. A payload has
+    to outlive the query that wrote it; below this, a capped instance evicts
+    the data of queries that are still running."""
+    configured = settings.monitor_redis_eviction_window_min_sec
+    if configured > 0:
+        return configured
+    return (
+        settings.ars_timeout_merge_sec
+        * settings.monitor_redis_eviction_window_safety_factor
+    )
+
+
+def _minutes(seconds: float) -> str:
+    return f"{seconds / 60:.1f} min"
 
 
 def _redis_memory_usage(redis: Dict[str, Any]) -> Optional[Tuple[float, str]]:
@@ -287,6 +467,28 @@ def _redis_memory_usage(redis: Dict[str, Any]) -> Optional[Tuple[float, str]]:
         footprint = int(redis.get("footprint_bytes", 0) or 0)
         candidates.append((100.0 * footprint / limit, "container memory limit"))
     return max(candidates) if candidates else None
+
+
+def _lagging_replicas(redis: Dict[str, Any]) -> List[str]:
+    """The connected replicas of an instance that are not keeping up, each
+    described for the alert."""
+    max_sec = settings.monitor_redis_replica_lag_sec
+    max_bytes = settings.monitor_redis_replica_lag_bytes
+    behind = []
+    for replica in redis.get("replicas") or []:
+        lag_sec = replica.get("lag_sec") or 0
+        lag_bytes = replica.get("lag_bytes") or 0
+        if replica.get("state") != "online":
+            # connected, but still receiving its initial copy of the dataset
+            why = f"state {replica.get('state')}"
+        elif lag_sec > max_sec:
+            why = f"last heard from {lag_sec}s ago"
+        elif max_bytes and lag_bytes > max_bytes:
+            why = f"{lag_bytes / 2**20:.0f} MiB behind"
+        else:
+            continue
+        behind.append(f"{replica.get('addr')} {why}")
+    return behind
 
 
 class AlertEngine:
@@ -337,13 +539,17 @@ class AlertEngine:
         # recovery alert when usage returns below the warning threshold.
         # ``_candidate``/``_since`` debounce a level change so a single-tick spike
         # (or dip) doesn't trip it.
-        self._redis_mem_level: str = "ok"
-        self._redis_mem_candidate: str = "ok"
-        self._redis_mem_candidate_since: float = 0.0
-        self._redis_mem_last_alerted_at: float = 0.0
-        # Whether the last snapshot showed a failing snapshot/AOF save (see
-        # handle_redis_persistence).
-        self._redis_persistence_failing: bool = False
+        # All of it is kept per Redis instance (keyed by the instance's alert
+        # suffix, empty for the broker role's), so one instance's level, grace
+        # and cooldown never mask or reset another's.
+        self._redis_mem: Dict[str, _MemoryState] = {}
+        # The severity rank (0 = fine) of each instance's persistence failures
+        # as of the last snapshot (see handle_redis_persistence).
+        self._redis_persistence: Dict[str, int] = {}
+        # Per-instance replication state (see handle_redis_replication) and
+        # whether its eviction window is too short (handle_redis_eviction_window).
+        self._redis_replication: Dict[str, _ReplicationState] = {}
+        self._redis_eviction_window: Dict[str, _Held] = {}
 
     @property
     def in_startup_grace(self) -> bool:
@@ -380,8 +586,11 @@ class AlertEngine:
         return time.time() < self._redis_eviction_grace_until
 
     def _note_redis_eviction(self, snapshot: Dict[str, Any]) -> None:
-        """Open/extend the eviction grace window when this tick saw evictions."""
-        redis = snapshot.get("redis", {}) or {}
+        """Open/extend the eviction grace window when this tick saw evictions.
+
+        Only the broker role's instance counts: the heartbeat keys live there,
+        so another instance evicting cannot make a worker read as down."""
+        redis = redis_instances.primary_view(snapshot).stats
         try:
             delta = int(redis.get("evicted_keys_delta", 0) or 0)
         except (TypeError, ValueError):
@@ -530,24 +739,38 @@ class AlertEngine:
         against the container memory limit (``redis_memory_limit``). The second
         is what the kernel OOM-kills on, and it can run out first. A no-op when
         neither denominator is known (``maxmemory`` 0 and no limit configured).
+
+        Every Redis instance runs its own copy of the machine.
         """
         now = time.time()
-        usage = _redis_memory_usage(snapshot.get("redis", {}) or {})
+        for view in redis_instances.views(snapshot):
+            await self._redis_memory_tick(view, now)
+
+    async def _redis_memory_tick(
+        self, view: "redis_instances.View", now: float
+    ) -> None:
+        """One instance's step of the memory-pressure machine."""
+        if view.named and "error" in view.stats:
+            # This instance didn't answer (the others did). Not knowing isn't
+            # a recovery: hold its state until it can be read again.
+            return
+        state = self._redis_mem.setdefault(view.suffix, _MemoryState())
+        usage = _redis_memory_usage(view.stats)
         if usage is None:
             # Uncapped: reset to ok silently. Losing the denominator isn't a real
             # recovery, so don't announce one.
-            self._redis_mem_level = "ok"
-            self._redis_mem_candidate = "ok"
+            state.level = "ok"
+            state.candidate = "ok"
             return
         pct, basis = usage
         if (
             pct >= settings.monitor_redis_memory_immediate_pct
-            and self._redis_mem_level != "critical"
+            and state.level != "critical"
         ):
-            self._redis_mem_level = "critical"
-            self._redis_mem_candidate = "critical"
-            self._redis_mem_candidate_since = now
-            await self._fire_redis_memory("critical", pct, now, basis)
+            state.level = "critical"
+            state.candidate = "critical"
+            state.candidate_since = now
+            await self._fire_redis_memory(view, state, "critical", pct, now, basis)
             return
         if pct >= settings.monitor_redis_memory_critical_pct:
             target = "critical"
@@ -558,42 +781,46 @@ class AlertEngine:
 
         # Debounce: an observed level must hold for the grace window before we
         # act on it, so a single-tick spike (or dip) doesn't alert or clear.
-        if target != self._redis_mem_candidate:
-            self._redis_mem_candidate = target
-            self._redis_mem_candidate_since = now
+        if target != state.candidate:
+            state.candidate = target
+            state.candidate_since = now
             return
-        if target == self._redis_mem_level:
+        if target == state.level:
             # Sustained at the committed level. Re-notify an elevated level at
             # most once per cooldown; ``ok`` needs nothing.
             if (
                 target != "ok"
-                and (now - self._redis_mem_last_alerted_at)
+                and (now - state.last_alerted_at)
                 >= settings.monitor_redis_memory_cooldown_sec
             ):
-                await self._fire_redis_memory(target, pct, now, basis)
+                await self._fire_redis_memory(view, state, target, pct, now, basis)
             return
         # A different level has held steady long enough: commit the transition.
-        if (
-            now - self._redis_mem_candidate_since
-        ) < settings.monitor_redis_memory_grace_sec:
+        if (now - state.candidate_since) < settings.monitor_redis_memory_grace_sec:
             return
-        prev = self._redis_mem_level
-        self._redis_mem_level = target
+        prev = state.level
+        state.level = target
         if target == "ok":
             # Recovery: an elevated committed level is only ever reached by
             # alerting, so a return to ok is always worth an "it's better" note.
-            await self._fire_redis_memory_recovery(pct, now, basis)
+            await self._fire_redis_memory_recovery(view, pct, now, basis)
         elif target == "critical" or prev == "ok":
             # Fire when entering an elevated level from ok, or escalating to
             # critical. A critical->warning de-escalation stays quiet (still
             # elevated and already alerted) until it either clears or re-escalates.
-            await self._fire_redis_memory(target, pct, now, basis)
+            await self._fire_redis_memory(view, state, target, pct, now, basis)
 
     async def _fire_redis_memory(
-        self, level: str, pct: float, now: float, basis: str = "maxmemory"
+        self,
+        view: "redis_instances.View",
+        state: _MemoryState,
+        level: str,
+        pct: float,
+        now: float,
+        basis: str = "maxmemory",
     ) -> None:
         """Dispatch (and record) a Redis memory warning/critical alert."""
-        self._redis_mem_last_alerted_at = now
+        state.last_alerted_at = now
         if level == "critical":
             rule = "redis_memory_critical"
             severity = "critical"
@@ -606,92 +833,299 @@ class AlertEngine:
             tail = "Eviction and OOM-kill risk are near"
         event = {
             "ts": now,
-            "rule": rule,
+            "rule": view.rule(rule),
             "severity": severity,
-            "detail": f"Redis memory {pct:.1f}% of {basis} (>= {threshold:.0f}%)",
-            "message": (
-                f"Redis broker memory is at {pct:.1f}% of its {basis} "
-                f"(>= {threshold:.0f}%). {tail} -- shed load, raise the cap, or "
-                "lower redis_ttl."
+            "detail": (
+                f"Redis{view.tag} memory {pct:.1f}% of {basis} "
+                f"(>= {threshold:.0f}%)"
             ),
+            "message": (
+                f"{view.name('Redis broker')} memory is at {pct:.1f}% of its "
+                f"{basis} (>= {threshold:.0f}%). {tail} -- shed load, raise the "
+                "cap, or lower redis_ttl."
+            ),
+            **view.event_fields(),
         }
         await _record_alert(event)
         await dispatch(event)
 
     async def _fire_redis_memory_recovery(
-        self, pct: float, now: float, basis: str = "maxmemory"
+        self,
+        view: "redis_instances.View",
+        pct: float,
+        now: float,
+        basis: str = "maxmemory",
     ) -> None:
         """Dispatch (and record) the Redis memory 'recovered' alert."""
         warn = settings.monitor_redis_memory_warning_pct
         event = {
             "ts": now,
-            "rule": "redis_memory_recovered",
+            "rule": view.rule("redis_memory_recovered"),
             "severity": "info",
-            "detail": f"Redis memory back to {pct:.1f}% of {basis}",
+            "detail": f"Redis{view.tag} memory back to {pct:.1f}% of {basis}",
             "message": (
-                f"Redis broker memory has fallen back below {warn:.0f}% of its "
-                f"{basis} (now {pct:.1f}%). Memory pressure has cleared."
+                f"{view.name('Redis broker')} memory has fallen back below "
+                f"{warn:.0f}% of its {basis} (now {pct:.1f}%). Memory pressure "
+                "has cleared."
             ),
+            **view.event_fields(),
         }
         await _record_alert(event)
         await dispatch(event)
 
     async def handle_redis_persistence(self, snapshot: Dict[str, Any]) -> None:
-        """Alert when the broker's snapshot or append-only file stops saving.
+        """Alert when a Redis instance's snapshot or append-only file stops
+        saving, saying which and what it costs (``_persistence_failures``).
 
         A failing save is silent until the next restart, which then loses
         everything since the last good one. One ``redis_persistence_failing``
-        alert when any save reports an error, one ``redis_persistence_recovered``
-        when they all succeed again.
+        alert when a save first reports an error -- critical when data is at
+        risk (a failed AOF write or RDB snapshot), warning when it is not yet
+        (a failed AOF rewrite alone) -- another if it gets worse, and one
+        ``redis_persistence_recovered`` when they all succeed again.
         """
-        redis = snapshot.get("redis", {}) or {}
-        if "error" in redis:
-            return
-        failing = [
-            name for name, key in _PERSISTENCE_STATUSES if redis.get(key) == "err"
-        ]
-        was_failing = self._redis_persistence_failing
-        self._redis_persistence_failing = bool(failing)
         now = time.time()
-        if failing and not was_failing:
-            event = {
-                "ts": now,
-                "rule": "redis_persistence_failing",
-                "severity": "critical",
-                "detail": f"Redis {', '.join(failing)} failing",
-                "message": (
-                    f"Broker `redis` reports its last {', '.join(failing)} "
-                    "failed. Until it saves again, a restart loses everything "
-                    "written since the last good save. Check the broker log "
-                    "and that /data has free space."
-                ),
-            }
-        elif was_failing and not failing:
-            event = {
-                "ts": now,
-                "rule": "redis_persistence_recovered",
-                "severity": "info",
-                "detail": "Redis saving to disk again",
-                "message": "Broker `redis` persistence is succeeding again.",
-            }
-        else:
-            return
-        await _record_alert(event)
-        await dispatch(event)
+        for view in redis_instances.views(snapshot):
+            redis = view.stats
+            if "error" in redis:
+                continue
+            failures = _persistence_failures(redis)
+            severity = max(
+                (sev for _, _, sev in failures),
+                key=_SEVERITY_RANK.__getitem__,
+                default=None,
+            )
+            rank = _SEVERITY_RANK.get(severity, 0)
+            was = self._redis_persistence.get(view.suffix, 0)
+            self._redis_persistence[view.suffix] = rank
+            if rank > was:
+                what = ", ".join(name for name, _, _ in failures)
+                event = {
+                    "ts": now,
+                    "rule": view.rule("redis_persistence_failing"),
+                    "severity": severity,
+                    "detail": f"Redis{view.tag} {what}",
+                    "message": (
+                        f"{view.name('Broker `redis`')} persistence: "
+                        + "; ".join(f"{name}: {means}" for name, means, _ in failures)
+                        + ". Check its log and that its data volume has free space."
+                    ),
+                    **view.event_fields(),
+                }
+            elif was and not rank:
+                event = {
+                    "ts": now,
+                    "rule": view.rule("redis_persistence_recovered"),
+                    "severity": "info",
+                    "detail": f"Redis{view.tag} saving to disk again",
+                    "message": (
+                        f"{view.name('Broker `redis`')} persistence is "
+                        "succeeding again."
+                    ),
+                    **view.event_fields(),
+                }
+            else:
+                continue
+            await _record_alert(event)
+            await dispatch(event)
 
-    async def _in_cooldown(self, rule: Rule) -> bool:
+    async def handle_redis_replication(self, snapshot: Dict[str, Any]) -> None:
+        """Alert when a Redis instance loses replicas or its replicas fall
+        behind (#201).
+
+        A primary whose replica is gone or far behind still serves every
+        request, so nothing else notices -- until it fails, and the failover
+        (or the restart) loses whatever the replica never received. Per
+        instance, both debounced by ``monitor_redis_replica_grace_sec`` in
+        each direction:
+
+        * ``redis_replicas_lost`` when it has fewer connected replicas than it
+          has had (critical at zero: no redundancy left), and
+          ``redis_replicas_recovered`` when they are all back;
+        * ``redis_replica_lagging`` when a connected replica is still syncing,
+          silent for ``monitor_redis_replica_lag_sec``, or more than
+          ``monitor_redis_replica_lag_bytes`` behind, and
+          ``redis_replica_caught_up`` when none is.
+
+        "Has had" is the most replicas seen since the monitor started, so an
+        instance that never had one (the single-server default) never alerts,
+        and a deliberate scale-down alerts once and is the new normal after
+        the monitor next restarts.
+        """
+        now = time.time()
+        grace = settings.monitor_redis_replica_grace_sec
+        for view in redis_instances.views(snapshot):
+            redis = view.stats
+            # Only a primary's replica list means anything: a replica reports
+            # zero replicas of its own. Sentinel always connects to the primary.
+            if "error" in redis or redis.get("role") != "master":
+                continue
+            connected = int(redis.get("connected_replicas") or 0)
+            state = self._redis_replication.setdefault(view.suffix, _ReplicationState())
+            state.expected = max(state.expected, connected)
+            if not state.expected:
+                continue
+            events = []
+            changed = state.lost.update(connected < state.expected, now, grace)
+            none_left = connected == 0
+            if not state.lost.active:
+                state.lost_all_alerted = False
+            elif none_left and not state.lost_all_alerted:
+                # the first alert of this loss, or a partial loss (already
+                # alerted, as a warning) that has now become total
+                state.lost_all_alerted = True
+                changed = True
+            if changed:
+                events.append(
+                    {
+                        "rule": view.rule("redis_replicas_lost"),
+                        "severity": "critical" if none_left else "warning",
+                        "detail": (
+                            f"Redis{view.tag} has {connected} of "
+                            f"{state.expected} replicas connected"
+                        ),
+                        "message": (
+                            f"{view.name('Broker `redis`')} has {connected} "
+                            f"connected replica(s), down from {state.expected}. "
+                            + (
+                                "It has no redundancy left: if it fails now "
+                                "there is nothing to fail over to."
+                                if none_left
+                                else "It has less redundancy than it had."
+                            )
+                        ),
+                    }
+                )
+            elif changed is False:
+                events.append(
+                    {
+                        "rule": view.rule("redis_replicas_recovered"),
+                        "severity": "info",
+                        "detail": (
+                            f"Redis{view.tag} has all {connected} replicas "
+                            "connected again"
+                        ),
+                        "message": (
+                            f"{view.name('Broker `redis`')} has all {connected} "
+                            "replica(s) connected again."
+                        ),
+                    }
+                )
+            behind = _lagging_replicas(redis)
+            changed = state.lagging.update(bool(behind), now, grace)
+            if changed:
+                events.append(
+                    {
+                        "rule": view.rule("redis_replica_lagging"),
+                        "severity": "warning",
+                        "detail": f"Redis{view.tag} replica lagging: "
+                        + "; ".join(behind),
+                        "message": (
+                            f"{view.name('Broker `redis`')} has a replica that "
+                            f"is not keeping up: {'; '.join(behind)}. A "
+                            "failover to it now would lose what it has not "
+                            "received."
+                        ),
+                    }
+                )
+            elif changed is False:
+                events.append(
+                    {
+                        "rule": view.rule("redis_replica_caught_up"),
+                        "severity": "info",
+                        "detail": f"Redis{view.tag} replicas caught up",
+                        "message": (
+                            f"{view.name('Broker `redis`')} replicas have "
+                            "caught up with it again."
+                        ),
+                    }
+                )
+            for event in events:
+                event = {"ts": now, **event, **view.event_fields()}
+                await _record_alert(event)
+                await dispatch(event)
+
+    async def handle_redis_eviction_window(self, snapshot: Dict[str, Any]) -> None:
+        """Alert when a Redis instance near its cap would evict keys younger
+        than a running query (#201).
+
+        The eviction window is ``maxmemory`` divided by the write rate: once
+        the instance is full and evicting oldest-first, that is how long a
+        newly written key lasts. A full instance with a long window sheds
+        finished queries' leftovers, which is what the cap is for; with a
+        window shorter than a query's time budget it sheds the payloads of
+        queries still running, and they fail. So this fires
+        (``redis_eviction_window_short``, critical) only when both hold: at or
+        above ``monitor_redis_eviction_window_near_cap_pct`` of maxmemory, and
+        a window under ``eviction_window_min_sec()``. Debounced by
+        ``monitor_redis_memory_grace_sec`` in both directions, on top of the
+        poller's smoothing of the write rate, so one burst doesn't flap it;
+        ``redis_eviction_window_recovered`` when it clears. A no-op for an
+        uncapped instance.
+        """
+        now = time.time()
+        minimum = eviction_window_min_sec()
+        near_cap = settings.monitor_redis_eviction_window_near_cap_pct
+        for view in redis_instances.views(snapshot):
+            redis = view.stats
+            if "error" in redis:
+                continue
+            window = redis.get("eviction_window_sec")
+            pct = redis.get("maxmemory_pct")
+            short = (
+                window is not None
+                and pct is not None
+                and pct >= near_cap
+                and window < minimum
+            )
+            held = self._redis_eviction_window.setdefault(view.suffix, _Held())
+            changed = held.update(short, now, settings.monitor_redis_memory_grace_sec)
+            if changed:
+                rate = redis.get("write_bytes_per_sec") or 0
+                event = {
+                    "rule": view.rule("redis_eviction_window_short"),
+                    "severity": "critical",
+                    "detail": (
+                        f"Redis{view.tag} eviction window {_minutes(window)} "
+                        f"(< {_minutes(minimum)}) at {pct:.1f}% of maxmemory"
+                    ),
+                    "message": (
+                        f"{view.name('Redis broker')} is at {pct:.1f}% of its "
+                        f"maxmemory and taking {rate / 2**20:.1f} MiB/s of "
+                        f"writes, so once full it evicts keys only "
+                        f"{_minutes(window)} old -- less than the "
+                        f"{_minutes(minimum)} a running query needs its data "
+                        "for. Queries in flight will lose their payloads; "
+                        "raise maxmemory or shed load."
+                    ),
+                }
+            elif changed is False:
+                event = {
+                    "rule": view.rule("redis_eviction_window_recovered"),
+                    "severity": "info",
+                    "detail": f"Redis{view.tag} eviction window long enough again",
+                    "message": (
+                        f"{view.name('Redis broker')} is no longer at risk of "
+                        "evicting the data of running queries."
+                    ),
+                }
+            else:
+                continue
+            event = {"ts": now, **event, **view.event_fields()}
+            await _record_alert(event)
+            await dispatch(event)
+
+    async def _in_cooldown(self, name: str) -> bool:
         try:
-            return bool(await broker_client.exists(f"alert:cooldown:{rule.name}"))
+            return bool(await broker_client.exists(f"alert:cooldown:{name}"))
         except Exception:
             return False
 
-    async def _set_cooldown(self, rule: Rule) -> None:
+    async def _set_cooldown(self, name: str, cooldown: float) -> None:
         try:
-            await broker_client.set(
-                f"alert:cooldown:{rule.name}", "1", ex=int(rule.cooldown)
-            )
+            await broker_client.set(f"alert:cooldown:{name}", "1", ex=int(cooldown))
         except Exception as e:
-            logger.debug(f"Failed to set cooldown for {rule.name}: {e}")
+            logger.debug(f"Failed to set cooldown for {name}: {e}")
 
     def _buffer_down(self, worker: str, event: Dict[str, Any], now: float) -> None:
         """Queue a worker-down alert for batched delivery.
@@ -742,14 +1176,17 @@ class AlertEngine:
             or self.in_broker_recovery_grace
             or self.in_redis_eviction_grace
         )
-        for rule in self.rules:
-            detail = rule.evaluate(snapshot)
+        # A rule is one check, except a per-instance rule (redis_eviction),
+        # which is one per Redis instance, each with its own alert name,
+        # breach streak and cooldown.
+        checks = [
+            (rule, *check) for rule in self.rules for check in rule.checks(snapshot)
+        ]
+        for rule, scope, name, detail, message, extra in checks:
             if detail is None:
-                rule.reset_streak()
+                rule.reset_streak(scope)
                 continue
-            if rule._first_fired_at is None:
-                rule._first_fired_at = now
-            duration_in_breach = now - rule._first_fired_at
+            duration_in_breach = now - rule.streak_started_at(now, scope)
             if duration_in_breach < rule.duration:
                 continue
             if rule.kind == "heartbeat_lost" and rule.worker and suppress_worker_down:
@@ -760,15 +1197,16 @@ class AlertEngine:
                 # and leave the breach streak intact -- so a worker that is
                 # genuinely still down once the window elapses fires promptly.
                 continue
-            if await self._in_cooldown(rule):
+            if await self._in_cooldown(name):
                 continue
-            await self._set_cooldown(rule)
+            await self._set_cooldown(name, rule.cooldown)
             event = {
                 "ts": now,
-                "rule": rule.name,
+                "rule": name,
                 "severity": rule.severity,
                 "detail": detail,
-                "message": rule.message or detail,
+                "message": message,
+                **extra,
             }
             fired.append(event)
             await _record_alert(event)
@@ -851,7 +1289,10 @@ async def _record_alert(event: Dict[str, Any]) -> None:
 
         worker = None
         rule = event.get("rule", "")
-        if ":" in rule:
+        # ``worker_crashed:<worker>`` and the like name their worker after the
+        # colon. An alert about a Redis instance has colons of its own
+        # (``...@shepherd_data:6379``) and no worker.
+        if ":" in rule and not event.get("instance"):
             worker = rule.split(":", 1)[1]
         await storage.insert_event(
             event_type="alert",

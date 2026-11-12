@@ -12,4 +12,12 @@ if [ -z "${REDIS_PASSWORD:-}" ]; then
     echo "REDIS_PASSWORD must be set to start the broker" >&2
     exit 1
 fi
+# redis.conf's maxmemory is sized for a local stack. A deployment gives the
+# broker more by setting REDIS_MAXMEMORY (e.g. "25gb"), without having to
+# ship its own copy of the config. Keep it at about half the container's
+# memory limit, and the volume at about three times it (see redis.conf).
+if [ -n "${REDIS_MAXMEMORY:-}" ]; then
+    exec redis-server "$conf" --requirepass "$REDIS_PASSWORD" \
+        --maxmemory "$REDIS_MAXMEMORY"
+fi
 exec redis-server "$conf" --requirepass "$REDIS_PASSWORD"

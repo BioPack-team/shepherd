@@ -135,6 +135,14 @@ async def retention_pass(logger: logging.Logger, hourly: bool) -> None:
     except Exception as e:
         logger.error(f"Payload purge failed: {e}", exc_info=True)
     try:
+        archived = await retention.purge_expired_archive(
+            settings.ara_response_retention_days, logger
+        )
+        if archived:
+            logger.info(f"Purged {archived} archived ARA responses")
+    except Exception as e:
+        logger.error(f"ARA response archive purge failed: {e}", exc_info=True)
+    try:
         deleted = await retention.delete_expired_trees(
             settings.ars_row_retention_days, logger
         )

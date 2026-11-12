@@ -10,6 +10,7 @@ import asyncio
 import io
 import logging
 
+import fakeredis as sync_fakeredis
 import orjson
 import pytest
 import zstandard
@@ -167,17 +168,7 @@ async def test_get_message_raises_keyerror_for_missing(redis_mock):
 def test_save_and_get_message_sync_roundtrip(redis_mock, mocker):
     """The sync variants are used inside ProcessPoolExecutor workers; route
     them through fakeredis by patching the lazy client accessor."""
-    sync_client = mocker.Mock()
-    storage = {}
-
-    def _set(key, blob, ex=None):
-        storage[key] = blob
-
-    def _get(key):
-        return storage.get(key)
-
-    sync_client.set.side_effect = _set
-    sync_client.get.side_effect = _get
+    sync_client = sync_fakeredis.FakeRedis()
     mocker.patch("shepherd_utils.db._get_sync_data_db", return_value=sync_client)
 
     payload = {"message": {"foo": "bar"}}
@@ -390,10 +381,9 @@ async def test_get_logs_sort_is_stable_for_missing_timestamps(redis_mock):
 
 @pytest.mark.asyncio
 async def test_save_message_retries_on_failure(redis_mock, mocker):
-    """The first call to data_db_client.set raises; save_message should sleep
-    and retry rather than dropping the message."""
-    real_set = redis_mock["data"].set
-    set_mock = mocker.AsyncMock()
+    """The first write raises; save_message should sleep and retry rather
+    than dropping the message."""
+    real_set = db_module._set_unless_sealed
     call_state = {"calls": 0}
 
     async def flaky_set(*args, **kwargs):
@@ -402,8 +392,7 @@ async def test_save_message_retries_on_failure(redis_mock, mocker):
             raise RuntimeError("simulated transient failure")
         return await real_set(*args, **kwargs)
 
-    set_mock.side_effect = flaky_set
-    mocker.patch("shepherd_utils.db.data_db_client.set", set_mock)
+    mocker.patch("shepherd_utils.db._set_unless_sealed", side_effect=flaky_set)
 
     # Patch sleep so the test doesn't block.
     mocker.patch("asyncio.sleep", new=mocker.AsyncMock())

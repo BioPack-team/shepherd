@@ -1,14 +1,20 @@
 {
   "_divergences": {
     "entries": {
-      "decorate/no_primary": "upstream raised UnboundLocalError (has_primary was only ever assigned inside the loop); the port appends a primary_knowledge_source for itself, which is what the unreachable branch intended",
+      "decorate/empty_sources": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
+      "decorate/has_primary_not_self": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
+      "decorate/no_primary": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores); upstream raised UnboundLocalError here (has_primary was only ever assigned inside the loop), and the port used to append a primary_knowledge_source for itself instead",
+      "decorate/no_sources_key": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
+      "decorate/none_inforesid": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
       "merge_ba.message.knowledge_graph.edges.e1.qualifiers": "upstream returned out of mergeDicts' attributes branch, abandoning every key it had not reached yet -- here, qualifiers",
+      "merge_pipeline_ab.message.knowledge_graph.edges.e3.sources": "deviation 21: upstream's pre_merge_process stamped infores:aragorn on e3 (its sources named only infores:ctd); the port leaves the edge as sent and reports it",
       "merge_pipeline_ab.message.results.1.analyses.0": "as premerged_inputs.arax.message.results.1.analyses.0, carried through the merge",
       "mergedicts/attributes_unhashable_dict_values": "upstream deduped the merged value list with set(), which raises on a list of objects; the generic except swallowed it, the break never ran, and the current agent's values were dropped from the attribute entirely",
       "mergedicts/node_bindings": "upstream's else hung off the for, so current-only bindings were dropped (all but the last, into a map it never wrote back); the port unions them per query-graph node",
       "mergedicts/qualifier_lists_conflicting_values": "TRAPI 2.0 port: a conflict on a single-valued TRAPI member (Qualifier.qualifier_value, Edge.knowledge_level / agent_type / predicate, ...) keeps the first value (dcurrent: in the ARS fold, the one earlier merged versions already served), except that a provided knowledge_level / agent_type beats not_provided -- instead of upstream's [merged, current] list, which is not a valid 2.0 string (merge._resolve_scalar_conflict)",
       "mergedicts/qualifier_lists_disjoint_types": "TRAPI 2.0 port: as mergedicts/qualifier_lists_conflicting_values (the object_direction_qualifier values conflict)",
       "mergedicts/unhashable_lists_concat": "upstream keyed a list of objects on resource_id / qualifier_type_id and dropped every object carrying neither -- from both sides, since it replaced the merged list with the keyed map's values -- so such a list merged to []",
+      "premerged_inputs.aragorn.message.knowledge_graph.edges.e3.sources": "deviation 21: upstream's pre_merge_process stamped infores:aragorn on e3 (its sources named only infores:ctd); the port leaves the edge as sent and reports it",
       "premerged_inputs.arax.message.results.1.analyses.0": "TRAPI 2.0 has no null score: the 1.5 corpus's `score: null` translates to an absent score (and premerge strips any null an ARA sends), so normalizeScores has no null to coerce to 0 and the analysis stays unscored (upstream wrote `score: 0`)",
       "scores/empty_analyses_list": "TRAPI 2.0 port: as scores/missing_analyses_key -- a result with no analyses is skipped, not a reason to abandon the batch",
       "scores/missing_analyses_key": "TRAPI 2.0 port: Result.analyses is optional in 2.0, so a result without analyses is skipped by normalizeScores / ScoreStatCalc rather than aborting the whole batch (upstream, 1.5: analyses required, batch abandoned with 'Results dont have the required fields')",
@@ -271,6 +277,9 @@
   ],
   "decorate": [
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "no_sources_key",
       "output": {
         "message": {
@@ -280,12 +289,6 @@
                 "agent_type": "not_provided",
                 "knowledge_level": "not_provided",
                 "object": "b",
-                "sources": [
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source"
-                  }
-                ],
                 "subject": "a"
               }
             }
@@ -294,6 +297,9 @@
       }
     },
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "empty_sources",
       "output": {
         "message": {
@@ -303,12 +309,7 @@
                 "agent_type": "not_provided",
                 "knowledge_level": "not_provided",
                 "object": "b",
-                "sources": [
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source"
-                  }
-                ],
+                "sources": [],
                 "subject": "a"
               }
             }
@@ -317,6 +318,9 @@
       }
     },
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "has_primary_not_self",
       "output": {
         "message": {
@@ -330,10 +334,6 @@
                   {
                     "resource_id": "infores:ctd",
                     "resource_role": "primary_knowledge_source"
-                  },
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "aggregator_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -344,6 +344,7 @@
       }
     },
     {
+      "missing_infores": [],
       "name": "already_self",
       "output": {
         "message": {
@@ -367,6 +368,7 @@
       }
     },
     {
+      "missing_infores": [],
       "name": "none_inforesid",
       "output": {
         "message": {
@@ -376,12 +378,7 @@
                 "agent_type": "not_provided",
                 "knowledge_level": "not_provided",
                 "object": "b",
-                "sources": [
-                  {
-                    "resource_id": "infores:unknown",
-                    "resource_role": "primary_knowledge_source"
-                  }
-                ],
+                "sources": [],
                 "subject": "a"
               }
             }
@@ -390,6 +387,9 @@
       }
     },
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "no_primary",
       "output": {
         "message": {
@@ -403,10 +403,6 @@
                   {
                     "resource_id": "infores:x",
                     "resource_role": "aggregator_knowledge_source"
-                  },
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -1081,10 +1077,6 @@
               {
                 "resource_id": "infores:ctd",
                 "resource_role": "primary_knowledge_source"
-              },
-              {
-                "resource_id": "infores:aragorn",
-                "resource_role": "aggregator_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
@@ -1846,10 +1838,6 @@
                 {
                   "resource_id": "infores:ctd",
                   "resource_role": "primary_knowledge_source"
-                },
-                {
-                  "resource_id": "infores:aragorn",
-                  "resource_role": "aggregator_knowledge_source"
                 }
               ],
               "subject": "NCBIGene:5468"

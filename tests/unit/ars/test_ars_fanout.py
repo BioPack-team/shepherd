@@ -140,6 +140,10 @@ async def test_fanout_creates_a_child_per_enabled_ara(env):
         assert ara is not None
         child = env["children"][ara.agent]
         assert callback_url == handoff_callback_url(child["id"])
+        # the child IS the response its ARA will produce: one id, so one
+        # entry in the data store and one archive (#252)
+        assert response_id == str(child["id"])
+        assert query_id != response_id
         assert saved_query["callback"] == callback_url
         assert saved_query["message"] == QUERY["message"]
 
@@ -223,6 +227,8 @@ async def test_fanout_dispatch_failure_is_e500(env):
     assert str(update.args[0]) == str(failed["id"])
     assert update.kwargs == {"status": "E", "code": 500}
     env["persist_data_copy"].assert_awaited_once()
+    # nothing is written under the child: its entry is its ARA's response
+    env["save_message_data"].assert_not_awaited()
     env["completion"].assert_awaited_once()
     assert await _stream_tasks("arax") == []
     assert len(await _stream_tasks("aragorn")) == 1

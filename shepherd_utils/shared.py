@@ -25,9 +25,11 @@ from .broker import (
 )
 from .config import settings
 from .db import (
+    ResponseSealedError,
     ResponseTooLargeError,
     enforce_response_size_limit,
     initialize_db,
+    is_response_sealed,
     save_logs,
 )
 from .heartbeat import Heartbeat
@@ -1056,6 +1058,59 @@ async def _guard_response_size(
         raise
 
 
+async def _stop_if_finished(task: Tuple[str, dict], logger: logging.Logger) -> None:
+    """Raise ``ResponseSealedError`` if this task's query has already finished.
+
+    A redelivered or reclaimed task, or one queued behind a query that was
+    finished another way (failed, timed out, recovered), would otherwise run
+    its whole operation only to have the save refused at the end. Checking the
+    seal first saves that work. Best-effort: if the check itself fails the
+    task runs, and the seal check every save makes still keeps the response
+    as it was delivered.
+    """
+    fields = task[1] if len(task) > 1 and isinstance(task[1], dict) else {}
+    response_id = fields.get("response_id")
+    if not response_id:
+        return
+    try:
+        sealed = await is_response_sealed(response_id)
+    except Exception as e:
+        logger.debug(f"Could not check whether {response_id} is sealed: {e}")
+        return
+    if sealed:
+        raise ResponseSealedError(response_id)
+
+
+async def stop_task_for_finished_query(
+    stream: str,
+    group: str,
+    task: Tuple[str, dict],
+    logger: logging.Logger,
+    error: ResponseSealedError,
+) -> None:
+    """End a task whose query finished while (or before) it ran.
+
+    The query's response is sealed (``shepherd_utils.db.seal_response``), so
+    whatever this task produced is refused and the response stays as it was
+    delivered. Nothing is left to do for the query: the task is ACKed, and the
+    query is not handed on, neither to its next operation (which would only
+    be refused in turn) nor to ``finish_query`` (which already ran; its claim
+    would refuse a second delivery, but only after this read as an ERROR).
+
+    One WARNING, in this worker's output. It is deliberately not flushed to
+    the query's log list: that list was delivered and archived with the
+    response, and appending to it would reset the TTL ``release_hot_copies``
+    shortened.
+    """
+    fields = task[1] if len(task) > 1 and isinstance(task[1], dict) else {}
+    logger.warning(
+        f"{stream}: query {fields.get('query_id')} has already finished; "
+        f"stopping task {task[0]} without handing the query on ({error})."
+    )
+    await mark_task_as_complete(stream, group, task[0], logger)
+    await _record_task_duration(stream, fields.get("_started_at", ""), logger)
+
+
 async def run_task_lifecycle(
     stream: str,
     group: str,
@@ -1071,7 +1126,9 @@ async def run_task_lifecycle(
     manual child spans nest under it, records exceptions + ERROR status on the
     span, runs ``worker_fn(task, logger)`` then ``wrap_up_task`` on success or
     ``handle_task_failure`` on an unhandled error, and always releases the
-    limiter.
+    limiter. A task whose query has already finished -- found before it runs,
+    or when its save is refused -- is stopped instead
+    (``stop_task_for_finished_query``).
 
     ``worker_fn`` is an async callable ``(task, logger) -> None`` holding the
     per-worker logic (or a closure for workers that dispatch to a process pool).
@@ -1079,8 +1136,15 @@ async def run_task_lifecycle(
     start = time.time()
     with _tracer.start_as_current_span(stream, context=parent_ctx) as span:
         try:
+            await _stop_if_finished(task, logger)
             await _guard_response_size(stream, task, logger)
             await worker_fn(task, logger)
+        except ResponseSealedError as e:
+            # Not a failure: the query finished and was delivered without
+            # this task. Ahead of the catch-all so it never reaches
+            # handle_task_failure.
+            span.set_attribute("query.already_finished", True)
+            await stop_task_for_finished_query(stream, group, task, logger, e)
         except asyncio.CancelledError:
             current = asyncio.current_task()
             if current is not None and current.cancelling():

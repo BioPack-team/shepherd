@@ -14,6 +14,8 @@ import contextlib
 import copy
 import logging
 
+import fakeredis
+
 from shepherd_utils.db import get_message_sync, save_message_sync
 from shepherd_utils.trapi import binding_ids
 from workers.merge_message import worker as merge
@@ -162,10 +164,8 @@ def test_the_same_rule_result_twice_adds_no_second_support_graph():
 
 
 def _patch_sync_store(mocker):
-    storage = {}
-    client = mocker.Mock()
-    client.set.side_effect = lambda key, blob, ex=None: storage.__setitem__(key, blob)
-    client.get.side_effect = lambda key: storage.get(key)
+    # A real (fake) client: a save is a transaction checking the seal.
+    client = fakeredis.FakeRedis()
     mocker.patch("shepherd_utils.db._get_sync_data_db", return_value=client)
 
 

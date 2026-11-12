@@ -20,17 +20,19 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import orjson
 import zstandard
 from psycopg.types.json import Jsonb
 
 import shepherd_utils.db as shepherd_db
+from shepherd_utils import response_archive
 from shepherd_utils.config import settings
+from shepherd_utils.trapi import wrap_stored_response
 
 from . import aras, payload_store
-from .statuses import coerce_code, to_letter, validate_letter
+from .statuses import TERMINAL_STATUSES, coerce_code, to_letter, validate_letter
 
 MESSAGE_COLUMNS = (
     "id",
@@ -568,6 +570,87 @@ async def clear_subscriptions(message_id: Union[str, uuid.UUID]) -> None:
 # ---------------------------------------------------------------------------
 
 
+# An ARA child is its ARA's response. A child's pk is the response id its
+# ARA's query was dispatched with, so the child and the response are ONE
+# entry in the data store, written by the ARA's pipeline and sealed by
+# finish_query when the query finishes (shepherd_utils.db.seal_response).
+# The ARS never writes it. A child's payload is therefore the ARA's own
+# answer as the ARA would deliver it (``load_delivered_response``): from
+# Redis while it is hot, from the archive finish_query wrote once it is not
+# -- the same answer either way. A child that is not terminal has no payload
+# yet: until then the entry holds a response its ARA is still building.
+#
+# What premerge makes of a child (scores normalized, nodes annotated ...) is
+# the merge's working copy, not the child's payload: it is stored beside it
+# (``premerged_key``), read by the fold, and deleted once the merge has
+# attempted the child.
+#
+# With a cold store configured (``lean``), the durable set is small and the
+# hot one short-lived:
+#   - a child keeps no durable copy of its own (the archive of its ARA's
+#     response is that copy), unless its ARA never answered;
+#   - only the newest merged version keeps a durable copy
+#     (``drop_durable_copy`` removes the one it supersedes);
+#   - when a tree completes, every Redis copy in it is left ``redis_hot_ttl``
+#     to live (``expire_hot_copies``), and a read that falls back to the
+#     durable copy re-warms Redis for only that long.
+# Without one, every message keeps a durable copy in Postgres and its Redis
+# copy for ``redis_ttl``.
+# ---------------------------------------------------------------------------
+
+PREMERGED_PREFIX = "ars:premerged:"
+
+
+def premerged_key(child_pk: Union[str, uuid.UUID]) -> str:
+    """Where the merge's working copy of a child is kept: the child's
+    response after premerge, for the fold to read."""
+    return f"{PREMERGED_PREFIX}{child_pk}"
+
+
+async def discard_premerged(
+    child_pk: Union[str, uuid.UUID], logger: logging.Logger
+) -> None:
+    """Delete a child's premerged working copy: the merge has attempted the
+    child (or never will), so nothing reads it again. Best-effort -- one
+    this misses lives out its ``redis_ttl``."""
+    try:
+        await shepherd_db.data_db_client.delete(premerged_key(child_pk))
+    except Exception as e:
+        logger.warning(f"Could not delete the premerged copy of {child_pk}: {e}")
+
+
+def lean() -> bool:
+    """Whether a cold store is configured, and so Redis is kept to what is
+    hot (see above)."""
+    return payload_store.enabled()
+
+
+def rewarm_ttl() -> int:
+    """How long a payload read back from its durable copy stays in Redis."""
+    if lean():
+        return max(1, min(int(settings.redis_hot_ttl), int(settings.redis_ttl)))
+    return int(settings.redis_ttl)
+
+
+async def expire_hot_copies(
+    message_ids: Iterable[Union[str, uuid.UUID]], logger: logging.Logger
+) -> None:
+    """Leave these messages' Redis copies ``redis_hot_ttl`` to live: their
+    tree has finished, and whatever is kept of it is in the cold store.
+    A no-op without one. Best-effort -- a copy this misses simply lives out
+    its ``redis_ttl``."""
+    if not lean():
+        return
+    ttl = rewarm_ttl()
+    try:
+        async with shepherd_db.data_db_client.pipeline(transaction=False) as pipe:
+            for message_id in message_ids:
+                pipe.expire(str(message_id), ttl)
+            await pipe.execute()
+    except Exception as e:
+        logger.warning(f"Could not shorten the Redis TTL of finished messages: {e}")
+
+
 async def save_message_data(
     message_id: Union[str, uuid.UUID],
     payload: Any,
@@ -781,6 +864,94 @@ async def persist_data_copy(
     )
 
 
+async def persist_child_copy(
+    child: Dict[str, Any], logger: logging.Logger, have_response: bool = True
+) -> None:
+    """``persist_data_copy`` for an ARA child going terminal.
+
+    With a cold store, a child whose ARA answered needs no copy of its own:
+    the archive finish_query wrote for that answer is under the child's own
+    id. A child that never got an answer (``have_response`` False: the
+    dispatch failed, or the response was lost) has no archive, so whatever
+    its entry holds is kept. Without a cold store every child keeps a copy,
+    in Postgres."""
+    if lean() and have_response:
+        return
+    await persist_data_copy(child["id"], logger)
+
+
+async def drop_durable_copy(
+    message_id: Union[str, uuid.UUID], logger: logging.Logger
+) -> None:
+    """Remove a message's durable copy (a merged version a newer one has
+    superseded). Its row and its Redis copy stay. Best-effort."""
+    pk = uuid.UUID(str(message_id))
+    try:
+        if payload_store.enabled():
+            await asyncio.to_thread(payload_store.delete, pk)
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+            await conn.execute(
+                "UPDATE ars_message SET data = NULL, data_size = NULL WHERE id = %s",
+                (pk,),
+            )
+            await conn.commit()
+    except Exception as e:
+        logger.warning(f"Could not drop the durable copy of {message_id}: {e}")
+
+
+async def _ara_child_status(message_id: Union[str, uuid.UUID]) -> Optional[str]:
+    """The status letter of ``message_id`` if it is an ARA child -- a
+    message under a parent that is not one of the ARS's own merged versions
+    -- else None (a parent, a merged version, or no such message)."""
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "SELECT status, agent, ref FROM ars_message WHERE id = %s",
+            (uuid.UUID(str(message_id)),),
+        )
+        row = await cur.fetchone()
+    if row is None or row[2] is None or row[1] == aras.MERGE_AGENT:
+        return None
+    return str(row[0])
+
+
+async def _load_child(
+    message_id: Union[str, uuid.UUID], logger: logging.Logger
+) -> Tuple[bool, Optional[bytes]]:
+    """``(is an ARA child, its payload)``.
+
+    A child's payload is its ARA's response as the ARA would deliver it --
+    the response with the query's parameters and logs -- as JSON bytes:
+    from the entry the child shares with it while that is in Redis, from
+    its archive afterwards. None until the child is terminal (its ARA may
+    still be building the response), and when nothing is left of it. A
+    child whose ARA never answered falls back to the durable copy it kept.
+    Never re-warmed into Redis: the entry is the ARA's, and sealed.
+    """
+    try:
+        status = await _ara_child_status(message_id)
+    except Exception as e:
+        logger.warning(f"Could not look up message {message_id}: {e}")
+        return False, None
+    if status is None:
+        return False, None
+    if status not in TERMINAL_STATUSES:
+        return True, None
+    try:
+        delivered = await response_archive.load_delivered_response(
+            str(message_id), logger
+        )
+        if delivered is not None:
+            return True, delivered
+        stored = await _load_durable(message_id, logger)
+        if stored is None:
+            return True, None
+        raw = await asyncio.to_thread(_decompress_payload_bytes, stored)
+        return True, await asyncio.to_thread(wrap_stored_response, raw, None, [])
+    except Exception as e:
+        logger.error(f"Could not read the response of child {message_id}: {e}")
+        return True, None
+
+
 async def _load_durable(
     message_id: Union[str, uuid.UUID], logger: logging.Logger
 ) -> Optional[bytes]:
@@ -820,6 +991,11 @@ async def load_message_data(
     Decompression + JSON parsing of a multi-MB payload is pure CPU and runs
     in a worker thread, so a server request handler (or a worker's task)
     reading a large merged message does not stall its event loop."""
+    is_child, delivered = await _load_child(message_id, logger)
+    if is_child:
+        if delivered is None:
+            return None
+        return await asyncio.to_thread(orjson.loads, delivered)
     blob = None
     try:
         blob = await shepherd_db.data_db_client.get(str(message_id))
@@ -832,11 +1008,26 @@ async def load_message_data(
         return None
     payload = await asyncio.to_thread(_decompress_payload, stored)
     # Re-warm Redis so subsequent reads are cheap again.
+    await _rewarm(message_id, stored, payload, logger)
+    return payload
+
+
+async def _rewarm(
+    message_id: Union[str, uuid.UUID],
+    stored: bytes,
+    payload: Any,
+    logger: logging.Logger,
+) -> None:
+    """Put a payload read from its durable copy back in Redis, for
+    ``rewarm_ttl``. Best-effort."""
     try:
-        await shepherd_db.save_message(str(message_id), payload, logger)
+        if stored[:4] == ZSTD_MAGIC:
+            blob = stored  # the same frame Redis normally holds
+        else:
+            blob = await asyncio.to_thread(shepherd_db.encode_message, payload)
+        await shepherd_db.data_db_client.set(str(message_id), blob, ex=rewarm_ttl())
     except Exception:
         pass
-    return payload
 
 
 async def load_message_bytes(
@@ -851,6 +1042,9 @@ async def load_message_bytes(
     JSON size in memory and a GIL-holding parse per read. None when no blob
     exists anywhere. A durable-copy fallback re-warms Redis with the stored
     compressed bytes as-is."""
+    is_child, delivered = await _load_child(message_id, logger)
+    if is_child:
+        return delivered
     blob = None
     try:
         blob = await shepherd_db.data_db_client.get(str(message_id))
@@ -869,7 +1063,7 @@ async def load_message_bytes(
     if stored[:4] == ZSTD_MAGIC:
         try:  # re-warm with the same zstd frame Redis normally holds
             await shepherd_db.data_db_client.set(
-                str(message_id), stored, ex=settings.redis_ttl
+                str(message_id), stored, ex=rewarm_ttl()
             )
         except Exception:
             pass
@@ -887,8 +1081,14 @@ async def load_message_compressed(
     this path used to) made ``?compress`` 404 on messages that were still
     perfectly readable through every other endpoint. A durable copy stored in
     some other codec is re-compressed as zstd so the response always matches
-    the advertised ``X-Content-Compression``.
+    the advertised ``X-Content-Compression``. An ARA child is compressed
+    here: what it serves is assembled, not stored (``_load_child``).
     """
+    is_child, delivered = await _load_child(message_id, logger)
+    if is_child:
+        if delivered is None:
+            return None
+        return await asyncio.to_thread(zstandard.compress, delivered)
     try:
         blob = await shepherd_db.data_db_client.get(str(message_id))
         if blob is not None:
@@ -901,7 +1101,7 @@ async def load_message_compressed(
     if stored[:4] == ZSTD_MAGIC:
         try:  # re-warm with the same frame Redis normally holds
             await shepherd_db.data_db_client.set(
-                str(message_id), stored, ex=settings.redis_ttl
+                str(message_id), stored, ex=rewarm_ttl()
             )
         except Exception:
             pass
@@ -915,6 +1115,20 @@ async def load_message_compressed(
 
 
 async def message_has_data(message_id: Union[str, uuid.UUID]) -> bool:
+    try:
+        child_status = await _ara_child_status(message_id)
+    except Exception:
+        child_status = None
+    if child_status is not None:
+        if child_status not in TERMINAL_STATUSES:
+            return False  # its ARA is still building the response
+        try:
+            if payload_store.enabled() and await asyncio.to_thread(
+                payload_store.exists, message_id, payload_store.ARA
+            ):
+                return True
+        except Exception:
+            pass
     if await shepherd_db.message_exists(str(message_id)):
         return True
     if payload_store.enabled():

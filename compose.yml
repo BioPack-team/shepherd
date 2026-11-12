@@ -43,7 +43,11 @@ x-postgres-budget: &postgres_budget
 services:
   # The shared base image (shepherd_base/Dockerfile) every Shepherd image is
   # built on, through `additional_contexts` -- compose builds it first. It is
-  # never run: the `base` profile keeps it out of `up`.
+  # never run: `scale: 0` gives it no container. (It used to be kept out of
+  # `up` with a profile instead, but some Compose versions drop a
+  # profile-disabled service before resolving `additional_contexts`, and then
+  # every image that builds on it fails with "declares unknown service
+  # shepherd_base as additional contexts".)
   shepherd_base:
     image: shepherd_base
     build:
@@ -51,7 +55,7 @@ services:
       dockerfile: shepherd_base/Dockerfile
       args:
         PYTHON_IMAGE: ${SHEPHERD_PYTHON_IMAGE:-ghcr.io/translatorsri/renci-python-image:3.12.13}
-    profiles: [base]
+    scale: 0
 
   shepherd_server:
     container_name: shepherd_server
@@ -138,12 +142,17 @@ services:
   shepherd_broker:
     container_name: shepherd_broker
     cpus: 2
-    mem_limit: 25g
+    # About twice redis.conf's maxmemory (2gb): an AOF rewrite forks, and
+    # fragmentation and client buffers sit on top of the data. Raise both
+    # together (REDIS_MAXMEMORY in .env, and this in compose.override.yml).
+    mem_limit: 4g
     build:
       context: .
       dockerfile: shepherd_broker/Dockerfile
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-supersecretpassword}
+      # empty keeps redis.conf's maxmemory
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-}
     ports:
       - "127.0.0.1:6379:6379"
     restart: unless-stopped
@@ -307,6 +316,8 @@ services:
     environment:
       <<: *postgres_budget
       CALLBACK_ALLOWED_HOSTS: *callback_allowed_hosts
+      # finish_query archives every finished ARA response to the cold store
+      ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -315,6 +326,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      - ./ars_payloads:/app/ars_payloads
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
     environment:

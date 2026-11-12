@@ -46,10 +46,11 @@ tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
 
-async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
-    """Persist a child transition; run the completion check when terminal."""
-    if payload is not None:
-        await ars_db.save_message_data(child_pk, payload, logger)
+async def _finalize_child(child_pk, parent_pk, updates, logger):
+    """Persist a child transition; run the completion check when terminal.
+
+    Nothing is saved under the child: its entry in the data store is its
+    ARA's response, which only the ARA's pipeline writes."""
     updated = await ars_db.update_message(child_pk, **updates)
     if updated and updated["status"] in ("D", "S", "E", "U"):
         await ars_db.persist_data_copy(child_pk, logger)
@@ -67,7 +68,10 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
     callback = handoff_callback_url(child_pk)
     data["callback"] = callback
     query_id = shepherd_db.new_id()
-    response_id = shepherd_db.new_id()
+    # The child IS the ARA's response: one id, one entry in the data store.
+    # The ARA's pipeline writes it, finish_query seals and archives it, and
+    # the ARS serves it as the child's payload without ever writing it.
+    response_id = str(child_pk)
     # TRAPI 2.0: the client's log level is parameters.log_level
     level_number = resolve_log_level(
         query_log_level(data), resolve_log_level(settings.log_level)
@@ -100,7 +104,7 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
             exc_info=True,
         )
         await _finalize_child(
-            child_pk, parent["id"], data, {"status": "E", "code": 500}, logger
+            child_pk, parent["id"], {"status": "E", "code": 500}, logger
         )
 
 

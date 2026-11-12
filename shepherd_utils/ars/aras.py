@@ -39,7 +39,8 @@ class ARA:
     ``name`` is the Shepherd target: the worker stream a query is enqueued
     on and the URL prefix (``/{name}/asyncquery``) the ARA is served at.
     ``agent`` is the name written to the ARA's child messages; ``inforesid``
-    decorates its results and identifies it in notifications and reports.
+    is what premerge expects on its edges' sources, and identifies it in
+    notifications and reports.
     """
 
     name: str

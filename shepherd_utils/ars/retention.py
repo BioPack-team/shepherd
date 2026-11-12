@@ -13,7 +13,31 @@ Three passes, all run by the ARS watchdog:
 * ``delete_expired_trees`` (hourly): delete the rows of trees older than
   ``ars_row_retention_days``, so ``ars_message`` doesn't grow forever.
 
-Every pass works on whole trees -- a parent plus every child and merged
+The same store also holds the archive of finished ARA queries
+(``shepherd_utils/response_archive.py``), and every archived object has
+exactly one owner:
+
+* **an ARS tree owns its children's archives.** A child's pk is its ARA's
+  response id, so the archive of that response is filed under the child's
+  own id, and its size is recorded on the child's row (``data_size``) like
+  any other durable payload. It is counted, kept and dropped with its tree
+  by the passes above: a retained tree keeps its children's answers, a
+  cache-backed tree keeps them while its entry is live, and evicting a tree
+  frees them.
+* **the archive passes own the rest** -- the archives of queries submitted
+  directly, which no ``ars_message`` row tracks -- by each object's age in
+  the store: ``purge_expired_archive`` (hourly) deletes those older than
+  ``ara_response_retention_days``, and under disk pressure
+  ``evict_for_space`` deletes them, oldest first, *before* it touches any
+  tree: they are debugging copies, and a tree's result is what clients come
+  back for.
+
+Ownership is decided by asking Postgres, not by where an object is filed, so
+the same rules hold on a volume and in a bucket. A bucket lifecycle rule
+cannot ask: do not put one on ``ara/`` (it would delete a retained tree's
+answers), or set it far longer than every retention above as a backstop.
+
+Every tree pass works on whole trees -- a parent plus every child and merged
 version under it -- and only on finished ones (every member in a terminal
 status), so a tree is either fully readable or has had all its payloads
 removed together; it is never left half there. Retained trees (the ARS
@@ -108,10 +132,13 @@ async def _drop_payloads(roots: Sequence[uuid.UUID], logger: logging.Logger) -> 
     freed = sum(int(r[1] or 0) for r in rows if r[2])
     if payload_store.enabled():
         for pk in ids:
-            try:
-                await asyncio.to_thread(payload_store.delete, pk)
-            except Exception as e:
-                logger.error(f"Failed to delete payload file for {pk}: {e}")
+            # a message's own durable copy, and -- for an ARA child -- the
+            # archive of its ARA's response, filed under the same id
+            for kind in (payload_store.ARS, payload_store.ARA):
+                try:
+                    await asyncio.to_thread(payload_store.delete, pk, kind)
+                except Exception as e:
+                    logger.error(f"Failed to delete payload file for {pk}: {e}")
     async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
         await shepherd_db.lift_statement_timeout(conn)
         await conn.execute(
@@ -205,18 +232,117 @@ async def retained_bytes() -> int:
     return int(row[0] or 0) if row else 0
 
 
+# Archived objects looked up per round trip when deciding who owns them.
+OWNER_BATCH = 500
+
+
+async def _owned_by_a_tree(message_ids: Sequence[str]) -> set:
+    """Which of these archived response ids are ARS children (an
+    ``ars_message`` row has that id), and so belong to a tree."""
+    pks = []
+    for message_id in message_ids:
+        try:
+            pks.append(uuid.UUID(str(message_id)))
+        except ValueError:
+            continue  # not one of ours; nothing owns it
+    if not pks:
+        return set()
+    async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            "SELECT id FROM ars_message WHERE id = ANY(%s)", (pks,)
+        )
+        rows = await cur.fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _delete_archived(entries: Sequence[payload_store.Entry]) -> None:
+    """Blocking."""
+    for entry in entries:
+        payload_store.delete(entry.message_id, payload_store.ARA)
+
+
+async def _delete_unowned(
+    candidates: Sequence[payload_store.Entry], to_free: Optional[float] = None
+) -> Dict[str, int]:
+    """Delete the archives among ``candidates`` (in order) that no ARS tree
+    owns, stopping once ``to_free`` bytes are gone when that is given. A
+    failed owner lookup raises and nothing more is deleted: an archive must
+    never go because Postgres could not be asked whose it is."""
+    result = {"objects": 0, "bytes": 0}
+    for start in range(0, len(candidates), OWNER_BATCH):
+        if to_free is not None and result["bytes"] >= to_free:
+            break
+        batch = candidates[start : start + OWNER_BATCH]
+        owned = await _owned_by_a_tree([entry.message_id for entry in batch])
+        doomed = []
+        for entry in batch:
+            if to_free is not None and result["bytes"] >= to_free:
+                break
+            if entry.message_id in owned:
+                continue
+            doomed.append(entry)
+            result["objects"] += 1
+            result["bytes"] += entry.size
+        await asyncio.to_thread(_delete_archived, doomed)
+    return result
+
+
+def _archived(older_than: Optional[float] = None) -> List[payload_store.Entry]:
+    """Every archived response, oldest first; only those last written
+    before ``older_than`` (epoch seconds) when given. Blocking."""
+    return sorted(
+        (
+            entry
+            for entry in payload_store.entries(payload_store.ARA)
+            if older_than is None or entry.modified < older_than
+        ),
+        key=lambda entry: entry.modified,
+    )
+
+
+async def purge_expired_archive(retention_days: int, logger: logging.Logger) -> int:
+    """Delete the archived responses of directly submitted queries older
+    than ``retention_days``. An ARS child's archive is left to its tree's
+    retention. Returns the number deleted."""
+    if retention_days <= 0 or not payload_store.enabled():
+        return 0
+    cutoff = time.time() - retention_days * 86400
+    old = await asyncio.to_thread(_archived, cutoff)
+    purged = await _delete_unowned(old)
+    return purged["objects"]
+
+
+async def _evict_archive(to_free: float) -> Dict[str, int]:
+    """Delete the archived responses of directly submitted queries, oldest
+    first, until ``to_free`` bytes are gone or none are left."""
+    return await _delete_unowned(await asyncio.to_thread(_archived), to_free)
+
+
 async def evict_for_space(logger: logging.Logger) -> Dict[str, Any]:
-    """Under disk pressure, evict whole trees until the payload volume is
-    back under the low mark. A no-op without ``ars_payload_dir`` or below
-    the high mark. Returns what it did, plus the volume's state."""
-    result: Dict[str, Any] = {"trees": 0, "freed_bytes": 0, "short_bytes": 0}
-    if not payload_store.enabled():
+    """Under disk pressure, evict archived ARA responses and then whole
+    trees until the payload volume is back under the low mark. A no-op
+    without a payload volume (none configured, or a bucket, which cannot
+    fill) or below the high mark. Returns what it did, plus the volume's
+    state."""
+    result: Dict[str, Any] = {
+        "trees": 0,
+        "archived_responses": 0,
+        "freed_bytes": 0,
+        "short_bytes": 0,
+    }
+    if not payload_store.bounded():
         return result
     used, total = await asyncio.to_thread(payload_store.usage)
     result.update(used_bytes=used, total_bytes=total)
     if not total or used < total * settings.ars_payload_evict_high_pct / 100:
         return result
     to_free = used - total * settings.ars_payload_evict_low_pct / 100
+    try:
+        evicted = await _evict_archive(to_free)
+        result["archived_responses"] = evicted["objects"]
+        result["freed_bytes"] += evicted["bytes"]
+    except Exception as e:
+        logger.error(f"Evicting archived ARA responses failed: {e}")
     while result["freed_bytes"] < to_free:
         batch = await _eviction_candidates(EVICT_BATCH)
         if not batch:
@@ -244,7 +370,8 @@ async def evict_for_space(logger: logging.Logger) -> Dict[str, Any]:
         result["trees"] += len(chosen)
     logger.info(
         f"Payload volume over {settings.ars_payload_evict_high_pct:.0f}%: "
-        f"evicted {result['trees']} trees ({result['freed_bytes']} bytes)"
+        f"evicted {result['archived_responses']} archived ARA responses and "
+        f"{result['trees']} trees ({result['freed_bytes']} bytes)"
     )
     return result
 
