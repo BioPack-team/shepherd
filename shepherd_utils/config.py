@@ -492,12 +492,6 @@ class Settings(BaseSettings):
     # under pathological bursts; leftover ready callbacks are swept by the next
     # drain iteration. 0 disables the cap (fold everything ready in one pass).
     merge_max_fold: int = 25
-    # How long a merge_message worker that has just taken a query's lock waits
-    # for more of its callbacks before the first pass (stopping early once
-    # merge_max_fold are ready). Every pass reloads and re-saves the whole
-    # accumulated response, so folding more callbacks per pass means fewer
-    # passes; the cost is up to this much latency per query. 0 disables it.
-    merge_debounce_sec: float = 1.0
     # A merge that fails is retried by re-enqueueing its wake task. Space the
     # retries out (exponential from merge_retry_backoff, capped at
     # merge_retry_backoff_max) so a deterministic failure can't spin the worker,

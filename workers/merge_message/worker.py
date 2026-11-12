@@ -1015,33 +1015,6 @@ async def _fit_batch_to_budget(
     return batch, None
 
 
-async def _debounce(response_id: str, lock_lost: asyncio.Event, logger) -> None:
-    """Wait up to ``merge_debounce_sec`` for a full pass of callbacks.
-
-    Returns early once ``merge_max_fold`` callbacks are ready (a pass can't
-    take more) or the lock is lost.
-    """
-    wait = float(settings.merge_debounce_sec)
-    if wait <= 0:
-        return
-    deadline = time.monotonic() + wait
-    fold = settings.merge_max_fold
-    while not lock_lost.is_set():
-        try:
-            ready = await get_ready_callbacks(response_id, logger)
-        except Exception:
-            return
-        if fold > 0 and len(ready) >= fold:
-            return
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return
-        await asyncio.sleep(min(_DEBOUNCE_POLL_SEC, left))
-
-
-_DEBOUNCE_POLL_SEC = 0.2
-
-
 async def _drop_unwanted_callbacks(
     response_id: str,
     ready: list[str],
@@ -1325,11 +1298,6 @@ async def poll_for_tasks():
                     await _give_up(_crash_reason(crashes))
                     return
 
-                # Let more of the query's callbacks arrive before the first
-                # pass: every pass reloads and re-saves the whole accumulated
-                # response, so folding more per pass is fewer of them (#218).
-                await _debounce(response_id, lock_lost, logger)
-
                 lock_time = time.time()
                 # Bound before the try: the failure handler reports the batch
                 # that failed, and get_ready_callbacks itself can raise.
@@ -1337,7 +1305,10 @@ async def poll_for_tasks():
                 # Drain the query to empty: one load + one save per iteration.
                 # Re-reading the set each pass sweeps up callbacks that arrived
                 # while we were merging, so the holder does all of this query's
-                # ready work.
+                # ready work. Start straight away rather than waiting for more
+                # callbacks: whatever lands during a pass is batched into the
+                # next one, so batching comes from the merge's own run time and
+                # the worker never idles while there is work.
                 try:
                     while True:
                         ready = await get_ready_callbacks(response_id, logger)
@@ -1500,13 +1471,11 @@ async def poll_for_tasks():
     # Each wake task runs concurrently. Distinct queries never share a lock,
     # so their merges run in parallel on the process pool, which alone bounds
     # the CPU- and memory-heavy work (pool.run waits for a free child). The
-    # in-flight task limit is deliberately larger than the pool: most of a
-    # task's life is not pool work -- the merge_debounce_sec wait after taking
-    # the lock, Redis round trips, and lock losers that just ack. Capping
-    # in-flight tasks at the pool size let those waits hold every slot, so a
-    # 2-CPU pod sat idle debouncing ~1s per query while its backlog grew. The
-    # parent only handles callback ids, so the extra tasks cost no memory.
-    # TASK_LIMIT overrides.
+    # in-flight task limit is deliberately larger than the pool: part of a
+    # task's life is not pool work -- Redis round trips, and lock losers that
+    # just ack. Capping in-flight tasks at the pool size let those hold the
+    # slots while the pool sat idle. The parent only handles callback ids, so
+    # the extra tasks cost no memory. TASK_LIMIT overrides.
     await run_poll_loop(
         STREAM,
         GROUP,

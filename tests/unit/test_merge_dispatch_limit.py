@@ -1,12 +1,10 @@
 """merge_message's in-flight task limit must not shrink to its pool size.
 
 The pool (sized to the pod's CPUs) is what bounds the CPU- and memory-heavy
-merge work. A wake task spends most of its life off the pool: up to
-``merge_debounce_sec`` waiting for more callbacks after taking the lock, Redis
-round trips, or -- for a lock loser -- just acking. When the poll loop's task
-limit was the pool size, a 2-CPU pod could have both slots asleep in the
-debounce with its pool idle, capping it at about two queries a second while its
-backlog grew past 300.
+merge work. Part of a wake task's life is off the pool: Redis round trips, or
+-- for a lock loser -- just acking. When the poll loop's task limit was the
+pool size, those tasks held every slot while the pool sat idle, and on a 2-CPU
+pod (then also sleeping in a 1s pre-merge debounce) the backlog grew past 300.
 """
 
 import pytest

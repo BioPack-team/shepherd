@@ -169,16 +169,6 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def no_merge_debounce(monkeypatch):
-    """merge_message waits up to merge_debounce_sec for more callbacks before
-    its first pass (#218). Tests drive passes directly; the ones about the
-    debounce set it themselves."""
-    from shepherd_utils.config import settings
-
-    monkeypatch.setattr(settings, "merge_debounce_sec", 0.0)
-
-
-@pytest.fixture(autouse=True)
 def fast_completion_checks(monkeypatch):
     """Waiters re-check their state on a backoff from 0.5s (#221); tests that
     don't send the completion signal shouldn't sit out real seconds. The
