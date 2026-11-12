@@ -416,19 +416,9 @@
       .join("");
   }
 
-  function updateInfra(pg, redis) {
-    // DB disk: show % full when PG_VOLUME_CAPACITY is configured (the poller
-    // only populates disk_used_pct then), otherwise fall back to raw DB size.
-    const cap = pg.disk_capacity_bytes || 0;
-    let dbDisk;
-    if (cap > 0) {
-      const pct = pg.disk_used_pct ?? 0;
-      const text = `${pct.toFixed(1)}% (${fmtBytes(pg.disk_used_bytes)} / ${fmtBytes(cap)})`;
-      const color = pct >= 90 ? "var(--bad)" : pct >= 80 ? "var(--warn)" : null;
-      dbDisk = color ? `<span style="color:${color}">${text}</span>` : text;
-    } else {
-      dbDisk = fmtBytes(pg.db_size_bytes);
-    }
+  // One Redis instance's rows. ``prefix`` is "Redis " on the single-instance
+  // panel (the labels it has always had) and empty under an instance heading.
+  function redisRows(redis, prefix) {
     // Redis memory: used / cap when a maxmemory is configured, plus a colorized
     // % of the cap and eviction activity -- the headroom signals behind the
     // redis_memory / redis_eviction alerts, visible at a glance.
@@ -452,18 +442,75 @@
     if ((redis.evicted_keys_delta || 0) > 0) {
       evictValue = `<span style="color:var(--warn)">${fmt(redis.evicted_keys)} (+${fmt(redis.evicted_keys_delta)})</span>`;
     }
+    const label = (text) => prefix ? prefix + text : text.charAt(0).toUpperCase() + text.slice(1);
+    return [
+      { label: label("memory"), value: memValue },
+      { label: label("mem %"), value: memPct },
+      { label: label("evicted"), value: evictValue },
+      { label: label("clients"), value: redis.connected_clients ?? "-" },
+      { label: label("ops/s"), value: redis.instantaneous_ops_per_sec ?? "-" },
+    ];
+  }
+
+  // The rows only the per-instance view shows: how fast the instance is being
+  // written to, how long a new key would survive eviction at that rate (the
+  // redis_eviction_window_short alert), and its replicas when it has any.
+  function redisExtraRows(redis) {
+    const rows = [];
+    if (redis.write_bytes_per_sec != null) {
+      rows.push({ label: "Write rate", value: `${fmtBytes(redis.write_bytes_per_sec)}/s` });
+    }
+    if (redis.eviction_window_sec != null) {
+      rows.push({ label: "Eviction window", value: fmtAge(redis.eviction_window_sec) });
+    }
+    if (redis.had_replicas) {
+      let replicas = `${redis.connected_replicas ?? 0}`;
+      if (redis.replica_max_lag_sec != null) {
+        replicas += ` (lag ${redis.replica_max_lag_sec}s, ${fmtBytes(redis.replica_max_lag_bytes || 0)})`;
+      }
+      rows.push({ label: "Replicas", value: replicas });
+    }
+    return rows;
+  }
+
+  function updateInfra(pg, redis, redisInstances) {
+    // DB disk: show % full when PG_VOLUME_CAPACITY is configured (the poller
+    // only populates disk_used_pct then), otherwise fall back to raw DB size.
+    const cap = pg.disk_capacity_bytes || 0;
+    let dbDisk;
+    if (cap > 0) {
+      const pct = pg.disk_used_pct ?? 0;
+      const text = `${pct.toFixed(1)}% (${fmtBytes(pg.disk_used_bytes)} / ${fmtBytes(cap)})`;
+      const color = pct >= 90 ? "var(--bad)" : pct >= 80 ? "var(--warn)" : null;
+      dbDisk = color ? `<span style="color:${color}">${text}</span>` : text;
+    } else {
+      dbDisk = fmtBytes(pg.db_size_bytes);
+    }
+    const kv = r => `<div class="kv"><span class="label">${r.label}</span><span class="value">${r.value}</span></div>`;
     const rows = [
       { label: "DB disk", value: dbDisk },
       { label: "PG connections", value: pg.connection_count ?? "-" },
-      { label: "Redis memory", value: memValue },
-      { label: "Redis mem %", value: memPct },
-      { label: "Redis evicted", value: evictValue },
-      { label: "Redis clients", value: redis.connected_clients ?? "-" },
-      { label: "Redis ops/s", value: redis.instantaneous_ops_per_sec ?? "-" },
     ];
-    infraEl.innerHTML = rows
-      .map(r => `<div class="kv"><span class="label">${r.label}</span><span class="value">${r.value}</span></div>`)
-      .join("");
+    const instances = Object.values(redisInstances || {});
+    if (instances.length <= 1) {
+      // One Redis (the default): the panel it has always been.
+      infraEl.innerHTML = rows.concat(redisRows(redis, "Redis ")).map(kv).join("");
+      return;
+    }
+    // Redis roles are on servers of their own: a block per instance, headed
+    // by its name and the roles it serves.
+    let html = rows.map(kv).join("");
+    for (const inst of instances) {
+      const roles = (inst.roles || []).join(", ");
+      html += `<div class="infra-instance">Redis ${escapeHtml(inst.instance || "?")}`
+        + `<span class="roles">${escapeHtml(roles)}</span></div>`;
+      if (inst.error) {
+        html += kv({ label: "Status", value: `<span style="color:var(--bad)">unreachable</span>` });
+        continue;
+      }
+      html += redisRows(inst, "").concat(redisExtraRows(inst)).map(kv).join("");
+    }
+    infraEl.innerHTML = html;
   }
 
   function updateAraChart(pg) {
@@ -533,7 +580,7 @@
     updateWorkers(snap.workers || {});
     updateStreams(snap.streams || {}, snap.ts);
     updateQuerySummary(snap.postgres || {});
-    updateInfra(snap.postgres || {}, snap.redis || {});
+    updateInfra(snap.postgres || {}, snap.redis || {}, snap.redis_instances);
     updateAraChart(snap.postgres || {});
     ingestEvents(snap.events || [], snap.ts);
     if (snap.new_alerts && snap.new_alerts.length) {

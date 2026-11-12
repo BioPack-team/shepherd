@@ -464,6 +464,15 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   gap: 10px;
 }
 .kv { display: flex; flex-direction: column; }
+/* Heading of one Redis instance's block, when there is more than one. */
+#infra .infra-instance {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+#infra .infra-instance .roles { margin-left: 8px; color: var(--muted); font-weight: 400; }
 .kv .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
 .kv .value { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
 

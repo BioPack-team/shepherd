@@ -132,8 +132,14 @@ async def _poll_loop(
             # broker/postgres health), not a YAML rule -- drive it each tick.
             await engine.handle_redis_memory(snapshot)
             await engine.handle_redis_persistence(snapshot)
-            # A Redis restart loses everything written since its snapshot:
-            # alert, and finish the queries that lost their data.
+            # Lost or lagging replicas, and an eviction window shorter than a
+            # running query: per Redis instance, like the two above.
+            await engine.handle_redis_replication(snapshot)
+            await engine.handle_redis_eviction_window(snapshot)
+            # A Redis restart (or failover) loses everything written since
+            # its snapshot: alert, and finish the queries that lost their
+            # data. Every instance is watched; which sweep runs depends on
+            # the roles the restarted one serves.
             await restarts.observe(snapshot)
             _latest_snapshot = snapshot
             # Persist history at a slower cadence than the live UI tick to

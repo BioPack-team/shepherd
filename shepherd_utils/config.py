@@ -781,6 +781,44 @@ class Settings(BaseSettings):
     # that footprint against the limit and fires on whichever is higher. Empty
     # disables the footprint check.
     redis_memory_limit: str = ""
+    # ``redis_memory_limit`` describes the Redis that serves the broker role.
+    # A role given a Redis of its own (``redis_<role>_host`` /
+    # ``_sentinel_master``) runs in another container with another limit; set
+    # that container's limit here to get the same footprint check for it.
+    # Empty skips the footprint check for that instance (its data-vs-maxmemory
+    # check still runs). Ignored for a role that shares the broker's Redis.
+    redis_data_memory_limit: str = ""
+    redis_lock_memory_limit: str = ""
+    redis_logs_memory_limit: str = ""
+    # Replication alerting (#201), per Redis instance. A no-op for an instance
+    # that has never reported a connected replica (the single-server default).
+    # An instance with fewer connected replicas than it has had, a replica
+    # still syncing, or one lagging past either threshold below, must stay
+    # that way this long before the monitor alerts (and be healthy this long
+    # before it reports recovery), so a replica reconnecting after a blip is
+    # silent.
+    monitor_redis_replica_grace_sec: float = 60.0
+    # A replica lags when the primary last heard from it more than this many
+    # seconds ago (INFO ``slaveN`` ``lag``; healthy is 0-1) ...
+    monitor_redis_replica_lag_sec: float = 30.0
+    # ... or when it is this many bytes of replication stream behind the
+    # primary: what a failover right now would lose. Sized above a burst of
+    # multi-megabyte payloads in transit. 0 disables the byte check.
+    monitor_redis_replica_lag_bytes: int = 268435456  # 256 MiB
+    # Each instance's write rate is the growth of INFO ``total_net_input_bytes``
+    # per second, smoothed over about this long (an exponential moving
+    # average) so one burst between two polls doesn't swing it.
+    monitor_redis_write_rate_window_sec: float = 60.0
+    # Eviction window (#201): maxmemory / write rate, i.e. how long a newly
+    # written key survives once the instance is at its cap and evicting
+    # oldest-first. The monitor alerts when an instance at or above
+    # ``..._near_cap_pct`` percent of maxmemory has a window shorter than
+    # ``..._min_sec``. 0 (the default) derives the minimum from the longest
+    # query budget, ``ars_timeout_merge_sec`` x ``..._safety_factor``: below
+    # that, eviction takes the payloads of queries that are still running.
+    monitor_redis_eviction_window_min_sec: float = 0.0
+    monitor_redis_eviction_window_safety_factor: float = 2.0
+    monitor_redis_eviction_window_near_cap_pct: float = 90.0
     # Postgres availability alerting. Same debounce idea as the broker: Postgres
     # must stay unreachable this long before the single ``postgres_down`` alert
     # fires, so a transient query timeout doesn't trip it. No recovery-grace

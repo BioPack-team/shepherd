@@ -615,6 +615,56 @@ practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
 default, so raising `TASK_LIMIT` for those only deepens the intake queue rather
 than adding parallelism.
 
+### Monitoring Redis
+
+The monitor (`workers/monitor/`) watches Redis per *instance*. By default the
+four Redis roles (broker, data, lock, logs) are one server, and the monitor
+reports and alerts on it exactly as it always has. When a role is given a Redis
+of its own (`REDIS_<ROLE>_HOST`, or `REDIS_<ROLE>_SENTINEL_MASTER` behind
+Sentinel), every distinct server is polled with one `INFO` and evaluated on its
+own:
+
+- **Snapshot.** `/api/snapshot` keeps `redis` (the instance serving the broker
+  role) and adds `redis_instances`, keyed by instance (`host:port`, or
+  `sentinel:<master>`), each with the roles it serves. An instance that can't
+  be reached reports an `error` in its own entry. The dashboard shows a block
+  per instance when there is more than one.
+- **Alert names.** The broker role's instance keeps today's names
+  (`redis_memory_high`, `redis_evicting`, `redis_restarted`, ...). Any other
+  instance's alerts append it -- `redis_memory_critical@shepherd_data:6379` --
+  and say which instance and roles in the text. Each instance has its own
+  grace periods and cooldowns, so one never masks another.
+- **History.** The broker role's instance keeps the `redis:<metric>` series;
+  others record `redis@<instance>:<metric>`.
+- **Memory.** `REDIS_MEMORY_LIMIT` is the container limit of the instance
+  serving the broker role. For a role with a Redis of its own set
+  `REDIS_DATA_MEMORY_LIMIT` (or `REDIS_LOCK_MEMORY_LIMIT` /
+  `REDIS_LOGS_MEMORY_LIMIT`); without it that instance is still checked
+  against its `maxmemory`, just not against a container limit.
+- **Restarts and failovers.** A restart of the data role's instance finishes,
+  as errors, the queries whose payloads it lost; a restart of the broker
+  role's instance finishes the ones whose next task it lost; a shared Redis
+  does both. Behind Sentinel a failover is handled the same way, since writes
+  the old primary had not replicated are gone, and is reported as
+  `redis_failover` where it can be told from a restart.
+
+Alerts added for multi-server and replicated deployments (all automatic, all
+no-ops on a single unreplicated Redis unless noted; thresholds in
+`shepherd_utils/config.py`, documented in
+`workers/monitor/monitor_alerts.yaml`):
+
+| Alert | Fires when |
+| --- | --- |
+| `redis_failover` | Sentinel promoted a replica; unreplicated writes are lost and the recovery sweep runs |
+| `redis_replicas_lost` / `redis_replicas_recovered` | an instance has fewer connected replicas than it had (critical at zero) for `MONITOR_REDIS_REPLICA_GRACE_SEC` |
+| `redis_replica_lagging` / `redis_replica_caught_up` | a replica is syncing, silent for `MONITOR_REDIS_REPLICA_LAG_SEC`, or `MONITOR_REDIS_REPLICA_LAG_BYTES` behind |
+| `redis_eviction_window_short` / `redis_eviction_window_recovered` | an instance near its `maxmemory` would evict keys younger than the longest query budget (any deployment with `maxmemory` set) |
+
+`redis_persistence_failing` now says which save failed: a failed AOF *write*
+("writes are not being persisted", critical), a failed AOF *rewrite* ("no data
+lost yet, but the AOF will keep growing", warning), or a failed RDB snapshot
+(critical).
+
 ### Message Broker Streams
 
 Shepherd uses Redis Streams for its message broker. More info on Redis Streams can be found [here](https://redis.io/docs/latest/develop/data-types/streams/)

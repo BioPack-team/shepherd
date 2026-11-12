@@ -21,6 +21,18 @@
 #   duration:   how long the condition must hold before firing (e.g. 60s, 5m)
 #   cooldown:   how long to suppress repeat fires (default 10m)
 #   severity:   info | warning | critical
+#
+# Redis instances. Shepherd's four Redis roles (broker, data, lock, logs) are
+# one server by default and can each be given a Redis of their own
+# (REDIS_<ROLE>_HOST / REDIS_<ROLE>_SENTINEL_MASTER). Everything the monitor
+# checks about Redis -- the redis_eviction rule below and the automatic alerts
+# described in the comments -- is checked per instance, with separate state
+# (grace periods, cooldowns) for each. The instance serving the broker role
+# keeps the alert names used here (`redis_evicting`, `redis_memory_high`, ...);
+# any other instance's alerts have its name appended, e.g.
+# `redis_evicting@shepherd_data:6379` or `redis_memory_high@sentinel:payloads`,
+# and their text says which instance and which roles. With a single Redis
+# nothing is renamed or reworded.
 
 rules:
   # Queue backlog: any ARA entry stream that piles up for a minute.
@@ -109,9 +121,29 @@ rules:
   # fires at a time, re-notifies at most once a day while elevated, and emits a
   # redis_memory_recovered alert when usage falls back below the warning line.
   # Tune via the monitor_redis_memory_* settings (thresholds, grace, cooldown).
+  # Evaluated for every Redis instance. The footprint side of the check needs
+  # the container's memory limit: REDIS_MEMORY_LIMIT for the instance serving
+  # the broker role, REDIS_DATA_MEMORY_LIMIT / REDIS_LOCK_MEMORY_LIMIT /
+  # REDIS_LOGS_MEMORY_LIMIT for a role with a Redis of its own (unset skips
+  # the footprint check for that instance; data-vs-maxmemory still runs).
+  #
+  # Also automatic, per instance, when it is at or above
+  # MONITOR_REDIS_EVICTION_WINDOW_NEAR_CAP_PCT (90%) of maxmemory:
+  # `redis_eviction_window_short` (critical) when maxmemory / write rate --
+  # how long a newly written key survives once the instance is full and
+  # evicting -- is shorter than the longest query budget times a safety factor
+  # (ARS_TIMEOUT_MERGE_SEC x MONITOR_REDIS_EVICTION_WINDOW_SAFETY_FACTOR = 16
+  # minutes by default; or set MONITOR_REDIS_EVICTION_WINDOW_MIN_SEC). Below
+  # that, eviction takes the payloads of queries still running. The write
+  # rate is smoothed over MONITOR_REDIS_WRITE_RATE_WINDOW_SEC and the condition
+  # must hold for MONITOR_REDIS_MEMORY_GRACE_SEC, so a burst doesn't trip it.
+  # `redis_eviction_window_recovered` (info) when it clears.
 
   # Redis eviction: with volatile-ttl, any eviction means the cap was reached
   # and blobs are being shed. threshold 0 => alert on the first eviction.
+  # One rule covers every Redis instance: each has its own `duration` streak
+  # and cooldown, and an instance other than the broker role's alerts as
+  # `redis_evicting@<instance>`.
   - name: redis_evicting
     type: redis_eviction
     threshold: 0
@@ -210,3 +242,39 @@ rules:
 # that lost their data in it -- or the task that would have moved them on --
 # are finished as errors, with one `query_data_lost` (warning) alert per
 # query, batched.
+#
+# Every Redis instance's run_id is watched, and what a restart sets off
+# depends on the roles the instance serves: the data role's instance holds the
+# payloads, so its restart runs the lost-data sweep; the broker role's holds
+# the task streams, so its restart runs the lost-task sweep; one serving only
+# locks and/or logs alerts and sweeps nothing. One shared Redis runs both, as
+# before. An instance other than the broker role's alerts as
+# `redis_restarted@<instance>`.
+#
+# Behind Sentinel a failover changes the run_id as well (another server is the
+# primary), and loses whatever the old primary had not replicated, so it
+# triggers the same sweeps. When the new primary is recognisably the old one's
+# promoted replica (its secondary replication id is the old primary's id) the
+# alert is `redis_failover` (warning) instead; when that can't be told, the
+# `redis_restarted` text says "restarted or failed over".
+#
+# Redis persistence is monitored automatically too, per instance:
+# `redis_persistence_failing` says which save failed and what it costs --
+#   * "AOF write failing: writes are not being persisted" (critical);
+#   * "AOF rewrite failed: no data lost yet, but the AOF will keep growing"
+#     (warning when it is the only failure);
+#   * "RDB snapshot failed" (critical), with whether an AOF still covers it.
+# It fires once, again if a warning becomes critical, and
+# `redis_persistence_recovered` (info) fires when every save succeeds again.
+#
+# Redis replication is monitored automatically, per instance, and is a no-op
+# for an instance that has never had a connected replica (the single-server
+# default). All of it is debounced by MONITOR_REDIS_REPLICA_GRACE_SEC (60s)
+# in both directions:
+#   * `redis_replicas_lost` when an instance has fewer connected replicas
+#     than it has had since the monitor started (warning; critical at zero),
+#     and `redis_replicas_recovered` (info) when they are all back;
+#   * `redis_replica_lagging` (warning) when a replica is still syncing, has
+#     not been heard from for MONITOR_REDIS_REPLICA_LAG_SEC (30s), or is more
+#     than MONITOR_REDIS_REPLICA_LAG_BYTES (256 MiB; 0 disables) behind, and
+#     `redis_replica_caught_up` (info) when none is.
