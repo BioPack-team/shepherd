@@ -82,55 +82,46 @@ async def test_an_unknown_response_is_404(redis_mock):
 async def test_a_response_gone_from_redis_is_served_from_the_archive(
     redis_mock, monkeypatch, tmp_path
 ):
-    """#252: finish_query archives every response in the cold store, and the
-    route falls back to that copy -- and its logs -- once Redis has let go."""
+    """#252: finish_query archives every finished query in the cold store,
+    and the route falls back to that copy -- with the logs and the query's
+    parameters it carries -- once Redis has let go. The client gets an
+    ordinary TRAPI Response, not the archive's three parts."""
     import uuid
 
     from shepherd_utils import response_archive
     from shepherd_utils.config import settings
 
     monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
-    response_id = str(uuid.uuid4())
+    query_id, response_id = str(uuid.uuid4()), str(uuid.uuid4())
+    await db.save_message(
+        query_id, {"message": {}, "parameters": {"log_level": "DEBUG"}}, logger
+    )
     await db.save_response(response_id, {"message": {"results": []}}, logger)
     await db._append_logs(response_id, [{"message": "hi", "level": "INFO"}])
-    await response_archive.archive_response(response_id, logger)
-    await response_archive.archive_logs(response_id, logger)
-    await db.data_db_client.delete(response_id)
-    await db.logs_db_client.delete(response_id)
-    monkeypatch.setattr(
-        base_routes, "get_response_query_parameters", AsyncMock(return_value={})
+    blob = await response_archive.capture_response(response_id, logger)
+    assert await response_archive.archive_query(
+        query_id, response_id, blob, "OK", None, logger
     )
+    await db.data_db_client.flushdb()
+    await db.logs_db_client.flushdb()
+    lookup = AsyncMock(return_value={})
+    monkeypatch.setattr(base_routes, "get_response_query_parameters", lookup)
 
     response = await base_routes.get_query_response(response_id)
 
     assert response.status_code == 200
     body = orjson.loads(response.body)
-    assert body["schema_version"]
+    assert list(body) == [
+        "schema_version",
+        "biolink_version",
+        "parameters",
+        "message",
+        "logs",
+    ]
+    assert body["parameters"] == {"log_level": "DEBUG"}
     assert body["message"] == {"results": []}
     assert body["logs"] == [{"message": "hi", "level": "INFO"}]
-
-
-async def test_archived_logs_fill_in_for_an_expired_log_list(
-    redis_mock, monkeypatch, tmp_path
-):
-    import uuid
-
-    from shepherd_utils import response_archive
-    from shepherd_utils.config import settings
-
-    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
-    response_id = str(uuid.uuid4())
-    await db.save_response(response_id, {"message": {"results": []}}, logger)
-    await db._append_logs(response_id, [{"message": "hi", "level": "INFO"}])
-    await response_archive.archive_logs(response_id, logger)
-    await db.logs_db_client.delete(response_id)
-    monkeypatch.setattr(
-        base_routes, "get_response_query_parameters", AsyncMock(return_value={})
-    )
-
-    response = await base_routes.get_query_response(response_id)
-
-    assert orjson.loads(response.body)["logs"] == [{"message": "hi", "level": "INFO"}]
+    lookup.assert_not_called()  # the archive carries its own query
 
 
 async def test_an_id_that_is_not_a_uuid_is_still_404_with_a_store(

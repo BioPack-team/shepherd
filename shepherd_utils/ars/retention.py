@@ -13,13 +13,13 @@ Three passes, all run by the ARS watchdog:
 * ``delete_expired_trees`` (hourly): delete the rows of trees older than
   ``ars_row_retention_days``, so ``ars_message`` doesn't grow forever.
 
-The same store also holds the archive of finished ARA responses and their
-logs (``shepherd_utils/response_archive.py``), which no ``ars_message`` row
+The same store also holds the archive of finished ARA queries
+(``shepherd_utils/response_archive.py``), which no ``ars_message`` row
 tracks. Two more passes keep that bounded, by each object's age in the
 store:
 
-* ``purge_expired_archive`` (hourly): delete archived responses and logs
-  older than ``ara_response_retention_days``.
+* ``purge_expired_archive`` (hourly): delete archived responses older than
+  ``ara_response_retention_days``.
 * under disk pressure, ``evict_for_space`` deletes archived responses,
   oldest first, *before* it touches any tree: they are debugging copies,
   and a tree's merged result is what clients come back for.
@@ -216,26 +216,22 @@ async def retained_bytes() -> int:
     return int(row[0] or 0) if row else 0
 
 
-_ARCHIVE_KINDS = (payload_store.ARA, payload_store.ARA_LOGS)
-
-
 def _purge_archive_older_than(cutoff: float) -> Dict[str, int]:
-    """Delete every archived response and log list last written before
-    ``cutoff`` (epoch seconds). Blocking."""
+    """Delete every archived response last written before ``cutoff`` (epoch
+    seconds). Blocking."""
     result = {"objects": 0, "bytes": 0}
-    for kind in _ARCHIVE_KINDS:
-        for entry in payload_store.entries(kind):
-            if entry.modified >= cutoff:
-                continue
-            payload_store.delete(entry.message_id, kind)
-            result["objects"] += 1
-            result["bytes"] += entry.size
+    for entry in payload_store.entries(payload_store.ARA):
+        if entry.modified >= cutoff:
+            continue
+        payload_store.delete(entry.message_id, payload_store.ARA)
+        result["objects"] += 1
+        result["bytes"] += entry.size
     return result
 
 
 async def purge_expired_archive(retention_days: int, logger: logging.Logger) -> int:
-    """Delete archived ARA responses (and their logs) older than
-    ``retention_days``. Returns the number of objects deleted."""
+    """Delete archived ARA responses older than ``retention_days``. Returns
+    the number deleted."""
     if retention_days <= 0 or not payload_store.enabled():
         return 0
     cutoff = time.time() - retention_days * 86400
@@ -245,7 +241,7 @@ async def purge_expired_archive(retention_days: int, logger: logging.Logger) -> 
 
 def _evict_archive(to_free: float) -> Dict[str, int]:
     """Delete archived responses, oldest first, until ``to_free`` bytes are
-    gone or none are left; each one's logs go with it. Blocking."""
+    gone or none are left. Blocking."""
     result = {"objects": 0, "bytes": 0}
     oldest_first = sorted(
         payload_store.entries(payload_store.ARA), key=lambda entry: entry.modified
@@ -254,7 +250,6 @@ def _evict_archive(to_free: float) -> Dict[str, int]:
         if result["bytes"] >= to_free:
             break
         payload_store.delete(entry.message_id, payload_store.ARA)
-        payload_store.delete(entry.message_id, payload_store.ARA_LOGS)
         result["objects"] += 1
         result["bytes"] += entry.size
     return result

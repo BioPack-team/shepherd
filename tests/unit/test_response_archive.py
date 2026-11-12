@@ -1,9 +1,12 @@
-"""The archive of finished ARA responses (shepherd_utils.response_archive):
-finish_query's copy of a response and its logs in the cold store, and the
-read paths that fall back to it once the Redis copy has expired.
+"""The archive of finished ARA queries (shepherd_utils.response_archive): one
+object per query in the cold store -- the response, the query and the logs
+as three zstd frames -- built without decoding the response, and taken apart
+again by the read paths once the Redis copy has expired.
 """
 
+import asyncio
 import logging
+import threading
 import uuid
 from unittest.mock import AsyncMock
 
@@ -18,6 +21,7 @@ from shepherd_utils.config import settings
 
 LOGGER = logging.getLogger(__name__)
 RESPONSE = b'{"message":{"results":[]}}'
+QUERY = {"message": {"query_graph": {}}, "parameters": {"log_level": "DEBUG"}}
 LOGS = [
     {"timestamp": "2026-01-01T00:00:02Z", "level": "INFO", "message": "second"},
     {"timestamp": "2026-01-01T00:00:01Z", "level": "INFO", "message": "first"},
@@ -32,13 +36,24 @@ def store(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def redis(monkeypatch):
-    """What Redis holds for the query: its response blob and its log list."""
-    state = {"blob": zstandard.compress(RESPONSE), "logs": LOGS}
+def ids():
+    return {"query": str(uuid.uuid4()), "response": str(uuid.uuid4())}
+
+
+@pytest.fixture
+def redis(monkeypatch, ids):
+    """What Redis holds for the query: its blobs by id, and its log list."""
+    state = {
+        "blobs": {
+            ids["response"]: zstandard.compress(RESPONSE),
+            ids["query"]: zstandard.compress(orjson.dumps(QUERY)),
+        },
+        "logs": LOGS,
+    }
     monkeypatch.setattr(
         shepherd_db.data_db_client,
         "get",
-        AsyncMock(side_effect=lambda *a: state["blob"]),
+        AsyncMock(side_effect=lambda key: state["blobs"].get(key)),
     )
     monkeypatch.setattr(
         shepherd_db.logs_db_client,
@@ -49,53 +64,139 @@ def redis(monkeypatch):
     return state
 
 
-async def test_a_finished_response_is_archived_as_the_frame_redis_held(store, redis):
-    response_id = str(uuid.uuid4())
+async def _archive(ids, status="OK", description=None):
+    blob = await response_archive.capture_response(ids["response"], LOGGER)
+    return await response_archive.archive_query(
+        ids["query"], ids["response"], blob, status, description, LOGGER
+    )
 
-    assert await response_archive.archive_response(response_id, LOGGER)
 
-    assert payload_store.read(response_id, payload_store.ARA) == redis["blob"]
+async def test_a_finished_query_is_one_object_of_three_frames(store, redis, ids):
+    assert await _archive(ids)
+
+    blob = payload_store.read(ids["response"], payload_store.ARA)
+    # the response and query frames are the bytes Redis held, untouched
+    assert blob.startswith(
+        redis["blobs"][ids["response"]] + redis["blobs"][ids["query"]]
+    )
+    response, query, tail = response_archive.split_frames(blob)
+    assert response == RESPONSE
+    assert orjson.loads(query) == QUERY
+    assert orjson.loads(tail) == {"status": "OK", "description": None, "logs": LOGS}
     # in its own directory, not among the ARS messages
-    assert payload_store.read(response_id) is None
-    assert await response_archive.load_response_bytes(response_id, LOGGER) == RESPONSE
-    assert response_archive.load_response_sync(response_id) == orjson.loads(RESPONSE)
+    assert payload_store.read(ids["response"]) is None
 
 
-async def test_logs_are_archived_and_read_back_in_order(store, redis):
-    response_id = str(uuid.uuid4())
+async def test_it_is_read_back_taken_apart(store, redis, ids):
+    await _archive(ids, status="ERROR", description="BTE refused it")
 
-    assert await response_archive.archive_logs(response_id, LOGGER)
+    archive = await response_archive.load_archive(ids["response"], LOGGER)
 
-    logs = await response_archive.load_logs(response_id, LOGGER)
-    assert [entry["message"] for entry in logs] == ["first", "second"]
+    assert archive.response == RESPONSE
+    assert archive.query == QUERY
+    assert (archive.status, archive.description) == ("ERROR", "BTE refused it")
+    assert [entry["message"] for entry in archive.logs] == ["first", "second"]
+    assert response_archive.load_archive_sync(ids["response"]) == archive
 
 
-async def test_nothing_in_redis_archives_nothing(store, redis):
-    redis["blob"] = None
+async def test_the_response_and_query_are_never_decoded(store, redis, ids, monkeypatch):
+    """finish_query's memory is what limits it: archiving must only ever
+    hold compressed bytes."""
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError("archiving decoded a payload")
+
+    monkeypatch.setattr(shepherd_db, "decompress_zstd", _refuse)
+    monkeypatch.setattr(shepherd_db, "decompress_frame", _refuse)
+    monkeypatch.setattr(shepherd_db, "decode_message", _refuse)
+    monkeypatch.setattr(zstandard, "decompress", _refuse)
+    monkeypatch.setattr(zstandard, "ZstdDecompressor", _refuse)
+
+    assert await _archive(ids)
+
+
+async def test_a_query_that_already_expired_is_archived_as_null(store, redis, ids):
+    del redis["blobs"][ids["query"]]
+
+    assert await _archive(ids)
+
+    archive = await response_archive.load_archive(ids["response"], LOGGER)
+    assert archive.query is None
+    assert archive.response == RESPONSE
+
+
+async def test_a_query_with_no_logs_archives_an_empty_list(store, redis, ids):
     redis["logs"] = []
-    response_id = str(uuid.uuid4())
-
-    assert not await response_archive.archive_response(response_id, LOGGER)
-    assert not await response_archive.archive_logs(response_id, LOGGER)
-
-    assert await response_archive.load_response_bytes(response_id, LOGGER) is None
-    assert await response_archive.load_logs(response_id, LOGGER) == []
+    assert await _archive(ids)
+    archive = await response_archive.load_archive(ids["response"], LOGGER)
+    assert archive.logs == []
 
 
-async def test_without_a_store_nothing_is_archived_or_read(monkeypatch, redis):
+async def test_redis_trouble_reading_the_query_or_logs_still_archives(
+    store, redis, ids, monkeypatch
+):
+    blob = await response_archive.capture_response(ids["response"], LOGGER)
+    monkeypatch.setattr(
+        shepherd_db.data_db_client,
+        "get",
+        AsyncMock(side_effect=ConnectionError("redis is down")),
+    )
+    monkeypatch.setattr(
+        shepherd_db.logs_db_client,
+        "lrange",
+        AsyncMock(side_effect=ConnectionError("redis is down")),
+    )
+
+    assert await response_archive.archive_query(
+        ids["query"], ids["response"], blob, "OK", None, LOGGER
+    )
+
+    archive = await response_archive.load_archive(ids["response"], LOGGER)
+    assert archive.response == RESPONSE
+    assert archive.query is None and archive.logs == []
+
+
+async def test_no_response_in_redis_archives_nothing(store, redis, ids):
+    del redis["blobs"][ids["response"]]
+
+    assert await response_archive.capture_response(ids["response"], LOGGER) is None
+    assert not await _archive(ids)
+    assert await response_archive.load_archive(ids["response"], LOGGER) is None
+
+
+async def test_a_redis_error_capturing_the_response_never_escapes(
+    store, redis, ids, monkeypatch
+):
+    monkeypatch.setattr(
+        shepherd_db.data_db_client,
+        "get",
+        AsyncMock(side_effect=ConnectionError("redis is down")),
+    )
+    assert await response_archive.capture_response(ids["response"], LOGGER) is None
+
+
+async def test_a_response_that_is_not_a_zstd_frame_is_not_archived(store, redis, ids):
+    assert not await response_archive.archive_query(
+        ids["query"], ids["response"], b'{"plain": "json"}', "OK", None, LOGGER
+    )
+    assert not payload_store.exists(ids["response"], payload_store.ARA)
+
+
+async def test_without_a_store_nothing_is_archived_or_read(monkeypatch, redis, ids):
     monkeypatch.setattr(settings, "ars_payload_dir", "")
     monkeypatch.setattr(settings, "payload_s3_bucket", "")
-    response_id = str(uuid.uuid4())
 
-    assert not await response_archive.archive_response(response_id, LOGGER)
-    assert not await response_archive.archive_logs(response_id, LOGGER)
+    assert await response_archive.capture_response(ids["response"], LOGGER) is None
     shepherd_db.data_db_client.get.assert_not_called()
-    assert await response_archive.load_response_bytes(response_id, LOGGER) is None
-    assert response_archive.load_response_sync(response_id) is None
+    assert not await response_archive.archive_query(
+        ids["query"], ids["response"], b"blob", "OK", None, LOGGER
+    )
+    assert await response_archive.load_archive(ids["response"], LOGGER) is None
+    assert response_archive.load_archive_sync(ids["response"]) is None
 
 
 async def test_a_failing_store_is_retried_then_given_up_on_without_raising(
-    store, redis, monkeypatch
+    store, redis, ids, monkeypatch
 ):
     calls = []
 
@@ -105,11 +206,13 @@ async def test_a_failing_store_is_retried_then_given_up_on_without_raising(
 
     monkeypatch.setattr(payload_store, "write", failing_write)
 
-    assert not await response_archive.archive_response(str(uuid.uuid4()), LOGGER)
+    assert not await _archive(ids)
     assert len(calls) == response_archive.ARCHIVE_ATTEMPTS
 
 
-async def test_a_transient_failure_is_retried_to_success(store, redis, monkeypatch):
+async def test_a_transient_failure_is_retried_to_success(
+    store, redis, ids, monkeypatch
+):
     real_write = payload_store.write
     attempts = []
 
@@ -120,55 +223,51 @@ async def test_a_transient_failure_is_retried_to_success(store, redis, monkeypat
         return real_write(*args)
 
     monkeypatch.setattr(payload_store, "write", flaky_write)
-    response_id = str(uuid.uuid4())
 
-    assert await response_archive.archive_response(response_id, LOGGER)
-    assert payload_store.read(response_id, payload_store.ARA) == redis["blob"]
-
-
-async def test_a_redis_error_never_escapes(store, redis, monkeypatch):
-    monkeypatch.setattr(
-        shepherd_db.data_db_client,
-        "get",
-        AsyncMock(side_effect=ConnectionError("redis is down")),
-    )
-    assert not await response_archive.archive_response(str(uuid.uuid4()), LOGGER)
+    assert await _archive(ids)
+    assert (
+        await response_archive.load_archive(ids["response"], LOGGER)
+    ).response == RESPONSE
 
 
-@pytest.mark.parametrize("bad_id", ["../../etc/passwd", "abcd1234", "", None])
-async def test_an_id_that_is_not_a_uuid_has_no_archive(store, redis, bad_id):
-    assert not await response_archive.archive_response(bad_id, LOGGER)
-    assert await response_archive.load_response_bytes(bad_id, LOGGER) is None
-    assert await response_archive.load_logs(bad_id, LOGGER) == []
-    assert response_archive.load_response_sync(bad_id) is None
-    shepherd_db.data_db_client.get.assert_not_called()
-
-
-async def test_an_unreadable_archived_copy_reads_as_absent(store, redis):
-    response_id = str(uuid.uuid4())
-    payload_store.write(response_id, b"not a zstd frame", payload_store.ARA)
-    payload_store.write(response_id, b"not a zstd frame", payload_store.ARA_LOGS)
-
-    assert await response_archive.load_response_bytes(response_id, LOGGER) is None
-    assert response_archive.load_response_sync(response_id) is None
-    assert await response_archive.load_logs(response_id, LOGGER) == []
-
-
-async def test_a_store_that_hangs_costs_the_copy_not_the_query(
-    store, redis, monkeypatch
+async def test_a_store_that_hangs_costs_the_copy_not_the_worker(
+    store, redis, ids, monkeypatch
 ):
-    """The write is abandoned at the deadline instead of holding up the
-    delivery finish_query makes next."""
-    import asyncio
-    import threading
-
+    """The write is abandoned at the deadline instead of holding the
+    finish_query task (and its slot) for as long as the store hangs."""
     release = threading.Event()
     monkeypatch.setattr(payload_store, "write", lambda *a: release.wait(5))
     monkeypatch.setattr(response_archive, "ARCHIVE_TIMEOUT_SEC", 0.05)
     try:
-        archived = await asyncio.wait_for(
-            response_archive.archive_response(str(uuid.uuid4()), LOGGER), timeout=2
-        )
+        archived = await asyncio.wait_for(_archive(ids), timeout=2)
     finally:
         release.set()
     assert not archived
+
+
+@pytest.mark.parametrize("bad_id", ["../../etc/passwd", "abcd1234", "", None])
+async def test_an_id_that_is_not_a_uuid_has_no_archive(store, redis, ids, bad_id):
+    assert await response_archive.capture_response(bad_id, LOGGER) is None
+    assert not await response_archive.archive_query(
+        ids["query"], bad_id, zstandard.compress(RESPONSE), "OK", None, LOGGER
+    )
+    assert await response_archive.load_archive(bad_id, LOGGER) is None
+    assert response_archive.load_archive_sync(bad_id) is None
+    shepherd_db.data_db_client.get.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        b"not a zstd frame",
+        zstandard.compress(RESPONSE),  # one frame: not an archive
+        zstandard.compress(RESPONSE)[:-3],  # truncated
+        zstandard.compress(RESPONSE) * 2 + zstandard.compress(b"[]"),  # bad tail
+    ],
+)
+async def test_an_unreadable_archived_object_reads_as_absent(store, ids, stored):
+    payload_store.write(ids["response"], stored, payload_store.ARA)
+
+    assert await response_archive.load_archive(ids["response"], LOGGER) is None
+    with pytest.raises(Exception):
+        response_archive.load_archive_sync(ids["response"])

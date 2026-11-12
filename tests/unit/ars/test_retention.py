@@ -121,15 +121,12 @@ async def test_a_bucket_is_never_evicted_for_space(volume, monkeypatch):
 # --- the archive of ARA responses --------------------------------------------
 
 
-def archive(response_bytes, age_days=0.0, logs=True):
-    """An archived response (and its logs) last written ``age_days`` ago."""
+def archive(response_bytes, age_days=0.0):
+    """An archived response last written ``age_days`` ago."""
     response_id = uuid.uuid4()
-    kinds = [payload_store.ARA] + ([payload_store.ARA_LOGS] if logs else [])
-    for kind in kinds:
-        body = b"r" * response_bytes if kind == payload_store.ARA else b"logs"
-        payload_store.write(response_id, body, kind)
-        when = time.time() - age_days * 86400
-        os.utime(payload_store.path_for(response_id, kind), (when, when))
+    payload_store.write(response_id, b"r" * response_bytes, payload_store.ARA)
+    when = time.time() - age_days * 86400
+    os.utime(payload_store.path_for(response_id, payload_store.ARA), (when, when))
     return response_id
 
 
@@ -137,15 +134,13 @@ def archived(response_id):
     return payload_store.exists(response_id, payload_store.ARA)
 
 
-async def test_archived_responses_past_retention_are_purged_with_their_logs(volume):
+async def test_archived_responses_past_retention_are_purged(volume):
     old, fresh = archive(10, age_days=31), archive(10, age_days=29)
 
-    assert await retention.purge_expired_archive(30, LOGGER) == 2  # response + logs
+    assert await retention.purge_expired_archive(30, LOGGER) == 1
 
     assert not archived(old)
-    assert not payload_store.exists(old, payload_store.ARA_LOGS)
     assert archived(fresh)
-    assert payload_store.exists(fresh, payload_store.ARA_LOGS)
 
 
 async def test_the_archive_purge_leaves_ars_messages_alone(volume):
@@ -194,7 +189,6 @@ async def test_under_pressure_archived_responses_go_before_any_tree(volume):
     assert result["trees"] == 0
     volume["drop"].assert_not_called()
     assert not archived(ids["oldest"]) and not archived(ids["middle"])
-    assert not payload_store.exists(ids["oldest"], payload_store.ARA_LOGS)
     assert archived(ids["newest"])
 
 

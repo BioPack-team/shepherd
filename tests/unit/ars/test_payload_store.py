@@ -160,18 +160,16 @@ def test_each_payload_class_has_its_own_directory(store):
     pk = uuid.uuid4()
     payload_store.write(pk, b"ars message")
     payload_store.write(pk, b"ara response", payload_store.ARA)
-    payload_store.write(pk, b"ara logs", payload_store.ARA_LOGS)
 
     assert payload_store.path_for(pk, payload_store.ARA) == os.path.join(
         str(store), "ara", str(pk)[:2], f"{pk}.zst"
     )
     assert payload_store.read(pk) == b"ars message"
     assert payload_store.read(pk, payload_store.ARA) == b"ara response"
-    assert payload_store.read(pk, payload_store.ARA_LOGS) == b"ara logs"
 
     payload_store.delete(pk, payload_store.ARA)
     assert not payload_store.exists(pk, payload_store.ARA)
-    assert payload_store.exists(pk) and payload_store.exists(pk, payload_store.ARA_LOGS)
+    assert payload_store.exists(pk)
 
 
 def test_an_id_that_is_not_a_uuid_is_refused(store):
@@ -184,7 +182,6 @@ def test_entries_lists_one_class_and_skips_writes_in_progress(store):
     first, second = uuid.uuid4(), uuid.uuid4()
     payload_store.write(first, b"12345", payload_store.ARA)
     payload_store.write(second, b"1", payload_store.ARA)
-    payload_store.write(uuid.uuid4(), b"logs", payload_store.ARA_LOGS)
     payload_store.write(uuid.uuid4(), b"ars message")
     # a write another process has not finished yet
     directory = os.path.dirname(payload_store.path_for(first, payload_store.ARA))
@@ -283,7 +280,6 @@ def test_entries_lists_a_class_in_the_bucket(bucket):
     first, second = uuid.uuid4(), uuid.uuid4()
     payload_store.write(first, b"12345", payload_store.ARA)
     payload_store.write(second, b"1", payload_store.ARA)
-    payload_store.write(uuid.uuid4(), b"logs", payload_store.ARA_LOGS)
     payload_store.write(uuid.uuid4(), b"ars message")
 
     found = {e.message_id: e for e in payload_store.entries(payload_store.ARA)}

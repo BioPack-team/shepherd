@@ -597,9 +597,9 @@ class Settings(BaseSettings):
     payload_s3_endpoint_url: str = ""
     # The store also archives every ARA response as its pipeline finished it
     # (shepherd_utils/response_archive.py): finish_query writes it, with the
-    # query's logs, for direct and ARS-originated queries alike, and
-    # GET /response/{id} falls back to it once the Redis copy has expired.
-    # Days an archived response and its logs are kept; the ARS watchdog
+    # query and its logs in the same object, for direct and ARS-originated
+    # queries alike, and GET /response/{id} falls back to it once the Redis
+    # copy has expired. Days an archived response is kept; the ARS watchdog
     # purges older ones hourly. 0 keeps them until disk pressure evicts them.
     # Nothing is archived unless a store is configured above.
     ara_response_retention_days: int = 30

@@ -1114,19 +1114,19 @@ async def get_query_response(
         stored = await get_message(query_id, logger, raw=True)
     except KeyError:
         # Gone from Redis: serve the copy finish_query archived, which
-        # outlives it (shepherd_utils/response_archive.py).
-        stored = await response_archive.load_response_bytes(query_id, logger)
-        if stored is None:
+        # outlives it and carries its own query and logs
+        # (shepherd_utils/response_archive.py).
+        archive = await response_archive.load_archive(query_id, logger)
+        if archive is None:
             return JSONResponse(content={"error": "Not found"}, status_code=404)
-        logs = await response_archive.load_logs(query_id, logger)
+        stored, logs = archive.response, archive.logs
+        parameters = dict(query_parameters(archive.query))
+        del archive
     else:
         logs = await get_logs(query_id, logger)
-        if not logs:
-            # the log list can expire before the response does
-            logs = await response_archive.load_logs(query_id, logger)
-    # A stored response carries no parameters (save_response); the ones to
-    # repeat are its query's.
-    parameters = await get_response_query_parameters(query_id, logger)
+        # A stored response carries no parameters (save_response); the ones
+        # to repeat are its query's.
+        parameters = await get_response_query_parameters(query_id, logger)
     body = wrap_stored_response(stored, {"parameters": parameters}, logs)
     del stored
     return Response(content=body, media_type="application/json")

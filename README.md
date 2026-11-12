@@ -324,20 +324,25 @@ it.
 ##### Archived ARA responses
 
 The same store archives every ARA response. When a query's pipeline finishes,
-`finish_query` copies the response there exactly as the pipeline left it --
-before a callback envelope or the ARS's premerge touches it -- and the
-query's logs beside it, for queries submitted directly and ones the ARS
-dispatched alike. `GET /response/{id}` (and `/arax/response/{id}`) falls back
+`finish_query` keeps the response exactly as the pipeline left it -- before a
+callback envelope or the ARS's premerge touches it -- for queries submitted
+directly and ones the ARS dispatched alike. `GET /response/{id}` falls back
 to that copy once the Redis one has expired, so an ARA's answer stays
-readable for `ARA_RESPONSE_RETENTION_DAYS` rather than `REDIS_TTL`. The
-`parameters` echo comes from the stored query, so an archived response is
-served without it once that has expired too.
+readable for `ARA_RESPONSE_RETENTION_DAYS` rather than `REDIS_TTL`.
 
-Archiving is best-effort: a failed write is retried, logged, and the query
-is delivered regardless. It needs the store configured for `finish_query` as
-well as the server (the same volume mounted, or the same bucket settings);
-with no store configured, nothing is archived. Archived responses live under
-`ara/` and their logs under `ara-logs/`, beside the ARS payloads.
+Each query is one self-contained object under `ara/`, beside the ARS
+payloads: three zstd frames back to back -- the stored response, the query
+(which carries the `parameters` a served response repeats), and a tail with
+the query's final `status`, `description` and `logs`. The first two are the
+compressed bytes Redis held, copied without being decompressed, so archiving
+costs `finish_query` only the compressed size of a response. The routes take
+the object apart; clients get an ordinary TRAPI Response. To look at one
+directly: `zstd -dc <file> | jq -s .` prints the three documents.
+
+Archiving is best-effort: a failed write is retried (for at most 30 seconds),
+logged, and the query is delivered regardless. It needs the store configured
+for `finish_query` as well as the server (the same volume mounted, or the
+same bucket settings); with no store configured, nothing is archived.
 
 The ARS watchdog keeps it bounded, always working on whole finished trees
 (a parent with every child and merged version under it) so a tree is never
@@ -348,7 +353,7 @@ left half there, and never touching retained trees:
 | `ARS_PAYLOAD_EVICT_HIGH_PCT` / `ARS_PAYLOAD_EVICT_LOW_PCT` | `80` / `65` | Checked every pass (`ARS_WATCHDOG_INTERVAL_SEC`): once the payload volume is this full, evict archived ARA responses (oldest first) and then tree payloads -- uncached oldest first, then cache-backed least recently used (dropping their cache entries) -- until it is back under the low mark. |
 | `ARS_DATA_RETENTION_DAYS` | `30` | Hourly: drop the payloads of trees finished this long ago. Rows stay. |
 | `ARS_ROW_RETENTION_DAYS` | `90` | Hourly: delete the rows of trees finished this long ago. |
-| `ARA_RESPONSE_RETENTION_DAYS` | `30` | Hourly: delete archived ARA responses and logs written this long ago. Under disk pressure they are evicted, oldest first, before any tree. |
+| `ARA_RESPONSE_RETENTION_DAYS` | `30` | Hourly: delete archived ARA responses written this long ago. Under disk pressure they are evicted, oldest first, before any tree. |
 
 The rest of the database is aged out by the monitor's janitor
 (`QUERY_RETENTION_DAYS` for queries and callbacks, 30 days of monitor

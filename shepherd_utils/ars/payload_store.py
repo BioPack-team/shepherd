@@ -8,11 +8,10 @@ here, as one object per message holding the same zstd frame Redis holds:
   ``ars_message.data``. A single stress run of large merged results filled
   a 5GB Postgres volume, and freeing space inside Postgres doesn't return
   it to the disk.
-* ``ARA`` -- an ARA's response exactly as its pipeline finished it, written
-  by ``finish_query`` for every query, whether it came in directly or from
-  the ARS (shepherd_utils/response_archive.py).
-* ``ARA_LOGS`` -- that query's logs, so the archived response is still
-  debuggable once the Redis log list has expired.
+* ``ARA`` -- the archive of a finished ARA query: its response exactly as
+  the pipeline finished it, with its query and logs, written by
+  ``finish_query`` for every query, whether it came in directly or from the
+  ARS (shepherd_utils/response_archive.py).
 
 Two backends, chosen by configuration:
 
@@ -49,7 +48,6 @@ MessageId = Union[str, uuid.UUID]
 # live under; ARS messages keep the root, where they have always been.
 ARS = ""
 ARA = "ara"
-ARA_LOGS = "ara-logs"
 
 FILE = "file"
 S3 = "s3"
