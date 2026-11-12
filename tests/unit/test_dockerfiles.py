@@ -84,7 +84,12 @@ def test_every_compose_image_gets_the_base_context():
         assert build.get("additional_contexts", {}).get("shepherd_base") == (
             "service:shepherd_base"
         ), name
-    assert compose["services"]["shepherd_base"]["profiles"] == ["base"]
+    # The base is built, never run. `scale: 0` rather than a profile: some
+    # Compose versions drop a profile-disabled service before resolving
+    # `additional_contexts`, and then no image that builds on it can load.
+    base = compose["services"]["shepherd_base"]
+    assert base["scale"] == 0
+    assert "profiles" not in base
 
 
 def test_the_release_builds_every_image_on_this_releases_base():
