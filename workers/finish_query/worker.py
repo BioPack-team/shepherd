@@ -30,6 +30,7 @@ from shepherd_utils.db import (
     get_query_state,
     get_response_size,
     save_logs,
+    seal_response,
     set_query_completed,
 )
 from shepherd_utils.response_archive import (
@@ -527,7 +528,8 @@ async def finish_query(task, logger: logging.Logger):
             # and what gets delivered is the empty message saying so. It is
             # rewritten here rather than trusted: a merge pass that was
             # already in flight when the query was failed can have saved the
-            # big accumulator over the top of it.
+            # big accumulator over the top of it before this claim. Once the
+            # response is sealed below, no such write can land any more.
             status = TOO_LARGE_STATUS
             description = None
             logger.error(
@@ -536,6 +538,14 @@ async def finish_query(task, logger: logging.Logger):
             too_large_response = await write_too_large_response(
                 query_id, response_id, too_large, logger
             )
+        # From here on the response is final: seal it, so a task still
+        # running for this query (a merge pass in flight, a late callback, a
+        # redelivered or slow operation) has its write refused instead of
+        # replacing what is delivered. After the rewrite above, the last
+        # legitimate write; before anything below reads the response, so
+        # what is archived, handed to the ARS, POSTed to the callback or read
+        # by a sync caller are all the bytes that stay stored.
+        await seal_response(response_id, logger)
         # What gets archived is the response as the pipeline left it, so it
         # is read before anyone downstream is handed it (the ARS's premerge
         # processes what it gets). Compressed bytes only -- nothing is

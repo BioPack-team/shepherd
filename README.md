@@ -523,6 +523,36 @@ completing, the query is failed `RESPONSE_TOO_LARGE` instead of being retried.
 This is the always-on backstop for the case the caps were set too high to
 catch.
 
+##### A finished response is sealed
+
+Tasks are delivered at least once, so work for a query can still be running
+after the query has finished: a merge pass already in flight, a late
+callback, a redelivered or reclaimed task, a slow operation that outlived its
+query. Once `finish_query` has claimed a query it seals the response (a
+`response_sealed:<response_id>` key next to it in the data store), after its
+own last write -- the too-large rewrite, when there is one -- and before it
+reads the response to deliver, hand to the ARS or archive. What the caller
+gets is then exactly what stays stored.
+
+Every write of a stored message checks the seal in the same Redis
+transaction as the write (`WATCH`/`MULTI`/`EXEC`, retried on a conflict), so
+a writer cannot slip in between the check and the seal. A refused write
+leaves the response untouched and raises `ResponseSealedError`; the task
+lifecycle (and `merge_message`, which drops the query's ready callbacks)
+logs it once at WARNING with the worker and query, ACKs the task, and stops
+-- the query is not handed to its next operation, and not to `finish_query`
+again. Standard workers also check the seal before running an operation, so
+a task for a finished query is skipped rather than run for nothing.
+
+The seal lives `REDIS_TTL` from the moment it is set, so it always outlives
+the response (whose TTL was set by an earlier write, and is only ever
+shortened after archiving). The initial response written at intake comes
+before any seal; the abandoned-query reaper does not seal (a late
+`finish_query` may still claim and deliver an abandoned query), and every
+other way a query ends -- a failed or timed-out operation, a response
+discarded as too large, the post-restart recovery -- goes through
+`finish_query` and is sealed there.
+
 ##### Query intake limits
 
 `/{ara}/query` and `/{ara}/asyncquery` are unauthenticated, so intake bounds

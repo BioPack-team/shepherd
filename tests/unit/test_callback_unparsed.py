@@ -11,6 +11,7 @@ import copy
 import io
 import logging
 
+import fakeredis
 import orjson
 import pytest
 import zstandard
@@ -213,18 +214,19 @@ async def test_the_route_refuses_a_body_that_is_not_json(route):
 
 @pytest.fixture
 def sync_store(mocker):
-    storage = {}
-    client = mocker.Mock()
-    client.set.side_effect = lambda key, blob, ex=None: storage.__setitem__(key, blob)
-    client.get.side_effect = lambda key: storage.get(key)
+    # A real (fake) client: a save is a transaction checking the seal.
+    client = fakeredis.FakeRedis()
     mocker.patch("shepherd_utils.db._get_sync_data_db", return_value=client)
-    return storage
+    return client
 
 
 def test_read_callback_response_fills_in_what_is_missing(sync_store, caplog):
-    sync_store["cb"] = encode_callback_body(
-        orjson.dumps({"message": {"query_graph": {"nodes": {}}}}), False
-    )[0]
+    sync_store.set(
+        "cb",
+        encode_callback_body(
+            orjson.dumps({"message": {"query_graph": {"nodes": {}}}}), False
+        )[0],
+    )
 
     with caplog.at_level(logging.INFO):
         response = read_callback_response("cb", logger)
@@ -268,7 +270,7 @@ def test_read_callback_response_logs_a_long_id_list_as_its_count(sync_store, cap
     ],
 )
 def test_read_callback_response_skips_what_is_not_a_response(sync_store, blob, caplog):
-    sync_store["cb"] = blob
+    sync_store.set("cb", blob)
 
     assert read_callback_response("cb", logger) is None
     assert "cb" in caplog.text
@@ -282,7 +284,7 @@ def test_a_bad_callback_does_not_stop_the_rest_merging(sync_store):
     query_graph = response_1["message"]["query_graph"]
     save_message_sync("qid", {"message": {"query_graph": copy.deepcopy(query_graph)}})
     save_message_sync("rid", generate_response())
-    sync_store["bad"] = zstandard.compress(b'{"message": {"results": [')
+    sync_store.set("bad", zstandard.compress(b'{"message": {"results": ['))
     save_message_sync("good", copy.deepcopy(response_2))
 
     merged, entries = merge_messages_by_ids("test_ara", "qid", "rid", ["bad", "good"])

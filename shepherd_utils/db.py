@@ -686,6 +686,150 @@ async def add_query(
     logger.debug(f"Adding query took {time.time() - start} seconds")
 
 
+# ---------------------------------------------------------------------------
+# Response seal
+#
+# Once finish_query has claimed a query (``claim_query_finish``) its response
+# is final: it is about to be POSTed to a callback, handed to the ARS, read by
+# a sync caller and archived. Nothing else kept it that way. Delivery is at
+# least once, so a redelivered or reclaimed task, a merge pass already in
+# flight, a late callback or a slow operation could all still save over it.
+# finish_query therefore seals the response right after its own last write,
+# and every write of a message blob from then on checks the seal and is
+# refused (``ResponseSealedError``) instead of landing.
+#
+# The check and the write are one optimistic transaction (WATCH the seal,
+# check it, MULTI/SET/EXEC, retry on WatchError), so a writer that checked
+# just before the seal went on cannot slip its write in after it: setting the
+# seal changes the watched key, its EXEC is aborted, and the retry sees the
+# seal. Not a Lua script, which would be one round trip fewer but which the
+# fakeredis the tests run on cannot execute.
+#
+# The guard is in the lowest-level writers (``save_encoded_message`` and
+# ``save_message_sync``), not just ``save_response``, so no path that stores a
+# blob by a sealed id gets around it. An id that is never sealed -- a query, a
+# callback payload, an ARS message -- costs one EXISTS on top of the SET.
+# ``add_query`` writes the initial response with a plain SET: nothing can be
+# sealed before the query exists.
+# ---------------------------------------------------------------------------
+
+_SEALED_PREFIX = "response_sealed:"
+# WatchError retries before giving up on a write. The seal is set once per
+# query, so a second abort is already unlikely; this only bounds a pathological
+# churn of the seal key. A give-up raises the WatchError, which the callers'
+# ordinary failure handling (retries, then raise or log) deals with.
+SEAL_WATCH_ATTEMPTS = 5
+
+
+def sealed_key(response_id: str) -> str:
+    return f"{_SEALED_PREFIX}{response_id}"
+
+
+class ResponseSealedError(Exception):
+    """A write to a response whose query has already finished was refused.
+
+    Its own type, rather than a plain failure, because it is not one: the
+    query is done and its response is exactly what was delivered, so the
+    writer has nothing to retry and nothing to report to the caller. Treated
+    as a failure it would be retried, and then sent to ``finish_query`` as an
+    ERROR -- which is refused by the claim anyway, but only after logging an
+    error with a traceback for a query that went fine. The task lifecycle
+    (``run_task_lifecycle``) and the merge worker catch it, log it once at
+    WARNING, ACK the task and stop, without handing the query on to its next
+    operation. It always propagates out of the save functions, whatever
+    ``raise_on_failure`` says: that flag is about losing a write to a storage
+    failure, and here there is nothing lost.
+
+    Built from the id alone so it pickles: process-pool children raise it to
+    their parent.
+    """
+
+    def __init__(self, response_id: str):
+        super().__init__(response_id)
+        self.response_id = response_id
+
+    def __str__(self) -> str:
+        return (
+            f"response {self.response_id} is sealed: its query has already "
+            "finished, so the write was refused"
+        )
+
+
+async def seal_response(response_id: str, logger: logging.Logger) -> bool:
+    """Seal ``response_id``: from now on every write of it is refused.
+
+    Lives ``redis_ttl`` from now. The response's own TTL was set by its last
+    write, which came before this (later ones are refused), and is only ever
+    shortened after that (``release_hot_copies``), so the seal always outlives
+    the response it protects. Idempotent: a finish_query that takes over a
+    crashed finisher's claim seals again, which only pushes the seal's expiry
+    further out.
+
+    True once sealed. A Redis failure is retried and then logged, not raised:
+    the seal protects the delivery, and losing it must not cost the caller
+    their response.
+    """
+    for attempt in range(REDIS_RETRIES):
+        try:
+            await data_db_client.set(
+                sealed_key(response_id), b"1", ex=settings.redis_ttl
+            )
+            return True
+        except Exception as e:
+            if attempt == REDIS_RETRIES - 1:
+                logger.error(
+                    f"Could not seal response {response_id}; a late task could "
+                    f"still overwrite it: {e}"
+                )
+                return False
+            await asyncio.sleep(0.1 * (2**attempt))
+    return False
+
+
+async def is_response_sealed(response_id: str) -> bool:
+    """Whether ``response_id``'s query has finished (``seal_response``)."""
+    return bool(await data_db_client.exists(sealed_key(response_id)))
+
+
+async def _set_unless_sealed(message_id: str, blob: bytes) -> None:
+    """SET ``message_id`` for ``redis_ttl``, atomically with a check that it
+    is not sealed. Raises ``ResponseSealedError`` if it is."""
+    seal = sealed_key(message_id)
+    async with data_db_client.pipeline(transaction=True) as pipe:
+        for attempt in range(SEAL_WATCH_ATTEMPTS):
+            try:
+                await pipe.watch(seal)
+                if await pipe.exists(seal):
+                    raise ResponseSealedError(message_id)
+                pipe.multi()
+                pipe.set(message_id, blob, ex=settings.redis_ttl)
+                await pipe.execute()
+                return
+            except redis.WatchError:
+                # The seal changed between the check and the EXEC; nothing
+                # was written. Look again.
+                if attempt == SEAL_WATCH_ATTEMPTS - 1:
+                    raise
+
+
+def _set_unless_sealed_sync(message_id: str, blob: bytes) -> None:
+    """``_set_unless_sealed`` for the process-pool workers."""
+    seal = sealed_key(message_id)
+    with _get_sync_data_db().pipeline(transaction=True) as pipe:
+        for attempt in range(SEAL_WATCH_ATTEMPTS):
+            try:
+                pipe.watch(seal)
+                if pipe.exists(seal):
+                    raise ResponseSealedError(message_id)
+                pipe.multi()
+                pipe.set(message_id, blob, ex=settings.redis_ttl)
+                pipe.execute()
+                return
+            except redis.WatchError:
+                if attempt == SEAL_WATCH_ATTEMPTS - 1:
+                    raise
+
+
 async def save_message(
     callback_id: str,
     response: dict[str, Any],
@@ -726,11 +870,14 @@ async def save_encoded_message(
     raise_on_failure: bool = False,
 ):
     """Store an already-encoded message blob, retrying as ``save_message``
-    does."""
+    does. Raises ``ResponseSealedError``, without retrying, for a sealed
+    response (``seal_response``)."""
     start = time.time()
     try:
-        await data_db_client.set(message_id, blob, ex=settings.redis_ttl)
+        await _set_unless_sealed(message_id, blob)
         logger.debug(f"Saving message took {time.time() - start} seconds")
+    except ResponseSealedError:
+        raise
     except Exception as e:
         # failed to put message in db
         if num_tries < 4:
@@ -794,6 +941,10 @@ async def save_response(
     the workflow carry on from the previous one, as if the operation had
     produced nothing; raising sends the query to ``finish_query`` as an error
     instead.
+
+    Once the query has finished its response is sealed, and this raises
+    ``ResponseSealedError`` (whatever ``raise_on_failure`` says) and leaves
+    the stored response as it was delivered.
     """
     kwargs.setdefault("raise_on_failure", True)
     await save_message(response_id, prepare_stored_response(response), logger, **kwargs)
@@ -1186,16 +1337,14 @@ def get_message_sync(message_id: str) -> Dict:
 
 
 def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
-    """Synchronously encode and store a message in the data db."""
-    _get_sync_data_db().set(
-        message_id,
-        encode_message(message),
-        ex=settings.redis_ttl,
-    )
+    """Synchronously encode and store a message in the data db. Raises
+    ``ResponseSealedError`` for a sealed response (``seal_response``)."""
+    _set_unless_sealed_sync(message_id, encode_message(message))
 
 
 def save_response_sync(response_id: str, response: dict[str, Any]) -> None:
-    """``save_response`` for the process-pool workers."""
+    """``save_response`` for the process-pool workers. Raises
+    ``ResponseSealedError`` once the query has finished."""
     save_message_sync(response_id, prepare_stored_response(response))
 
 

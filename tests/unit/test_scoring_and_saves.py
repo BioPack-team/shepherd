@@ -89,7 +89,8 @@ def store_down(redis_mock, monkeypatch):
     async def _set(*args, **kwargs):
         raise ConnectionError("redis unavailable")
 
-    monkeypatch.setattr(redis_mock["data"], "set", _set)
+    # Every message write goes through the seal-checking transaction.
+    monkeypatch.setattr(db, "_set_unless_sealed", _set)
     monkeypatch.setattr(db.asyncio, "sleep", AsyncMock())
 
 

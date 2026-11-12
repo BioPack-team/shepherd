@@ -107,7 +107,14 @@ async def write_too_large_response(
 
     Idempotent, and safe to call again later: a merge pass that was already in
     flight when the query was failed can save the big accumulator over the
-    top of this, so ``finish_query`` rewrites it before delivering.
+    top of this before the query finishes, so ``finish_query`` rewrites it
+    once more and only then seals the response (``seal_response``).
+
+    Once sealed, the write is refused and the stored copy left alone: it is
+    the one the finished query was delivered with. That happens to a
+    ``finish_query`` taking over a crashed finisher's claim (which sealed
+    after writing this same message) and to a task that only gets here after
+    the query finished; neither has anything to rewrite.
     """
     query_graph = None
     try:
@@ -122,7 +129,10 @@ async def write_too_large_response(
     # ``finish_query`` delivers the response returned here (rewriting the
     # stored copy again first), so a failed save must not stop the query
     # being failed cleanly.
-    await _db.save_response(response_id, response, logger, raise_on_failure=False)
+    try:
+        await _db.save_response(response_id, response, logger, raise_on_failure=False)
+    except _db.ResponseSealedError as e:
+        logger.warning(f"Not rewriting the too-large response of {query_id}: {e}")
     return response
 
 
