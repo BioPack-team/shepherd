@@ -200,7 +200,7 @@ class Settings(BaseSettings):
     arax_background_tasks: bool = True
     # The remote ARAX service the arax worker sends queries to on the legacy
     # path. The other path runs ARAX in-process (DEC-14).
-    arax_url: str = "https://arax.ncats.io/shepherd/api/arax/v1.4/query"
+    arax_url: str = "https://arax.ncats.io/beta/api/arax/v2.0/query"
     # Which path an ARAX query takes when it doesn't set
     # parameters.arax_internal itself: false sends it to arax_url, true runs it
     # in-process.

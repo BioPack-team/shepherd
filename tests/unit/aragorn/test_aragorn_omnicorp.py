@@ -458,8 +458,11 @@ def test_aragorn_omnicorp_loads_overlays_saves_and_preserves_workflow(
         lambda response_id, message: saved.update({response_id: message}),
     )
 
-    logger = logging.getLogger(__name__)
-    worker.aragorn_omnicorp("resp-1", logger)
+    entries = worker.aragorn_omnicorp("resp-1", logging.INFO)
+
+    # The child's log records come back for the parent to fold into the
+    # query's logs.
+    assert any("Omnicorp complete" in e["message"] for e in entries)
 
     # The overlaid message was written back under its id.
     assert "resp-1" in saved

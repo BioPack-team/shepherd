@@ -10,6 +10,7 @@ where to send it.
     python scripts/run_query.py bte-dev -t mvp2-chem-increased -c CHEBI:85078
     python scripts/run_query.py aragorn-local -t pathfinder -c "CHEBI:45783~MONDO:0004979"
     python scripts/run_query.py arax-local --async --callback-host 172.17.0.1
+    python scripts/run_query.py arax-local -c MONDO:0005148 --arax-internal
     python scripts/run_query.py http://localhost:5439/arax --query-file my_query.json
     python scripts/run_query.py --list                              # targets, types, curies
     python scripts/run_query.py aragorn-local -t mvp2-increased --print-query
@@ -72,6 +73,7 @@ SHEPHERD_HOSTS = {
     "dev": "https://shepherd.renci.org",
     "ci": "https://shepherd.ci.transltr.io",
     "test": "https://shepherd.test.transltr.io",
+    "prod": "https://shepherd.transltr.io",
 }
 SHEPHERD_ARAS = ("aragorn", "arax", "bte")
 
@@ -282,6 +284,7 @@ MVP2_CHEMICALS = [
     "CHEBI:85078",
     "CHEBI:167574",
     "CHEBI:41879",
+    "CHEBI:142437",
 ]
 
 PATHFINDER_PAIRS = [
@@ -335,6 +338,8 @@ def finalize_query(query: dict, kind: str, args) -> dict:
         parameters["bypass_cache"] = True
     if args.timeout_param is not None:
         parameters["timeout"] = args.timeout_param
+    if args.arax_internal is not None:
+        parameters["arax_internal"] = args.arax_internal
     if parameters:
         query["parameters"] = parameters
     if kind == "ara":
@@ -851,6 +856,14 @@ def parse_args(argv=None):
         type=int,
         metavar="SECONDS",
         help="set parameters.timeout",
+    )
+    query.add_argument(
+        "--arax-internal",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="set parameters.arax_internal: --arax-internal runs the query in "
+        "Shepherd's ARAX port, --no-arax-internal sends it to the deployed "
+        "ARAX (default: unset, the server's arax_internal_default decides)",
     )
     query.add_argument(
         "--submitter", default="Max", help="ARA queries' submitter (default Max)"

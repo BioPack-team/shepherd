@@ -142,7 +142,7 @@ def test_pathfinder_task_searches_rehydrates_and_saves(mocker):
     )
     save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
-    pf_worker.arax_pathfinder_task("query-1", "resp-1", {}, LOGGER)
+    pf_worker.arax_pathfinder_task("query-1", "resp-1", {}, logging.INFO)
 
     search.assert_called_once()
     rehydrate.assert_called_once()
@@ -196,7 +196,7 @@ def test_pathfinder_task_saves_empty_graphs_when_no_paths_found(mocker):
     mocker.patch("workers.arax_pathfinder.worker.rehydrate", return_value=None)
     save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
-    pf_worker.arax_pathfinder_task("query-2", "resp-2", {}, LOGGER)
+    pf_worker.arax_pathfinder_task("query-2", "resp-2", {}, logging.INFO)
 
     _, message = save.call_args.args
     assert message["message"]["results"] == []
@@ -242,7 +242,7 @@ def test_kg_without_edges_is_saved_with_an_empty_edges_map(mocker):
     )
     save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
-    pf_worker.arax_pathfinder_task("query-6", "resp-6", {}, LOGGER)
+    pf_worker.arax_pathfinder_task("query-6", "resp-6", {}, logging.INFO)
 
     _, message = save.call_args.args
     assert message["message"]["knowledge_graph"]["edges"] == {}
@@ -325,7 +325,7 @@ def test_unanswerable_query_graph_raises(mocker, qgraph, expected):
     search = mocker.patch("workers.arax_pathfinder.worker.execute_pathfinding")
 
     with pytest.raises(ValueError, match=expected):
-        pf_worker.arax_pathfinder_task("query-3", "resp-3", {}, LOGGER)
+        pf_worker.arax_pathfinder_task("query-3", "resp-3", {}, logging.INFO)
 
     search.assert_not_called()
     save.assert_not_called()
@@ -346,7 +346,7 @@ def test_search_failure_propagates_instead_of_saving_error_blob(mocker):
     save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
     with pytest.raises(RuntimeError, match="sqlite is on fire"):
-        pf_worker.arax_pathfinder_task("query-4", "resp-4", {}, LOGGER)
+        pf_worker.arax_pathfinder_task("query-4", "resp-4", {}, logging.INFO)
 
     save.assert_not_called()
 
@@ -365,7 +365,7 @@ def test_rehydrate_failure_propagates(mocker):
     save = mocker.patch("workers.arax_pathfinder.worker.save_response_sync")
 
     with pytest.raises(RuntimeError, match="retriever unreachable"):
-        pf_worker.arax_pathfinder_task("query-5", "resp-5", {}, LOGGER)
+        pf_worker.arax_pathfinder_task("query-5", "resp-5", {}, logging.INFO)
 
     save.assert_not_called()
 
