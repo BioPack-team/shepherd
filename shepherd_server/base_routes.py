@@ -36,7 +36,7 @@ from shepherd_utils.db import (
     encode_callback_body,
     save_encoded_message,
 )
-from shepherd_utils import completion
+from shepherd_utils import completion, response_archive
 from shepherd_utils.logger import (
     attach_query_handler,
     transient_logger,
@@ -1113,8 +1113,17 @@ async def get_query_response(
         # delivery does.
         stored = await get_message(query_id, logger, raw=True)
     except KeyError:
-        return JSONResponse(content={"error": "Not found"}, status_code=404)
-    logs = await get_logs(query_id, logger)
+        # Gone from Redis: serve the copy finish_query archived, which
+        # outlives it (shepherd_utils/response_archive.py).
+        stored = await response_archive.load_response_bytes(query_id, logger)
+        if stored is None:
+            return JSONResponse(content={"error": "Not found"}, status_code=404)
+        logs = await response_archive.load_logs(query_id, logger)
+    else:
+        logs = await get_logs(query_id, logger)
+        if not logs:
+            # the log list can expire before the response does
+            logs = await response_archive.load_logs(query_id, logger)
     # A stored response carries no parameters (save_response); the ones to
     # repeat are its query's.
     parameters = await get_response_query_parameters(query_id, logger)

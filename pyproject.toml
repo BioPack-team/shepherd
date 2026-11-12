@@ -6,6 +6,9 @@ authors = [{ name = "Max Wang", email = "max@covar.com" }]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  # The S3 backend of the cold payload store
+  # (shepherd_utils/ars/payload_store.py); imported only when a bucket is set.
+  "boto3~=1.35",
   "fastapi~=0.110",
   "httpx~=0.28",
   "opentelemetry-api==1.42.1",

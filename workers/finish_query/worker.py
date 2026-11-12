@@ -32,6 +32,7 @@ from shepherd_utils.db import (
     save_logs,
     set_query_completed,
 )
+from shepherd_utils.response_archive import archive_logs, archive_response
 from shepherd_utils.response_limit import (
     TOO_LARGE_STATUS,
     fail_response_too_large,
@@ -495,6 +496,8 @@ async def finish_query(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
+    # whether this task is the one that finished the query (and so archives it)
+    archived = False
     status = task[1].get("status", "OK")
     # Client-safe reason a failed operation gave for how the query ends (a
     # QueryError's description, e.g. "BTE does not support Pathfinder type
@@ -528,6 +531,12 @@ async def finish_query(task, logger: logging.Logger):
             too_large_response = await write_too_large_response(
                 query_id, response_id, too_large, logger
             )
+        # Archive the response as the pipeline left it, before anyone
+        # downstream gets it (the ARS's premerge processes what it is
+        # handed). Best-effort and bounded in time: a failed or hung archive
+        # write never stops the delivery.
+        archived = True
+        await archive_response(response_id, logger)
         callback_url = query_state[8]
         ars_child_pk = parse_handoff_callback(callback_url)
         if ars_child_pk is not None:
@@ -652,6 +661,9 @@ async def finish_query(task, logger: logging.Logger):
         await save_logs(response_id, logger)
     except Exception as e:
         logger.error(f"Failed to save logs for {response_id}: {e}")
+    if archived:
+        # after the flush above, so the archived logs include this worker's
+        await archive_logs(response_id, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):

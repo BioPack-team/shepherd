@@ -307,6 +307,8 @@ services:
     environment:
       <<: *postgres_budget
       CALLBACK_ALLOWED_HOSTS: *callback_allowed_hosts
+      # finish_query archives every finished ARA response to the cold store
+      ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -315,6 +317,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      - ./ars_payloads:/app/ars_payloads
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
     environment:

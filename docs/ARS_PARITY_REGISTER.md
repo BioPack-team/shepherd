@@ -190,7 +190,7 @@ Infrastructure substitutions (behavior-preserving by definition):
 | Upstream | Port |
 |---|---|
 | Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.notify`) + the `ars_watchdog` loop |
-| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` when set, else `ars_message.data` bytea |
+| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` (or an object in `PAYLOAD_S3_BUCKET`) when set, else `ars_message.data` bytea |
 | `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent, lock-and-drain: `ars_premerge` records each validated child in a merge-ready index and wakes `ars.merge`; the worker that wins the parent's lock folds every ready child in arrival order and a loser simply acks (the semaphore column is still maintained for envelope parity; see deviation 17) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
 | self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |

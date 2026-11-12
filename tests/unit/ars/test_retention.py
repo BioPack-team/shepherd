@@ -9,6 +9,8 @@ it evicts, and says how far short it fell when nothing evictable is left.
 
 import json
 import logging
+import os
+import time
 import uuid
 from unittest.mock import AsyncMock
 
@@ -33,7 +35,7 @@ def volume(tmp_path, monkeypatch, mocker):
     monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
     monkeypatch.setattr(settings, "ars_payload_evict_high_pct", 80.0)
     monkeypatch.setattr(settings, "ars_payload_evict_low_pct", 65.0)
-    state = {"used": 0, "queue": []}
+    state = {"used": 0, "queue": [], "monkeypatch": monkeypatch}
     monkeypatch.setattr(payload_store, "usage", lambda: (state["used"], 100 * GB))
 
     async def candidates(limit):
@@ -98,9 +100,132 @@ async def test_nothing_happens_without_a_payload_directory(monkeypatch):
     monkeypatch.setattr(settings, "ars_payload_dir", "")
     assert await retention.evict_for_space(LOGGER) == {
         "trees": 0,
+        "archived_responses": 0,
         "freed_bytes": 0,
         "short_bytes": 0,
     }
+
+
+async def test_a_bucket_is_never_evicted_for_space(volume, monkeypatch):
+    """S3 has no capacity: the volume's usage is not even looked at."""
+    monkeypatch.setattr(settings, "payload_s3_bucket", "shepherd-payloads")
+    volume["used"] = 99 * GB
+    volume["queue"] = [tree(30)]
+
+    result = await retention.evict_for_space(LOGGER)
+
+    assert result["trees"] == 0 and "total_bytes" not in result
+    volume["drop"].assert_not_called()
+
+
+# --- the archive of ARA responses --------------------------------------------
+
+
+def archive(response_bytes, age_days=0.0, logs=True):
+    """An archived response (and its logs) last written ``age_days`` ago."""
+    response_id = uuid.uuid4()
+    kinds = [payload_store.ARA] + ([payload_store.ARA_LOGS] if logs else [])
+    for kind in kinds:
+        body = b"r" * response_bytes if kind == payload_store.ARA else b"logs"
+        payload_store.write(response_id, body, kind)
+        when = time.time() - age_days * 86400
+        os.utime(payload_store.path_for(response_id, kind), (when, when))
+    return response_id
+
+
+def archived(response_id):
+    return payload_store.exists(response_id, payload_store.ARA)
+
+
+async def test_archived_responses_past_retention_are_purged_with_their_logs(volume):
+    old, fresh = archive(10, age_days=31), archive(10, age_days=29)
+
+    assert await retention.purge_expired_archive(30, LOGGER) == 2  # response + logs
+
+    assert not archived(old)
+    assert not payload_store.exists(old, payload_store.ARA_LOGS)
+    assert archived(fresh)
+    assert payload_store.exists(fresh, payload_store.ARA_LOGS)
+
+
+async def test_the_archive_purge_leaves_ars_messages_alone(volume):
+    message = uuid.uuid4()
+    payload_store.write(message, b"merged result")
+    when = time.time() - 400 * 86400
+    os.utime(payload_store.path_for(message), (when, when))
+
+    assert await retention.purge_expired_archive(30, LOGGER) == 0
+    assert payload_store.exists(message)
+
+
+async def test_the_archive_purge_is_off_at_zero_days_or_without_a_store(
+    volume, monkeypatch
+):
+    old = archive(10, age_days=400)
+    assert await retention.purge_expired_archive(0, LOGGER) == 0
+    assert archived(old)
+    monkeypatch.setattr(settings, "ars_payload_dir", "")
+    assert await retention.purge_expired_archive(30, LOGGER) == 0
+
+
+async def test_under_pressure_archived_responses_go_before_any_tree(volume):
+    """85 GB used of 100: 20 GB must go. The archive covers it, oldest
+    first, so no tree -- a result a client may come back for -- is touched."""
+    volume["used"] = 85 * GB
+    volume["queue"] = [tree(30)]
+    sizes = {"oldest": 15, "middle": 10, "newest": 10}
+    ids = {
+        "oldest": archive(sizes["oldest"], age_days=3),
+        "middle": archive(sizes["middle"], age_days=2),
+        "newest": archive(sizes["newest"], age_days=1),
+    }
+    real_entries = payload_store.entries
+
+    def entries_in_gb(kind):
+        for entry in real_entries(kind):
+            yield entry._replace(size=entry.size * GB)
+
+    volume["monkeypatch"].setattr(payload_store, "entries", entries_in_gb)
+
+    result = await retention.evict_for_space(LOGGER)
+
+    assert result["archived_responses"] == 2
+    assert result["freed_bytes"] == 25 * GB
+    assert result["trees"] == 0
+    volume["drop"].assert_not_called()
+    assert not archived(ids["oldest"]) and not archived(ids["middle"])
+    assert not payload_store.exists(ids["oldest"], payload_store.ARA_LOGS)
+    assert archived(ids["newest"])
+
+
+async def test_trees_are_evicted_only_for_what_the_archive_cannot_free(volume):
+    volume["used"] = 85 * GB
+    volume["queue"] = [tree(30), tree(30)]
+    only = archive(5)
+    real_entries = payload_store.entries
+
+    def entries_in_gb(kind):
+        for entry in real_entries(kind):
+            yield entry._replace(size=entry.size * GB)
+
+    volume["monkeypatch"].setattr(payload_store, "entries", entries_in_gb)
+
+    result = await retention.evict_for_space(LOGGER)
+
+    assert not archived(only)
+    assert result["archived_responses"] == 1
+    assert result["trees"] == 1  # 5 GB from the archive, then one 30 GB tree
+    assert result["freed_bytes"] == 35 * GB
+
+
+async def test_a_failing_archive_eviction_still_evicts_trees(volume, mocker):
+    volume["used"] = 85 * GB
+    volume["queue"] = [tree(30)]
+    mocker.patch.object(retention, "_evict_archive", side_effect=OSError("io error"))
+
+    result = await retention.evict_for_space(LOGGER)
+
+    assert result["trees"] == 1
 
 
 async def test_usage_is_published_for_the_monitor(volume, redis_mock, mocker):

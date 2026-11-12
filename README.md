@@ -307,10 +307,37 @@ results stay readable after the Redis copy expires. Set `ARS_PAYLOAD_DIR` to
 keep those copies as files on a volume instead of in Postgres -- a single
 stress run of large merged results otherwise fills a small Postgres volume,
 and space freed inside Postgres is never returned to the disk. The directory
-must be shared by the server and every `ars_*` worker that writes or reads
-payloads (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_watchdog`), so in
+must be shared by the server, `finish_query` and every `ars_*` worker that
+writes or reads payloads (`ars_fanout`, `ars_premerge`, `ars_merge`,
+`ars_watchdog`), so in
 Kubernetes it is a `ReadWriteMany` volume; compose mounts `./ars_payloads`.
 Copies already in Postgres stay readable. Unset, payloads stay in Postgres.
+
+Set `PAYLOAD_S3_BUCKET` to keep the same store in an S3 bucket instead (with
+both set, the bucket is used). Objects keep the directory layout as their
+keys, under `PAYLOAD_S3_PREFIX`, so a directory can be copied into a bucket
+as it is. Credentials and region come from the standard AWS chain (the pod's
+IAM role); `PAYLOAD_S3_ENDPOINT_URL` points it at an S3-compatible service.
+A bucket cannot fill, so the disk-pressure eviction below does not apply to
+it.
+
+##### Archived ARA responses
+
+The same store archives every ARA response. When a query's pipeline finishes,
+`finish_query` copies the response there exactly as the pipeline left it --
+before a callback envelope or the ARS's premerge touches it -- and the
+query's logs beside it, for queries submitted directly and ones the ARS
+dispatched alike. `GET /response/{id}` (and `/arax/response/{id}`) falls back
+to that copy once the Redis one has expired, so an ARA's answer stays
+readable for `ARA_RESPONSE_RETENTION_DAYS` rather than `REDIS_TTL`. The
+`parameters` echo comes from the stored query, so an archived response is
+served without it once that has expired too.
+
+Archiving is best-effort: a failed write is retried, logged, and the query
+is delivered regardless. It needs the store configured for `finish_query` as
+well as the server (the same volume mounted, or the same bucket settings);
+with no store configured, nothing is archived. Archived responses live under
+`ara/` and their logs under `ara-logs/`, beside the ARS payloads.
 
 The ARS watchdog keeps it bounded, always working on whole finished trees
 (a parent with every child and merged version under it) so a tree is never
@@ -318,9 +345,10 @@ left half there, and never touching retained trees:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `ARS_PAYLOAD_EVICT_HIGH_PCT` / `ARS_PAYLOAD_EVICT_LOW_PCT` | `80` / `65` | Checked every pass (`ARS_WATCHDOG_INTERVAL_SEC`): once the payload volume is this full, evict tree payloads -- uncached oldest first, then cache-backed least recently used (dropping their cache entries) -- until it is back under the low mark. |
+| `ARS_PAYLOAD_EVICT_HIGH_PCT` / `ARS_PAYLOAD_EVICT_LOW_PCT` | `80` / `65` | Checked every pass (`ARS_WATCHDOG_INTERVAL_SEC`): once the payload volume is this full, evict archived ARA responses (oldest first) and then tree payloads -- uncached oldest first, then cache-backed least recently used (dropping their cache entries) -- until it is back under the low mark. |
 | `ARS_DATA_RETENTION_DAYS` | `30` | Hourly: drop the payloads of trees finished this long ago. Rows stay. |
 | `ARS_ROW_RETENTION_DAYS` | `90` | Hourly: delete the rows of trees finished this long ago. |
+| `ARA_RESPONSE_RETENTION_DAYS` | `30` | Hourly: delete archived ARA responses and logs written this long ago. Under disk pressure they are evicted, oldest first, before any tree. |
 
 The rest of the database is aged out by the monitor's janitor
 (`QUERY_RETENTION_DAYS` for queries and callbacks, 30 days of monitor

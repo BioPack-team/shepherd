@@ -586,6 +586,23 @@ class Settings(BaseSettings):
     # in Kubernetes). Empty keeps payloads in Postgres. Payloads already in
     # Postgres stay readable either way.
     ars_payload_dir: str = ""
+    # The same store in an S3 bucket instead of a directory (and with both
+    # set, the bucket is used). Objects keep the directory layout as their
+    # keys, under payload_s3_prefix. Credentials and region come from the
+    # standard AWS chain (the pod's IAM role). payload_s3_endpoint_url is for
+    # an S3-compatible service such as MinIO. A bucket has no capacity, so the
+    # disk-pressure eviction below never runs against it.
+    payload_s3_bucket: str = ""
+    payload_s3_prefix: str = ""
+    payload_s3_endpoint_url: str = ""
+    # The store also archives every ARA response as its pipeline finished it
+    # (shepherd_utils/response_archive.py): finish_query writes it, with the
+    # query's logs, for direct and ARS-originated queries alike, and
+    # GET /response/{id} falls back to it once the Redis copy has expired.
+    # Days an archived response and its logs are kept; the ARS watchdog
+    # purges older ones hourly. 0 keeps them until disk pressure evicts them.
+    # Nothing is archived unless a store is configured above.
+    ara_response_retention_days: int = 30
     # Disk-pressure eviction on that volume (shepherd_utils/ars/retention.py).
     # Once it is this full, the watchdog evicts the payloads of whole finished
     # trees, oldest first, until it is back under the low mark. Trees backing

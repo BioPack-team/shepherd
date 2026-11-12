@@ -55,7 +55,7 @@ from shepherd_server.base_routes import (
 )
 from shepherd_server.aras import arax_status
 from shepherd_server.openapi import set_open_api_schema
-from shepherd_utils import completion
+from shepherd_utils import completion, response_archive
 from shepherd_utils.arax_progress import is_done, read_progress
 from shepherd_utils.config import settings
 from shepherd_utils.process_pool import ProcessPoolManager
@@ -422,7 +422,8 @@ def finish_stored_response(response_id: str, parameters: dict, logs: list):
     try:
         envelope = get_message_sync(response_id)
     except KeyError:
-        return response_lookup.not_found(response_id)
+        # gone from Redis: the copy finish_query archived outlives it
+        envelope = response_archive.load_response_sync(response_id)
     if not isinstance(envelope, dict) or "message" not in envelope:
         return response_lookup.not_found(response_id)
     finalize_response(envelope, {"parameters": parameters}, logs)
@@ -436,6 +437,9 @@ async def _load_stored_response(response_id: str):
     logger = logging.getLogger("shepherd.arax.response")
     parameters = await arax_status.query_parameters_for_response(response_id)
     logs = await get_logs(response_id, logger)
+    if not logs:
+        # the log list can expire before (or with) the response
+        logs = await response_archive.load_logs(response_id, logger)
     return await _run_in_pool(finish_stored_response, response_id, parameters, logs)
 
 

@@ -389,3 +389,174 @@ async def test_finish_query_gives_up_on_a_long_postgres_outage(redis_mock, mocke
             logging.getLogger(__name__),
         )
     mock_post.assert_not_called()
+
+
+# --- the archive of finished responses (#252) --------------------------------
+
+
+def _archive_spies(mocker, events):
+    """Record the order finish_query archives, hands off and saves logs in."""
+
+    async def _archive_response(response_id, logger):
+        events.append(("archive_response", response_id))
+        return True
+
+    async def _archive_logs(response_id, logger):
+        events.append(("archive_logs", response_id))
+        return True
+
+    async def _save_logs(response_id, logger):
+        events.append(("save_logs", response_id))
+
+    async def _add_task(stream, *args, **kwargs):
+        events.append(("add_task", stream))
+
+    mocker.patch(
+        "workers.finish_query.worker.archive_response", side_effect=_archive_response
+    )
+    mocker.patch("workers.finish_query.worker.archive_logs", side_effect=_archive_logs)
+    mocker.patch("workers.finish_query.worker.save_logs", side_effect=_save_logs)
+    return _add_task
+
+
+@pytest.mark.asyncio
+async def test_the_response_is_archived_before_the_ars_is_handed_it(redis_mock, mocker):
+    """The ARS's premerge rewrites the response it is handed, so the raw copy
+    has to be in the cold store first; the logs follow once this worker has
+    flushed its own."""
+    import uuid
+
+    from shepherd_utils.ars.handoff import handoff_callback_url
+
+    response_id = str(uuid.uuid4())
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, handoff_callback_url(uuid.uuid4())],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+    events = []
+    add_task = _archive_spies(mocker, events)
+    mocker.patch("workers.finish_query.worker.add_task", side_effect=add_task)
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}],
+        logging.getLogger(__name__),
+    )
+
+    assert events == [
+        ("archive_response", response_id),
+        ("add_task", "ars.premerge"),
+        ("save_logs", response_id),
+        ("archive_logs", response_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_direct_query_is_archived_the_same_way(redis_mock, mocker):
+    response_id = "test_response"
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    completed = mocker.patch("workers.finish_query.worker.set_query_completed")
+    events = []
+    _archive_spies(mocker, events)
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}],
+        logging.getLogger(__name__),
+    )
+
+    assert [name for name, _ in events] == [
+        "archive_response",
+        "save_logs",
+        "archive_logs",
+    ]
+    completed.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_archive_write_does_not_stop_the_delivery(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    """The store is down for the whole query: it is still handed to the ARS
+    and completed."""
+    import uuid
+
+    from shepherd_utils.ars import payload_store
+    from shepherd_utils.ars.handoff import handoff_callback_url
+    from shepherd_utils.broker import get_task
+    from shepherd_utils.config import settings
+    from shepherd_utils import db, response_archive
+
+    logger = logging.getLogger(__name__)
+    response_id = str(uuid.uuid4())
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    monkeypatch.setattr(response_archive.asyncio, "sleep", mocker.AsyncMock())
+    write = mocker.patch.object(
+        payload_store, "write", side_effect=OSError("No space left on device")
+    )
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, handoff_callback_url(uuid.uuid4())],
+    )
+    completed = mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}], logger
+    )
+
+    assert write.call_count >= response_archive.ARCHIVE_ATTEMPTS
+    assert await get_task("ars.premerge", "consumer", "t", logger) is not None
+    completed.assert_called_once_with("test", "OK", logger)
+
+
+@pytest.mark.asyncio
+async def test_a_finished_response_and_its_logs_land_in_the_store(
+    redis_mock, mocker, tmp_path, monkeypatch
+):
+    import uuid
+
+    from shepherd_utils.config import settings
+    from shepherd_utils import db, response_archive
+
+    logger = logging.getLogger(__name__)
+    response_id = str(uuid.uuid4())
+    await db.save_response(response_id, {"message": {"results": []}}, logger)
+    await db._append_logs(
+        response_id, [{"timestamp": "2026-01-01T00:00:00Z", "message": "looked up"}]
+    )
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + [response_id, None],
+    )
+    mocker.patch("workers.finish_query.worker.set_query_completed")
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": response_id}], logger
+    )
+
+    stored = await response_archive.load_response_bytes(response_id, logger)
+    assert orjson.loads(stored) == {"message": {"results": []}}
+    logs = await response_archive.load_logs(response_id, logger)
+    assert [entry["message"] for entry in logs] == ["looked up"]
+
+
+@pytest.mark.asyncio
+async def test_a_query_someone_else_finished_is_not_archived_again(redis_mock, mocker):
+    mocker.patch(
+        "workers.finish_query.worker.get_query_state",
+        return_value=[""] * 7 + ["test_response", None],
+    )
+    mocker.patch("workers.finish_query.worker._wait_for_claim", return_value=False)
+    events = []
+    _archive_spies(mocker, events)
+
+    await finish_query(
+        ["test", {"query_id": "test", "response_id": "test_response"}],
+        logging.getLogger(__name__),
+    )
+
+    assert [name for name, _ in events] == ["save_logs"]
