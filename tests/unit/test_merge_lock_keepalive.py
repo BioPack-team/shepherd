@@ -8,6 +8,7 @@ already kept its lock alive, but carried on folding after finding it lost.
 """
 
 import asyncio
+import contextlib
 import logging
 from unittest.mock import AsyncMock
 
@@ -110,6 +111,10 @@ async def test_merge_lock_is_still_held_at_the_end_of_a_long_pass(
         def __init__(self, *args, **kwargs):
             pass
 
+        @contextlib.asynccontextmanager
+        async def slot(self):
+            yield self
+
         async def run(self, loop, fn, target, query_id, rid, ready, level):
             await asyncio.sleep(2.5)
             if not observed.done():
@@ -145,6 +150,10 @@ async def test_merge_lock_is_released_when_the_drain_finishes(
     class _QuickPool:
         def __init__(self, *args, **kwargs):
             pass
+
+        @contextlib.asynccontextmanager
+        async def slot(self):
+            yield self
 
         async def run(self, loop, fn, target, query_id, rid, ready, level):
             return list(ready), []
@@ -182,6 +191,10 @@ async def test_drain_stops_once_the_lock_is_lost(redis_mock, merge_env, monkeypa
     class _Pool:
         def __init__(self, *args, **kwargs):
             pass
+
+        @contextlib.asynccontextmanager
+        async def slot(self):
+            yield self
 
         async def run(self, loop, fn, target, query_id, rid, ready, level):
             passes.append(list(ready))

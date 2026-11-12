@@ -37,6 +37,7 @@ safe.
 """
 
 import asyncio
+import contextlib
 import logging
 import multiprocessing
 import os
@@ -44,7 +45,7 @@ import signal
 import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from typing import Callable, Optional
+from typing import AsyncIterator, Callable, Optional
 
 from .otel import POOL_CHILD_ENV
 from .query_errors import QueryTimedOut
@@ -160,6 +161,24 @@ class ProcessPoolManager:
                 self._free.put_nowait(index)
         return self._free
 
+    @contextlib.asynccontextmanager
+    async def slot(self) -> AsyncIterator["PoolSlot"]:
+        """Claim a free slot for the ``async with`` block, waiting for one when
+        all are busy.
+
+        For a caller that should decide *what* to run only once a child is
+        free to run it -- e.g. merge_message reads its batch of ready
+        callbacks here, so everything that arrived while it queued for a child
+        joins the pass. Run work with the yielded slot's ``run``; the slot is
+        released when the block exits.
+        """
+        free = self._free_slots()
+        index = await free.get()
+        try:
+            yield PoolSlot(self, index)
+        finally:
+            free.put_nowait(index)
+
     async def run(self, loop, fn, *args, timeout: Optional[float] = None):
         """Run ``fn(*args)`` in a free slot, self-healing on breakage or
         timeout. Waits for a slot when all are busy.
@@ -167,12 +186,8 @@ class ProcessPoolManager:
         ``timeout`` tightens the pool's ``task_timeout`` for this call (the
         shorter of the two applies), e.g. to the time its query has left.
         """
-        free = self._free_slots()
-        index = await free.get()
-        try:
-            return await self._run_in_slot(index, loop, fn, *args, timeout=timeout)
-        finally:
-            free.put_nowait(index)
+        async with self.slot() as slot:
+            return await slot.run(loop, fn, *args, timeout=timeout)
 
     async def run_within_budget(self, loop, task_fields, step: str, fn, *args):
         """``run`` bounded by the query's remaining budget as well (#245).
@@ -298,3 +313,18 @@ class ProcessPoolManager:
                 executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
+
+
+class PoolSlot:
+    """One claimed slot of a ``ProcessPoolManager`` (see ``slot``)."""
+
+    def __init__(self, manager: ProcessPoolManager, index: int):
+        self._manager = manager
+        self._index = index
+
+    async def run(self, loop, fn, *args, timeout: Optional[float] = None):
+        """``ProcessPoolManager.run`` in this slot: same timeout and
+        self-healing, without waiting for a slot."""
+        return await self._manager._run_in_slot(
+            self._index, loop, fn, *args, timeout=timeout
+        )

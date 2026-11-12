@@ -334,3 +334,31 @@ async def test_a_task_without_a_deadline_just_runs():
         assert await pool.run_within_budget(loop, {}, "Test step", _echo, "x") == "x"
     finally:
         pool.shutdown()
+
+
+async def test_a_slot_is_held_for_its_block_and_runs_in_it():
+    """slot() claims a child for the whole block: run() waits behind it, and
+    the block's own work runs without queueing again."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        async with pool.slot() as slot:
+            other = asyncio.ensure_future(pool.run(loop, _echo, "other"))
+            await asyncio.sleep(0.2)
+            assert not other.done()
+            assert await slot.run(loop, _echo, "mine") == "mine"
+        assert await asyncio.wait_for(other, timeout=30) == "other"
+    finally:
+        pool.shutdown()
+
+
+async def test_a_slot_is_released_when_its_block_raises():
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        with pytest.raises(RuntimeError):
+            async with pool.slot():
+                raise RuntimeError("boom")
+        assert await asyncio.wait_for(pool.run(loop, _echo, 1), timeout=30) == 1
+    finally:
+        pool.shutdown()
