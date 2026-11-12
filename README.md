@@ -621,6 +621,89 @@ Shepherd uses Redis Streams for its message broker. More info on Redis Streams c
 Each worker type listens to its own message stream/queue. The shared workers can just use their Translator workflow name for their stream name. For workers that share the same workflow but are for different ARAs need their own custom stream name. The current convention is to use the format `{ara_name}.{workflow_name}`.
 Multiple workers of the same type can be in the same `GROUP`, and redis will make sure not to give out the same task to more than one worker in that group. The current convention is to call the group `consumer`.
 
+#### Redis roles
+
+Shepherd uses Redis for four jobs: the **broker** (task streams, worker
+heartbeats, the monitor's state), **data** (query, response and callback
+payloads while they are hot), **locks**, and **logs**. By default they are one
+Redis, `REDIS_HOST`, told apart by database number (0-3).
+
+Each role can be given a Redis of its own, so the small, latency-critical
+broker and locks stop sharing a command thread and a `maxmemory` with
+multi-megabyte payload transfers. Set any of:
+
+| Setting | Role |
+| --- | --- |
+| `REDIS_BROKER_HOST` | streams, heartbeats, monitor state |
+| `REDIS_DATA_HOST` | payloads |
+| `REDIS_LOCK_HOST` | locks |
+| `REDIS_LOGS_HOST` | query logs |
+
+Each has an optional `..._PORT` and `..._PASSWORD`, defaulting to `REDIS_PORT`
+and `REDIS_PASSWORD`. A role keeps its database number wherever it lives, so
+moving one is a configuration change only. **Every process must be given the
+same values** (the server and every worker), and a role must be moved while
+nothing is in flight: its existing keys are not migrated.
+
+A reasonable split is the broker and locks together on one small Redis and
+the data role on another. They want different settings:
+
+- **Broker and locks:** `maxmemory-policy noeviction`. Nothing there may be
+  evicted (a task, a heartbeat, a lock), and the dataset is small. This is the
+  Redis to make highly available first.
+- **Data:** `maxmemory-policy volatile-ttl`, as `shepherd_broker/redis.conf`
+  has it, so the oldest payloads go first if the cap is ever reached. With a
+  cold store configured it only holds payloads while they are hot (see "What
+  stays in Redis").
+
+#### Redis high availability (Sentinel)
+
+A single Redis is a single point of failure: if its node dies, every query in
+flight is lost and nothing recovers until it is back. With Redis Sentinel (one
+primary, two replicas, three Sentinels, each on a different node), a replica
+is promoted in about 15-30 seconds.
+
+Point Shepherd at the Sentinels instead of at Redis:
+
+```
+REDIS_SENTINELS=sentinel-0:26379,sentinel-1:26379,sentinel-2:26379
+REDIS_SENTINEL_MASTER=shepherd      # the name the Sentinels monitor it under
+REDIS_PASSWORD=...                  # the Redis password, as before
+REDIS_SENTINEL_PASSWORD=...         # only if the Sentinels require auth
+```
+
+Clients then ask Sentinel for the current primary and follow it across a
+failover; `REDIS_HOST` is not used. With roles split, a role with its own
+Redis names its master with `REDIS_<ROLE>_SENTINEL_MASTER` (watched by the
+same Sentinels). For each role the most specific setting wins: its own
+sentinel master, then its own host, then `REDIS_SENTINEL_MASTER`, then
+`REDIS_HOST`. Unset, nothing changes: compose and the tests connect directly.
+
+What a failover costs:
+
+- **Seconds of errors.** Commands fail while no primary is reachable. Workers
+  retry as they do through a broker restart.
+- **The last writes.** Replication is asynchronous, so writes the replica had
+  not received are lost, as are writes the old primary accepted in the moment
+  before it was demoted. The monitor treats a failover like a restart and
+  fails the queries whose payloads are gone.
+- **Possibly a lock.** A lock taken just before the failover may not have
+  reached the replica, so for a moment two workers could merge the same
+  response. This is rare and accepted.
+
+Redis settings to use on each node, on top of `shepherd_broker/redis.conf`:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `repl-backlog-size` | `1gb` | A replica that briefly disconnects can catch up without a full resync. |
+| `client-output-buffer-limit` | `replica 4gb 2gb 120` | The default 256mb overflows with large payloads during a full sync, which would restart the resync forever. |
+| `appendonly` | `yes` (already) | A primary without persistence that restarts empty before a failover is copied to its replicas, wiping the dataset. |
+| `masterauth` | the Redis password | So a demoted primary can sync from the new one. |
+
+Sentinel: quorum `2`, `down-after-milliseconds 10000`, `failover-timeout
+60000`. Use a maintained Sentinel Helm chart or operator rather than
+hand-rolling the failover, and spread the pods with anti-affinity.
+
 ### Creating your own ARA
 
 Creating a brand new ARA is fairly straightforward. Here are the steps to create a basic ARA that performs all the necessary Translator operations:
