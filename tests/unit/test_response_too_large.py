@@ -12,6 +12,7 @@ is logged at CRITICAL.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 from concurrent.futures.process import BrokenProcessPool
@@ -376,6 +377,10 @@ class _FakePool:
         # function called as fn(response_id, ready) -> (merged, logs).
         self.outcomes = list(outcomes)
         self.calls = []
+
+    @contextlib.asynccontextmanager
+    async def slot(self):
+        yield self
 
     async def run(self, loop, fn, target, query_id, response_id, ready, log_level):
         self.calls.append(list(ready))

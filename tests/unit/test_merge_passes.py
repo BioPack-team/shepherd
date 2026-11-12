@@ -10,6 +10,7 @@ callbacks ended up with up to k identical inferred edges, depending on how
 callbacks happened to be batched.
 """
 
+import contextlib
 import copy
 import logging
 
@@ -219,23 +220,118 @@ def test_a_pass_groups_and_merges_results_once(mocker):
     assert grouped.call_count == 1
 
 
-# --- C4-4: the debounce ----------------------------------------------------
+# --- no idle wait before the first pass ---------------------------------------
 
 
-async def test_a_callback_arriving_just_after_the_lock_joins_the_first_pass(
+async def test_a_pass_starts_at_once_and_late_callbacks_join_the_next(
     redis_mock, monkeypatch
 ):
-    """The lock holder waits briefly for more callbacks, so one pass (one load
-    and one save of the whole response) folds them all."""
+    """The lock holder merges what is ready straight away instead of waiting
+    for more callbacks; one that lands during a pass is folded by the next."""
     import asyncio
     from unittest.mock import AsyncMock
 
     from shepherd_utils import db
-    from shepherd_utils.config import settings
 
-    monkeypatch.setattr(settings, "merge_debounce_sec", 1.0)
-    response_id = "resp-debounce"
-    await redis_mock["data"].set("q-debounce", b"x")
+    response_id = "resp-eager"
+    await redis_mock["data"].set("q-eager", b"x")
+    await redis_mock["data"].set(response_id, b"x")
+    await db.add_ready_callback(response_id, "cb-1", logger)
+
+    lock = redis_mock["lock"]
+
+    async def _remove_lock(key, consumer, _logger):
+        if await lock.get(key) == consumer:
+            await lock.delete(key)
+
+    async def _refresh_lock(key, consumer, ttl_ms, _logger):
+        return await lock.get(key) == consumer
+
+    monkeypatch.setattr(merge, "remove_lock", _remove_lock)
+    monkeypatch.setattr(merge, "refresh_lock", _refresh_lock)
+    monkeypatch.setattr(merge, "remove_callback_id", AsyncMock())
+    monkeypatch.setattr(merge, "resolve_pool_workers", lambda limit, lg: 1)
+    monkeypatch.setattr(
+        merge,
+        "get_existing_callback_ids",
+        AsyncMock(return_value={"cb-1", "cb-2"}),
+    )
+    passes = []
+    started = []
+    done = asyncio.get_running_loop().create_future()
+    loop = asyncio.get_running_loop()
+
+    class _Pool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @contextlib.asynccontextmanager
+        async def slot(self):
+            yield self
+
+        async def run(self, loop_, fn, target, query_id, rid, ready, level):
+            started.append(loop.time())
+            passes.append(list(ready))
+            if len(passes) == 1:
+                # A callback arrives while the first pass is running.
+                await db.add_ready_callback(response_id, "cb-2", logger)
+            return list(ready), []
+
+        def shutdown(self):
+            pass
+
+    class _Limiter:
+        def release(self):
+            if not done.done():
+                done.set_result(None)
+
+    async def _one_task(stream, group, consumer, limit):
+        yield (
+            "1-0",
+            {
+                "query_id": "q-eager",
+                "response_id": response_id,
+                "callback_id": "cb-1",
+                "target": "aragorn",
+                "log_level": "20",
+                "otel": "{}",
+                "metadata": "{}",
+            },
+        ), None, logging.getLogger("shepherd.test.eager"), _Limiter()
+        await asyncio.sleep(3600)
+
+    from shepherd_utils import shared
+
+    monkeypatch.setattr(shared, "get_tasks", _one_task)
+    monkeypatch.setattr(merge, "ProcessPoolManager", _Pool)
+    t0 = loop.time()
+    poller = asyncio.create_task(merge.poll_for_tasks())
+    try:
+        await asyncio.wait_for(done, timeout=10)
+    finally:
+        poller.cancel()
+        try:
+            await poller
+        except BaseException:
+            pass
+
+    assert passes == [["cb-1"], ["cb-2"]]
+    # No debounce: the first pass starts well inside the old 1s wait.
+    assert started[0] - t0 < 0.5
+
+
+async def test_callbacks_that_land_while_waiting_for_a_child_join_the_pass(
+    redis_mock, monkeypatch
+):
+    """The batch is read once a pool child is free, not before: callbacks that
+    arrive while the task queues for a child are merged in the same pass."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from shepherd_utils import db
+
+    response_id = "resp-queued"
+    await redis_mock["data"].set("q-queued", b"x")
     await redis_mock["data"].set(response_id, b"x")
     await db.add_ready_callback(response_id, "cb-1", logger)
 
@@ -259,12 +355,22 @@ async def test_a_callback_arriving_just_after_the_lock_joins_the_first_pass(
     )
     passes = []
     done = asyncio.get_running_loop().create_future()
+    # The pool's only child, busy with another query's merge.
+    busy = asyncio.Lock()
+    await busy.acquire()
+    waiting = asyncio.Event()
 
     class _Pool:
         def __init__(self, *args, **kwargs):
             pass
 
-        async def run(self, loop, fn, target, query_id, rid, ready, level):
+        @contextlib.asynccontextmanager
+        async def slot(self):
+            waiting.set()
+            async with busy:
+                yield self
+
+        async def run(self, loop_, fn, target, query_id, rid, ready, level):
             passes.append(list(ready))
             return list(ready), []
 
@@ -280,7 +386,7 @@ async def test_a_callback_arriving_just_after_the_lock_joins_the_first_pass(
         yield (
             "1-0",
             {
-                "query_id": "q-debounce",
+                "query_id": "q-queued",
                 "response_id": response_id,
                 "callback_id": "cb-1",
                 "target": "aragorn",
@@ -288,30 +394,26 @@ async def test_a_callback_arriving_just_after_the_lock_joins_the_first_pass(
                 "otel": "{}",
                 "metadata": "{}",
             },
-        ), None, logging.getLogger("shepherd.test.debounce"), _Limiter()
+        ), None, logging.getLogger("shepherd.test.queued"), _Limiter()
         await asyncio.sleep(3600)
 
-    async def _late_callback():
-        await asyncio.sleep(0.3)
-        await db.add_ready_callback(response_id, "cb-2", logger)
-
-    # the shared poll loop (run_poll_loop) reads it from shared
     from shepherd_utils import shared
 
     monkeypatch.setattr(shared, "get_tasks", _one_task)
     monkeypatch.setattr(merge, "ProcessPoolManager", _Pool)
-    late = asyncio.ensure_future(_late_callback())
     poller = asyncio.create_task(merge.poll_for_tasks())
     try:
+        await asyncio.wait_for(waiting.wait(), timeout=10)
+        # Arrives while the lock holder is queued for the busy child.
+        await db.add_ready_callback(response_id, "cb-2", logger)
+        busy.release()
         await asyncio.wait_for(done, timeout=10)
     finally:
         poller.cancel()
-        late.cancel()
-        for t in (poller, late):
-            try:
-                await t
-            except BaseException:
-                pass
+        try:
+            await poller
+        except BaseException:
+            pass
 
     # one pass with both; the ready index is a set, so in no particular order
     assert [sorted(batch) for batch in passes] == [["cb-1", "cb-2"]]
