@@ -73,6 +73,11 @@ STREAM = "merge_message"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
+# In-flight wake tasks per pool child. Enough that one child's next pass is
+# queued while its current one runs, and lock losers can ack without waiting
+# behind merges; few enough that, with several replicas, one pod doesn't pull
+# backlog it can't start on while another pod sits idle.
+TASKS_PER_POOL_CHILD = 2
 # Task field carrying how many times this wake task's merge has failed in a
 # row. See _reenqueue_wake_task.
 MERGE_ATTEMPT_FIELD = "merge_attempt"
@@ -1493,12 +1498,14 @@ async def poll_for_tasks():
     # task's life is not pool work -- Redis round trips, and lock losers that
     # just ack. Capping in-flight tasks at the pool size let those hold the
     # slots while the pool sat idle. The parent only handles callback ids, so
-    # the extra tasks cost no memory. TASK_LIMIT overrides.
+    # the extra tasks cost no memory. It stays a small multiple of the pool,
+    # though: every task in flight here is one other replicas can't take.
+    # The TASK_LIMIT env var overrides.
     await run_poll_loop(
         STREAM,
         GROUP,
         CONSUMER,
-        max(TASK_LIMIT, max_workers),
+        max_workers * TASKS_PER_POOL_CHILD,
         process_query,
         on_stop=pool.shutdown,
     )

@@ -33,5 +33,7 @@ async def test_task_limit_exceeds_pool_size(monkeypatch, pool_workers):
     await merge.poll_for_tasks()
 
     assert seen["pool"] == pool_workers
-    assert seen["task_limit"] == merge.TASK_LIMIT
     assert seen["task_limit"] > seen["pool"]
+    # ...but only a small multiple of it, so with several replicas one pod
+    # doesn't pull backlog it can't start on while another sits idle.
+    assert seen["task_limit"] == pool_workers * merge.TASKS_PER_POOL_CHILD
