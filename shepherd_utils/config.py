@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -142,6 +142,42 @@ class Settings(BaseSettings):
     redis_host: str = "shepherd_broker"
     redis_port: int = 6379
     redis_password: str = "supersecretpassword"
+    # Shepherd uses Redis for four jobs -- the broker (task streams,
+    # heartbeats), data (payloads while hot), locks and logs -- which by
+    # default all live on ``redis_host``, in databases 0-3. Each can be given
+    # a Redis of its own (shepherd_utils/redis_clients.py), so the small,
+    # latency-critical broker and locks stop sharing a command thread and a
+    # ``maxmemory`` with multi-megabyte payload transfers. Unset, a role uses
+    # ``redis_host``; with a host of its own, its port and password default to
+    # ``redis_port`` / ``redis_password``. A role keeps its database number
+    # wherever it lives. EVERY process must be given the same values.
+    redis_broker_host: str = ""
+    redis_broker_port: Optional[int] = None
+    redis_broker_password: Optional[str] = None
+    redis_data_host: str = ""
+    redis_data_port: Optional[int] = None
+    redis_data_password: Optional[str] = None
+    redis_lock_host: str = ""
+    redis_lock_port: Optional[int] = None
+    redis_lock_password: Optional[str] = None
+    redis_logs_host: str = ""
+    redis_logs_port: Optional[int] = None
+    redis_logs_password: Optional[str] = None
+    # Redis Sentinel (#201). With both set, clients ask these Sentinels
+    # ("host:26379,host2:26379"; the port defaults to 26379) for the current
+    # primary of ``redis_sentinel_master`` instead of connecting to
+    # ``redis_host``, and follow it across a failover. A role with a Redis of
+    # its own names its master with ``redis_<role>_sentinel_master`` (watched
+    # by the same Sentinels), which takes precedence over ``redis_<role>_host``.
+    # ``redis_sentinel_password`` is for Sentinels that themselves require
+    # auth; the Redis password is ``redis_password`` as usual.
+    redis_sentinels: str = ""
+    redis_sentinel_master: str = ""
+    redis_sentinel_password: str = ""
+    redis_broker_sentinel_master: str = ""
+    redis_data_sentinel_master: str = ""
+    redis_lock_sentinel_master: str = ""
+    redis_logs_sentinel_master: str = ""
 
     lookup_timeout: int = 210
     callback_host: str = "http://host.docker.internal:5439"

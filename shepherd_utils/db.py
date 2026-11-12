@@ -15,7 +15,7 @@ import zstandard
 from psycopg import OperationalError
 from psycopg_pool import AsyncConnectionPool
 
-from . import completion
+from . import completion, redis_clients
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
 from .trapi import (
@@ -196,31 +196,25 @@ async def monitor_event_loop_lag(logger: logging.Logger) -> None:
             logger.warning(f"EVENT_LOOP_LAG lag_ms={lag * 1000:.0f}")
 
 
-data_db_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=1,
-    password=settings.redis_password,
+# Which Redis each of these talks to is decided in
+# shepherd_utils/redis_clients.py (one shared server by default).
+data_db_pool = redis_clients.async_pool(
+    redis_clients.DATA,
     max_connections=10,
     timeout=30,
     socket_timeout=5,
     socket_connect_timeout=10,
-    socket_keepalive=True,
     socket_keepalive_options={},
     health_check_interval=30,
     retry_on_timeout=True,
 )
 
-logs_db_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=3,
-    password=settings.redis_password,
+logs_db_pool = redis_clients.async_pool(
+    redis_clients.LOGS,
     max_connections=10,
     timeout=30,
     socket_timeout=5,
     socket_connect_timeout=10,
-    socket_keepalive=True,
     socket_keepalive_options={},
     health_check_interval=30,
     retry_on_timeout=True,
@@ -245,11 +239,8 @@ def _get_sync_data_db() -> redis.Redis:
     """Return a process-local sync Redis client for the data db."""
     global _sync_data_db_client
     if _sync_data_db_client is None:
-        _sync_data_db_client = redis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            db=1,
-            password=settings.redis_password,
+        _sync_data_db_client = redis_clients.sync_client(
+            redis_clients.DATA,
             socket_timeout=5,
             socket_connect_timeout=10,
             socket_keepalive=True,
