@@ -13,7 +13,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
 
 from opentelemetry import trace
 from opentelemetry.context.context import Context
-from opentelemetry.propagate import extract
+from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import Status, StatusCode
 
 from .broker import (
@@ -887,6 +887,38 @@ async def run_poll_loop(
             await asyncio.sleep(5)  # back off before retrying
 
 
+# Task field set once a query's entry worker has handed on its span, so the
+# operations after it pass that carrier along instead of replacing it.
+TRACE_ROOTED_FIELD = "otel_rooted"
+
+
+def _operation_trace_fields(fields: dict) -> dict:
+    """The trace fields a task hands the query's next operation.
+
+    Every operation in a workflow is handed the same carrier, so they all show
+    up as siblings under one span. That carrier used to be whatever the query
+    arrived with -- the intake span. Fine while one request ran one ARA, but
+    under the ARS one intake span fans out to several ARAs, and their
+    operations all landed under it, interleaved, with nothing tying an
+    operation to its ARA: each ARA's own span was an empty leaf beside them.
+
+    So the first worker to hand a query on -- its entry worker (``aragorn``,
+    ``bte``, ``arax``, ...) -- hands on *its own* span's context, and marks
+    the task so everything after passes that along: the ARA's operations nest
+    under the ARA. "First" rather than "not in the workflow", because an entry
+    worker can do the whole job itself and name itself as the one operation
+    (``arax``), and its finish_query belongs under it all the same. With no
+    span to hand on (tracing off) the carrier is kept as it came.
+    """
+    otel = fields.get("otel", "{}")
+    if not fields.get(TRACE_ROOTED_FIELD):
+        carrier: dict = {}
+        inject(carrier)
+        if carrier:
+            otel = json.dumps(carrier)
+    return {"otel": otel, TRACE_ROOTED_FIELD: "1"}
+
+
 async def wrap_up_task(
     stream: str,
     group: str,
@@ -913,7 +945,7 @@ async def wrap_up_task(
             "response_id": task[1]["response_id"],
             "workflow": json.dumps(workflow),
             "log_level": task[1].get("log_level", 20),
-            "otel": task[1]["otel"],
+            **_operation_trace_fields(task[1]),
             "metadata": task[1]["metadata"],
             # The budget is measured from intake, so it travels with the query
             # rather than restarting at each operation.
@@ -964,7 +996,7 @@ async def handle_task_failure(
                 "response_id": task[1]["response_id"],
                 "workflow": "[]",
                 "log_level": task[1].get("log_level", 20),
-                "otel": task[1]["otel"],
+                **_operation_trace_fields(task[1]),
                 **failure,
                 "metadata": task[1]["metadata"],
                 **carry_deadline(task[1]),

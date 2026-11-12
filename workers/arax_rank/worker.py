@@ -18,7 +18,11 @@ import uuid
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_response_sync
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import (
+    get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
 from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
@@ -63,7 +67,7 @@ def rank_message(in_message: dict, logger: logging.Logger) -> dict:
     return arax_rank(in_message, logger)
 
 
-def arax_rank_task(response_id: str, logger: logging.Logger) -> None:
+def arax_rank_task(response_id: str, log_level: int = logging.INFO) -> list[dict]:
     """Process-pool entrypoint: load, rank, and save entirely in the child.
 
     Only the small ``response_id`` crosses the process-pool boundary; the
@@ -73,12 +77,19 @@ def arax_rank_task(response_id: str, logger: logging.Logger) -> None:
     sat on the parent's heap and was resident several times over, and the
     decode blocked the loop. Reading and writing here keeps the payload off the
     parent entirely (matching aragorn_omnicorp / aragorn_score).
+
+    The task's logger can't cross the boundary either (it isn't picklable), so
+    the child logs at the task's ``log_level`` through its own logger and
+    returns the formatted records, oldest-first, for the parent to fold into
+    the query's logs.
     """
-    message = get_message_sync(response_id)
-    ranked_message = rank_message(message, logger)
-    if ranked_message is None:
-        ranked_message = message
-    save_response_sync(response_id, ranked_message)
+    with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
+        message = get_message_sync(response_id)
+        ranked_message = rank_message(message, logger)
+        if ranked_message is None:
+            ranked_message = message
+        save_response_sync(response_id, ranked_message)
+        return query_log_handler.drain()
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):
@@ -93,9 +104,15 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
     async def _run(task, logger):
         response_id = task[1]["response_id"]
         # Held no longer than the query can use the answer (#245).
-        await pool.run_within_budget(
-            loop, task[1], "ARAX's ranking", arax_rank_task, response_id, logger
+        entries = await pool.run_within_budget(
+            loop,
+            task[1],
+            "ARAX's ranking",
+            arax_rank_task,
+            response_id,
+            logger.getEffectiveLevel(),
         )
+        ingest_query_logs(logger, entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
