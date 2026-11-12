@@ -262,7 +262,8 @@ Behavioral deviations:
     oldest first and cache-backed last, when the payload volume passes
     `ars_payload_evict_high_pct`. A message whose payload was dropped reads
     exactly as one past the age window (item 11). Retained trees are never
-    touched.
+    touched. A tree's payloads include the archives of its children's ARA
+    responses (deviation 22), which are kept and dropped with it.
 11. **Payload inclusion in envelopes**: a single message GET loads its
     payload from the blob store, and one evicted from Redis with no durable
     copy renders `fields.data: null` (upstream MySQL always had it inline).

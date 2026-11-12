@@ -35,8 +35,16 @@ def volume(tmp_path, monkeypatch, mocker):
     monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
     monkeypatch.setattr(settings, "ars_payload_evict_high_pct", 80.0)
     monkeypatch.setattr(settings, "ars_payload_evict_low_pct", 65.0)
-    state = {"used": 0, "queue": [], "monkeypatch": monkeypatch}
+    state = {"used": 0, "queue": [], "monkeypatch": monkeypatch, "owned": set()}
     monkeypatch.setattr(payload_store, "usage", lambda: (state["used"], 100 * GB))
+
+    async def owned(message_ids):
+        """Archives that are ARS children's (ids put in state["owned"])."""
+        return {i for i in message_ids if i in state["owned"]}
+
+    state["owner_lookup"] = mocker.patch.object(
+        retention, "_owned_by_a_tree", side_effect=owned
+    )
 
     async def candidates(limit):
         return state["queue"][:limit]
@@ -210,6 +218,137 @@ async def test_trees_are_evicted_only_for_what_the_archive_cannot_free(volume):
     assert result["archived_responses"] == 1
     assert result["trees"] == 1  # 5 GB from the archive, then one 30 GB tree
     assert result["freed_bytes"] == 35 * GB
+
+
+# --- who owns an archive (#252 stage 3) ---------------------------------------
+
+
+async def test_the_age_purge_leaves_an_ars_childs_archive_to_its_tree(volume):
+    """A child's archive is its tree's: kept for as long as the tree keeps
+    its payloads (a retained tree, a live cache entry), however old."""
+    childs, direct = archive(10, age_days=400), archive(10, age_days=400)
+    volume["owned"].add(str(childs))
+
+    assert await retention.purge_expired_archive(30, LOGGER) == 1
+
+    assert archived(childs)
+    assert not archived(direct)
+
+
+async def test_under_pressure_only_direct_query_archives_are_evicted_by_age(volume):
+    """An ARS child's archive goes with its tree, not ahead of it."""
+    volume["used"] = 85 * GB
+    volume["queue"] = [tree(30)]
+    childs = archive(15, age_days=3)
+    direct = archive(5, age_days=1)
+    volume["owned"].add(str(childs))
+    real_entries = payload_store.entries
+
+    def entries_in_gb(kind):
+        for entry in real_entries(kind):
+            yield entry._replace(size=entry.size * GB)
+
+    volume["monkeypatch"].setattr(payload_store, "entries", entries_in_gb)
+
+    result = await retention.evict_for_space(LOGGER)
+
+    assert archived(childs) and not archived(direct)
+    assert result["archived_responses"] == 1
+    assert result["trees"] == 1  # 5 GB of direct archives was not enough
+    assert result["freed_bytes"] == 35 * GB
+
+
+async def test_an_owner_lookup_that_fails_deletes_nothing(volume):
+    """An archive is never deleted because Postgres could not be asked
+    whose it is."""
+    old = archive(10, age_days=400)
+    volume["owner_lookup"].side_effect = RuntimeError("postgres is down")
+
+    with pytest.raises(RuntimeError):
+        await retention.purge_expired_archive(30, LOGGER)
+
+    assert archived(old)
+
+
+async def test_owners_are_looked_up_in_batches(volume, monkeypatch):
+    monkeypatch.setattr(retention, "OWNER_BATCH", 2)
+    ids = [archive(1, age_days=31 + n) for n in range(5)]
+
+    assert await retention.purge_expired_archive(30, LOGGER) == 5
+
+    assert [len(c.args[0]) for c in volume["owner_lookup"].await_args_list] == [2, 2, 1]
+    assert not any(archived(i) for i in ids)
+
+
+async def test_ownership_is_an_ars_message_row_with_that_id(monkeypatch):
+    """The real lookup: one query, and ids that are not UUIDs are nobody's."""
+    from unittest.mock import MagicMock
+
+    import shepherd_utils.db as shepherd_db
+
+    child, direct = uuid.uuid4(), uuid.uuid4()
+    seen = {}
+
+    async def _execute(sql, params=None):
+        seen["sql"], seen["params"] = sql, params
+        cur = MagicMock()
+        cur.fetchall = AsyncMock(return_value=[(child,)])
+        return cur
+
+    conn = AsyncMock()
+    conn.execute.side_effect = _execute
+    pool = MagicMock()
+    pool.connection.return_value.__aenter__ = AsyncMock(return_value=conn)
+    pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(shepherd_db, "pool", pool)
+
+    owned = await retention._owned_by_a_tree([str(child), str(direct), "not-a-uuid"])
+
+    assert owned == {str(child)}
+    assert "FROM ars_message WHERE id = ANY" in seen["sql"]
+    assert seen["params"] == ([child, direct],)
+    assert await retention._owned_by_a_tree(["not-a-uuid"]) == set()
+
+
+async def test_dropping_a_trees_payloads_takes_its_childrens_archives(
+    tmp_path, monkeypatch
+):
+    """The tree owns them: a child's archive is filed under the child's own
+    id and goes with the tree's other payloads."""
+    from unittest.mock import MagicMock
+
+    import shepherd_utils.db as shepherd_db
+
+    monkeypatch.setattr(settings, "ars_payload_dir", str(tmp_path))
+    root, child, merged = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    payload_store.write(root, b"query")
+    payload_store.write(merged, b"merged result")
+    payload_store.write(child, b"the ARA's archived response", payload_store.ARA)
+    other = uuid.uuid4()
+    payload_store.write(other, b"someone else's", payload_store.ARA)
+
+    async def _execute(sql, params=None):
+        cur = MagicMock()
+        # (id, data_size, data IS NULL) for every stored member of the tree
+        cur.fetchall = AsyncMock(
+            return_value=[(root, 5, True), (child, 27, True), (merged, 13, True)]
+        )
+        return cur
+
+    conn = AsyncMock()
+    conn.execute.side_effect = _execute
+    pool = MagicMock()
+    pool.connection.return_value.__aenter__ = AsyncMock(return_value=conn)
+    pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(shepherd_db, "pool", pool)
+    monkeypatch.setattr(shepherd_db, "lift_statement_timeout", AsyncMock())
+
+    freed = await retention._drop_payloads([root], LOGGER)
+
+    assert freed == 45  # the child's archive is counted with the rest
+    assert not payload_store.exists(root) and not payload_store.exists(merged)
+    assert not payload_store.exists(child, payload_store.ARA)
+    assert payload_store.exists(other, payload_store.ARA)
 
 
 async def test_a_failing_archive_eviction_still_evicts_trees(volume, mocker):

@@ -271,3 +271,66 @@ async def test_an_unreadable_archived_object_reads_as_absent(store, ids, stored)
     assert await response_archive.load_archive(ids["response"], LOGGER) is None
     with pytest.raises(Exception):
         response_archive.load_archive_sync(ids["response"])
+
+
+# --- an ARS tree owns its children's archives (#252 stage 3) -----------------
+
+
+@pytest.fixture
+def pg(monkeypatch):
+    """Mock pool recording the SQL the archive runs."""
+    from unittest.mock import MagicMock
+
+    state = {"sql": []}
+
+    async def _execute(sql, params=None):
+        state["sql"].append((sql, params))
+        return MagicMock()
+
+    conn = AsyncMock()
+    conn.execute.side_effect = _execute
+    pool = MagicMock()
+    pool.connection.return_value.__aenter__ = AsyncMock(return_value=conn)
+    pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(shepherd_db, "pool", pool)
+    state["conn"] = conn
+    return state
+
+
+async def test_the_archives_size_is_recorded_on_the_ars_child_it_belongs_to(
+    store, redis, ids, pg
+):
+    """An ARS child's pk is its ARA's response id. Recording the archive's
+    size there is what puts it under the tree's retention; for a directly
+    submitted query the UPDATE matches no row."""
+    assert await _archive(ids)
+
+    blob = payload_store.read(ids["response"], payload_store.ARA)
+    ((sql, params),) = pg["sql"]
+    assert "UPDATE ars_message SET data_size = %s" in sql
+    assert "updated_at" not in sql  # bookkeeping, not a change to the message
+    assert params == (len(blob), uuid.UUID(ids["response"]))
+    pg["conn"].commit.assert_awaited_once()
+
+
+async def test_no_size_is_recorded_for_an_archive_that_was_not_written(
+    store, redis, ids, pg, monkeypatch
+):
+    monkeypatch.setattr(
+        payload_store, "write", lambda *a: (_ for _ in ()).throw(OSError("disk full"))
+    )
+    assert not await _archive(ids)
+    assert pg["sql"] == []
+
+
+async def test_failing_to_record_the_size_does_not_undo_the_archive(
+    store, redis, ids, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    pool = MagicMock()
+    pool.connection.side_effect = RuntimeError("postgres is down")
+    monkeypatch.setattr(shepherd_db, "pool", pool)
+
+    assert await _archive(ids)
+    assert payload_store.exists(ids["response"], payload_store.ARA)

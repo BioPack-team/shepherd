@@ -389,7 +389,18 @@ left half there, and never touching retained trees:
 | `ARS_PAYLOAD_EVICT_HIGH_PCT` / `ARS_PAYLOAD_EVICT_LOW_PCT` | `80` / `65` | Checked every pass (`ARS_WATCHDOG_INTERVAL_SEC`): once the payload volume is this full, evict archived ARA responses (oldest first) and then tree payloads -- uncached oldest first, then cache-backed least recently used (dropping their cache entries) -- until it is back under the low mark. |
 | `ARS_DATA_RETENTION_DAYS` | `30` | Hourly: drop the payloads of trees finished this long ago. Rows stay. |
 | `ARS_ROW_RETENTION_DAYS` | `90` | Hourly: delete the rows of trees finished this long ago. |
-| `ARA_RESPONSE_RETENTION_DAYS` | `30` | Hourly: delete archived ARA responses written this long ago. Under disk pressure they are evicted, oldest first, before any tree. |
+| `ARA_RESPONSE_RETENTION_DAYS` | `30` | Hourly: delete the archived responses of directly submitted queries written this long ago. Under disk pressure they are evicted, oldest first, before any tree. |
+
+Every object in the store has one owner. An ARS child's pk is its ARA's
+response id, so the archive of that response belongs to the child's tree: it
+is kept as long as the tree keeps its payloads (`ARS_DATA_RETENTION_DAYS`, a
+retained tree, a live cache entry) and dropped with them, and its size counts
+toward what evicting the tree frees. The archive of a query submitted
+directly has no tree, and is the only kind `ARA_RESPONSE_RETENTION_DAYS`
+applies to. Ownership is decided by asking Postgres, so it works the same on
+a volume and in a bucket; for that reason do not put a bucket lifecycle rule
+on `ara/` (it would delete a retained tree's answers), or set one far longer
+than every retention above as a backstop.
 
 The rest of the database is aged out by the monitor's janitor
 (`QUERY_RETENTION_DAYS` for queries and callbacks, 30 days of monitor

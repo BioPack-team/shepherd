@@ -38,6 +38,7 @@ every read answers None) unless a store is configured
 
 import asyncio
 import logging
+import uuid
 from typing import Any, List, NamedTuple, Optional
 
 import orjson
@@ -154,6 +155,31 @@ async def _write_with_retries(
     return False
 
 
+async def _record_size(response_id: str, size: int, logger: logging.Logger) -> None:
+    """Record the archive's size on the ARS child it belongs to, if any.
+
+    An ARS child's pk is its ARA's response id, so for an ARS-dispatched
+    query this id is a row in ``ars_message``; ``data_size`` is where the
+    ARS's retention finds a message's durable payload and how big it is
+    (shepherd_utils/ars/retention.py), which is what makes the tree own
+    this archive -- counted, kept and dropped with it. For a directly
+    submitted query no row matches and nothing happens. ``updated_at`` is
+    left alone: this is bookkeeping, not a change to the message.
+    Best-effort: an archive whose size was not recorded is deleted when its
+    tree's rows are.
+    """
+    try:
+        async with shepherd_db.pool.connection(settings.postgres_pool_timeout) as conn:
+            await conn.execute(
+                "UPDATE ars_message SET data_size = %s "
+                "WHERE id = %s AND data IS NULL",
+                (size, uuid.UUID(response_id)),
+            )
+            await conn.commit()
+    except Exception as e:
+        logger.warning(f"Could not record the archive size of {response_id}: {e}")
+
+
 async def archive_query(
     query_id: str,
     response_id: str,
@@ -185,7 +211,10 @@ async def archive_query(
             blob = await _build(
                 response_blob, query_id, response_id, status, description, logger
             )
-            return await _write_with_retries(response_id, blob, logger)
+            written = await _write_with_retries(response_id, blob, logger)
+        if written:
+            await _record_size(response_id, len(blob), logger)
+        return written
     except TimeoutError:
         logger.error(
             f"Gave up archiving {response_id} after {ARCHIVE_TIMEOUT_SEC:g}s: "

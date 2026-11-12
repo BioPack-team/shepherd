@@ -611,8 +611,10 @@ class Settings(BaseSettings):
     # (shepherd_utils/response_archive.py): finish_query writes it, with the
     # query and its logs in the same object, for direct and ARS-originated
     # queries alike, and GET /response/{id} falls back to it once the Redis
-    # copy has expired. Days an archived response is kept; the ARS watchdog
-    # purges older ones hourly. 0 keeps them until disk pressure evicts them.
+    # copy has expired. Days the archive of a directly submitted query is
+    # kept; the ARS watchdog purges older ones hourly. The archive of a query
+    # the ARS dispatched belongs to its ARS tree instead and is kept and
+    # dropped with it (ars_data_retention_days, the retain flag, the cache). 0 keeps them until disk pressure evicts them.
     # Nothing is archived unless a store is configured above.
     ara_response_retention_days: int = 30
     # Disk-pressure eviction on that volume (shepherd_utils/ars/retention.py).
