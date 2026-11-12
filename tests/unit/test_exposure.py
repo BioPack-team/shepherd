@@ -166,6 +166,67 @@ def test_broker_entrypoint_uses_the_password_from_the_environment(tmp_path):
         proc.wait(timeout=10)
 
 
+@pytest.mark.skipif(not shutil.which("redis-server"), reason="redis-server missing")
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        # redis.conf's own value, sized for a local stack
+        ({}, 2 * 1024**3),
+        ({"REDIS_MAXMEMORY": ""}, 2 * 1024**3),
+        # a deployment's
+        ({"REDIS_MAXMEMORY": "25gb"}, 25 * 1024**3),
+    ],
+)
+def test_broker_maxmemory_is_local_by_default_and_set_by_the_environment(
+    tmp_path, env, expected
+):
+    """The config's maxmemory suits a laptop; a deployment gives the broker
+    more with REDIS_MAXMEMORY instead of shipping its own redis.conf."""
+    import redis
+
+    port = _free_port()
+    local_only = {"port", "dir", "logfile", "appendonly", "save", "dbfilename"}
+    conf = [
+        line
+        for line in (REPO / "shepherd_broker" / "redis.conf").read_text().splitlines()
+        if not (line.split() and line.split()[0] in local_only)
+    ]
+    conf += [f"port {port}", f"dir {tmp_path}", "appendonly no", 'save ""']
+    (tmp_path / "redis.conf").write_text("\n".join(conf) + "\n")
+    proc = subprocess.Popen(
+        [
+            "sh",
+            str(REPO / "shepherd_broker" / "entrypoint.sh"),
+            str(tmp_path / "redis.conf"),
+        ],
+        env={"PATH": "/usr/bin:/bin", "REDIS_PASSWORD": "pw", **env},
+    )
+    try:
+        client = redis.Redis(port=port, password="pw")
+        for _ in range(50):
+            try:
+                if client.ping():
+                    break
+            except redis.exceptions.ConnectionError:
+                time.sleep(0.1)
+        assert int(client.config_get("maxmemory")["maxmemory"]) == expected
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_the_default_redis_ttl_outlasts_the_longest_query():
+    """The default is sized for a local stack, not for keeping finished work
+    (the cold store does that), but it must never be shorter than a query
+    can run, or Redis would drop payloads still in use."""
+    from shepherd_utils.config import Settings
+
+    defaults = Settings(_env_file=None)
+    longest = defaults.ars_timeout_standard_sec + defaults.ars_timeout_merge_sec
+    assert defaults.redis_ttl >= 4 * longest
+    assert defaults.redis_hot_ttl < defaults.redis_ttl
+
+
 def test_broker_entrypoint_refuses_to_start_without_a_password():
     entrypoint = REPO / "shepherd_broker" / "entrypoint.sh"
     if not entrypoint.exists():

@@ -336,14 +336,18 @@ class Settings(BaseSettings):
     jaeger_port: int = 4317
 
     # TTL (seconds) for every payload we stash in Redis: the query/response
-    # blobs, each per-callback blob, the ready-callback set, and the logs. We
-    # deliberately keep callbacks around after a query finishes so the
-    # ``/response`` endpoint can serve them for debugging, but that made Redis
-    # accumulate ~14 days of finished-query blobs under load and hit its
-    # ``maxmemory`` cap. 3 days keeps recent queries debuggable while bounding
-    # the working set; the broker's ``volatile-ttl`` eviction policy then drops
-    # the oldest (nearest-expiry) blobs first if the cap is still reached.
-    redis_ttl: int = 259200  # 3 days
+    # blobs, each per-callback blob, the ready-callback set, and the logs.
+    # It only has to outlast the longest query (minutes): finished work is
+    # read from the cold store (see ``redis_hot_ttl`` below), so what this
+    # governs is how long something that never finished -- a query that was
+    # abandoned, a response whose archive write failed -- stays in Redis for
+    # someone to look at. The default suits a local stack, where Redis shares
+    # a laptop's memory; a deployment sets its own. Without a cold store
+    # configured this is also how long a finished response stays readable at
+    # all, so such a deployment wants it much longer (it used to be 3 days).
+    # The broker's ``volatile-ttl`` eviction policy drops the oldest
+    # (nearest-expiry) blobs first if the cap is still reached.
+    redis_ttl: int = 14400  # 4 hours
     # With a cold store configured (ars_payload_dir / payload_s3_bucket),
     # Redis only has to hold a payload while it is hot: finished ARA
     # responses are archived there and finished ARS trees keep their final

@@ -376,9 +376,17 @@ every ARS message keeps a durable copy in Postgres.
   store). A batch given up on as unmergeable keeps its payloads until
   `REDIS_TTL`, as evidence.
 
-`REDIS_TTL` (default 3 days) remains the TTL of anything still in flight or
-never finished. With a store configured it can be lowered to a few hours: it
-only has to outlast the longest query.
+`REDIS_TTL` (default 4 hours) remains the TTL of anything still in flight or
+never finished; it only has to outlast the longest query.
+
+The defaults are sized for a local stack, and a deployment sets its own:
+
+| Setting | Default | For a deployment |
+| --- | --- | --- |
+| `REDIS_TTL` | `14400` (4 hours) | How long unfinished work stays in Redis to be looked at. Without a cold store it is also how long a finished response is readable at all, so set it much longer there (it used to be 3 days). |
+| `REDIS_HOT_TTL` | `1800` (30 minutes) | How long finished work stays in Redis after its cold copy exists. |
+| `REDIS_MAXMEMORY` (broker container) | unset: `redis.conf`'s `2gb` | The broker's `maxmemory`, e.g. `25gb`. Keep it at about half the container's memory limit and a third of its volume. |
+| `REDIS_MEMORY_LIMIT` (monitor) | unset | The broker container's memory limit, for the monitor's footprint alert. |
 
 The ARS watchdog keeps it bounded, always working on whole finished trees
 (a parent with every child and merged version under it) so a tree is never

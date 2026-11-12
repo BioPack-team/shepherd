@@ -142,12 +142,17 @@ services:
   shepherd_broker:
     container_name: shepherd_broker
     cpus: 2
-    mem_limit: 25g
+    # About twice redis.conf's maxmemory (2gb): an AOF rewrite forks, and
+    # fragmentation and client buffers sit on top of the data. Raise both
+    # together (REDIS_MAXMEMORY in .env, and this in compose.override.yml).
+    mem_limit: 4g
     build:
       context: .
       dockerfile: shepherd_broker/Dockerfile
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-supersecretpassword}
+      # empty keeps redis.conf's maxmemory
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-}
     ports:
       - "127.0.0.1:6379:6379"
     restart: unless-stopped
