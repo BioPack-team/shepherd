@@ -33,7 +33,9 @@ type optional members as ``X | None`` and so accept an explicit ``null``.
 The ARS treats a null exactly as an absent member: ``strip_nulls`` removes
 them before validation (premerge runs it on every ARA response, validated
 or not, so nothing downstream -- and nothing the ARS emits -- carries a
-null). A null in a REQUIRED member therefore fails validation as a missing
+null). Premerge reports every null it strips as a warning on the query:
+a hosted ARA sending one is a bug to fix at the source, and the step is
+slated for removal (docs/ARS_PARITY_REGISTER.md, deviation 21). A null in a REQUIRED member therefore fails validation as a missing
 member, and a null attribute ``value`` (required, never null in 2.0) does
 too. Forbidden EMPTY containers are not repaired: they fail the verdict.
 """
@@ -46,7 +48,7 @@ from translator_tom import Response
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["strip_nulls", "validate"]
+__all__ = ["count_stripped_nulls", "strip_nulls", "validate"]
 
 # Members whose content is free-form JSON (Attribute.value, a constraint's
 # value): a null nested inside them is data, not an absent TRAPI member.
@@ -59,11 +61,30 @@ def strip_nulls(obj: Any) -> Any:
     Does not descend into free-form ``value`` members; a ``"value": null``
     member itself is still removed (an attribute value may not be null).
     Iterative so a deeply nested response cannot hit the recursion limit.
-    Returns ``obj`` for convenience.
+    Returns ``obj`` for convenience (``count_stripped_nulls`` returns how
+    many members it removed instead).
 
     >>> strip_nulls({"a": None, "b": [{"c": None, "value": {"d": None}}]})
     {'b': [{'value': {'d': None}}]}
     """
+    _strip_nulls(obj)
+    return obj
+
+
+def count_stripped_nulls(obj: Any) -> int:
+    """``strip_nulls``, returning the number of null members it removed.
+
+    >>> doc = {"a": None, "b": [{"c": None, "value": {"d": None}}]}
+    >>> count_stripped_nulls(doc), doc
+    (2, {'b': [{'value': {'d': None}}]})
+    >>> count_stripped_nulls(doc)
+    0
+    """
+    return _strip_nulls(obj)
+
+
+def _strip_nulls(obj: Any) -> int:
+    removed = 0
     stack = [obj]
     while stack:
         node = stack.pop()
@@ -71,6 +92,7 @@ def strip_nulls(obj: Any) -> Any:
             nulls = [k for k, v in node.items() if v is None]
             for key in nulls:
                 del node[key]
+            removed += len(nulls)
             for key, value in node.items():
                 if key in _OPAQUE_MEMBERS:
                     continue
@@ -80,7 +102,7 @@ def strip_nulls(obj: Any) -> Any:
             for value in node:
                 if isinstance(value, (dict, list)):
                     stack.append(value)
-    return obj
+    return removed
 
 
 class _AnyOfError(ValueError):

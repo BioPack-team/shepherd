@@ -238,7 +238,6 @@ async def test_intake_does_not_decode_the_response_in_the_worker(
     mocker.patch.object(ars_db, "persist_data_copy", AsyncMock())
     mocker.patch.object(pm, "notify_subscribers", AsyncMock())
     mocker.patch.object(pm.lifecycle, "check_parent_completion", AsyncMock())
-    mocker.patch.object(pm, "get_logs", AsyncMock(return_value=[]))
     # Anything decoding the response in the worker process fails the test.
     mocker.patch.object(
         pm, "get_message", AsyncMock(side_effect=AssertionError), create=True
@@ -250,7 +249,7 @@ async def test_intake_does_not_decode_the_response_in_the_worker(
     mocker.patch.object(
         pm,
         "get_message_sync",
-        side_effect=lambda pk: {"message": {"results": []}, "logs": [1]},
+        side_effect=lambda pk: {"message": {"results": []}},
     )
     mocker.patch.object(
         pm, "save_message_sync", side_effect=lambda pk, data: stored.update({pk: data})
@@ -261,7 +260,7 @@ async def test_intake_does_not_decode_the_response_in_the_worker(
 
     final = update.await_args_list[-1].kwargs
     assert (final["status"], final["code"]) == ("D", 200)
-    # stored under the child, with the (empty) query logs spliced in
+    # stored under the child, as the ARA sent it (no query logs spliced in)
     assert stored == {"child-1": {"message": {"results": []}}}
 
 

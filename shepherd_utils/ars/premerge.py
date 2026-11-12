@@ -2,18 +2,21 @@
 
 Ported from NCATSTranslator/Relay @ 3e65975 tr_sys/tr_ars/utils.py:
 get_safe, add_attribute, add_log_entry, scrub_null_attributes,
-decorate_edges_with_infores, normalizeScores, ScoreStatCalc,
-normalize_scores, remove_phantom_support_graphs, pre_merge_process,
-appraise_confidence, get_confidence.
+normalizeScores, ScoreStatCalc, normalize_scores,
+remove_phantom_support_graphs, pre_merge_process, appraise_confidence,
+get_confidence.
 
-Faithful port, minus the upstream crashes (the UnboundLocalError when an
-edge has non-empty sources but no primary_knowledge_source, the IndexError
-when only some results carry scores) -- see docs/ARS_PARITY_REGISTER.md.
+``decorate_edges_with_infores`` is gone: the ARS no longer stamps its ARA's
+infores on edge sources, it reports the edges that lack it
+(``edges_missing_infores``). See docs/ARS_PARITY_REGISTER.md, deviation 21.
+
+Faithful port, minus the upstream crash (the IndexError when only some
+results carry scores) -- see docs/ARS_PARITY_REGISTER.md.
 Node normalization is intentionally absent from pre_merge_process, matching
 upstream master (Relay PR #871 removed the call).
 
 TRAPI 2.0 (Shepherd speaks 2.0; upstream is 1.5): nothing here emits a null
-or a forbidden empty (``add_attribute``, ``_self_source``), log timestamps
+or a forbidden empty (``add_attribute``), log timestamps
 are RFC 3339 (``log_timestamp``), and a result without analyses -- optional
 in 2.0 -- is skipped by the score passes instead of aborting them.
 """
@@ -87,53 +90,34 @@ def add_attribute(node_or_edge, attribute_json):
         node_or_edge["attributes"] = [attribute]
 
 
-def _self_source(inforesid, role):
-    """A fresh retrieval source for this agent.
+def edges_missing_infores(data, inforesid):
+    """Ids of the knowledge-graph edges whose ``sources`` do not name
+    ``inforesid``, in the response's order. Pure: nothing is modified.
 
-    Built per edge on purpose. Upstream reused one dict for the whole graph,
-    so a later edge flipping the role mutated the source already appended to
-    every earlier edge -- the last edge to need a role decided the role every
-    edge reported.
+    Replaces upstream's ``decorate_edges_with_infores``, which appended a
+    retrieval source for the ARA to every such edge (or, for an edge with no
+    sources at all, made the ARA its primary source). The ARS no longer
+    edits an ARA's provenance: every hosted ARA is expected to name itself
+    on every edge it returns, and an edge that doesn't is reported (see the
+    ars_premerge worker) so it can be fixed in the ARA. See
+    docs/ARS_PARITY_REGISTER.md, deviation 21.
 
-    Upstream also set ``source_record_urls: None`` and
-    ``upstream_resource_ids: []``; TRAPI 2.0 forbids both (no nulls, and
-    ``upstream_resource_ids`` has minItems 1), so the source carries only
-    what it knows.
+    An unknown ARA (``inforesid`` None) has nothing to check against.
     """
-    return {"resource_id": inforesid, "resource_role": role}
-
-
-def decorate_edges_with_infores(data, inforesid):
-    edges = get_safe(data, "message", "knowledge_graph", "edges")
     if inforesid is None:
-        inforesid = "infores:unknown"
-    if edges is not None:
-        for key, edge in edges.items():
-            has_self = False
-            # upstream only ever assigned has_primary inside the loop below,
-            # so a non-empty sources list with no primary_knowledge_source
-            # raised UnboundLocalError and failed the whole callback
-            has_primary = False
-            if (
-                "sources" not in edge.keys()
-                or edge["sources"] is None
-                or len(edge["sources"]) == 0
-            ):
-                edge["sources"] = [_self_source(inforesid, "primary_knowledge_source")]
-            else:
-                for source in edge["sources"]:
-                    if source.get("resource_id") == inforesid:
-                        has_self = True
-                    if source.get("resource_role") == "primary_knowledge_source":
-                        has_primary = True
-                if not has_self:
-                    logger.info("decorateEdges: found lacking self")
-                    role = (
-                        "aggregator_knowledge_source"
-                        if has_primary
-                        else "primary_knowledge_source"
-                    )
-                    edge["sources"].append(_self_source(inforesid, role))
+        return []
+    edges = get_safe(data, "message", "knowledge_graph", "edges")
+    if not isinstance(edges, dict):
+        return []
+    missing = []
+    for key, edge in edges.items():
+        sources = edge.get("sources") if isinstance(edge, dict) else None
+        if not any(
+            isinstance(source, dict) and source.get("resource_id") == inforesid
+            for source in sources or []
+        ):
+            missing.append(key)
+    return missing
 
 
 def ScoreStatCalc(results):
@@ -265,47 +249,66 @@ def normalize_scores(data, key, agent_name):
 
 
 def remove_phantom_support_graphs(response):
+    """Remove every ``biolink:support_graphs`` edge attribute that names an
+    auxiliary graph the response does not contain, in place.
+
+    Returns ``{edge_id: [missing aux graph ids]}`` for the edges it changed,
+    so the caller can report them: a dangling reference is an ARA bug, and
+    removing it silently (as upstream did) hid it.
+
+    A response with support-graph attributes but no ``auxiliary_graphs`` at
+    all has nothing those attributes could reference, so they are all
+    dangling and are removed too. Upstream skipped the whole pass in that
+    case (with only a debug line) and the dangling references went on into
+    the merged message.
+    """
     edges = get_safe(response, "message", "knowledge_graph", "edges")
-    aux_graphs = get_safe(response, "message", "auxiliary_graphs")
-    if edges is not None and aux_graphs is not None:
-        for edge_i, edge in edges.items():
-            if "attributes" in edge.keys() and edge["attributes"] is not None:
-                attributes = edge["attributes"]
-                removal_list = []
-                for attribute in attributes:
-                    if attribute["attribute_type_id"] == "biolink:support_graphs":
-                        for value in attribute["value"]:
-                            if value not in aux_graphs:
-                                if attribute not in removal_list:
-                                    removal_list.append(attribute)
-                for bad in removal_list:
-                    if bad in attributes:
-                        attributes.remove(bad)
-    else:
-        logger.debug(
-            "Response lacking edges and/or auxiliary_graphs. "
-            "No phantom support graphs to remove."
-        )
+    if edges is None:
+        return {}
+    aux_graphs = get_safe(response, "message", "auxiliary_graphs") or {}
+    phantoms = {}
+    for edge_i, edge in edges.items():
+        if "attributes" in edge.keys() and edge["attributes"] is not None:
+            attributes = edge["attributes"]
+            removal_list = []
+            missing = []
+            for attribute in attributes:
+                # .get: an attribute without a type id is invalid TRAPI and
+                # fails validation as such, rather than crashing this pass
+                if attribute.get("attribute_type_id") == "biolink:support_graphs":
+                    for value in attribute["value"]:
+                        if value not in aux_graphs:
+                            if value not in missing:
+                                missing.append(value)
+                            if attribute not in removal_list:
+                                removal_list.append(attribute)
+            for bad in removal_list:
+                if bad in attributes:
+                    attributes.remove(bad)
+            if missing:
+                phantoms[edge_i] = missing
+    return phantoms
 
 
 def pre_merge_process(data, key, agent_name, inforesid):
     """The per-callback processing pipeline, ported from utils.py.
+
+    Normalizes the scores in place and returns the ids of the edges whose
+    sources lack the ARA's infores (``edges_missing_infores``), which
+    upstream stamped here and the port only reports.
 
     Raises on any stage failure (the caller marks the child errored, exactly
     as the upstream callback handler's generic except does).
     """
     # null-attribute scrubbing removed upstream (Relay PR #885) and node
     # normalization before it (Relay PR #871): data arrives pre-normalized.
-    try:
-        decorate_edges_with_infores(data, inforesid)
-    except Exception as e:
-        logger.exception("Error in ARS edge source decoration")
-        raise e
+    missing_infores = edges_missing_infores(data, inforesid)
     try:
         normalize_scores(data, key, agent_name)
     except Exception as e:
         logger.exception("Error in ARS score normalization")
         raise e
+    return missing_infores
 
 
 def appraise_confidence(results):
