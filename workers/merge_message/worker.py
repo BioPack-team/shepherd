@@ -1176,11 +1176,10 @@ async def _uncount_interrupted_passes() -> None:
 
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
-    # Size by the pod's actual CPU allocation (cgroup limit), not os.cpu_count()
-    # which reports the whole node's cores. This one value drives both the pool
-    # and the in-flight task limit below: each merge runs a child that loads the
-    # growing response blob, so pool size == concurrency bounds peak memory.
-    # POOL_MAX_WORKERS overrides.
+    # Size the pool by the pod's actual CPU allocation (cgroup limit), not
+    # os.cpu_count() which reports the whole node's cores. Each merge runs a
+    # child that loads the growing response blob, so the pool size is what
+    # bounds CPU and peak memory. POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
     LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
     on_graceful_shutdown(_uncount_interrupted_passes)
@@ -1499,10 +1498,22 @@ async def poll_for_tasks():
             limiter.release()
 
     # Each wake task runs concurrently. Distinct queries never share a lock,
-    # so their merges run in parallel on the process pool; the task limiter
-    # (sized to max_workers) bounds concurrency.
+    # so their merges run in parallel on the process pool, which alone bounds
+    # the CPU- and memory-heavy work (pool.run waits for a free child). The
+    # in-flight task limit is deliberately larger than the pool: most of a
+    # task's life is not pool work -- the merge_debounce_sec wait after taking
+    # the lock, Redis round trips, and lock losers that just ack. Capping
+    # in-flight tasks at the pool size let those waits hold every slot, so a
+    # 2-CPU pod sat idle debouncing ~1s per query while its backlog grew. The
+    # parent only handles callback ids, so the extra tasks cost no memory.
+    # TASK_LIMIT overrides.
     await run_poll_loop(
-        STREAM, GROUP, CONSUMER, max_workers, process_query, on_stop=pool.shutdown
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max(TASK_LIMIT, max_workers),
+        process_query,
+        on_stop=pool.shutdown,
     )
 
 
