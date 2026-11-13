@@ -19,6 +19,11 @@
 # The production values live in the Helm chart -- keep the two in step.
 # To run without limits locally, override them in a gitignored
 # compose.override.yml (`cpus: 0` / `mem_limit: 0` means unlimited).
+#
+# Init: every worker runs with `init: true`, so a small init (tini) is PID 1
+# rather than `python worker.py`. Processes orphaned inside the container are
+# re-parented to PID 1, and Python never reaps children it didn't start, so
+# without an init they pile up as <defunct> entries.
 
 # Postgres connection budget (#223 C11-3). Every process's pool max is its
 # share of one fleet-wide budget -- budget x POSTGRES_POOL_SHARES /
@@ -182,6 +187,7 @@ services:
       - ./data/redisinsight:/db
   shepherd_monitor:
     container_name: shepherd_monitor
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -218,6 +224,7 @@ services:
   ########## Shared Workers
   merge_message:
     container_name: merge_message
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 2
@@ -240,6 +247,7 @@ services:
       - ./.env:/app/.env
   sort_results_score:
     container_name: sort_results_score
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -261,6 +269,7 @@ services:
       - ./.env:/app/.env
   filter_results_top_n:
     container_name: filter_results_top_n
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -282,6 +291,7 @@ services:
       - ./.env:/app/.env
   filter_kgraph_orphans:
     container_name: filter_kgraph_orphans
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -304,6 +314,7 @@ services:
       - ./.env:/app/.env
   finish_query:
     container_name: finish_query
+    init: true
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
@@ -329,6 +340,7 @@ services:
       - ./ars_payloads:/app/ars_payloads
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -349,6 +361,7 @@ services:
       - ./.env:/app/.env
   score_paths:
     container_name: score_paths
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 6
@@ -376,6 +389,7 @@ services:
   ######### Example ARA
   example_ara:
     container_name: example_ara
+    init: true
     environment:
       <<: *postgres_budget
     platform: linux/amd64
@@ -395,6 +409,7 @@ services:
       - ./.env:/app/.env
   example_lookup:
     container_name: example_lookup
+    init: true
     environment:
       <<: *postgres_budget
     platform: linux/amd64
@@ -414,6 +429,7 @@ services:
       - ./.env:/app/.env
   example_score:
     container_name: example_score
+    init: true
     environment:
       <<: *postgres_budget
     platform: linux/amd64
@@ -436,6 +452,7 @@ services:
   ######### ARAGORN
   aragorn:
     container_name: aragorn
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -457,6 +474,7 @@ services:
       - ./.env:/app/.env
   aragorn_lookup:
     container_name: aragorn_lookup
+    init: true
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
@@ -487,6 +505,7 @@ services:
       - ./.env:/app/.env
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -514,6 +533,7 @@ services:
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 2 # -> pool sizes to 2; confirm via the "process pool sized to 2 worker(s)" startup log
@@ -559,6 +579,7 @@ services:
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 4
@@ -583,6 +604,7 @@ services:
   ######### ARAX
   arax:
     container_name: arax
+    init: true
     # Runs ARAX's whole plan in-process (DEC-14): one pool child per query, so
     # cpus is how many queries run at once. A large multi-hop answer's KG and
     # results live in one child, hence about 3 GB per child.
@@ -617,6 +639,7 @@ services:
       - ./arax_dbs:/app/arax_dbs
   arax_pathfinder:
     container_name: arax_pathfinder
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 6
@@ -648,6 +671,7 @@ services:
 
   arax_rank:
     container_name: arax_rank
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 4
@@ -670,6 +694,7 @@ services:
 ######### BTE
   bte:
     container_name: bte
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -692,6 +717,7 @@ services:
   
   bte_lookup:
     container_name: bte_lookup
+    init: true
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
@@ -720,6 +746,7 @@ services:
 ######### SIPR
   sipr:
     container_name: sipr
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 1
@@ -746,6 +773,7 @@ services:
   # `docker compose --profile ars up --build` (or COMPOSE_PROFILES=ars).
   ars_fanout:
     container_name: ars_fanout
+    init: true
     cpus: 1
     mem_limit: 2g
     profiles: [ars]
@@ -770,6 +798,7 @@ services:
 
   ars_premerge:
     container_name: ars_premerge
+    init: true
     cpus: 2
     mem_limit: 5g
     profiles: [ars]
@@ -794,6 +823,7 @@ services:
 
   ars_merge:
     container_name: ars_merge
+    init: true
     cpus: 2
     mem_limit: 5g
     profiles: [ars]
@@ -818,6 +848,7 @@ services:
 
   ars_watchdog:
     container_name: ars_watchdog
+    init: true
     cpus: 0.5
     mem_limit: 1g
     profiles: [ars]
@@ -842,6 +873,7 @@ services:
 
   ars_notify:
     container_name: ars_notify
+    init: true
     environment:
       <<: *postgres_budget
     cpus: 0.5
