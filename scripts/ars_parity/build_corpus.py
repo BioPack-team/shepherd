@@ -593,6 +593,152 @@ def scores_cases():
                 {"analyses": []},
             ],
         },
+        {
+            # ScoreStatCalc reads ordering_components.confidence (Relay PR
+            # #891); appraise_confidence then sorts by it
+            "name": "with_confidence",
+            "results": [
+                {
+                    "analyses": [{"score": 0.2}],
+                    "ordering_components": {"confidence": 0.2},
+                },
+                {
+                    "analyses": [{"score": 0.8}],
+                    "ordering_components": {"confidence": 0.8, "novelty": 0.1},
+                },
+                {
+                    "analyses": [{"score": 0.5}],
+                    "ordering_components": {"confidence": 0.5},
+                },
+                # no confidence / not a dict / none: skipped by the stats
+                {"analyses": [{"score": 0.4}], "ordering_components": {"novelty": 0.3}},
+                {"analyses": [{"score": 0.7}], "ordering_components": []},
+                {"analyses": [{"score": 0.6}]},
+            ],
+        },
+    ]
+
+
+def _rrf_result(*ids, qnodes=("n0", "n1"), trapi2=False):
+    """A bare result binding ``ids`` (one id per query node, the last query
+    node taking any extra ids), in 1.5 or 2.0 binding form."""
+    groups = {q: [] for q in qnodes}
+    for i, curie in enumerate(ids):
+        groups[qnodes[min(i, len(qnodes) - 1)]].append(curie)
+    if trapi2:
+        return {"node_bindings": {q: {"ids": g} for q, g in groups.items() if g}}
+    return {
+        "node_bindings": {
+            q: [{"id": c, "attributes": []} for c in g] for q, g in groups.items() if g
+        }
+    }
+
+
+ARAGORN = "infores:shepherd-aragorn"
+ARAX = "infores:shepherd-arax"
+
+
+def ranker_fusion_cases(trapi2=False):
+    """apply_weighted_rrf inputs (Relay PR #897): the merged ``results``,
+    each ranker's own ordered results, and the weights / c (None for
+    upstream's defaults). Results are tagged with ``tag`` so the golden
+    order is readable; the function ignores it."""
+
+    def r(tag, *ids, **kw):
+        result = _rrf_result(*ids, trapi2=trapi2, **kw)
+        result["tag"] = tag
+        return result
+
+    return [
+        {
+            "name": "basic",
+            "results": [
+                r("A", "X:a", "Y:1"),
+                r("B", "X:b", "Y:1"),
+                r("C", "X:c", "Y:1"),
+                r("D", "X:d", "Y:1"),
+                r("E", "X:e", "Y:1"),
+            ],
+            "rankers": {
+                ARAGORN: [r("b", "X:b", "Y:1"), r("a", "X:a", "Y:1"), r("z", "X:z", "Y:1")],
+                ARAX: [r("c", "X:c", "Y:1"), r("b", "X:b", "Y:1")],
+            },
+            "weights": None,
+            "c": None,
+        },
+        {
+            # a ranker's later duplicate keeps the first (best) rank; the
+            # key is the SET of bound ids, whatever query node binds them
+            "name": "duplicates_and_set_keys",
+            "results": [
+                r("A", "X:a", "Y:1"),
+                r("B", "X:b", "Y:1", "Y:2"),
+                r("C", "X:c", "Y:1"),
+            ],
+            "rankers": {
+                ARAGORN: [
+                    r("c", "X:c", "Y:1"),
+                    r("c-again", "X:c", "Y:1"),
+                    r("b", "Y:2", "X:b", "Y:1", qnodes=("m0", "m1")),
+                ],
+            },
+            "weights": None,
+            "c": None,
+        },
+        {
+            # equal weights and c=0: equal scores share a rank, and ties
+            # keep the merged order
+            "name": "equal_weights_ties",
+            "results": [
+                r("A", "X:a", "Y:1"),
+                r("B", "X:b", "Y:1"),
+                r("C", "X:c", "Y:1"),
+                r("D", "X:d", "Y:1"),
+            ],
+            "rankers": {
+                ARAGORN: [r("b", "X:b", "Y:1"), r("a", "X:a", "Y:1")],
+                ARAX: [r("a", "X:a", "Y:1"), r("b", "X:b", "Y:1")],
+            },
+            "weights": {ARAGORN: 0.5, ARAX: 0.5},
+            "c": 0,
+        },
+        {
+            # a source without a weight is ignored; a result binding nothing
+            # scores 0
+            "name": "unweighted_source_and_empty_bindings",
+            "results": [
+                r("A", "X:a", "Y:1"),
+                {"node_bindings": {}, "tag": "empty"},
+                r("B", "X:b", "Y:1"),
+            ],
+            "rankers": {
+                "infores:shepherd-bte": [r("a", "X:a", "Y:1")],
+                ARAX: [r("b", "X:b", "Y:1")],
+            },
+            "weights": None,
+            "c": None,
+        },
+        {
+            "name": "no_matching_results",
+            "results": [r("A", "X:a", "Y:1")],
+            "rankers": {ARAGORN: [r("q", "X:q", "Y:1")]},
+            "weights": None,
+            "c": None,
+        },
+        {
+            "name": "only_unweighted_sources",
+            "results": [r("A", "X:a", "Y:1")],
+            "rankers": {"infores:shepherd-bte": [r("a", "X:a", "Y:1")]},
+            "weights": None,
+            "c": None,
+        },
+        {
+            "name": "no_results",
+            "results": [],
+            "rankers": {ARAGORN: [r("a", "X:a", "Y:1")]},
+            "weights": None,
+            "c": None,
+        },
     ]
 
 
@@ -1002,6 +1148,13 @@ def main():
         ):
             path.write_text(json.dumps(doc, indent=2) + "\n")
             print(f"wrote {path}")
+    # bare results, so the 2.0 form is built directly (bindings only)
+    for path, doc in (
+        (OUT_TRAPI15 / "ranker_fusion_cases.json", ranker_fusion_cases()),
+        (OUT / "ranker_fusion_cases.json", ranker_fusion_cases(trapi2=True)),
+    ):
+        path.write_text(json.dumps(doc, indent=2) + "\n")
+        print(f"wrote {path}")
 
 
 if __name__ == "__main__":

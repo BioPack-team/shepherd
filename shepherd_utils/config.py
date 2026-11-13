@@ -594,6 +594,13 @@ class Settings(BaseSettings):
     # Nodes already carrying a biothings_annotations attribute are skipped in
     # every mode.
     ars_annotation_mode: Literal["merge", "premerge", "off"] = "premerge"
+    # Weighted RRF ranker fusion (upstream Relay PR #897) reorders each
+    # merged version's results by the hosted ARAs' own rankings. Not a
+    # Shepherd setting: shepherd_utils/ars/ranker_fusion.py reads upstream's
+    # variables from the ars_merge container's environment on every merge,
+    # with upstream's fall-backs -- ARS_RRF_ENABLED (default "true"),
+    # ARS_RRF_ARAGORN_WEIGHT (default 0.9; ARAX gets 1 - weight) and
+    # ARS_RRF_C (default 40).
     # AES key for decrypting stored notification-client secrets (upstream env
     # AES_MASTER_KEY). Empty disables signed notifications.
     aes_master_key: str = ""

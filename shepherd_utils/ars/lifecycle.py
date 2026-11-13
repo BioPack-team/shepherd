@@ -17,7 +17,7 @@ from . import aras
 from . import cache
 from . import db as ars_db
 from .completion import evaluate_completion
-from .notify import notify_subscribers
+from .notify import merged_result_stat, notify_subscribers
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,7 @@ async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> Non
                         if claimed.get("merged_versions_list") is not None
                         else []
                     ),
+                    "results_stat": await merged_result_stat(claimed, task_logger),
                 },
                 task_logger,
             )

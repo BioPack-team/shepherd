@@ -1,10 +1,10 @@
 """Parity tests for the ars_premerge worker.
 
-Upstream reference: NCATSTranslator/Relay @ 3e65975 api.py (the result
-callback view): intake guards and counts, pre_merge_process ->
-remove_phantom_support_graphs -> validate over the payload (deviation 21:
-the ARA's infores is reported rather than stamped, and stripped nulls and
-removed phantom support graphs are reported too), the D/200 (or
+Upstream reference: NCATSTranslator/Relay @ 84a66c1 api.py (the result
+callback view): intake guards and counts (a response with no knowledge
+graph nodes counts as having no results), validate over the payload as sent
+(upstream no longer runs pre_merge_process or remove_phantom_support_graphs,
+Relay PR #898; stripped nulls are reported, deviation 21), the D/200 (or
 header-status) flip and merge hand-off on success, E/422 + the
 ara_failed_validation notification on invalid TRAPI, the generic-handler
 E/500 with its "Internal ARS Server Error" log entry on a crash, and the
@@ -171,12 +171,12 @@ def _final_status_update(env):
 async def test_premerge_happy_path(env, redis_mock):
     await pm.ars_premerge(_task(env), LOGGER)
 
-    # the pool child saved the premerged result (normalize_scores ran) as
-    # the merge's working copy -- never over the child's own entry, which is
-    # its ARA's response
+    # the pool child saved the premerged result as the merge's working copy
+    # -- never over the child's own entry, which is its ARA's response.
+    # Scores are no longer normalized (Relay PR #898).
     ((pk, payload),) = env["saved"]
     assert pk == ars_db.premerged_key(env["child_pk"])
-    assert "normalized_score" in payload["message"]["results"][0]
+    assert "normalized_score" not in payload["message"]["results"][0]
     # ...and nothing large went through the async save in this process
     env["save_message_data"].assert_not_awaited()
 
@@ -323,7 +323,7 @@ async def test_premerge_crash_is_500_with_log_entry(env, mocker, redis_mock, cap
     callback handler did. Upstream also wrote an 'Internal ARS Server Error'
     entry into the payload; the child's payload is its ARA's response, which
     the ARS never writes, so the entry goes to the ARS query's logs."""
-    mocker.patch.object(pm, "pre_merge_process", side_effect=RuntimeError("scrub boom"))
+    mocker.patch.object(pm, "validate", side_effect=RuntimeError("validate boom"))
     with caplog.at_level(logging.ERROR):
         await pm.ars_premerge(_task(env), LOGGER)
 
@@ -438,7 +438,7 @@ async def test_intake_happy_path_premerges_and_merges(env, intake, redis_mock):
     intake["get_message"].assert_called_once_with("resp1")
     ((pk, payload),) = env["saved"]
     assert pk == ars_db.premerged_key(env["child_pk"])
-    assert "normalized_score" in payload["message"]["results"][0]
+    assert "normalized_score" not in payload["message"]["results"][0]
     # the counts are recorded before the child is handed on
     counts = next(
         c.kwargs
@@ -446,7 +446,9 @@ async def test_intake_happy_path_premerges_and_merges(env, intake, redis_mock):
         if "result_count" in c.kwargs
     )
     assert counts["result_count"] == 2
-    assert counts["result_stat"]
+    # the stats are over ordering_components.confidence (Relay PR #891),
+    # which an ARA's answer doesn't carry: there are none
+    assert counts["result_stat"] == {}
 
     # D/200, merge
     final = _final_status_update(env)
@@ -477,6 +479,31 @@ async def test_intake_empty_results_terminal_without_merge(env, intake, redis_mo
     assert await _merge_tasks() == []
     # nothing is saved: the child's payload is the ARA's response itself,
     # already in its entry, and nothing goes to the merge
+    assert env["saved"] == []
+
+
+@pytest.mark.parametrize("nodes", [{}, None])
+async def test_intake_results_without_kg_nodes_count_as_none(
+    env, intake, redis_mock, nodes
+):
+    """Relay PRs #894/#895: a response with results but no knowledge graph
+    nodes (a Pathfinder answer with one "result" and an empty graph) counts
+    as having no results: announced with 0, completed D/200, not merged."""
+    if nodes is None:
+        del env["data"]["message"]["knowledge_graph"]["nodes"]
+    else:
+        env["data"]["message"]["knowledge_graph"]["nodes"] = nodes
+    assert env["data"]["message"]["results"]
+    intake["get_message"].return_value = env["data"]
+
+    await pm.ars_premerge(_intake_task(env), LOGGER)
+
+    notified = env["notify"].await_args_list[0].args[1]
+    assert notified["ara_n_results"] == 0
+    final = _final_status_update(env)
+    assert (final["status"], final["code"]) == ("D", 200)
+    assert "result_count" not in final
+    assert await _merge_tasks() == []
     assert env["saved"] == []
 
 
@@ -562,7 +589,7 @@ async def test_intake_redelivered_before_the_merge_resumes_at_premerge(
     # sent, whatever the dead worker had got to) and saved once for the merge
     ((pk, payload),) = env["saved"]
     assert pk == ars_db.premerged_key(env["child_pk"])
-    assert "normalized_score" in payload["message"]["results"][0]
+    assert payload["message"] == env["data"]["message"]
     final = _final_status_update(env)
     assert final["status"] == "D"
     assert final["code"] == 200
@@ -685,7 +712,7 @@ async def test_intake_premerge_crash_still_notifies_and_counts_first(
     keeps the shape it had as a pool call of its own: the
     ara_response_complete notification and the counts first, then E/500.
     Nothing is saved for the merge."""
-    mocker.patch.object(pm, "pre_merge_process", side_effect=RuntimeError("boom"))
+    mocker.patch.object(pm, "validate", side_effect=RuntimeError("boom"))
     await pm.ars_premerge(_intake_task(env), LOGGER)
 
     notified = env["notify"].await_args_list[0].args[1]
@@ -811,26 +838,16 @@ async def test_stripped_nulls_are_reported_as_a_warning(
     assert _reports(logs, "support graphs") == []
 
 
-async def test_edges_without_the_ara_infores_are_reported_not_stamped(
-    env, mocker, redis_mock
-):
+async def test_edges_without_the_ara_infores_are_left_as_sent(env, mocker, redis_mock):
     """Upstream appended the ARA's infores to every edge whose sources
-    lacked it. The port leaves the sources as the ARA sent them and warns,
-    naming the edges. (The corpus edges name infores:aragorn, not the
-    hosted ARA's infores:shepherd-aragorn.)"""
+    lacked it, and later stopped running that stage at all (Relay PR #898).
+    The sources stay as the ARA sent them, and nothing is reported. (The
+    corpus edges name infores:aragorn, not the hosted ARA's
+    infores:shepherd-aragorn.)"""
     sent = copy.deepcopy(env["data"]["message"]["knowledge_graph"]["edges"])
     logs = await _query_logs(env, _task(env), mocker)
 
-    (entry,) = _reports(logs, "do not name")
-    assert entry["level"] == "WARNING"
-    for part in (
-        "ara-shepherd-aragorn",
-        ARA_INFORES,
-        str(env["child_pk"]),
-        "3 knowledge graph edge(s)",
-        "e1, e2, e3",
-    ):
-        assert part in entry["message"]
+    assert _reports(logs, "do not name") == []
     edges = env["saved"][-1][1]["message"]["knowledge_graph"]["edges"]
     assert {k: e["sources"] for k, e in edges.items()} == {
         k: e["sources"] for k, e in sent.items()
@@ -840,39 +857,23 @@ async def test_edges_without_the_ara_infores_are_reported_not_stamped(
     assert await _ready(env) == [str(env["child_pk"])]
 
 
-async def test_phantom_support_graphs_are_removed_and_reported_as_an_error(
-    env, intake, mocker, redis_mock
-):
+async def test_phantom_support_graphs_are_left_as_sent(env, intake, mocker, redis_mock):
+    """Upstream no longer removes support_graphs attributes naming an
+    auxiliary graph the response does not contain (Relay PR #898): the
+    response validates and merges with the dangling reference."""
     _name_the_ara_on_every_edge(env["data"])
     edges = env["data"]["message"]["knowledge_graph"]["edges"]
-    edges["e3"]["attributes"] = [
-        {"attribute_type_id": "biolink:support_graphs", "value": ["aux9"]}
-    ]
+    phantom = [{"attribute_type_id": "biolink:support_graphs", "value": ["aux9"]}]
+    edges["e3"]["attributes"] = copy.deepcopy(phantom)
 
     logs = await _query_logs(env, _intake_task(env), mocker)
 
-    (entry,) = _reports(logs, "support graphs")
-    assert entry["level"] == "ERROR"
-    for part in (
-        "ara-shepherd-aragorn",
-        ARA_INFORES,
-        str(env["child_pk"]),
-        "1 edge(s)",
-        "e3",
-        "aux9",
-    ):
-        assert part in entry["message"]
-    # removed, so the response still merges; the intact reference stays
+    assert _reports(logs, "support graphs") == []
     saved = env["saved"][-1][1]["message"]["knowledge_graph"]["edges"]
-    assert saved["e3"]["attributes"] == []
+    assert saved["e3"]["attributes"] == phantom
     assert saved["e2"]["attributes"][0]["value"] == ["aux1"]
     assert _final_status_update(env)["status"] == "D"
     assert await _ready(env) == [str(env["child_pk"])]
-
-
-def test_report_examples_are_capped():
-    assert pm._examples(["a", "b"]) == "a, b"
-    assert pm._examples([f"e{i}" for i in range(9)]) == "e0, e1, e2, e3, e4, ..."
 
 
 # ---------------------------------------------------------------------------
