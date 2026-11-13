@@ -153,6 +153,9 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-supersecretpassword}
       # empty keeps redis.conf's maxmemory
       REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-}
+      # Truncate a damaged AOF at startup instead of restart-looping on it
+      # (see shepherd_broker/entrypoint.sh).
+      REDIS_AOF_AUTOFIX: ${REDIS_AOF_AUTOFIX:-yes}
     ports:
       - "127.0.0.1:6379:6379"
     restart: unless-stopped
@@ -170,16 +173,25 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
+    # A named volume, not a bind mount of ./data: on Docker Desktop (Windows,
+    # macOS) a bind mount goes through the host file-sharing layer, whose
+    # fsync doesn't make the AOF durable, so an unclean stop could leave it
+    # corrupt. A named volume lives on the Docker VM's own disk. Wipe it with
+    # `docker compose down -v` (or `docker volume rm shepherd_broker_data`).
     volumes:
-      - ./data:/data
+      - broker_data:/data
   shepherd_broker_insight:
     image: redislabs/redisinsight:latest
     container_name: shepherd_broker_insight
     restart: unless-stopped
     ports:
       - '127.0.0.1:5540:5540'
+    # Its own volume: nesting it inside the broker's data directory mixed
+    # RedisInsight's files into Redis's, and made Docker create both host
+    # directories at once, which Docker Desktop can fail at ("error while
+    # creating mount source path ...: file exists").
     volumes:
-      - ./data/redisinsight:/db
+      - broker_insight_data:/db
   shepherd_monitor:
     container_name: shepherd_monitor
     environment:
@@ -861,3 +873,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+
+volumes:
+  broker_data:
+  broker_insight_data:
