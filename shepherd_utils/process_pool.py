@@ -34,6 +34,13 @@ the loop wedges, the heartbeat stops, and the pod looks alive while doing nothin
 and never recovering. Spawn launches children via ``fork_exec`` (C level), which
 does not run the Python at-fork handlers, so rebuilding the pool in-process is
 safe.
+
+Every child leads its own process group, and a child is killed by group. Work a
+task hands to processes of its own -- e.g. catrax-pathfinder runs each BFS leg
+in a nested ``ProcessPoolExecutor`` -- lands in its group, so killing the child
+kills that work too. Killing only the child's pid used to orphan those
+grandchildren: they ran their searches to the end, querying the retriever for
+minutes after the task had been failed, with no task left to show for it.
 """
 
 import asyncio
@@ -64,6 +71,14 @@ def _init_pool_worker() -> None:
     # leaves something actionable in the logs instead of a bare
     # BrokenProcessPool in the parent.
     faulthandler.enable()
+    # Lead a process group of our own, which every process this child starts
+    # (and theirs) joins, so ``_kill_children`` can stop them all with one
+    # ``killpg``. ``setpgrp``, not ``setsid``: the child stays in the worker's
+    # session.
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
     # Spawned children start with no logging config; give them a minimal one so
     # log calls inside the child reach stderr for the container log collector.
     logging.basicConfig(
@@ -253,34 +268,46 @@ class ProcessPoolManager:
             raise
 
     async def _kill_children(self, executor: ProcessPoolExecutor) -> None:
-        """Force-terminate any live children of ``executor``, capturing stacks.
+        """Force-terminate ``executor``'s children and everything they started,
+        capturing stacks.
 
         A ProcessPoolExecutor gives no way to cancel a running child, so on a
         timeout we terminate the slot's child directly to stop the runaway
-        work and free the slot. We send SIGABRT first, not SIGKILL: the
-        faulthandler installed in ``_init_pool_worker`` catches SIGABRT and dumps
-        the child's C+Python traceback to stderr before it dies -- so a child
-        that hung *before* it ever ran its task (e.g. stuck in cold-start
-        import/setup) leaves an actionable stack instead of a silent kill. After
-        a short grace for that dump, any child still alive (ignored SIGABRT, e.g.
-        stuck in an uninterruptible syscall) is SIGKILLed so the slot is always
-        freed. Already-dead children (the broken-pool case) are a no-op.
-        ``_processes`` is a CPython internal (pid -> Process); guarded.
+        work and free the slot. We send the child SIGABRT first, not SIGKILL:
+        the faulthandler installed in ``_init_pool_worker`` catches SIGABRT and
+        dumps the child's C+Python traceback to stderr before it dies -- so a
+        child that hung *before* it ever ran its task (e.g. stuck in cold-start
+        import/setup) leaves an actionable stack instead of a silent kill.
+        After a short grace for that dump, the child's whole process group
+        (see ``_init_pool_worker``) is SIGKILLed: the child if it ignored
+        SIGABRT, and any processes it started, which would otherwise be
+        orphaned and keep working with no task behind them.
+
+        The group is killed even when the child itself is already dead (an
+        OOM kill): its grandchildren may still be running. The group id is the
+        child's pid, which the kernel does not reuse while any process is left
+        in that group. ``_processes`` is a CPython internal (pid -> Process);
+        guarded.
         """
         procs = list((getattr(executor, "_processes", None) or {}).values())
+        pids = [pid for pid in (getattr(p, "pid", None) for p in procs) if pid]
+        if not pids:
+            return
         aborted = []
         for proc in procs:
-            pid = getattr(proc, "pid", None)
-            if pid is None:
-                continue
             try:
-                os.kill(pid, signal.SIGABRT)
-                aborted.append(proc)
-            except (ProcessLookupError, OSError):
+                if proc.is_alive():
+                    os.kill(proc.pid, signal.SIGABRT)
+                    aborted.append(proc)
+            except (ProcessLookupError, OSError, ValueError):
                 pass
-        if not aborted:
-            return
-        await asyncio.sleep(_ABORT_GRACE_SEC)
+        if aborted:
+            await asyncio.sleep(_ABORT_GRACE_SEC)
+        for pid in pids:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         for proc in aborted:
             try:
                 if proc.is_alive():
