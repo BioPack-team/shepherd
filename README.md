@@ -85,13 +85,14 @@ To lift them locally, override `cpus` / `mem_limit` (0 = unlimited) in a gitigno
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`
 (with `profiles: [ars]` if it's part of the ARS).
 
-Broker data: Redis and RedisInsight keep their data in the named volumes `shepherd_broker_data`
-and `shepherd_broker_insight_data`, not in a `./data` folder (a bind mount on Docker Desktop
-doesn't make Redis's append-only file durable, so an unclean stop could corrupt it). With
+Data volumes: Postgres, Redis and RedisInsight keep their data in the named volumes
+`shepherd_db_data`, `shepherd_broker_data` and `shepherd_broker_insight_data`, not in `./pgdata`
+and `./data` folders (a bind mount on Docker Desktop doesn't make their writes durable, so an
+unclean stop could corrupt them). Docker Desktop's Volumes tab can browse and download their files. With
 `REDIS_AOF_AUTOFIX=yes` (the compose default) the broker repairs a damaged AOF at startup, keeping
 the damaged files in `/data/appendonlydir.damaged`, instead of restart-looping on it. To start
-with an empty broker, run `docker compose down -v`, or `docker volume rm shepherd_broker_data`
-to keep the other volumes.
+empty, run `docker compose down -v`, or `docker volume rm` just the volume to reset (e.g.
+`shepherd_broker_data`).
 
 Credentials and admin access:
 

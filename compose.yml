@@ -137,8 +137,13 @@ services:
       timeout: 2s
       retries: 5
       start_period: 60s
+    # A named volume, not a bind mount of ./pgdata, for the same reason as the
+    # broker's: on Docker Desktop a bind mount goes through the host
+    # file-sharing layer, whose fsync doesn't make Postgres's WAL durable, so
+    # an unclean stop could corrupt the database. A new volume is initialized
+    # from shepherd_db/*.sql. Wipe it with `docker volume rm shepherd_db_data`.
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql/data
   shepherd_broker:
     container_name: shepherd_broker
     cpus: 2
@@ -875,5 +880,6 @@ services:
       - ./.env:/app/.env
 
 volumes:
+  db_data:
   broker_data:
   broker_insight_data:
