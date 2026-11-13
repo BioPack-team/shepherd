@@ -83,7 +83,6 @@ ARA_TARGETS = {
     for ara in SHEPHERD_ARAS
     for env, host in SHEPHERD_HOSTS.items()
 }
-ARA_TARGETS["aragorn-prod"] = "https://aragorn.transltr.io/aragorn"
 
 # name -> base URL of an ARS (POST {base}/api/submit). ars-<env> is the
 # deployed ARS; ars-local and shepherd-ars-<env> are Shepherd's port of it.
