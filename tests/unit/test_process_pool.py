@@ -362,3 +362,83 @@ async def test_a_slot_is_released_when_its_block_raises():
         assert await asyncio.wait_for(pool.run(loop, _echo, 1), timeout=30) == 1
     finally:
         pool.shutdown()
+
+
+# A task that starts processes of its own (catrax-pathfinder runs each BFS leg
+# in a nested pool). Killing only the child used to orphan them, and they kept
+# querying the retriever long after their task had been failed.
+def _start_grandchild_then(path, then):
+    import subprocess
+
+    grandchild = subprocess.Popen(["sleep", "60"])
+    with open(path, "w") as f:
+        f.write(str(grandchild.pid))
+    if then == "die":
+        os._exit(1)
+    time.sleep(60)
+
+
+def _gone(pid):
+    """True once ``pid`` has exited (a zombie nobody reaped counts as exited)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] in ("Z", "X")
+    except FileNotFoundError:
+        return True
+
+
+async def _grandchild_pid(path, timeout=20.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if os.path.exists(path) and open(path).read():
+            return int(open(path).read())
+        await asyncio.sleep(0.05)
+    raise AssertionError("the task never started its grandchild")
+
+
+async def _until_gone(pid, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not _gone(pid):
+        await asyncio.sleep(0.05)
+    return _gone(pid)
+
+
+async def test_a_timeout_kills_what_the_task_started(tmp_path):
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=3.0)
+    path = str(tmp_path / "grandchild.pid")
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await pool.run(loop, _start_grandchild_then, path, "sleep")
+        grandchild = await _grandchild_pid(path)
+        assert await _until_gone(grandchild)
+    finally:
+        pool.shutdown()
+
+
+async def test_a_dead_childs_processes_are_killed_with_it(tmp_path):
+    """The OOM case: the child is already gone, what it started is not."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    path = str(tmp_path / "grandchild.pid")
+    try:
+        with pytest.raises(BrokenProcessPool):
+            await pool.run(loop, _start_grandchild_then, path, "die")
+        grandchild = await _grandchild_pid(path)
+        assert await _until_gone(grandchild)
+    finally:
+        pool.shutdown()
+
+
+async def test_a_child_leads_its_own_process_group():
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        pid, pgid = await pool.run(loop, _pid_and_pgid, None)
+        assert pgid == pid != os.getpgrp()
+    finally:
+        pool.shutdown()
+
+
+def _pid_and_pgid(_):
+    return os.getpid(), os.getpgrp()

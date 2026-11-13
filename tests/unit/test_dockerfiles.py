@@ -131,3 +131,16 @@ def test_deps_lists_pyproject_dependencies():
         check=True,
     ).stdout.split()
     assert extra == project["optional-dependencies"]["arax-api"]
+
+
+def test_every_compose_worker_runs_under_an_init():
+    """PID 1 must reap orphans; ``python worker.py`` never does (see compose.yml)."""
+    compose = yaml.safe_load((REPO / "compose.yml").read_text())
+    workers = {
+        name: service
+        for name, service in compose["services"].items()
+        if isinstance(service.get("build"), dict)
+        and service["build"].get("dockerfile", "").startswith("workers/")
+    }
+    assert workers
+    assert [name for name, s in workers.items() if s.get("init") is not True] == []
