@@ -828,6 +828,12 @@ services:
     environment:
       <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
+      # biothings_annotator reads these from os.environ, not Shepherd's
+      # Settings, so they must be container env (a mounted .env is not
+      # enough). Compose interpolates them from the shell or the project
+      # .env, so ELASTICSEARCH_CONNECTION=ci_forward there switches presets.
+      ANNOTATOR_QUERY_BACKEND: ${ANNOTATOR_QUERY_BACKEND:-elasticsearch}
+      ELASTICSEARCH_CONNECTION: ${ELASTICSEARCH_CONNECTION:-in_cluster}
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -853,6 +859,12 @@ services:
     environment:
       <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
+      # biothings_annotator reads these from os.environ, not Shepherd's
+      # Settings, so they must be container env (a mounted .env is not
+      # enough). Compose interpolates them from the shell or the project
+      # .env, so ELASTICSEARCH_CONNECTION=ci_forward there switches presets.
+      ANNOTATOR_QUERY_BACKEND: ${ANNOTATOR_QUERY_BACKEND:-elasticsearch}
+      ELASTICSEARCH_CONNECTION: ${ELASTICSEARCH_CONNECTION:-in_cluster}
     depends_on:
       shepherd_db:
         condition: service_healthy
