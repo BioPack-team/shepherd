@@ -198,11 +198,12 @@ def failing_fanout(mocker, redis_mock):
         "clear_subscriptions": mocker.patch.object(
             ars_db, "clear_subscriptions", new_callable=AsyncMock
         ),
+        # the parent is ended by lifecycle.fail_parent
         "notify": mocker.patch.object(
-            fanout, "notify_subscribers", new_callable=AsyncMock
+            fanout.lifecycle, "notify_subscribers", new_callable=AsyncMock
         ),
         "on_parent_failed": mocker.patch.object(
-            fanout.cache, "on_parent_failed", new_callable=AsyncMock
+            fanout.lifecycle.cache, "on_parent_failed", new_callable=AsyncMock
         ),
     }
     mocker.patch.object(fanout, "mark_task_as_complete", new_callable=AsyncMock)

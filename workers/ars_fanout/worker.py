@@ -22,13 +22,11 @@ import uuid
 
 from opentelemetry.propagate import inject
 
-import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars import aras
 from shepherd_utils.ars.handoff import handoff_callback_url
-from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.broker import add_task, mark_task_as_complete
 from shepherd_utils.config import settings
 from shepherd_utils.db import save_logs
@@ -173,13 +171,10 @@ async def fail_unfanned_parent(parent_pk, logger: logging.Logger) -> None:
     try:
         if await ars_db.get_children(parent_pk):
             return
-        claimed = await ars_db.claim_terminal_transition(parent_pk, "E", 500)
-        if claimed is None:
-            return
-        logger.error(f"Fanout for {parent_pk} failed with no children; parent E/500")
-        await notify_subscribers(claimed, None, logger)
-        await ars_db.clear_subscriptions(parent_pk)
-        await cache.on_parent_failed(claimed, logger)
+        if await lifecycle.fail_parent(parent_pk, logger):
+            logger.error(
+                f"Fanout for {parent_pk} failed with no children; parent E/500"
+            )
     except Exception as e:
         logger.error(f"Could not fail parent {parent_pk} after its fanout: {e}")
 

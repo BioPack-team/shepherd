@@ -530,3 +530,17 @@ def test_no_golden_still_expects_an_upstream_crash():
         assert "raises" not in entry, f"{entry['name']} still expects a raise"
     for entry in GOLDENS["scores"]:
         assert "normalized_raises" not in entry, entry["name"]
+
+
+@pytest.mark.parametrize(
+    "first,second,golden",
+    [("aragorn", "arax", "merge_ab"), ("arax", "aragorn", "merge_ba")],
+)
+def test_merge_without_copying_inputs_matches_the_goldens(first, second, golden):
+    """The ARS fold merges freshly decoded messages in place
+    (``copy_inputs=False``) instead of deep-copying them first; the merged
+    output must not change."""
+    a = load(f"response_{first}.json")
+    b = load(f"response_{second}.json")
+    merged = ars_merge.mergeMessages([_tmsg(a), _tmsg(b)], "pk", copy_inputs=False)
+    assert_parity(jsonable(merged.to_dict()), GOLDENS[golden])

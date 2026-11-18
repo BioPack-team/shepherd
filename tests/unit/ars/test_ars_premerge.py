@@ -93,8 +93,14 @@ def env(mocker, redis_mock):
             raise KeyError(pk)
         return blobs[pk]
 
+    rankings = {}
+
     def _save_sync(pk, payload):
         blobs[pk] = payload
+        if pk.startswith(ars_db.RANKING_PREFIX):
+            # the ranker fusion's compact copy, saved beside the premerged one
+            rankings[pk] = payload
+            return
         saved.append((pk, payload))
 
     mocker.patch.object(pm, "get_message_sync", side_effect=_get_sync)
@@ -111,6 +117,7 @@ def env(mocker, redis_mock):
         "child_row": child_row,
         "data": data,
         "saved": saved,
+        "rankings": rankings,
         "get_message_row": _patch(
             "get_message_row", side_effect=lambda pk: rows.get(str(pk))
         ),
@@ -965,3 +972,47 @@ async def test_a_child_whose_response_was_lost_keeps_its_copy(
 
     assert _final_status_update(env)["status"] == "E"
     env["persist_data_copy"].assert_awaited_once_with(env["child_pk"], LOGGER)
+
+
+async def test_premerge_saves_the_ranking_beside_the_working_copy(env, redis_mock):
+    await pm.ars_premerge(_task(env), LOGGER)
+    ranking = env["rankings"][ars_db.ranking_key(env["child_pk"])]
+    results = env["data"]["message"]["results"]
+    assert ranking == {
+        "results": [{"node_bindings": r["node_bindings"]} for r in results]
+    }
+
+
+async def test_a_response_for_a_timed_out_child_is_not_merged(env, redis_mock):
+    """The watchdog timed the child out (E/598) while its response was being
+    processed. Its parent may already have completed without it, so the
+    late response is neither merged nor allowed to flip the child back."""
+    env["child_row"]["status"] = "E"
+    env["child_row"]["code"] = 598
+
+    await pm.ars_premerge(_task(env), LOGGER)
+
+    assert await _ready(env) == []
+    assert await _merge_tasks() == []
+    assert not [
+        c for c in env["update_message"].await_args_list if "status" in c.kwargs
+    ]
+    env["completion"].assert_not_awaited()
+
+
+@pytest.mark.parametrize("only_if_running,expected", [(True, "R"), (False, None)])
+async def test_finish_child_is_conditional_on_running(env, only_if_running, expected):
+    env["update_message"].side_effect = None
+    env["update_message"].return_value = None  # the child had moved on
+    finished = await pm._finish_child(
+        env["child_pk"],
+        env["child_row"],
+        LOGGER,
+        only_if_running=only_if_running,
+        status="D",
+        code=200,
+    )
+    assert finished is False
+    assert env["update_message"].await_args.kwargs["only_if_status"] == expected
+    env["persist_data_copy"].assert_not_awaited()
+    env["completion"].assert_not_awaited()

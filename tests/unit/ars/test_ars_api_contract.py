@@ -816,6 +816,66 @@ async def test_submit_payload_save_failure_is_honest_400(
     assert "failing due to" in resp.text
 
 
+@pytest.mark.parametrize("failure", ["save", "enqueue"])
+async def test_submit_failure_after_insert_ends_the_parent(
+    client, db, mocker, redis_mock, failure
+):
+    """A parent whose query could not be stored, or whose fanout could not be
+    queued, is never fanned out -- and parents are watchdog-exempt, so left
+    alone it would stay Running forever (holding its pending cache entry,
+    and any identical submit WAITING on it). Submit ends it E/500."""
+    import shepherd_utils.broker as broker_mod
+
+    if failure == "save":
+        db["save_message_data"].side_effect = TimeoutError("redis down")
+    else:
+        mocker.patch.object(
+            broker_mod.broker_client, "xadd", side_effect=TimeoutError("broker down")
+        )
+    fail_parent = mocker.patch.object(lifecycle, "fail_parent", new_callable=AsyncMock)
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 400
+    created = db["create_message"].await_count
+    assert created == 1
+    fail_parent.assert_awaited_once()
+    assert fail_parent.await_args.args[0] is not None
+
+
+async def test_fail_parent_errors_notifies_and_drops_the_cache_entry(mocker):
+    claimed = make_message(agent="ars-default-agent", status="E", code=500)
+    claim = mocker.patch.object(
+        ars_db,
+        "claim_terminal_transition",
+        new_callable=AsyncMock,
+        return_value=claimed,
+    )
+    clear = mocker.patch.object(ars_db, "clear_subscriptions", new_callable=AsyncMock)
+    notify = mocker.patch.object(
+        lifecycle, "notify_subscribers", new_callable=AsyncMock
+    )
+    failed = mocker.patch.object(
+        lifecycle.cache, "on_parent_failed", new_callable=AsyncMock
+    )
+    log = _logging_for_tests()
+    assert await lifecycle.fail_parent("p", log) is True
+    claim.assert_awaited_once_with("p", "E", 500)
+    notify.assert_awaited_once_with(claimed, None, log)
+    clear.assert_awaited_once_with("p")
+    failed.assert_awaited_once_with(claimed, log)
+
+    # already terminal: nothing more happens
+    claim.return_value = None
+    notify.reset_mock()
+    assert await lifecycle.fail_parent("p", log) is False
+    notify.assert_not_awaited()
+
+
+def _logging_for_tests():
+    import logging
+
+    return logging.getLogger("test.fail_parent")
+
+
 # ---------------------------------------------------------------------------
 # response cache (Shepherd-native; docs/ARS_RESPONSE_CACHE_PLAN.md)
 # ---------------------------------------------------------------------------

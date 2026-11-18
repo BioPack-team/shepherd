@@ -86,6 +86,7 @@ from opentelemetry.propagate import extract, inject
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
 from shepherd_utils.ars import aras
+from shepherd_utils.ars.ranker_fusion import ranking_snapshot
 from shepherd_utils.ars.annotate import annotate_nodes
 from shepherd_utils.ars.notify import notify_subscribers
 from shepherd_utils.ars.premerge import (
@@ -156,6 +157,18 @@ def _annotate_in_child(data, agent_name, child_pk) -> None:
                 "DEBUG",
             ],
         )
+
+
+def _save_for_merge(child_pk, data) -> None:
+    """Save what the merge reads of a validated response: the premerged
+    working copy, and the response's ranking for the ranker fusion (its
+    results' node bindings in order -- the fusion reads only that, and
+    would otherwise decode the whole response again on every later fold)."""
+    save_message_sync(ars_db.premerged_key(child_pk), data)
+    save_message_sync(
+        ars_db.ranking_key(child_pk),
+        ranking_snapshot(response_results(data)),
+    )
 
 
 def _strip_and_report_nulls(data, child_pk, agent_name, inforesid, report) -> None:
@@ -236,7 +249,7 @@ def premerge_in_child(
             if valid:
                 # the merge's working copy; the child's own entry (its
                 # ARA's response, as sent) is not touched
-                save_message_sync(ars_db.premerged_key(child_pk), data)
+                _save_for_merge(child_pk, data)
             span.set_attribute("premerge.valid", valid)
         logs = handler.drain()
     return {"valid": valid, "logs": logs}
@@ -288,9 +301,43 @@ async def _terminal_error(child_pk, parent_pk, mesg, logger, have_response=True)
         f"Internal ARS Server Error: child {child_pk} ({mesg.get('agent')}) "
         "ended E/500"
     )
-    await ars_db.update_message(child_pk, status="E", code=500)
+    # Only while Running: a child the watchdog already timed out keeps its
+    # 598 (which the response cache reads as "do not cache this run").
+    updated = await ars_db.update_message(
+        child_pk, only_if_status="R", status="E", code=500
+    )
+    if updated is None:
+        return
     await ars_db.persist_child_copy(mesg, logger, have_response=have_response)
     await lifecycle.check_parent_completion(parent_pk, logger)
+
+
+async def _finish_child(
+    child_pk, mesg, logger: logging.Logger, only_if_running=True, **updates
+) -> bool:
+    """Move a Running child to its terminal state, keep its durable copy, and
+    run the parent completion check.
+
+    Conditional on the child still being Running (unless
+    ``only_if_running`` is False): one the watchdog timed out while its
+    response was being processed keeps its E/598 -- its parent may already
+    have completed without it. A child already handed to the merge is the
+    exception: its merged version only balances the completion count
+    against a Done origin, so it is flipped regardless. False when the
+    child had moved on."""
+    updated = await ars_db.update_message(
+        child_pk, only_if_status="R" if only_if_running else None, **updates
+    )
+    if updated is None:
+        logger.warning(
+            f"{child_pk} is no longer Running (timed out?); its response was "
+            "processed too late and is not recorded"
+        )
+        return False
+    await ars_db.persist_child_copy(mesg, logger)
+    if updated["status"] in ("D", "S", "E", "U"):
+        await lifecycle.check_parent_completion(mesg["ref"], logger)
+    return True
 
 
 async def intake_internal_response(fields, logger: logging.Logger):
@@ -422,10 +469,9 @@ async def intake_internal_response(fields, logger: logging.Logger):
                 f"Intake: {child_pk} was already handed to the merge; "
                 "finishing its status"
             )
-            updated = await ars_db.update_message(child_pk, status=status, code=200)
-            await ars_db.persist_child_copy(mesg, logger)
-            if updated and updated["status"] in ("D", "S", "E", "U"):
-                await lifecycle.check_parent_completion(mesg["ref"], logger)
+            await _finish_child(
+                child_pk, mesg, logger, only_if_running=False, status=status, code=200
+            )
             return None
         if plan == "skip_errored":
             logger.info(f"Intake: {child_pk} already errored; response rejected")
@@ -450,12 +496,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
                 )
                 + f"; child errored with code {failed_code}"
             )
-            updated = await ars_db.update_message(
-                child_pk, status="E", code=failed_code
-            )
-            await ars_db.persist_child_copy(mesg, logger)
-            if updated and updated["status"] in ("D", "S", "E", "U"):
-                await lifecycle.check_parent_completion(mesg["ref"], logger)
+            await _finish_child(child_pk, mesg, logger, status="E", code=failed_code)
             return None
         if result_length:
             await ars_db.update_message(
@@ -478,10 +519,7 @@ async def intake_internal_response(fields, logger: logging.Logger):
         updates = {"status": status, "code": 200}
         if result_length is None:
             updates["result_count"] = 0
-        updated = await ars_db.update_message(child_pk, **updates)
-        await ars_db.persist_child_copy(mesg, logger)
-        if updated and updated["status"] in ("D", "S", "E", "U"):
-            await lifecycle.check_parent_completion(mesg["ref"], logger)
+        await _finish_child(child_pk, mesg, logger, **updates)
         return None
     except Exception as e:
         logger.error(f"Intake failed for {child_pk}: {e}", exc_info=True)
@@ -583,7 +621,7 @@ def intake_in_child(
                     if valid:
                         # the merge's working copy; the child's own entry
                         # (this response, as the ARA sent it) is not touched
-                        save_message_sync(ars_db.premerged_key(child_pk), data)
+                        _save_for_merge(child_pk, data)
                 except Exception as e:
                     # Caught rather than raised, so the intake's own steps
                     # (the notification, the counts) still happen before the
@@ -697,6 +735,22 @@ async def ars_premerge(task, logger: logging.Logger):
         ingest_query_logs(logger, outcome.get("logs"))
         valid = outcome["valid"]
 
+    if verdict is None:
+        # the premerge above can take a while: look again
+        mesg = await ars_db.get_message_row(child_pk) or mesg
+    if mesg["status"] != "R":
+        # The watchdog timed the child out (or something else ended it)
+        # while its response was being processed. Its parent may already
+        # have completed without it, so it is neither merged nor flipped:
+        # the late response is rejected, as the intake rejects one that
+        # arrives for an errored child.
+        logger.warning(
+            f"Premerge: {child_pk} is {mesg['status']}/{mesg.get('code')}, "
+            "no longer Running; its response is not merged"
+        )
+        await ars_db.discard_premerged(child_pk, logger)
+        return
+
     if valid:
         if agent_name.startswith("ara-"):
             # merge before the child's status flip, matching upstream's
@@ -714,6 +768,10 @@ async def ars_premerge(task, logger: logging.Logger):
                 await ars_db.discard_premerged(child_pk, logger)
                 await _terminal_error(child_pk, parent_pk, mesg, logger)
                 return
+        # Unconditional: the child is in the merge's hands now, and the
+        # merged version it becomes only balances the parent's completion
+        # count against a Done origin. If the watchdog timed it out since
+        # the check above, this puts it back.
         updated = await ars_db.update_message(child_pk, status=status, code=200)
         await ars_db.persist_child_copy(mesg, logger)
         if updated and updated["status"] in ("D", "S", "E", "U"):
@@ -722,7 +780,11 @@ async def ars_premerge(task, logger: logging.Logger):
         logger.debug(
             f"Validation problem found for agent {agent_name} with pk {parent_pk}"
         )
-        await ars_db.update_message(child_pk, status="E", code=422)
+        updated = await ars_db.update_message(
+            child_pk, only_if_status="R", status="E", code=422
+        )
+        if updated is None:
+            return
         await ars_db.persist_child_copy(mesg, logger)
         if parent is not None:
             await notify_subscribers(
