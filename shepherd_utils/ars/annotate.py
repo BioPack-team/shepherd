@@ -17,11 +17,17 @@ itself (e.g. from tier0) free at run time.
 import re
 
 from biothings_annotator import annotator
+from biothings_annotator.annotator import settings as annotator_settings
 from opentelemetry import trace
 
 from shepherd_utils.ars.premerge import add_attribute, get_safe
+from shepherd_utils.config import settings
 
 ANNOTATION_MODES = ("merge", "premerge", "off")
+
+# The package only reaches Elasticsearch through named presets with
+# hardcoded hosts, so settings.annotator_es_url is registered as one more.
+SHEPHERD_ES_CONNECTION = "shepherd"
 
 CURIE_PATTERN = re.compile(r"[\w\.]+:[\w\.]+")
 
@@ -51,6 +57,32 @@ def _separate_annotated_nodes(nodes, logger):
     return unannotated
 
 
+def _new_annotator():
+    """An Annotator for this deployment. With ``annotator_es_url`` set it
+    queries that Elasticsearch, overriding the package's env vars; otherwise
+    the package configures itself from the environment, as upstream."""
+    es_url = settings.annotator_es_url.strip()
+    if not es_url:
+        return annotator.Annotator()
+    annotator_settings.ELASTICSEARCH_CONNECTIONS[SHEPHERD_ES_CONNECTION] = {
+        "host": es_url,
+        "headers": {},
+    }
+    atr = annotator.Annotator(query_backend="elasticsearch")
+    atr.elasticsearch_connection = SHEPHERD_ES_CONNECTION
+    return atr
+
+
+def _annotator_host(atr):
+    """Where this Annotator's queries go, for the trace span."""
+    if atr.query_backend == "elasticsearch":
+        connection = annotator_settings.ELASTICSEARCH_CONNECTIONS.get(
+            atr.elasticsearch_connection, {}
+        )
+        return str(connection.get("host", atr.elasticsearch_connection))
+    return str(atr.api_host)
+
+
 async def annotate_nodes(data, agent_name, logger):
     """utils.annotate_nodes via the in-process biothings_annotator package,
     as upstream. The consumption loop is verbatim, quirks included: a
@@ -76,8 +108,9 @@ async def annotate_nodes(data, agent_name, logger):
     with tracer.start_as_current_span("annotator") as span:
         span.set_attribute("annotator.curie_count", len(curie_list))
         span.set_attribute("agent", agent_name)
-        atr = annotator.Annotator()
-        span.set_attribute("annotator.api_host", str(atr.api_host))
+        atr = _new_annotator()
+        span.set_attribute("annotator.query_backend", str(atr.query_backend))
+        span.set_attribute("annotator.api_host", _annotator_host(atr))
         rj = await atr.annotate_curie_list(curie_list)
         annotated = 0
         for key, value in rj.items():

@@ -575,11 +575,18 @@ class Settings(BaseSettings):
     tr_normalizer: str = "https://nodenorm-es.ci.transltr.io/get_normalized_nodes"
     # Node annotation runs the biothings_annotator package in-process (as
     # upstream), in the ars_premerge or ars_merge worker's pool children (see
-    # ars_annotation_mode below), which inherit the container's environment. The package's own env vars configure it, not
-    # a Shepherd setting: SERVICE_PROVIDER_API_HOST (the BioThings host) and
+    # ars_annotation_mode below), which inherit the container's environment.
+    # By default the package's own env vars configure it, not a Shepherd
+    # setting: SERVICE_PROVIDER_API_HOST (the BioThings host) and
     # ANNOTATOR_QUERY_BACKEND ("biothings", the package default, or
-    # "elasticsearch" with ELASTICSEARCH_CONNECTION) -- the same variable
-    # upstream Relay's deployment sets (Relay PR #888).
+    # "elasticsearch" with ELASTICSEARCH_CONNECTION, one of the package's
+    # hardcoded hosts) -- the same variable upstream Relay's deployment sets
+    # (Relay PR #888).
+    # annotator_es_url overrides all of that: when set, the annotator queries
+    # this Elasticsearch base URL directly (e.g.
+    # https://core-components-es.ci.transltr.io from outside the cluster),
+    # whatever the package's env vars say. Empty leaves the package alone.
+    annotator_es_url: str = ""
     # Where node annotation runs:
     #   "merge"    -- upstream's placement: in ars_merge's post-process, over
     #                 every merged version, under the parent's merge lock.

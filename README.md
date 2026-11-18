@@ -262,10 +262,15 @@ lock (the merge_message worker's pattern). Node annotation runs the
 `premerge` (the default -- each ARA response is annotated in `ars_premerge`,
 in parallel and outside the merge lock), `merge` (upstream's placement, over
 every merged version), or `off`. Nodes that already carry a
-`biothings_annotations` attribute are never re-annotated. The package is
-configured by its own environment variables (`SERVICE_PROVIDER_API_HOST`,
-`ANNOTATOR_QUERY_BACKEND`), set on the `ars_premerge` and `ars_merge`
-containers.
+`biothings_annotations` attribute are never re-annotated. By default the
+package is configured by its own environment variables
+(`ANNOTATOR_QUERY_BACKEND`, `ELASTICSEARCH_CONNECTION`,
+`SERVICE_PROVIDER_API_HOST`), set on the `ars_premerge` and `ars_merge`
+containers; compose defaults them to the in-cluster Elasticsearch. Outside
+that cluster (local or a dev environment), set `ANNOTATOR_ES_URL` in `.env`
+to query an Elasticsearch directly, e.g.
+`ANNOTATOR_ES_URL=https://core-components-es.ci.transltr.io` for CI's; it
+overrides the package's own variables.
 Each merged version's results are ordered by weighted Reciprocal Rank
 Fusion of the hosted ARAs' own rankings (Aragorn 0.9, ARAX 0.1, as
 upstream), configured on the `ars_merge` container by upstream's variables:
