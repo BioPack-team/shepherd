@@ -20,6 +20,8 @@ The upstream rules, verbatim from the signal:
 Behavior register rows: P-LC-1 .. P-LC-6 (arithmetic portion).
 """
 
+import pytest
+
 from shepherd_utils.ars.completion import evaluate_completion
 
 
@@ -116,14 +118,17 @@ def test_merge_error_other_code_decrements_orig():
     assert decision.empty
 
 
-def test_done_merge_with_zero_results_does_not_count():
-    """A 'D' merge child needs result_count > 0 to satisfy its origin --
-    faithful to upstream, where such a parent never completes."""
-    decision = evaluate_completion([ara(), merge(results=0)])
+@pytest.mark.parametrize("results", [0, None])
+def test_done_merge_with_no_results_still_counts(results):
+    """A 'D' merge child satisfies its origin even when post-processing
+    (the blocklist) removed every result. Upstream required result_count > 0,
+    so such a parent -- exempt from the watchdog -- never completed."""
+    decision = evaluate_completion([ara(), merge(results=results)])
     assert decision.finished
     assert decision.orig_count == 1
-    assert decision.merge_count == 0
-    assert not decision.complete
+    assert decision.merge_count == 1
+    assert decision.complete
+    assert not decision.empty
 
 
 def test_non_ar_agent_results_do_not_count():

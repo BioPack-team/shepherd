@@ -22,6 +22,7 @@ are read, so the key is the same set upstream builds. See
 docs/ARS_PARITY_REGISTER.md, deviation 18.
 """
 
+import copy
 import logging
 import math
 import os
@@ -137,6 +138,24 @@ def _result_key(result):
     if not ids:
         return None
     return frozenset(ids)
+
+
+def ranking_snapshot(results):
+    """The part of a ranker's results the fusion reads -- each result's node
+    bindings, in the ranker's order -- as a ``{"results": [...]}`` document.
+
+    A fraction of the response it comes from, so the merge can rank against
+    it without decoding the ARA's whole response on every fold. Deep-copied
+    from ``results``, so later in-place edits (the fold unions bindings)
+    cannot change it.
+    """
+    return {
+        "results": [
+            {"node_bindings": copy.deepcopy(result.get("node_bindings"))}
+            for result in results or []
+            if isinstance(result, dict)
+        ]
+    }
 
 
 def _rank_map_from_results(results):

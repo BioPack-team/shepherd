@@ -885,6 +885,7 @@ async def test_ranker_children_are_the_finished_ara_children(mocker):
             "id": "a",
             "agent": "ara-shepherd-aragorn",
             "inforesid": "infores:shepherd-aragorn",
+            "result_count": None,
         }
     ]
     merge_worker.ars_db.get_children.side_effect = RuntimeError("pg down")
@@ -957,15 +958,98 @@ def test_merge_and_postprocess_in_child_final_save_failure_is_422(
     real_save = merge_worker.save_message_sync
     calls = {"n": 0}
 
-    def _flaky(pk, payload):
+    def _broken(pk, payload):
         calls["n"] += 1
-        if calls["n"] == 2:
-            raise RuntimeError("redis full")
-        real_save(pk, payload)
+        raise RuntimeError("redis full")
 
-    mocker.patch.object(merge_worker, "save_message_sync", side_effect=_flaky)
+    mocker.patch.object(merge_worker, "save_message_sync", side_effect=_broken)
+    mocker.patch.object(merge_worker.time, "sleep")
     outcome = merge_worker.merge_and_postprocess_in_child(
         None, child_pk, str(uuid.uuid4()), "ara-shepherd-aragorn", None
     )
     assert outcome["status"] == "E"
     assert outcome["code"] == 422
+    # the only save of the version (no bare-fold save before it), retried
+    assert calls["n"] == merge_worker.FINAL_SAVE_ATTEMPTS
+
+
+def test_merge_and_postprocess_in_child_retries_a_transient_save_failure(
+    sync_blobs, bt_annotator, mocker
+):
+    shepherd_db = sync_blobs
+    child_pk = "11111111-1111-1111-1111-111111111111"
+    new_pk = str(uuid.uuid4())
+    shepherd_db.save_message_sync(
+        ars_db.premerged_key(child_pk), load_corpus("response_aragorn.json")
+    )
+    real_save = merge_worker.save_message_sync
+    calls = {"n": 0}
+
+    def _flaky(pk, payload):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("redis blip")
+        real_save(pk, payload)
+
+    mocker.patch.object(merge_worker, "save_message_sync", side_effect=_flaky)
+    mocker.patch.object(merge_worker.time, "sleep")
+    outcome = merge_worker.merge_and_postprocess_in_child(
+        None, child_pk, new_pk, "ara-shepherd-aragorn", None
+    )
+    assert outcome["status"] == "D"
+    assert calls["n"] == 2
+    assert shepherd_db.get_message_sync(new_pk)["message"]["results"]
+
+
+def test_fold_hands_the_fusion_the_incoming_ranking_as_sent(sync_blobs):
+    """The fold merges in place, which unions node bindings on the incoming
+    results; the ranking it hands the fusion is snapshotted first."""
+    shepherd_db = sync_blobs
+    aragorn = load_corpus("response_aragorn.json")
+    arax = load_corpus("response_arax.json")
+    child_pk = "11111111-1111-1111-1111-111111111111"
+    current_pk = "22222222-2222-2222-2222-222222222222"
+    shepherd_db.save_message_sync(current_pk, aragorn)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), arax)
+
+    _, _, ranking = merge_worker._fold(current_pk, child_pk)
+
+    assert ranking == {
+        "results": [
+            {"node_bindings": r["node_bindings"]} for r in arax["message"]["results"]
+        ]
+    }
+
+
+def test_ranker_results_come_from_the_ranking_when_there_is_one(sync_blobs):
+    shepherd_db = sync_blobs
+    child_pk = "33333333-3333-3333-3333-333333333333"
+    response = load_corpus("response_aragorn.json")
+    shepherd_db.save_message_sync(child_pk, response)
+    # no ranking yet: the whole response is read
+    assert merge_worker._load_ranker_results(child_pk) == response["message"]["results"]
+    ranking = {"results": [{"node_bindings": {"n0": {"ids": ["X:1"]}}}]}
+    shepherd_db.save_message_sync(ars_db.ranking_key(child_pk), ranking)
+    assert merge_worker._load_ranker_results(child_pk) == ranking["results"]
+
+
+async def test_ranker_fusion_skips_children_without_results(
+    bt_annotator, rrf_defaults, mocker
+):
+    data = load_corpus("response_aragorn.json")
+    loader = mocker.patch.object(merge_worker, "_load_ranker_results")
+    merge_worker.apply_ranker_fusion(
+        data,
+        "ara-shepherd-aragorn",
+        LOGGER,
+        None,
+        [
+            {
+                "id": "c-aragorn",
+                "agent": "ara-shepherd-aragorn",
+                "inforesid": "infores:shepherd-aragorn",
+                "result_count": 0,
+            }
+        ],
+    )
+    loader.assert_not_called()

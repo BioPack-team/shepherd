@@ -706,6 +706,27 @@ Behavioral deviations:
       far as storing (its initial, empty response, or nothing), not a copy
       of the query.
 
+23. **The fold does less redundant work per merged version** (post-parity
+    change; behavior-preserving). Upstream's merge path copied and stored
+    more than it read:
+    - `mergeMessages` deep-copies every input. The fold decodes both
+      messages fresh just for that merge and drops them after, so it merges
+      them in place (`mergeMessages(..., copy_inputs=False)`); deep-copying
+      two multi-MB messages cost more than decoding them. The goldens are
+      checked both ways (`test_merge_without_copying_inputs_matches_the_goldens`).
+    - the bare fold was saved before post-processing and the final version
+      saved over it. Nothing reads the bare copy: a post-process that raises
+      fails the pool call and the version ends E/500 without the parent
+      ever pointing at it. The version is now encoded and written once, and
+      that one save is retried (`FINAL_SAVE_ATTEMPTS`) before it is E/422.
+    - ranker fusion read each weighted ARA child's whole response, decoded,
+      on every fold, to use only its results' node bindings. Premerge now
+      saves those (`ranker_fusion.ranking_snapshot`) beside the premerged
+      copy (`ars:ranking:<pk>`, deleted when the tree completes); the fusion
+      reads them, falling back to the response, and skips a finished child
+      with no results without reading anything. The rankings are the same.
+    - the query's `parameters` are read once per drain, not once per fold.
+
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 
 Everything above is parity work. This section is the opposite: places where
@@ -753,6 +774,10 @@ bug is deviation 18.
 | — (Shepherd-native) The merge lock's 45s TTL was shorter than a large fold, so a lapsed lock let two `ars_merge` tasks fold the same parent and the later UPDATE dropped the other ARA's merge | the lock is refreshed every 15s for as long as it is held |
 | — (Shepherd-native) Ready cache entries never expired, and a live entry exempts its whole tree from the payload purge, so the cache pinned the payloads of every distinct query it had ever seen | `ars_cache_ready_max_age_sec` (7 days) retires them; expired entries stop answering immediately and the watchdog purges them |
 | — (Shepherd-native) The cache key covered only the query graph and `workflow`, but the fanout forwards `parameters` verbatim to every ARA, so two submits differing only there shared an entry and one got the other's answer | `parameters` is part of the key (minus `overwrite_cache`, which steers the cache, not the query); `CACHE_KEY_VERSION` bumped to `2`. With TRAPI 2.0 (deviation 18) `bypass_cache`, `log_level` and `timeout` moved into `parameters` and are excluded from the key too; `CACHE_KEY_VERSION` `3` |
+
+| `message_post_save` counted a Done merged version toward `merge_count` only when it had `result_count > 0`. A merge whose results the blocklist removed entirely ends Done with no count, so `merge_count` stayed one short of `orig_count` and the parent never completed (upstream pinned this in its own arithmetic; here parents are also watchdog-exempt, so it was forever) | a Done `ars-ars-agent` child always counts: every merged version folds exactly one result-bearing ARA child (`completion.evaluate_completion`) |
+| — (Shepherd-native) `/submit` answered 400 when the query could not be stored or the fanout could not be queued, but left the parent row it had already inserted Running — forever, since parents are watchdog-exempt, and as a cache leader holding every identical submit WAITING on it | the parent is ended E/500 (`lifecycle.fail_parent`: ars_error notification, subscriptions cleared, pending cache entry dropped), as a fanout that dies before creating a child already did |
+| — (Shepherd-native) A child the watchdog timed out (E/598) while `ars_premerge` was still processing its response was flipped back to Done and handed to the merge anyway — after its parent could already have completed without it, so a merged version landed under a finished parent, and every other terminal flip in intake overwrote the 598 the response cache reads as "do not cache" | premerge re-reads the child after its pool call and rejects a response for a child that is no longer Running, as the intake rejects one for an errored child; the intake's terminal flips are conditional on Running. Once a child has been handed to the merge it is still flipped Done unconditionally: its merged version only balances against a Done origin |
 
 ### Endpoints
 

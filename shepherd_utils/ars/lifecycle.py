@@ -71,6 +71,31 @@ async def _discard_empty_merge(empty_pk, task_logger: logging.Logger) -> None:
         pass
 
 
+async def fail_parent(parent_pk, task_logger: logging.Logger) -> bool:
+    """End a parent nothing will ever move again: E/500.
+
+    Parents are exempt from the watchdog, so a parent whose fanout never
+    happened (submit could not store its query or queue the fanout; the
+    fanout failed before creating a child) would otherwise stay Running
+    forever -- and, as a cache leader, hold every identical submit WAITING
+    on it. It gets what any errored parent gets: the ars_error notification,
+    its subscriptions cleared, its pending cache entry dropped. Only the
+    caller that actually flips it does this; False when it was already
+    terminal (or gone). Never raises.
+    """
+    try:
+        claimed = await ars_db.claim_terminal_transition(parent_pk, "E", 500)
+        if claimed is None:
+            return False
+        await notify_subscribers(claimed, None, task_logger)
+        await ars_db.clear_subscriptions(parent_pk)
+        await cache.on_parent_failed(claimed, task_logger)
+        return True
+    except Exception as e:
+        task_logger.error(f"Could not fail parent {parent_pk}: {e}")
+        return False
+
+
 async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> None:
     """Evaluate and apply the upstream parent-completion transitions.
 
@@ -174,6 +199,8 @@ async def check_parent_completion(parent_pk, task_logger: logging.Logger) -> Non
         if updated is not None and updated.get("merged_version") is not None:
             members.append(updated["merged_version"])
         await ars_db.expire_hot_copies(members, task_logger)
+        # every merge the rankings fed is done
+        await ars_db.discard_rankings([child["id"] for child in children], task_logger)
     elif parent["status"] == "E":
         await ars_db.clear_subscriptions(parent_pk)
         await cache.on_parent_failed(parent, task_logger)

@@ -619,6 +619,31 @@ async def discard_premerged(
         logger.warning(f"Could not delete the premerged copy of {child_pk}: {e}")
 
 
+RANKING_PREFIX = "ars:ranking:"
+
+
+def ranking_key(child_pk: Union[str, uuid.UUID]) -> str:
+    """Where a validated child's ranking is kept: its results' node bindings
+    in its ARA's order (``ranker_fusion.ranking_snapshot``), written by
+    premerge beside the premerged copy so the merge's ranker fusion can read
+    a ranker's order without decoding its whole response on every fold."""
+    return f"{RANKING_PREFIX}{child_pk}"
+
+
+async def discard_rankings(
+    child_pks: Iterable[Union[str, uuid.UUID]], logger: logging.Logger
+) -> None:
+    """Delete the rankings of a finished tree's children. Best-effort -- one
+    this misses lives out its ``redis_ttl``."""
+    keys = [ranking_key(pk) for pk in child_pks]
+    if not keys:
+        return
+    try:
+        await shepherd_db.data_db_client.delete(*keys)
+    except Exception as e:
+        logger.warning(f"Could not delete child rankings: {e}")
+
+
 def lean() -> bool:
     """Whether a cold store is configured, and so Redis is kept to what is
     hot (see above)."""

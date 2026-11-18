@@ -229,8 +229,17 @@ class TranslatorMessage:
         return {"message": d}
 
 
-def mergeMessages(messageList, pk):
-    messageListCopy = copy.deepcopy(messageList)
+def mergeMessages(messageList, pk, copy_inputs=True):
+    """Merge ``messageList`` into one TranslatorMessage.
+
+    ``copy_inputs`` False skips upstream's deep copy of every input and
+    merges them in place (the result shares, and the inputs are left
+    holding, mutated structure). For a caller whose inputs are throwaway --
+    the ARS fold, which decodes both messages fresh from the store just for
+    this -- the copy is pure overhead: deep-copying two multi-MB messages
+    costs more than decoding them did. The merged output is the same.
+    """
+    messageListCopy = copy.deepcopy(messageList) if copy_inputs else list(messageList)
     message = messageListCopy.pop()
     merged = mergeMessagesRecursive(message, messageListCopy, pk)
     return merged

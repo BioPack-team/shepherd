@@ -224,8 +224,9 @@ async def test_ars_merge_stops_folding_once_its_lock_is_lost(mocker):
         AsyncMock(side_effect=[["c1", "c2"], ["c2"], []]),
     )
     mocker.patch.object(ars_merge.ars_db, "clear_ready_child", AsyncMock())
+    mocker.patch.object(ars_merge, "_query_parameters", AsyncMock(return_value={}))
 
-    async def _slow_merge(parent_pk, child_pk, lg):
+    async def _slow_merge(parent_pk, child_pk, lg, parameters=None):
         await asyncio.sleep(0.2)
 
     merge_one = mocker.patch.object(
