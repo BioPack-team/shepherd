@@ -582,11 +582,13 @@ class Settings(BaseSettings):
     # "elasticsearch" with ELASTICSEARCH_CONNECTION, one of the package's
     # hardcoded hosts) -- the same variable upstream Relay's deployment sets
     # (Relay PR #888).
-    # annotator_es_url overrides all of that: when set, the annotator queries
-    # this Elasticsearch base URL directly (e.g.
-    # https://core-components-es.ci.transltr.io from outside the cluster),
-    # whatever the package's env vars say. Empty leaves the package alone.
-    annotator_es_url: str = ""
+    # annotator_url sends annotation to a deployed annotator service instead
+    # (e.g. https://annotator.ci.transltr.io, for stacks outside the cluster
+    # that cannot reach its Elasticsearch): one POST /curie per call, which
+    # runs the same annotate_curie_list there against the service's own
+    # Elasticsearch. Empty runs the package in-process, as upstream.
+    annotator_url: str = ""
+    annotator_timeout_sec: float = 300.0
     # Where node annotation runs:
     #   "merge"    -- upstream's placement: in ars_merge's post-process, over
     #                 every merged version, under the parent's merge lock.

@@ -831,8 +831,8 @@ services:
       # biothings_annotator reads these from os.environ, not Shepherd's
       # Settings, so they must be container env (a mounted .env is not
       # enough). Compose interpolates them from the shell or the project
-      # .env. Outside the cluster, set ANNOTATOR_ES_URL in .env instead
-      # (e.g. https://core-components-es.ci.transltr.io); it overrides both.
+      # .env. Outside the cluster, set ANNOTATOR_URL in .env instead (e.g.
+      # https://annotator.ci.transltr.io) to use a deployed annotator service.
       ANNOTATOR_QUERY_BACKEND: ${ANNOTATOR_QUERY_BACKEND:-elasticsearch}
       ELASTICSEARCH_CONNECTION: ${ELASTICSEARCH_CONNECTION:-in_cluster}
     depends_on:
@@ -863,8 +863,8 @@ services:
       # biothings_annotator reads these from os.environ, not Shepherd's
       # Settings, so they must be container env (a mounted .env is not
       # enough). Compose interpolates them from the shell or the project
-      # .env. Outside the cluster, set ANNOTATOR_ES_URL in .env instead
-      # (e.g. https://core-components-es.ci.transltr.io); it overrides both.
+      # .env. Outside the cluster, set ANNOTATOR_URL in .env instead (e.g.
+      # https://annotator.ci.transltr.io) to use a deployed annotator service.
       ANNOTATOR_QUERY_BACKEND: ${ANNOTATOR_QUERY_BACKEND:-elasticsearch}
       ELASTICSEARCH_CONNECTION: ${ELASTICSEARCH_CONNECTION:-in_cluster}
     depends_on:

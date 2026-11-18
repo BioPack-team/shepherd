@@ -267,10 +267,12 @@ package is configured by its own environment variables
 (`ANNOTATOR_QUERY_BACKEND`, `ELASTICSEARCH_CONNECTION`,
 `SERVICE_PROVIDER_API_HOST`), set on the `ars_premerge` and `ars_merge`
 containers; compose defaults them to the in-cluster Elasticsearch. Outside
-that cluster (local or a dev environment), set `ANNOTATOR_ES_URL` in `.env`
-to query an Elasticsearch directly, e.g.
-`ANNOTATOR_ES_URL=https://core-components-es.ci.transltr.io` for CI's; it
-overrides the package's own variables.
+that cluster (local or a dev environment), set `ANNOTATOR_URL` in `.env` to
+send annotation to a deployed annotator service instead, e.g.
+`ANNOTATOR_URL=https://annotator.ci.transltr.io` for CI's: Shepherd POSTs the
+CURIE list to its `/curie` endpoint, which runs the same `annotate_curie_list`
+against the service's own Elasticsearch. `ANNOTATOR_TIMEOUT_SEC` (default
+300) bounds that request.
 Each merged version's results are ordered by weighted Reciprocal Rank
 Fusion of the hosted ARAs' own rankings (Aragorn 0.9, ARAX 0.1, as
 upstream), configured on the `ars_merge` container by upstream's variables:

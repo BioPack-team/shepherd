@@ -12,22 +12,22 @@ biothings_annotator package, shared by the two places it can run:
 Nodes that already carry a ``biothings_annotations`` attribute are skipped
 either way -- which is also what makes annotations shipped in the graph
 itself (e.g. from tier0) free at run time.
+
+With ``settings.annotator_url`` set, the same annotate_curie_list call runs
+on a deployed annotator service instead (POST /curie), for stacks outside the
+cluster that cannot reach the Elasticsearch behind it.
 """
 
 import re
 
+import httpx
 from biothings_annotator import annotator
-from biothings_annotator.annotator import settings as annotator_settings
 from opentelemetry import trace
 
 from shepherd_utils.ars.premerge import add_attribute, get_safe
 from shepherd_utils.config import settings
 
 ANNOTATION_MODES = ("merge", "premerge", "off")
-
-# The package only reaches Elasticsearch through named presets with
-# hardcoded hosts, so settings.annotator_es_url is registered as one more.
-SHEPHERD_ES_CONNECTION = "shepherd"
 
 CURIE_PATTERN = re.compile(r"[\w\.]+:[\w\.]+")
 
@@ -57,30 +57,40 @@ def _separate_annotated_nodes(nodes, logger):
     return unannotated
 
 
-def _new_annotator():
-    """An Annotator for this deployment. With ``annotator_es_url`` set it
-    queries that Elasticsearch, overriding the package's env vars; otherwise
-    the package configures itself from the environment, as upstream."""
-    es_url = settings.annotator_es_url.strip()
-    if not es_url:
-        return annotator.Annotator()
-    annotator_settings.ELASTICSEARCH_CONNECTIONS[SHEPHERD_ES_CONNECTION] = {
-        "host": es_url,
-        "headers": {},
-    }
-    atr = annotator.Annotator(query_backend="elasticsearch")
-    atr.elasticsearch_connection = SHEPHERD_ES_CONNECTION
-    return atr
-
-
-def _annotator_host(atr):
-    """Where this Annotator's queries go, for the trace span."""
-    if atr.query_backend == "elasticsearch":
-        connection = annotator_settings.ELASTICSEARCH_CONNECTIONS.get(
-            atr.elasticsearch_connection, {}
+async def _annotate_via_service(base_url, curie_list):
+    """annotate_curie_list run by a deployed annotator service: POST /curie
+    calls it there with the same defaults as the in-process call. Only
+    query_backend is sent -- the service reads raw, include_extra and fields
+    as strings, so e.g. raw=false would arrive truthy and skip the
+    transforms."""
+    async with httpx.AsyncClient(timeout=settings.annotator_timeout_sec) as client:
+        response = await client.post(
+            f"{base_url}/curie",
+            params={"query_backend": "elasticsearch"},
+            json={"ids": curie_list},
         )
-        return str(connection.get("host", atr.elasticsearch_connection))
-    return str(atr.api_host)
+    if response.status_code >= 400:
+        # the service puts the underlying exception in the body; keep it
+        raise RuntimeError(
+            f"annotator service {response.status_code} from {response.url}: "
+            f"{response.text[:1000]}"
+        )
+    return response.json()
+
+
+async def _annotate_curie_list(curie_list, span):
+    """The annotation call: a configured annotator service, or the package
+    in-process (configured by its own env vars)."""
+    base_url = settings.annotator_url.strip().rstrip("/")
+    if base_url:
+        span.set_attribute("annotator.transport", "service")
+        span.set_attribute("annotator.api_host", base_url)
+        return await _annotate_via_service(base_url, curie_list)
+    atr = annotator.Annotator()
+    span.set_attribute("annotator.transport", "in_process")
+    span.set_attribute("annotator.query_backend", str(atr.query_backend))
+    span.set_attribute("annotator.api_host", str(atr.api_host))
+    return await atr.annotate_curie_list(curie_list)
 
 
 async def annotate_nodes(data, agent_name, logger):
@@ -100,7 +110,7 @@ async def annotate_nodes(data, agent_name, logger):
         curie_list.remove(key)
     if not curie_list:
         return
-    logger.info(f"annotating {len(curie_list)} curie ids in-process")
+    logger.info(f"annotating {len(curie_list)} curie ids")
     # A named span, as upstream's annotate_nodes wraps its package call: the
     # annotator is in-process (no separate Jaeger service), so this is what
     # makes the stage findable -- the package's outbound BioThings requests
@@ -108,10 +118,7 @@ async def annotate_nodes(data, agent_name, logger):
     with tracer.start_as_current_span("annotator") as span:
         span.set_attribute("annotator.curie_count", len(curie_list))
         span.set_attribute("agent", agent_name)
-        atr = _new_annotator()
-        span.set_attribute("annotator.query_backend", str(atr.query_backend))
-        span.set_attribute("annotator.api_host", _annotator_host(atr))
-        rj = await atr.annotate_curie_list(curie_list)
+        rj = await _annotate_curie_list(curie_list, span)
         annotated = 0
         for key, value in rj.items():
             if (
