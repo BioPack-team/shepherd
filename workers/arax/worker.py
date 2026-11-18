@@ -773,9 +773,19 @@ async def kp_cache_refresh_loop(loop, logger: logging.Logger) -> None:
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     # First run: fetch the data files ARAX's actions read (DEC-6). No-ops once
-    # they are on the mounted volumes.
+    # they are on the mounted volumes. Only the internal path reads them: the
+    # legacy path POSTs to arax_url and pathfinder queries go to the
+    # arax.pathfinder worker, so skip the downloads unless internal is the
+    # default. A query that opts in with arax_internal=true still needs the
+    # files present.
     ensure_arax_pathfinder_dbs(LOGGER)
-    ensure_arax_dbs(ARAX_WORKER_DBS, LOGGER)
+    if settings.arax_internal_default:
+        ensure_arax_dbs(ARAX_WORKER_DBS, LOGGER)
+    else:
+        LOGGER.info(
+            "ARAX_INTERNAL_DEFAULT is false; skipping the in-process ARAX data "
+            "downloads."
+        )
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, warm_biolink_cache, LOGGER)
     # held so the task isn't garbage-collected
