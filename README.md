@@ -103,7 +103,7 @@ filenames embed a Knowledge Graph version that changes periodically, so only one
 when a new Knowledge Graph ships:
 
 ```dotenv
-ARAX_PATHFINDER_TIER_VERSION=tier0-20260621
+ARAX_PATHFINDER_TIER_VERSION=tier0-20260928
 ```
 
 The ARAX blocked-concept list (`general_concepts.json`, fetched from GitHub) lands in this same
@@ -118,7 +118,7 @@ and `arax_db_path(name)` is the single place their on-disk paths come from. The 
 filenames are filled from one variable, separate from pathfinder's:
 
 ```dotenv
-ARAX_TIER_VERSION=tier0-20260621
+ARAX_TIER_VERSION=tier0-20260928
 ```
 
 By default each file is fetched from `ARAX_DBS_BASE_URL/<filename>`. These URLs are placeholders until

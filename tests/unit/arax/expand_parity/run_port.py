@@ -35,7 +35,7 @@ import fixtures as F  # noqa: E402
 
 F.write_tier0_sqlite(
     os.path.join(
-        DATA, "pathfinder", "tier0-info-for-overlay_v1.0_tier0-20260621.sqlite"
+        DATA, "pathfinder", "tier0-info-for-overlay_v1.0_tier0-20260928.sqlite"
     )
 )
 F.write_fda_pickle(os.path.join(DATA, "arax", "fda_approved_drugs_v1.0.pickle"))
