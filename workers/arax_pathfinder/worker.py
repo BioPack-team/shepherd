@@ -30,10 +30,14 @@ from shepherd_utils.trapi import BIOLINK_VERSION
 from shepherd_utils.inject_shepherd_arax_provenance import (
     add_shepherd_arax_to_edge_sources,
 )
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import (
+    get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
 
 # Queue name
 STREAM = "arax.pathfinder"
@@ -291,8 +295,11 @@ def pathfinder_results(result, aux_graphs, qpath_key=None) -> tuple[list, dict]:
 
 
 def arax_pathfinder_task(
-    query_id: str, response_id: str, otel_carrier: dict, logger: logging.Logger
-) -> None:
+    query_id: str,
+    response_id: str,
+    otel_carrier: dict,
+    log_level: int = logging.INFO,
+) -> list[dict]:
     """Process-pool entrypoint: load, search, rehydrate, and save in the child.
 
     Only the two small ids cross the process-pool boundary; the (potentially
@@ -303,12 +310,19 @@ def arax_pathfinder_task(
     concurrent searches could starve the heartbeat past HEARTBEAT_TTL_SEC and
     get a live worker's tasks reclaimed out from under it (matching
     aragorn_score / arax_rank).
+
+    The task's logger can't cross the boundary either (it isn't picklable), so
+    the child logs at the task's ``log_level`` through its own logger and
+    returns the formatted records, oldest-first, for the parent to fold into
+    the query's logs.
     """
     start = time.time()
     _, parent_ctx = child_bootstrap(otel_carrier)
     otel_token = otel_context.attach(parent_ctx)
     try:
-        _arax_pathfinder_task(query_id, response_id, logger, start)
+        with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
+            _arax_pathfinder_task(query_id, response_id, logger, start)
+            return query_log_handler.drain()
     finally:
         otel_context.detach(otel_token)
         flush_child()
@@ -386,14 +400,18 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 
     async def _run(task, logger):
         otel_carrier = inject_context()
-        await pool.run(
+        # Held no longer than the query can use the answer (#245).
+        entries = await pool.run_within_budget(
             loop,
+            task[1],
+            "ARAX's pathfinder",
             arax_pathfinder_task,
             task[1]["query_id"],
             task[1]["response_id"],
             otel_carrier,
-            logger,
+            logger.getEffectiveLevel(),
         )
+        ingest_query_logs(logger, entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
@@ -425,19 +443,14 @@ async def poll_for_tasks():
         name="arax.pathfinder process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, pool)
-                )
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max_workers,
+        lambda *task_args: process_task(*task_args, loop, pool),
+        on_stop=pool.shutdown,
+    )
 
 
 if __name__ == "__main__":

@@ -52,10 +52,11 @@ class _Cursor:
 def pg(monkeypatch):
     fake = _FakePostgres(
         [
+            # before "FILTER", which this query also contains
+            ("pg_stat_activity", [(12, 15, 397)]),
             ("state NOT IN", [("QUEUED", 3), ("RUNNING", 2)]),
             ("FILTER", [("aragorn", 40, 4), ("bte", 10, 1), (None, 5, 0)]),
             ("FROM callbacks", [(7, 125.0)]),
-            ("pg_stat_activity", [(12,)]),
             ("state IS NULL OR", [("COMPLETED", 900), ("ABANDONED", 6), (None, 1)]),
             ("pg_database_size", [(1000,)]),
             ("pg_ls_waldir", [(24,)]),
@@ -79,6 +80,8 @@ async def test_tick_counts(pg):
         "callbacks_pending": 7,
         "oldest_callback_age_sec": 125.0,
         "connection_count": 12,
+        "client_connections": 15,
+        "usable_connections": 397,
     }
 
 

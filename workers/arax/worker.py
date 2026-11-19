@@ -34,6 +34,7 @@ import json
 import logging
 import multiprocessing
 import os
+import random
 import time
 import uuid
 
@@ -68,7 +69,8 @@ from shepherd_utils.inject_shepherd_arax_provenance import (
 from shepherd_utils.logger import get_query_handler, get_worker_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
+from shepherd_utils.task_deadline import get_deadline
 from shepherd_utils.trapi import normalize_query_graph, query_parameters
 
 # Queue name
@@ -104,6 +106,12 @@ ERROR_BODY_BYTES = 500
 # code of its own to pass on: we are a gateway in front of it.
 BAD_GATEWAY = 502
 GATEWAY_TIMEOUT = 504
+# The legacy path: a gateway error or a dropped connection is often a moment of
+# overload in front of ARAX, so the call gets a few more tries (see retry_delay)
+ARAX_RETRY_STATUS_CODES = frozenset({BAD_GATEWAY, 503, GATEWAY_TIMEOUT})
+ARAX_RETRY_ERRORS = (httpx.NetworkError, httpx.RemoteProtocolError)
+ARAX_MAX_ATTEMPTS = 5
+ARAX_RETRY_DELAY = 5
 
 
 class ARAXServiceError(Exception):
@@ -111,12 +119,14 @@ class ARAXServiceError(Exception):
 
     Carries ARAX's HTTP status code (the one its ``/query`` would have answered
     with), so it reaches the task span as ``arax.status_code``, the query's logs
-    via ``run_task_lifecycle``, and the caller.
+    via ``run_task_lifecycle``, and the caller. ``retryable`` says whether
+    another try could go differently.
     """
 
-    def __init__(self, message: str, status_code: int):
+    def __init__(self, message: str, status_code: int, retryable: bool = False):
         super().__init__(message)
         self.status_code = status_code
+        self.retryable = retryable
 
 
 def is_pathfinder_query(message):
@@ -233,12 +243,35 @@ def body_head(response: httpx.Response) -> str:
     return f": {body.decode('utf-8', 'replace')}"
 
 
-async def call_arax(message: dict, logger: logging.Logger) -> dict:
+def retry_delay(attempt: int, deadline: float | None) -> float | None:
+    """Seconds to wait after failed try ``attempt``, or None to give up.
+
+    The wait doubles each time, plus up to half of it again at random, so
+    queries that failed together don't all come back together. There is no
+    retry once the tries are used up, or when the wait alone would reach the
+    query's deadline.
+    """
+    if attempt >= ARAX_MAX_ATTEMPTS:
+        return None
+    delay = ARAX_RETRY_DELAY * 2 ** (attempt - 1)
+    delay += random.uniform(0, delay / 2)
+    if deadline is not None and time.time() + delay >= deadline:
+        return None
+    return delay
+
+
+async def call_arax(
+    message: dict, logger: logging.Logger, deadline: float | None = None
+) -> dict:
     """POST the query to the remote ARAX service and return its TRAPI response.
 
     Raises ``ARAXServiceError`` -- carrying ARAX's own status code -- for
     anything that isn't a parseable 2xx, so the code reaches the span, the
     query's logs and the response instead of being logged and dropped.
+
+    A gateway error or a dropped connection is retried with backoff (see
+    ``retry_delay``), and a retry is cut off at the query's ``deadline``:
+    nobody is waiting for its answer after that.
     """
     # The remote call is always non-streaming: Shepherd relays nothing from it,
     # and a streamed body is NDJSON rather than a TRAPI response.
@@ -246,6 +279,43 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
     if "submitter" not in message:
         message["submitter"] = default_submitter()
     url = settings.arax_url
+    span = get_current_span()
+    attempt = 1
+    while True:
+        span.set_attribute("arax.attempts", attempt)
+        time_left = None
+        if attempt > 1 and deadline is not None:
+            time_left = deadline - time.time()
+        try:
+            async with asyncio.timeout(time_left):
+                return await post_to_arax(message, url, logger)
+        except TimeoutError as e:
+            # post_to_arax turns its own errors into ARAXServiceError, so this
+            # is the deadline above
+            span.set_attribute("arax.status_code", GATEWAY_TIMEOUT)
+            raise ARAXServiceError(
+                f"ARAX service at {url} did not respond before the query's "
+                f"deadline (gave up after {attempt} attempts)",
+                GATEWAY_TIMEOUT,
+            ) from e
+        except ARAXServiceError as e:
+            delay = retry_delay(attempt, deadline) if e.retryable else None
+            if delay is None:
+                if attempt == 1:
+                    raise
+                raise ARAXServiceError(
+                    f"{e} (gave up after {attempt} attempts)", e.status_code
+                ) from e
+            logger.warning(
+                f"ARAX attempt {attempt} of {ARAX_MAX_ATTEMPTS} failed, "
+                f"retrying in {delay:.0f}s: {e}"
+            )
+        await asyncio.sleep(delay)
+        attempt += 1
+
+
+async def post_to_arax(message: dict, url: str, logger: logging.Logger) -> dict:
+    """One try at the remote ARAX service; see ``call_arax``."""
     logger.info(f"Sending the query to the ARAX service at {url}")
     span = get_current_span()
     try:
@@ -267,6 +337,7 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
             f"Error occurred calling ARAX service at {url}: "
             f"{type(e).__name__}: {e}",
             BAD_GATEWAY,
+            retryable=isinstance(e, ARAX_RETRY_ERRORS),
         ) from e
 
     status_code = response.status_code
@@ -276,6 +347,7 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
         raise ARAXServiceError(
             f"ARAX service at {url} returned HTTP {status_code}{body_head(response)}",
             status_code,
+            retryable=status_code in ARAX_RETRY_STATUS_CODES,
         )
     try:
         result = response.json()
@@ -297,12 +369,15 @@ async def call_arax(message: dict, logger: logging.Logger) -> dict:
 
 
 async def run_legacy_arax(
-    message: dict, response_id: str, logger: logging.Logger
+    message: dict,
+    response_id: str,
+    logger: logging.Logger,
+    deadline: float | None = None,
 ) -> None:
     """The legacy path: answer the query with the remote ARAX service."""
     try:
         try:
-            result = await call_arax(message, logger)
+            result = await call_arax(message, logger, deadline)
         except ARAXServiceError as e:
             # Leave the caller a TRAPI response that says what happened before
             # letting the failure reach run_task_lifecycle, which routes the
@@ -653,7 +728,7 @@ async def arax(task, logger: logging.Logger, loop=None, pool=None):
     response_id = task[1]["response_id"]
     if not uses_internal_workers(message):
         span.set_attribute("arax.path", "legacy")
-        await run_legacy_arax(message, response_id, logger)
+        await run_legacy_arax(message, response_id, logger, get_deadline(task[1]))
         task[1]["workflow"] = json.dumps([{"id": "arax"}])
         return
     span.set_attribute("arax.path", "internal")
@@ -665,7 +740,10 @@ async def arax(task, logger: logging.Logger, loop=None, pool=None):
     if pool is None:
         summary = await loop.run_in_executor(None, arax_query_task, *args)
     else:
-        summary = await pool.run(loop, arax_query_task, *args)
+        # Held no longer than the query can use the answer (#245).
+        summary = await pool.run_within_budget(
+            loop, task[1], "ARAX", arax_query_task, *args
+        )
     http_status = summary["http_status"]
     span.set_attribute("arax.status_code", http_status)
     if summary.get("n_results") is not None:
@@ -803,19 +881,14 @@ async def poll_for_tasks():
         # Each child imports ARAX (seconds, cold) before the first query needs it
         warmup=_warm_pool_child if settings.pool_prewarm else None,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, pool)
-                )
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max_workers,
+        lambda *task_args: process_task(*task_args, loop, pool),
+        on_stop=pool.shutdown,
+    )
 
 
 if __name__ == "__main__":

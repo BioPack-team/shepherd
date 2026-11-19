@@ -1,22 +1,28 @@
 {
   "_divergences": {
     "entries": {
-      "decorate/no_primary": "upstream raised UnboundLocalError (has_primary was only ever assigned inside the loop); the port appends a primary_knowledge_source for itself, which is what the unreachable branch intended",
+      "decorate/empty_sources": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
+      "decorate/has_primary_not_self": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
+      "decorate/no_primary": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores); upstream raised UnboundLocalError here (has_primary was only ever assigned inside the loop), and the port used to append a primary_knowledge_source for itself instead",
+      "decorate/no_sources_key": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
+      "decorate/none_inforesid": "deviation 21: the ARS no longer stamps its ARA's infores on edge sources (upstream's decorate_edges_with_infores); the edge is left as sent and reported (edges_missing_infores, recorded as missing_infores)",
       "merge_ba.message.knowledge_graph.edges.e1.qualifiers": "upstream returned out of mergeDicts' attributes branch, abandoning every key it had not reached yet -- here, qualifiers",
+      "merge_pipeline_ab.message.knowledge_graph.edges.e3.sources": "deviation 21: upstream's pre_merge_process stamped infores:aragorn on e3 (its sources named only infores:ctd); the port leaves the edge as sent and reports it",
       "merge_pipeline_ab.message.results.1.analyses.0": "as premerged_inputs.arax.message.results.1.analyses.0, carried through the merge",
       "mergedicts/attributes_unhashable_dict_values": "upstream deduped the merged value list with set(), which raises on a list of objects; the generic except swallowed it, the break never ran, and the current agent's values were dropped from the attribute entirely",
       "mergedicts/node_bindings": "upstream's else hung off the for, so current-only bindings were dropped (all but the last, into a map it never wrote back); the port unions them per query-graph node",
       "mergedicts/qualifier_lists_conflicting_values": "TRAPI 2.0 port: a conflict on a single-valued TRAPI member (Qualifier.qualifier_value, Edge.knowledge_level / agent_type / predicate, ...) keeps the first value (dcurrent: in the ARS fold, the one earlier merged versions already served), except that a provided knowledge_level / agent_type beats not_provided -- instead of upstream's [merged, current] list, which is not a valid 2.0 string (merge._resolve_scalar_conflict)",
       "mergedicts/qualifier_lists_disjoint_types": "TRAPI 2.0 port: as mergedicts/qualifier_lists_conflicting_values (the object_direction_qualifier values conflict)",
       "mergedicts/unhashable_lists_concat": "upstream keyed a list of objects on resource_id / qualifier_type_id and dropped every object carrying neither -- from both sides, since it replaced the merged list with the keyed map's values -- so such a list merged to []",
+      "premerged_inputs.aragorn.message.knowledge_graph.edges.e3.sources": "deviation 21: upstream's pre_merge_process stamped infores:aragorn on e3 (its sources named only infores:ctd); the port leaves the edge as sent and reports it",
       "premerged_inputs.arax.message.results.1.analyses.0": "TRAPI 2.0 has no null score: the 1.5 corpus's `score: null` translates to an absent score (and premerge strips any null an ARA sends), so normalizeScores has no null to coerce to 0 and the analysis stays unscored (upstream wrote `score: 0`)",
       "scores/empty_analyses_list": "TRAPI 2.0 port: as scores/missing_analyses_key -- a result with no analyses is skipped, not a reason to abandon the batch",
       "scores/missing_analyses_key": "TRAPI 2.0 port: Result.analyses is optional in 2.0, so a result without analyses is skipped by normalizeScores / ScoreStatCalc rather than aborting the whole batch (upstream, 1.5: analyses required, batch abandoned with 'Results dont have the required fields')",
       "scores/mixed": "upstream popped one rank per result while ranking only the score-bearing ones, so a mixed corpus raised IndexError after misassigning the ranks it did hand out; the port assigns each rank to the result it was computed from"
     },
-    "note": "Relay @ 2b2121df740a4c8bc47bb2e6bafa9e52f748f028 ran on the TRAPI 1.5 corpus (goldens_trapi15.json); this file is its TRAPI 2.0 translation (upconvert_goldens.py). The entries below are recorded from the Shepherd port instead, each for the reason given."
+    "note": "Relay @ 84a66c183a8ac97556b7d9030d610b4d107269ac ran on the TRAPI 1.5 corpus (goldens_trapi15.json); this file is its TRAPI 2.0 translation (upconvert_goldens.py). The entries below are recorded from the Shepherd port instead, each for the reason given."
   },
-  "_relay_commit": "2b2121df740a4c8bc47bb2e6bafa9e52f748f028",
+  "_relay_commit": "84a66c183a8ac97556b7d9030d610b4d107269ac",
   "_trapi2_verdicts": {
     "kg_missing_edges": "KnowledgeGraph.edges is optional in TRAPI 2.0 (TOM's KnowledgeGraph); 1.5 required it",
     "pathfinder_qg_with_edges": "QueryGraph.edges has minProperties 1 in TRAPI 2.0, so the empty edges object beside the paths is invalid; 1.5's PathfinderQueryGraph arm ignored it"
@@ -41,15 +47,12 @@
         {
           "analyses": [
             {
-              "score": 0.1
-            },
-            {
-              "score": 0.3
+              "score": 0.9
             }
           ],
           "ordering_components": {
             "clinical_evidence": 0.0,
-            "confidence": 0.37,
+            "confidence": 0.9,
             "novelty": 0.0
           }
         },
@@ -71,12 +74,15 @@
         {
           "analyses": [
             {
-              "score": 0.9
+              "score": 0.1
+            },
+            {
+              "score": 0.3
             }
           ],
           "ordering_components": {
             "clinical_evidence": 0.0,
-            "confidence": 0.9,
+            "confidence": 0.37,
             "novelty": 0.0
           }
         },
@@ -158,6 +164,83 @@
           "ordering_components": {
             "clinical_evidence": 0.0,
             "confidence": 0,
+            "novelty": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "with_confidence",
+      "output": [
+        {
+          "analyses": [
+            {
+              "score": 0.8
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.8,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.7
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.7,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.6
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.6,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.5
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.5,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.4
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.4,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.2
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.19999999999999996,
             "novelty": 0.0
           }
         }
@@ -271,6 +354,9 @@
   ],
   "decorate": [
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "no_sources_key",
       "output": {
         "message": {
@@ -280,12 +366,6 @@
                 "agent_type": "not_provided",
                 "knowledge_level": "not_provided",
                 "object": "b",
-                "sources": [
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source"
-                  }
-                ],
                 "subject": "a"
               }
             }
@@ -294,6 +374,9 @@
       }
     },
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "empty_sources",
       "output": {
         "message": {
@@ -303,12 +386,7 @@
                 "agent_type": "not_provided",
                 "knowledge_level": "not_provided",
                 "object": "b",
-                "sources": [
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source"
-                  }
-                ],
+                "sources": [],
                 "subject": "a"
               }
             }
@@ -317,6 +395,9 @@
       }
     },
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "has_primary_not_self",
       "output": {
         "message": {
@@ -330,10 +411,6 @@
                   {
                     "resource_id": "infores:ctd",
                     "resource_role": "primary_knowledge_source"
-                  },
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "aggregator_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -344,6 +421,7 @@
       }
     },
     {
+      "missing_infores": [],
       "name": "already_self",
       "output": {
         "message": {
@@ -367,6 +445,7 @@
       }
     },
     {
+      "missing_infores": [],
       "name": "none_inforesid",
       "output": {
         "message": {
@@ -376,12 +455,7 @@
                 "agent_type": "not_provided",
                 "knowledge_level": "not_provided",
                 "object": "b",
-                "sources": [
-                  {
-                    "resource_id": "infores:unknown",
-                    "resource_role": "primary_knowledge_source"
-                  }
-                ],
+                "sources": [],
                 "subject": "a"
               }
             }
@@ -390,6 +464,9 @@
       }
     },
     {
+      "missing_infores": [
+        "e1"
+      ],
       "name": "no_primary",
       "output": {
         "message": {
@@ -403,10 +480,6 @@
                   {
                     "resource_id": "infores:x",
                     "resource_role": "aggregator_knowledge_source"
-                  },
-                  {
-                    "resource_id": "infores:aragorn",
-                    "resource_role": "primary_knowledge_source"
                   }
                 ],
                 "subject": "a"
@@ -1081,10 +1154,6 @@
               {
                 "resource_id": "infores:ctd",
                 "resource_role": "primary_knowledge_source"
-              },
-              {
-                "resource_id": "infores:aragorn",
-                "resource_role": "aggregator_knowledge_source"
               }
             ],
             "subject": "NCBIGene:5468"
@@ -1846,10 +1915,6 @@
                 {
                   "resource_id": "infores:ctd",
                   "resource_role": "primary_knowledge_source"
-                },
-                {
-                  "resource_id": "infores:aragorn",
-                  "resource_role": "aggregator_knowledge_source"
                 }
               ],
               "subject": "NCBIGene:5468"
@@ -2793,13 +2858,7 @@
           ]
         }
       ],
-      "stat": {
-        "maximum": 0.9,
-        "mean": 0.625,
-        "median": 0.7,
-        "minimum": 0.2,
-        "stdev": 0.3403429642777023
-      }
+      "stat": {}
     },
     {
       "name": "missing_analyses_key",
@@ -2853,6 +2912,80 @@
         }
       ],
       "stat": {}
+    },
+    {
+      "name": "with_confidence",
+      "normalized": [
+        {
+          "analyses": [
+            {
+              "score": 0.2
+            }
+          ],
+          "normalized_score": 16.666666666666668,
+          "ordering_components": {
+            "confidence": 0.2
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.8
+            }
+          ],
+          "normalized_score": 100.0,
+          "ordering_components": {
+            "confidence": 0.8,
+            "novelty": 0.1
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.5
+            }
+          ],
+          "normalized_score": 50.0,
+          "ordering_components": {
+            "confidence": 0.5
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.4
+            }
+          ],
+          "normalized_score": 33.333333333333336,
+          "ordering_components": {
+            "novelty": 0.3
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.7
+            }
+          ],
+          "normalized_score": 83.33333333333333,
+          "ordering_components": []
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.6
+            }
+          ],
+          "normalized_score": 66.66666666666667
+        }
+      ],
+      "stat": {
+        "maximum": 0.8,
+        "mean": 0.5,
+        "median": 0.5,
+        "minimum": 0.2,
+        "stdev": 0.30000000000000004
+      }
     }
   ],
   "sugeno_grid": [
@@ -3015,5 +3148,484 @@
     "qg_categories_not_list": false,
     "result_missing_node_bindings": false,
     "results_not_list": false
-  }
+  },
+  "ranker_fusion_default_config": {
+    "c_value": 40,
+    "enabled": true,
+    "weights": {
+      "infores:shepherd-aragorn": 0.9,
+      "infores:shepherd-arax": 0.1
+    }
+  },
+  "ranker_fusion": [
+    {
+      "name": "basic",
+      "summary": {
+        "applied": true,
+        "c_value": 40,
+        "matched_results": 3,
+        "ranker_sources": [
+          "infores:shepherd-aragorn",
+          "infores:shepherd-arax"
+        ],
+        "result_count": 5,
+        "weights": {
+          "infores:shepherd-aragorn": 0.9,
+          "infores:shepherd-arax": 0.1
+        }
+      },
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:b"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "B",
+              "rrf_score": 0.024332171893147507,
+              "rrf_rank": 1,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 1,
+                "infores:shepherd-arax": 2
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.021951219512195124,
+                "infores:shepherd-arax": 0.002380952380952381
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:a"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "A",
+              "rrf_score": 0.02142857142857143,
+              "rrf_rank": 2,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 2
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.02142857142857143
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:c"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "C",
+              "rrf_score": 0.0024390243902439024,
+              "rrf_rank": 3,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-arax": 1
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-arax": 0.0024390243902439024
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:d"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "D",
+              "rrf_score": 0.0,
+              "rrf_rank": 4,
+              "rrf_ranker_ranks": {},
+              "rrf_ranker_contributions": {}
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:e"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "E",
+              "rrf_score": 0.0,
+              "rrf_rank": 4,
+              "rrf_ranker_ranks": {},
+              "rrf_ranker_contributions": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "duplicates_and_set_keys",
+      "summary": {
+        "applied": true,
+        "c_value": 40,
+        "matched_results": 2,
+        "ranker_sources": [
+          "infores:shepherd-aragorn"
+        ],
+        "result_count": 3,
+        "weights": {
+          "infores:shepherd-aragorn": 0.9
+        }
+      },
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:c"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "C",
+              "rrf_score": 0.021951219512195124,
+              "rrf_rank": 1,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 1
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.021951219512195124
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:b"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1",
+                    "Y:2"
+                  ]
+                }
+              },
+              "tag": "B",
+              "rrf_score": 0.020930232558139535,
+              "rrf_rank": 2,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 3
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.020930232558139535
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:a"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "A",
+              "rrf_score": 0.0,
+              "rrf_rank": 3,
+              "rrf_ranker_ranks": {},
+              "rrf_ranker_contributions": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "equal_weights_ties",
+      "summary": {
+        "applied": true,
+        "c_value": 0,
+        "matched_results": 2,
+        "ranker_sources": [
+          "infores:shepherd-aragorn",
+          "infores:shepherd-arax"
+        ],
+        "result_count": 4,
+        "weights": {
+          "infores:shepherd-aragorn": 0.5,
+          "infores:shepherd-arax": 0.5
+        }
+      },
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:a"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "A",
+              "rrf_score": 0.75,
+              "rrf_rank": 1,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 2,
+                "infores:shepherd-arax": 1
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.25,
+                "infores:shepherd-arax": 0.5
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:b"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "B",
+              "rrf_score": 0.75,
+              "rrf_rank": 1,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 1,
+                "infores:shepherd-arax": 2
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.5,
+                "infores:shepherd-arax": 0.25
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:c"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "C",
+              "rrf_score": 0.0,
+              "rrf_rank": 3,
+              "rrf_ranker_ranks": {},
+              "rrf_ranker_contributions": {}
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:d"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "D",
+              "rrf_score": 0.0,
+              "rrf_rank": 3,
+              "rrf_ranker_ranks": {},
+              "rrf_ranker_contributions": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unweighted_source_and_empty_bindings",
+      "summary": {
+        "applied": true,
+        "c_value": 40,
+        "matched_results": 1,
+        "ranker_sources": [
+          "infores:shepherd-arax"
+        ],
+        "result_count": 3,
+        "weights": {
+          "infores:shepherd-arax": 0.1
+        }
+      },
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:b"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "B",
+              "rrf_score": 0.0024390243902439024,
+              "rrf_rank": 1,
+              "rrf_ranker_ranks": {
+                "infores:shepherd-arax": 1
+              },
+              "rrf_ranker_contributions": {
+                "infores:shepherd-arax": 0.0024390243902439024
+              }
+            },
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:a"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "A",
+              "rrf_score": 0.0,
+              "rrf_rank": 2,
+              "rrf_ranker_ranks": {},
+              "rrf_ranker_contributions": {}
+            },
+            {
+              "node_bindings": {},
+              "tag": "empty",
+              "rrf_score": 0.0,
+              "rrf_rank": 2,
+              "rrf_ranker_ranks": {},
+              "rrf_ranker_contributions": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "no_matching_results",
+      "summary": {
+        "applied": false,
+        "reason": "no_matching_results"
+      },
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:a"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "only_unweighted_sources",
+      "summary": {
+        "applied": false,
+        "reason": "missing_ranker_results"
+      },
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": {
+                  "ids": [
+                    "X:a"
+                  ]
+                },
+                "n1": {
+                  "ids": [
+                    "Y:1"
+                  ]
+                }
+              },
+              "tag": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "no_results",
+      "summary": {
+        "applied": false,
+        "reason": "missing_results"
+      },
+      "output": {
+        "message": {
+          "results": []
+        }
+      }
+    }
+  ]
 }

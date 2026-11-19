@@ -98,7 +98,16 @@ async def sweep(logger: logging.Logger) -> int:
                 f"{agent_name} pk: {row['id']} still Running after "
                 f"{age:.0f}s (> {threshold:.0f}s), setting its code to 598"
             )
-            await ars_db.update_message(row["id"], status="E", code=598)
+            # Only while it is still Running: a child that reached Done since
+            # the scan above (or that another watchdog replica already timed
+            # out) must keep its status, or its results drop out of the
+            # parent's completion count.
+            updated = await ars_db.update_message(
+                row["id"], only_if_status="R", status="E", code=598
+            )
+            if updated is None:
+                logger.info(f"pk: {row['id']} finished before it timed out")
+                continue
             timed_out += 1
             if row.get("ref") is not None:
                 await lifecycle.check_parent_completion(row["ref"], logger)
@@ -125,6 +134,14 @@ async def retention_pass(logger: logging.Logger, hourly: bool) -> None:
             logger.info(f"Purged the durable payloads of {purged} old ARS trees")
     except Exception as e:
         logger.error(f"Payload purge failed: {e}", exc_info=True)
+    try:
+        archived = await retention.purge_expired_archive(
+            settings.ara_response_retention_days, logger
+        )
+        if archived:
+            logger.info(f"Purged {archived} archived ARA responses")
+    except Exception as e:
+        logger.error(f"ARA response archive purge failed: {e}", exc_info=True)
     try:
         deleted = await retention.delete_expired_trees(
             settings.ars_row_retention_days, logger

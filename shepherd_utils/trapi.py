@@ -60,6 +60,8 @@ from typing import Any, Iterable, Mapping, Optional, cast
 
 from functools import cache
 
+import orjson
+
 from pydantic import TypeAdapter, ValidationError
 from translator_tom import TRAPI_CONFIG
 from translator_tom.model_dicts import (
@@ -78,6 +80,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "TRAPIRequestError",
     "add_binding_ids",
+    "apply_query_status",
     "binding_ids",
     "edge_binding_ids",
     "edge_support_graphs",
@@ -85,12 +88,14 @@ __all__ = [
     "make_binding",
     "node_binding_ids",
     "normalize_query_graph",
+    "operation_parameters",
     "prune_response",
     "qedge_qualifier_sets",
     "query_bypass_cache",
     "query_log_level",
     "query_parameters",
     "validate_query",
+    "wrap_stored_response",
 ]
 
 #: Biolink Model version the TRAPI 2.0 models (and so Shepherd's responses) use.
@@ -260,6 +265,21 @@ def qedge_qualifier_sets(qedge: QEdgeDict) -> list[list[QualifierDict]]:
         for qualifier_set in constraints.get("qualifiers") or []
         if qualifier_set
     ]
+
+
+def operation_parameters(operation: Mapping[str, Any]) -> dict[str, Any]:
+    """The settings of a TRAPI workflow operation.
+
+    TRAPI puts them under the operation's ``parameters`` -- as Shepherd's own
+    default workflows write them -- but the workers used to read them from the
+    top level of the operation, so a client's settings were ignored. Both are
+    read here, ``parameters`` winning, so a workflow written either way works.
+    """
+    settings_ = {k: v for k, v in operation.items() if k not in ("id", "parameters")}
+    parameters = operation.get("parameters")
+    if isinstance(parameters, dict):
+        settings_.update(parameters)
+    return settings_
 
 
 #: Query-graph element properties that 2.0 gives a ``minItems`` of 1, so an
@@ -510,6 +530,46 @@ def prune_response(response: dict[str, Any]) -> None:
 _QUERY_ONLY_MEMBERS = ("callback", "submitter", "log_level", "bypass_cache")
 
 
+def wrap_stored_response(
+    stored: bytes, query: "dict | None", logs: "list[dict]"
+) -> bytes:
+    """The TRAPI 2.0 Response delivered for ``stored``, without decoding it.
+
+    A stored response never carries the delivery envelope (see
+    ``shepherd_utils.trapi.prepare_stored_response``) and its content is
+    already valid 2.0, so the envelope -- ``schema_version``,
+    ``biolink_version``, the query's ``parameters`` (which 2.0 says the server
+    MUST repeat) -- is written in front of the stored members, and the logs
+    after them. ``logs`` are last so finish_query's ``_append_log_entry`` can extend them,
+    and absent when there are none (``Response.logs`` has a ``minItems`` of
+    1). One allocation of the payload's size; the slices are views. Anything
+    that is not a JSON object is returned untouched.
+    """
+    envelope: dict = {
+        "schema_version": SCHEMA_VERSION,
+        "biolink_version": BIOLINK_VERSION,
+    }
+    parameters = query_parameters(query)
+    if parameters:
+        envelope["parameters"] = parameters
+    head = orjson.dumps(envelope)
+    view = memoryview(stored)
+    # ``stored`` is one JSON object as orjson wrote it: no whitespace, so its
+    # members are everything between the outer braces.
+    if stored[:1] != b"{" or stored[-1:] != b"}":
+        # Not something a worker stored; deliver it untouched rather than
+        # guess at its structure.
+        return stored
+    members = view[1:-1]
+    parts = [memoryview(head)[:-1]]
+    if len(members):
+        parts += [b",", members]
+    if logs:
+        parts += [b',"logs":', orjson.dumps(logs)]
+    parts.append(b"}")
+    return b"".join(parts)
+
+
 def finalize_response(
     response: dict[str, Any],
     query: Optional[Mapping[str, Any]] = None,
@@ -554,6 +614,33 @@ def finalize_response(
         response["logs"] = final_logs
     prune_response(response)
     return cast("ResponseDict", response)
+
+
+def apply_query_status(
+    response: dict[str, Any],
+    status: Optional[str],
+    description: Optional[str] = None,
+) -> None:
+    """Stamp a non-OK query status onto the TRAPI response, in place.
+
+    ``status``/``description`` are TRAPI Response fields, so a caller reading
+    the body it already parses can tell a failed query from an empty one. An
+    error the ARA reported itself is left alone -- it is more specific than the
+    query-level status -- but a body that claims nothing, or claims success for
+    a query that failed, is corrected here. ``description`` is the reason the
+    failing worker gave (stored with the status); it is used when the body
+    doesn't already carry one.
+    """
+    if not status or status == "OK":
+        return
+    current = response.get("status")
+    if isinstance(current, str) and (
+        "error" in current.lower() or "fail" in current.lower()
+    ):
+        return
+    response["status"] = "Error"
+    if not response.get("description"):
+        response["description"] = description or f"Query finished with status {status}."
 
 
 #: Response members added when a response is delivered, from the query and

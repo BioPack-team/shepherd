@@ -12,8 +12,8 @@ import logging
 import pytest
 
 from tests.helpers.generate_messages import creative_query
+from shepherd_utils.lookups import AsyncResponse
 from workers.bte_lookup.worker import (
-    AsyncResponse,
     bte_lookup,
     examine_query,
     expand_bte_query,
@@ -344,11 +344,11 @@ async def test_bte_lookup_pure_lookup_calls_kg_retrieval(redis_mock, mocker):
         return_value=msg,
     )
     mocker.patch(
-        "workers.bte_lookup.worker.add_callback_id",
+        "shepherd_utils.lookups.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
     mocker.patch(
-        "workers.bte_lookup.worker.get_running_callbacks",
+        "shepherd_utils.lookups.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )
@@ -381,5 +381,9 @@ async def test_bte_lookup_rejects_pathfinder_query(redis_mock, mocker):
         new_callable=mocker.AsyncMock,
         return_value=pathfinder_msg,
     )
-    with pytest.raises(Exception, match="does not support Pathfinder"):
+    from shepherd_utils.query_errors import UnsupportedQueryError
+
+    # Unsupported, not broken: the query ends 501 rather than 500.
+    with pytest.raises(UnsupportedQueryError, match="does not support Pathfinder") as e:
         await bte_lookup(_make_task(), logger)
+    assert e.value.status_code == 501

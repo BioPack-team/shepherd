@@ -80,6 +80,9 @@ def env(mocker, redis_mock):
             "load_message_data", return_value=json.loads(json.dumps(QUERY))
         ),
         "create_message": _patch("create_message", side_effect=_create),
+        "get_children": _patch(
+            "get_children", side_effect=lambda pk: list(children.values())
+        ),
         "update_message": _patch(
             "update_message",
             side_effect=lambda pk, **kw: {"id": pk, **kw},
@@ -137,6 +140,10 @@ async def test_fanout_creates_a_child_per_enabled_ara(env):
         assert ara is not None
         child = env["children"][ara.agent]
         assert callback_url == handoff_callback_url(child["id"])
+        # the child IS the response its ARA will produce: one id, so one
+        # entry in the data store and one archive (#252)
+        assert response_id == str(child["id"])
+        assert query_id != response_id
         assert saved_query["callback"] == callback_url
         assert saved_query["message"] == QUERY["message"]
 
@@ -220,6 +227,8 @@ async def test_fanout_dispatch_failure_is_e500(env):
     assert str(update.args[0]) == str(failed["id"])
     assert update.kwargs == {"status": "E", "code": 500}
     env["persist_data_copy"].assert_awaited_once()
+    # nothing is written under the child: its entry is its ARA's response
+    env["save_message_data"].assert_not_awaited()
     env["completion"].assert_awaited_once()
     assert await _stream_tasks("arax") == []
     assert len(await _stream_tasks("aragorn")) == 1
@@ -242,3 +251,33 @@ async def test_fanout_unknown_parent_is_a_noop(env):
     env["create_message"].assert_not_awaited()
     env["add_query"].assert_not_awaited()
     env["completion"].assert_not_awaited()
+
+
+async def test_a_redelivered_fanout_does_not_fan_out_twice(env):
+    """C8-5 (#214): a fanout task redelivered after its worker died mid-fanout
+    created a second child per ARA and dispatched the query again."""
+    targets = aras.enabled_aras()
+    await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
+    first = env["create_message"].await_count
+    for ara in targets:
+        assert len(await _stream_tasks(ara.name)) == 1
+
+    await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
+
+    assert first == len(targets)
+    assert env["create_message"].await_count == first
+    for ara in targets:
+        assert await _stream_tasks(ara.name) == []
+
+
+async def test_a_redelivered_fanout_finishes_the_aras_it_missed(env):
+    """Killed after creating some children: the rest still get theirs."""
+    targets = aras.enabled_aras()
+    assert len(targets) > 1
+    done = targets[0]
+    env["children"][done.agent] = {"id": uuid.uuid4(), "agent": done.agent}
+
+    await fanout.ars_fanout(_task(env["parent_pk"]), LOGGER)
+
+    created = [c.kwargs["agent"] for c in env["create_message"].await_args_list]
+    assert sorted(created) == sorted(a.agent for a in targets[1:])

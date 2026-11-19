@@ -46,7 +46,14 @@ from .completion import MERGE_AGENT_NAME
 #   "3": TRAPI 2.0 -- ``parameters.bypass_cache`` / ``log_level`` / ``timeout``
 #        (1.x kept the first two at the top level, outside the key) are
 #        excluded from the key material.
-CACHE_KEY_VERSION = "3"
+#   "4": the caller's node/edge/path ids are part of the key. A hit hands back
+#        the source tree, whose query graph and bindings use the source's ids,
+#        so two queries may share an entry only if they use the same ids.
+CACHE_KEY_VERSION = "4"
+
+# The code the ARS watchdog gives an ARA child it timed out
+# (workers/ars_watchdog). A timeout is a blip, not part of the answer.
+TIMED_OUT_CODE = 598
 
 MODE_NORMAL = "normal"
 MODE_BYPASS = "bypass"
@@ -265,8 +272,9 @@ _NON_KEY_PARAMETERS = frozenset(
 
 
 def key_material(body: Dict[str, Any]) -> Tuple[Any, Dict[str, Dict[str, str]]]:
-    """What the key hashes: the canonical query graph, a non-empty workflow,
-    and any non-empty ``parameters``. Returns it with the caller's label map.
+    """What the key hashes: the canonical query graph, the caller's node /
+    edge / path ids (as the label map onto the canonical ones), a non-empty
+    workflow, and any non-empty ``parameters``. Returns it with the label map.
 
     ``parameters`` is forwarded verbatim to every ARA by the fanout, so two
     submits that differ there are different queries and must not share an
@@ -295,6 +303,10 @@ def key_material(body: Dict[str, Any]) -> Tuple[Any, Dict[str, Dict[str, str]]]:
     elif not _is_empty(parameters):
         # a non-dict ``parameters`` still changes what the ARAs receive
         material["parameters"] = canonicalize(parameters)
+    # The ids themselves, as the label map from them to the canonical ones: a
+    # served tree answers in its source's ids, so the same structure under
+    # other ids is a different entry (until hits rewrite the ids).
+    material["labels"] = label_map
     return material, label_map
 
 
@@ -562,6 +574,15 @@ async def _cacheable(parent_row: Dict[str, Any], children, logger) -> bool:
     ]
     errored = any(c.get("status") == "E" for c in ara_children)
     if not settings.ars_cache_store_partial and errored:
+        return False
+    # A child the watchdog timed out failed for a reason the next run may not
+    # share; caching the run would serve its missing results to every
+    # identical query until the entry ages out. A lasting error (an ARA that
+    # doesn't do this kind of query) is part of the answer and is kept.
+    if any(
+        c.get("status") == "E" and c.get("code") == TIMED_OUT_CODE for c in ara_children
+    ):
+        logger.info(f"Cache: not caching {parent_row['id']}: an ARA timed out")
         return False
     merged_pk = parent_row.get("merged_version")
     merged = next((c for c in children if str(c["id"]) == str(merged_pk)), None)

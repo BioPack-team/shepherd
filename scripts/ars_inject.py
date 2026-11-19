@@ -39,9 +39,10 @@ Local stack prerequisites:
   - the ARA URL overrides point every actor at this script's sink,
     e.g. http://host.docker.internal:8210/<agent> (any path; it 200s all)
   - the local registry uses the STANDARD actor inforesids (the default
-    ars_config seed), so re-running decorate_edges_with_infores over the
-    captured (already-decorated) payloads is a no-op. The script warns and
-    compensates if a local inforesid differs, but matching them is cleaner.
+    ars_config seed). Premerge used to stamp each actor's inforesid on its
+    edges, so a differing local inforesid showed up as an extra source; it
+    only reports missing ones now (parity register deviation 21), and the
+    script's compensation for a mismatch is kept for older stacks.
 
 Usage:
   python scripts/ars_inject.py --curies MONDO:0005148
@@ -200,10 +201,12 @@ async def wait_for_merge_count(client, base, parent_pk, count) -> None:
 
 
 def strip_alien_self_sources(merged: dict, alien_inforesids: set) -> dict:
-    """When a local actor's inforesid differs from the captured one,
-    re-running decorate_edges_with_infores appends the LOCAL inforesid as an
-    extra source on that agent's edges. Remove exactly those entries so the
-    comparison measures the pipeline, not the registry naming."""
+    """When a local actor's inforesid differs from the captured one, a stack
+    whose premerge still stamps the infores (before parity register
+    deviation 21) appends the LOCAL inforesid as an extra source on that
+    agent's edges. Remove exactly those entries so the comparison measures
+    the pipeline, not the registry naming; on a current stack there are
+    none to remove."""
     if not alien_inforesids or not isinstance(merged, dict):
         return merged
     out = json.loads(json.dumps(merged))
@@ -287,8 +290,8 @@ async def run_injection(curie: str, args) -> str:
             )
             return "MISSING_ACTORS"
 
-        # registry naming mismatches make the callback's decorate pass add
-        # the local inforesid as an extra source; note them for stripping
+        # registry naming mismatches made an older premerge's decorate pass
+        # add the local inforesid as an extra source; note them for stripping
         alien = set()
         for agent, kid in kids.items():
             cap = kinds.get(agent)

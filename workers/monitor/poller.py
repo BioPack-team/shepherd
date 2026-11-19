@@ -9,9 +9,11 @@ broadcast to connected websocket clients.
 import asyncio
 import json
 import logging
+import math
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Set, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import shepherd_utils.ars.retention as retention
 from shepherd_utils.broker import broker_client
@@ -24,7 +26,7 @@ from shepherd_utils.heartbeat import (
     SHUTDOWN_SCAN_PATTERN,
 )
 
-from . import history, storage
+from . import history, redis_instances, storage
 
 logger = logging.getLogger("shepherd.monitor.poller")
 
@@ -296,11 +298,20 @@ async def _collect_postgres() -> Dict[str, Any]:
             snapshot["callbacks_pending"] = int(row[0] or 0)
             snapshot["oldest_callback_age_sec"] = float(row[1] or 0)
 
-            cur = await conn.execute(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-            )
+            # This database's backends, and every client backend against the
+            # server's usable limit: max_connections is server-wide, and the
+            # superuser-reserved slots are not the fleet's to use (#223 C11-3).
+            cur = await conn.execute("""
+                SELECT count(*) FILTER (WHERE datname = current_database()),
+                       count(*) FILTER (WHERE backend_type = 'client backend'),
+                       current_setting('max_connections')::int
+                         - current_setting('superuser_reserved_connections')::int
+                FROM pg_stat_activity
+                """)
             row = await cur.fetchone()
             snapshot["connection_count"] = int(row[0] or 0)
+            snapshot["client_connections"] = int(row[1] or 0)
+            snapshot["usable_connections"] = int(row[2] or 0)
         _note_pg_reachable()
     except Exception as e:
         _note_pg_unreachable(e)
@@ -347,27 +358,113 @@ async def _collect_postgres_slow() -> Dict[str, Any]:
     return _pg_slow
 
 
-# Previous ``evicted_keys`` counter reading, so we can expose a per-tick delta
-# (the raw field is monotonic). ``None`` until the first sample; reset-safe
-# because a broker restart drops the counter to 0 and we clamp negatives.
-_last_evicted_keys: "int | None" = None
+@dataclass
+class _InstanceState:
+    """What the poller remembers about one Redis between ticks. Kept per
+    instance: every server has its own counters, and mixing two servers'
+    readings would turn the difference between them into a bogus delta."""
+
+    # Previous ``evicted_keys`` reading, so we can expose a per-tick delta (the
+    # raw field is monotonic). ``None`` until the first sample; reset-safe
+    # because a restart drops the counter to 0 and we clamp negatives.
+    evicted_keys: Optional[int] = None
+    # Previous ``total_net_input_bytes`` reading and when it was taken, for
+    # the write rate.
+    net_input_bytes: Optional[int] = None
+    net_input_at: float = 0.0
+    # Smoothed write rate in bytes/sec; ``None`` until two samples exist.
+    write_rate: Optional[float] = None
+    # Whether this instance has ever reported a connected replica, so the
+    # replica count keeps being recorded in history after it drops to zero.
+    had_replicas: bool = False
 
 
-async def _collect_redis_info() -> Dict[str, Any]:
-    global _last_evicted_keys
+_instance_state: Dict[str, _InstanceState] = {}
+
+
+def _write_rate(state: _InstanceState, total: int, now: float) -> Optional[float]:
+    """Fold a ``total_net_input_bytes`` reading into the instance's smoothed
+    write rate (bytes/sec) and return it.
+
+    The poll interval is a few seconds, so the raw per-tick rate swings with
+    every large payload. It is smoothed as an exponential moving average over
+    ``monitor_redis_write_rate_window_sec``, weighted by the time each sample
+    covers so an uneven tick spacing doesn't distort it. A counter that went
+    backwards (the server restarted, or a failover put another server behind
+    this name) is a new baseline, not a rate: the smoothed value is kept, as
+    the load on the instance did not change because the server did.
+    """
+    previous, previous_at = state.net_input_bytes, state.net_input_at
+    state.net_input_bytes, state.net_input_at = total, now
+    if previous is None or total < previous or now <= previous_at:
+        return state.write_rate
+    elapsed = now - previous_at
+    raw = (total - previous) / elapsed
+    window = settings.monitor_redis_write_rate_window_sec
+    if state.write_rate is None or window <= 0:
+        state.write_rate = raw
+    else:
+        weight = 1.0 - math.exp(-elapsed / window)
+        state.write_rate += weight * (raw - state.write_rate)
+    return state.write_rate
+
+
+def _replication(info: Dict[str, Any]) -> Dict[str, Any]:
+    """The replication half of INFO: this server's role, its replication id
+    (how a failover is told from a restart, see monitor.recovery), and how far
+    behind each connected replica is."""
+    offset = int(info.get("master_repl_offset", 0) or 0)
+    replicas: List[Dict[str, Any]] = []
+    # redis-py parses each ``slaveN:ip=..,port=..,state=..,offset=..,lag=..``
+    # line into a dict.
+    for key, entry in info.items():
+        if not (key.startswith("slave") and key[5:].isdigit()):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        replica_offset = int(entry.get("offset", 0) or 0)
+        replicas.append(
+            {
+                "addr": f"{entry.get('ip')}:{entry.get('port')}",
+                "state": entry.get("state"),
+                # seconds since the primary last heard from it
+                "lag_sec": int(entry.get("lag", 0) or 0),
+                # replication stream it has not acknowledged yet: what a
+                # failover to it right now would lose
+                "lag_bytes": max(0, offset - replica_offset),
+            }
+        )
+    return {
+        "role": info.get("role"),
+        "connected_replicas": int(info.get("connected_slaves", 0) or 0),
+        "replicas": replicas,
+        "replica_max_lag_sec": max((r["lag_sec"] for r in replicas), default=None),
+        "replica_max_lag_bytes": max((r["lag_bytes"] for r in replicas), default=None),
+        "master_replid": info.get("master_replid"),
+        "master_replid2": info.get("master_replid2"),
+    }
+
+
+async def _collect_instance(
+    instance: str, roles: List[str], client: Any
+) -> Dict[str, Any]:
+    """One Redis instance's numbers, from a single INFO."""
+    tags: Dict[str, Any] = {"instance": instance, "roles": list(roles)}
     try:
-        info = await broker_client.info()
+        tags["sentinel"] = redis_instances.uses_sentinel(roles)
+        info = await client.info()
     except Exception as e:
-        return {"error": str(e)}
+        return {**tags, "error": str(e)}
+    state = _instance_state.setdefault(instance, _InstanceState())
     used = int(info.get("used_memory", 0) or 0)
     maxmem = int(info.get("maxmemory", 0) or 0)
     evicted = int(info.get("evicted_keys", 0) or 0)
     # Delta since the previous tick. Clamp to >= 0 so a counter reset (broker
     # restart) reads as "no evictions this interval" rather than a huge negative.
     evicted_delta = 0
-    if _last_evicted_keys is not None:
-        evicted_delta = max(0, evicted - _last_evicted_keys)
-    _last_evicted_keys = evicted
+    if state.evicted_keys is not None:
+        evicted_delta = max(0, evicted - state.evicted_keys)
+    state.evicted_keys = evicted
     # What the kernel counts against the container's memory limit: the
     # process's resident memory (data + allocator fragmentation + client
     # buffers) plus the pages a running snapshot / AOF-rewrite fork has copied
@@ -375,8 +472,16 @@ async def _collect_redis_info() -> Dict[str, Any]:
     # broker can be OOM-killed with the maxmemory alert never firing.
     rss = int(info.get("used_memory_rss", 0) or 0)
     footprint = rss + int(info.get("current_cow_size", 0) or 0)
-    limit = settings.redis_memory_limit_bytes
+    limit = redis_instances.memory_limit_bytes(roles)
+    write_rate = None
+    if info.get("total_net_input_bytes") is not None:
+        write_rate = _write_rate(
+            state, int(info.get("total_net_input_bytes") or 0), time.time()
+        )
+    replication = _replication(info)
+    state.had_replicas = state.had_replicas or replication["connected_replicas"] > 0
     return {
+        **tags,
         "used_memory_human": info.get("used_memory_human"),
         "used_memory_bytes": used,
         # ``maxmemory`` is 0 when the broker runs uncapped; downstream treats
@@ -389,8 +494,9 @@ async def _collect_redis_info() -> Dict[str, Any]:
         "mem_fragmentation_ratio": info.get("mem_fragmentation_ratio"),
         "used_memory_rss_bytes": rss,
         "footprint_bytes": footprint,
-        # The container's memory limit (``redis_memory_limit``); 0 when unset,
-        # which skips the footprint side of the memory alert.
+        # The container's memory limit (``redis_memory_limit`` for the broker
+        # role's instance, ``redis_<role>_memory_limit`` for another); 0 when
+        # unset, which skips the footprint side of the memory alert.
         "memory_limit_bytes": limit,
         "memory_limit_pct": round(100.0 * footprint / limit, 1) if limit else None,
         # Persistence health. A failed snapshot or AOF write means a restart
@@ -410,7 +516,46 @@ async def _collect_redis_info() -> Dict[str, Any]:
         # monitor.recovery), and whether it is still loading its dataset.
         "run_id": info.get("run_id"),
         "loading": int(info.get("loading", 0) or 0),
+        # Smoothed bytes/sec arriving from clients: nearly all of it is
+        # payload writes. ``None`` until a second sample exists.
+        "write_bytes_per_sec": None if write_rate is None else round(write_rate, 1),
+        # How long a newly written key survives once the instance is at its
+        # cap and evicting oldest-first: the cap divided by the write rate.
+        # ``None`` when uncapped or nothing is being written.
+        "eviction_window_sec": (
+            round(maxmem / write_rate, 1) if maxmem and write_rate else None
+        ),
+        **replication,
+        "had_replicas": state.had_replicas,
     }
+
+
+async def _collect_redis_info() -> Dict[str, Any]:
+    """The numbers of the Redis that serves the broker role: the only Redis
+    there is by default, and ``snapshot["redis"]`` either way."""
+    instance, roles = redis_instances.discover()[0]
+    return await _collect_instance(instance, roles, broker_client)
+
+
+async def _collect_redis_instances() -> Dict[str, Dict[str, Any]]:
+    """Every distinct Redis' numbers, keyed by instance, the broker role's
+    first. One INFO per instance however many roles it serves, all at once;
+    an instance that can't be reached reports its ``error`` in its own entry
+    and leaves the others' intact."""
+    found = redis_instances.discover()
+
+    async def _extra(instance: str, roles: List[str]) -> Dict[str, Any]:
+        try:
+            client = redis_instances.extra_client(instance, roles)
+        except Exception as e:
+            return {"instance": instance, "roles": list(roles), "error": str(e)}
+        return await _collect_instance(instance, roles, client)
+
+    collected = await asyncio.gather(
+        _collect_redis_info(),
+        *(_extra(instance, roles) for instance, roles in found[1:]),
+    )
+    return {instance: stats for (instance, _), stats in zip(found, collected)}
 
 
 async def _collect_payload_store() -> Dict[str, Any]:
@@ -498,11 +643,19 @@ def _rollup_workers(workers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "mem_limit_bytes": hb.get("mem_limit_bytes"),
                 "cpu_pct": hb.get("cpu_pct"),
                 "cpu_count": hb.get("cpu_count"),
+                "version": hb.get("version"),
                 "stale": hb.get("stale", False),
             }
         )
         bucket["task_limit_total"] += int(hb.get("task_limit", 0) or 0)
         bucket["in_flight_total"] += int(hb.get("in_flight") or 0)
+    # Distinct image versions across replicas, so the dashboard can show which
+    # version a worker type runs and flag a mixed fleet (e.g. mid-rollout).
+    # Replicas from images that predate version reporting show as "unknown".
+    for bucket in grouped.values():
+        bucket["versions"] = sorted(
+            {c.get("version") or "unknown" for c in bucket["consumers"]}
+        )
     return dict(grouped)
 
 
@@ -574,6 +727,7 @@ async def _resolve_worker_states(
                 "consumers": [],
                 "task_limit_total": 0,
                 "in_flight_total": 0,
+                "versions": [],
             },
         )
         prev = await _load_worker_state(stream)
@@ -673,20 +827,32 @@ def _attach_load_to_workers(
 ) -> None:
     """Fold stream backlog/pending into each worker card.
 
-    A worker type's stream is itself, so the lookup is direct. Utilization is
-    clamped to a sensible range for display; the raw numbers stay accurate.
+    A worker type's stream is itself, so the lookup is direct.
+
+    Workers ``XDEL`` an entry only once it's finished (``mark_task_as_complete``),
+    so ``XLEN`` counts both tasks still waiting *and* tasks a consumer has
+    already read and is working on (the group's pending entries). ``backlog`` is
+    just the waiting part -- ``XLEN - pending`` -- so a single task in progress
+    reads as Running 1 / Backlog 0 rather than 1 and 1. Clamped at zero because
+    the two reads aren't atomic and acked-but-not-yet-deleted leftovers (which
+    the janitor sweeps) can skew either side briefly.
+
+    ``utilization`` stays total load (waiting + in progress, i.e. ``XLEN``)
+    against capacity, so a worker type that's saturated with an empty queue
+    still reads as busy. ``xlen`` is kept so history keeps recording the same
+    total-depth series it always has.
     """
     for wtype, info in workers_rollup.items():
         stats = stream_stats.get(wtype) or {}
         xlen = int(stats.get("xlen", 0) or 0)
         pending = int(stats.get("pending", 0) or 0)
-        backlog = xlen
         capacity = int(info.get("task_limit_total", 0) or 0)
-        info["backlog"] = backlog
+        info["xlen"] = xlen
+        info["backlog"] = max(0, xlen - pending)
         info["pending"] = pending
         info["capacity"] = capacity
         info["utilization"] = (
-            (backlog / capacity) if capacity > 0 else (1.0 if backlog > 0 else 0.0)
+            (xlen / capacity) if capacity > 0 else (1.0 if xlen > 0 else 0.0)
         )
 
 
@@ -698,10 +864,10 @@ async def collect_snapshot() -> Dict[str, Any]:
         _known_workers(),
     )
     streams = _discover_streams(workers, known)
-    stream_stats, pg_state, redis_info, pg_slow, payloads = await asyncio.gather(
+    stream_stats, pg_state, redis_all, pg_slow, payloads = await asyncio.gather(
         _collect_streams(streams),
         _collect_postgres(),
-        _collect_redis_info(),
+        _collect_redis_instances(),
         _collect_postgres_slow(),
         _collect_payload_store(),
     )
@@ -732,7 +898,10 @@ async def collect_snapshot() -> Dict[str, Any]:
         "workers": workers_rollup,
         "streams": stream_stats,
         "postgres": pg_state,
-        "redis": redis_info,
+        # ``redis`` is the broker role's instance (the only one by default);
+        # ``redis_instances`` has every instance, that one included.
+        "redis": next(iter(redis_all.values())),
+        "redis_instances": redis_all,
         "ars_payload_store": payloads,
         "events": events,
         "aras": ARAS,
@@ -758,6 +927,39 @@ async def collect_snapshot() -> Dict[str, Any]:
     return snapshot
 
 
+def _redis_samples(prefix: str, redis_info: Dict[str, Any]) -> Dict[str, Any]:
+    """One Redis instance's history samples, named ``<prefix>:<metric>``."""
+    samples: Dict[str, Any] = {}
+    if redis_info.get("used_memory_bytes"):
+        samples[f"{prefix}:used_memory_bytes"] = redis_info["used_memory_bytes"]
+    if redis_info.get("maxmemory_bytes"):
+        samples[f"{prefix}:maxmemory_bytes"] = redis_info["maxmemory_bytes"]
+    if redis_info.get("evicted_keys") is not None:
+        samples[f"{prefix}:evicted_keys"] = int(redis_info.get("evicted_keys") or 0)
+    if redis_info.get("connected_clients") is not None:
+        samples[f"{prefix}:connected_clients"] = int(
+            redis_info.get("connected_clients") or 0
+        )
+    if redis_info.get("instantaneous_ops_per_sec") is not None:
+        samples[f"{prefix}:ops_per_sec"] = int(
+            redis_info.get("instantaneous_ops_per_sec") or 0
+        )
+    if redis_info.get("write_bytes_per_sec") is not None:
+        samples[f"{prefix}:write_bytes_per_sec"] = redis_info["write_bytes_per_sec"]
+    if redis_info.get("eviction_window_sec") is not None:
+        samples[f"{prefix}:eviction_window_sec"] = redis_info["eviction_window_sec"]
+    # Replication, only for an instance that has (or has had) replicas, so a
+    # single-server deployment doesn't grow series of constant zeros.
+    if redis_info.get("had_replicas"):
+        samples[f"{prefix}:connected_replicas"] = int(
+            redis_info.get("connected_replicas") or 0
+        )
+        if redis_info.get("replica_max_lag_sec") is not None:
+            samples[f"{prefix}:replica_lag_sec"] = redis_info["replica_max_lag_sec"]
+            samples[f"{prefix}:replica_lag_bytes"] = redis_info["replica_max_lag_bytes"]
+    return samples
+
+
 async def write_history(snapshot: Dict[str, Any]) -> None:
     """Persist a tick's scalars into both the Redis recent-window cache and
     the Postgres durable archive."""
@@ -769,7 +971,10 @@ async def write_history(snapshot: Dict[str, Any]) -> None:
         samples[f"consumers:{stream}"] = stats["consumer_count"]
     for wtype, info in snapshot["workers"].items():
         samples[f"workers_alive:{wtype}"] = info["alive"]
-        samples[f"backlog:{wtype}"] = info.get("backlog", 0)
+        # Total stream depth (waiting + in progress): the History page plots
+        # this as "Queue backlog (XLEN)" and derives its utilization heatmap
+        # from it, so it deliberately isn't the card's waiting-only backlog.
+        samples[f"backlog:{wtype}"] = info.get("xlen", info.get("backlog", 0))
         samples[f"capacity:{wtype}"] = info.get("capacity", 0)
     pg = snapshot["postgres"]
     samples["pg:callbacks_pending"] = pg.get("callbacks_pending", 0)
@@ -784,21 +989,12 @@ async def write_history(snapshot: Dict[str, Any]) -> None:
         samples["pg:disk_used_pct"] = pg.get("disk_used_pct", 0)
     for state, count in pg.get("state_counts", {}).items():
         samples[f"pg:state:{state}"] = count
-    redis_info = snapshot.get("redis", {}) or {}
-    if redis_info.get("used_memory_bytes"):
-        samples["redis:used_memory_bytes"] = redis_info["used_memory_bytes"]
-    if redis_info.get("maxmemory_bytes"):
-        samples["redis:maxmemory_bytes"] = redis_info["maxmemory_bytes"]
-    if redis_info.get("evicted_keys") is not None:
-        samples["redis:evicted_keys"] = int(redis_info.get("evicted_keys") or 0)
-    if redis_info.get("connected_clients") is not None:
-        samples["redis:connected_clients"] = int(
-            redis_info.get("connected_clients") or 0
-        )
-    if redis_info.get("instantaneous_ops_per_sec") is not None:
-        samples["redis:ops_per_sec"] = int(
-            redis_info.get("instantaneous_ops_per_sec") or 0
-        )
+    # The broker role's instance keeps the series names it always had
+    # (``redis:...``); any other instance records the same series under
+    # ``redis@<instance>:...``.
+    for view in redis_instances.views(snapshot):
+        prefix = "redis" if view.primary else f"redis@{view.instance}"
+        samples.update(_redis_samples(prefix, view.stats))
 
     # Live cache: bounded Redis sorted sets used by the live dashboard.
     await history.record_many(samples, ts=ts)

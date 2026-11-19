@@ -73,10 +73,14 @@ APP.mount("/ars", ARS)
 APP.mount("/bte", BTE)
 APP.mount("/sipr", SIPR)
 
+# Any origin may call the API, but without credentials: with credentials
+# allowed, a wildcard origin makes the middleware echo back whatever Origin
+# asked, letting any site make credentialed requests. Nothing here uses
+# cookies; the token-gated routes take an Authorization header.
 APP.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

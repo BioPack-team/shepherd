@@ -334,6 +334,24 @@
         since, until,
       })}`
     );
+    // Redis instances other than the broker role's record their series as
+    // ``redis@<instance>:<metric>``; none exist unless roles have been moved
+    // onto Redis servers of their own, and the chart is then as it always was.
+    const extra = await fetchJSON(
+      `api/historical/metrics_by_prefix?${qs({ prefix: "redis@", since, until })}`
+    ).catch(() => ({ series: {} }));
+    const extraMem = [];
+    Object.keys(extra.series || {}).sort().forEach((name, i) => {
+      const cut = name.lastIndexOf(":");
+      const instance = name.slice("redis@".length, cut);
+      const metric = name.slice(cut + 1);
+      const color = COLORS[(5 + i) % COLORS.length];
+      if (metric === "used_memory_bytes") {
+        extraMem.push(seriesToDataset(`Redis memory (${instance})`, extra.series[name], color));
+      } else if (metric === "maxmemory_bytes") {
+        extraMem.push(seriesToDataset(`Redis maxmemory (${instance})`, extra.series[name], color, { dash: [6, 4] }));
+      }
+    });
     if (!charts.redisMem) charts.redisMem = mkChart("redis-mem-chart", "line", []);
     replaceDatasets(charts.redisMem, [
       seriesToDataset("Redis memory", r.series["redis:used_memory_bytes"] || [], COLORS[0], { fill: true }),
@@ -341,6 +359,7 @@
       // to it) reads directly off the chart.
       seriesToDataset("Redis maxmemory", r.series["redis:maxmemory_bytes"] || [], COLORS[3], { dash: [6, 4] }),
       seriesToDataset("Postgres DB size", r.series["pg:db_size_bytes"] || [], COLORS[4], { fill: false }),
+      ...extraMem,
     ]);
     charts.redisMem.options.scales.y.ticks.callback = v => fmtBytes(v);
     charts.redisMem.update("none");

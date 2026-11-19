@@ -19,6 +19,7 @@ from shepherd_utils.broker import add_task
 from shepherd_utils.callback_url import CallbackURLError, validate_callback_url
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    new_id,
     DatabaseUnavailableError,
     DecompressedTooLargeError,
     add_query,
@@ -35,22 +36,28 @@ from shepherd_utils.db import (
     encode_callback_body,
     save_encoded_message,
 )
+from shepherd_utils import completion, response_archive
 from shepherd_utils.logger import (
     attach_query_handler,
+    transient_logger,
     resolve_log_level,
     setup_logging,
 )
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.query_errors import status_error_code
 from shepherd_utils.response_limit import (
     TOO_LARGE_LOG_MARKER,
     fail_response_too_large,
 )
 from shepherd_utils.trapi import (
+    apply_query_status,
+    operation_parameters,
     TRAPIRequestError,
     finalize_response,
     query_log_level,
     query_parameters,
     validate_query,
+    wrap_stored_response,
 )
 from shepherd_utils.task_deadline import (
     TIMEOUT_STATUS,
@@ -317,21 +324,94 @@ async def parse_query_body(request: Request) -> dict:
     return query
 
 
+# The workflow operations Shepherd runs itself (ARAX checks its own).
+SUPPORTED_WORKFLOW_OPERATIONS = frozenset(
+    [
+        "lookup",  # just for O&O ranker comparison work
+        "score",  # Ditto
+        "aragorn.lookup",
+        "aragorn.pathfinder",
+        "aragorn.omnicorp",
+        "aragorn.score",
+        "arax.pathfinder",
+        "arax.rank",
+        "bte.lookup",
+        "sort_results_score",
+        "filter_results_top_n",
+        "filter_kgraph_orphans",
+        "score_paths",
+        "filter_analyses_top_n",
+    ]
+)
+# Operation settings that must be a positive integer.
+_POSITIVE_INT_SETTINGS = {
+    "filter_results_top_n": "max_results",
+    "filter_analyses_top_n": "max_analyses",
+}
+_SORT_DIRECTIONS = ("ascending", "descending")
+
+
+def check_workflow(workflow) -> None:
+    """Reject a workflow Shepherd can't run, as a client error.
+
+    A malformed workflow used to raise a bare ``TypeError`` / ``KeyError`` out
+    of intake (a 500), and settings a worker would misread -- a negative or
+    non-integer ``max_results`` deletes the wrong results; an unknown sort
+    direction silently sorts descending -- were accepted and failed later, or
+    not at all.
+
+    Raises:
+        TRAPIRequestError: with a client-safe description of the problem.
+    """
+    if not isinstance(workflow, list):
+        raise TRAPIRequestError("Invalid workflow: expected a list of operations.")
+    for operation in workflow:
+        if not isinstance(operation, dict):
+            raise TRAPIRequestError(
+                "Invalid workflow: every operation must be an object."
+            )
+        op_id = operation.get("id")
+        if op_id not in SUPPORTED_WORKFLOW_OPERATIONS:
+            raise TRAPIRequestError(
+                f"Invalid workflow: operation {op_id!r} is not supported."
+            )
+        parameters = operation.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            raise TRAPIRequestError(
+                f"Invalid workflow: {op_id} parameters must be an object."
+            )
+        settings_ = operation_parameters(operation)
+        key = _POSITIVE_INT_SETTINGS.get(op_id)
+        if key is not None and key in settings_:
+            value = settings_[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise TRAPIRequestError(
+                    f"Invalid workflow: {op_id} {key} must be a positive integer."
+                )
+        if op_id == "sort_results_score" and "ascending_or_descending" in settings_:
+            if settings_["ascending_or_descending"] not in _SORT_DIRECTIONS:
+                raise TRAPIRequestError(
+                    f"Invalid workflow: sort_results_score ascending_or_descending "
+                    f"must be one of {list(_SORT_DIRECTIONS)}."
+                )
+
+
 async def run_query(
     target: str,
     query: dict,
     callback_url: Optional[str] = None,
 ) -> Tuple[str, str, logging.Logger]:
     """Run a single query."""
-    query_id = str(uuid.uuid4())[:8]
-    response_id = str(uuid.uuid4())[:8]
+    query_id = new_id()
+    response_id = new_id()
     # Set up logger
     # Same resolver the callback handler and the merge use, so an unparseable
     # level from a client falls back to the default instead of failing intake.
     level_number = resolve_log_level(
         query_log_level(query), resolve_log_level(settings.log_level)
     )
-    logger = logging.getLogger(f"shepherd.{query_id}")
+    # Unregistered, so it is freed with the request (#216).
+    logger = transient_logger(f"shepherd.{query_id}", logging.getLogger("shepherd"))
     logger.setLevel(level_number)
     attach_query_handler(logger)
 
@@ -341,24 +421,6 @@ async def run_query(
     # adds otel trace to carrier for next worker
     inject(span_carrier)
 
-    supported_workflow_operations = set(
-        [
-            "lookup",  # just for O&O ranker comparison work
-            "score",  # Ditto
-            "aragorn.lookup",
-            "aragorn.pathfinder",
-            "aragorn.omnicorp",
-            "aragorn.score",
-            "arax.pathfinder",
-            "arax.rank",
-            "bte.lookup",
-            "sort_results_score",
-            "filter_results_top_n",
-            "filter_kgraph_orphans",
-            "score_paths",
-            "filter_analyses_top_n",
-        ]
-    )
     # ``target`` is either an ARATargetEnum (which subclasses str -- value
     # like "aragorn") or already a plain string for workflow-driven queries.
     target_name = target.value if hasattr(target, "value") else target
@@ -373,13 +435,7 @@ async def run_query(
         and query["workflow"] is not None
     ):
         workflow = query["workflow"]
-        if not isinstance(workflow, list):
-            raise TypeError("Query workflow must be a list.")
-        for operation in workflow:
-            if not isinstance(operation, dict):
-                raise TypeError("Query workflow operations must be objects.")
-            if operation.get("id") not in supported_workflow_operations:
-                raise KeyError(f"Workflow operation {operation} is not supported.")
+        check_workflow(workflow)
 
     # save query to db
     try:
@@ -412,6 +468,9 @@ async def run_query(
                 **deadline_field(deadline),
             },
             logger,
+            # Strict: an enqueue failure must reach the except below, not
+            # answer Accepted for a query no worker will ever pick up.
+            raise_on_failure=True,
         )
     except Exception as e:
         # Previously this was swallowed and we returned as if the query had been
@@ -464,34 +523,28 @@ def query_status_code(status: Optional[str]) -> int:
 
     A query that ran out of its budget (``TIMEOUT``) or was reaped without ever
     completing (``Abandoned: ...``) is a gateway timeout: Shepherd is fine, the
-    work behind it didn't finish in time. Anything else non-OK is an operation
-    that failed, which is a genuine internal error.
+    work behind it didn't finish in time. A failure whose worker named its own
+    code (``"ERROR 501"``: BTE refusing a Pathfinder query, see
+    ``shepherd_utils.query_errors``) is answered with that code -- the ARA's
+    worker is what knows whether it broke or simply doesn't do this. Anything
+    else non-OK is an operation that failed, which is a genuine internal error.
     """
     if not status or status == OK_QUERY_STATUS:
         return 200
+    worker_code = status_error_code(status)
+    if worker_code is not None:
+        return worker_code
     if status == TIMEOUT_STATUS or status.lower().startswith(ABANDONED_STATUS_PREFIX):
         return QUERY_TIMEOUT_CODE
     return QUERY_ERROR_CODE
 
 
-def apply_query_status(response: dict, status: Optional[str]) -> None:
-    """Stamp a non-OK query status onto the TRAPI response, in place.
-
-    ``status``/``description`` are TRAPI Response fields, so a caller reading
-    the body it already parses can tell a failed query from an empty one. An
-    error the ARA reported itself is left alone -- it is more specific than the
-    query-level status -- but a body that claims nothing, or claims success for
-    a query that failed, is corrected here.
-    """
-    if not status or status == OK_QUERY_STATUS:
-        return
-    current = response.get("status")
-    if isinstance(current, str) and (
-        "error" in current.lower() or "fail" in current.lower()
-    ):
-        return
-    response["status"] = "Error"
-    response.setdefault("description", f"Query finished with status {status}.")
+def query_description(query_state) -> Optional[str]:
+    """The stored ``description`` of a ``shepherd_brain`` row (the reason a
+    failing worker gave), or None."""
+    if query_state is None or len(query_state) <= 11:
+        return None
+    return query_state[11] or None
 
 
 def query_timeout(query_dict: dict) -> float:
@@ -504,13 +557,17 @@ class ClientDisconnected(Exception):
     """The caller of a sync query went away before it finished."""
 
 
+# Longest gap between a sync /query wait's own checks (see wait_for_query).
+SYNC_WAIT_MAX_INTERVAL_SEC = 2.0
+
+
 async def wait_for_query(
     query_id: str,
     logger: logging.Logger,
     timeout: float,
     request: Optional[Request] = None,
 ) -> Optional[tuple]:
-    """Poll until the query is COMPLETED; its state row, or None on timeout.
+    """Wait until the query is COMPLETED; its state row, or None on timeout.
 
     With ``request``, raises ``ClientDisconnected`` as soon as its caller is
     gone. Each poll takes a pooled connection, and a caller that timed out or
@@ -521,27 +578,33 @@ async def wait_for_query(
     itself keeps running; only this wait for it ends.
     """
     start = time.time()
-    now = start
-    while now <= start + timeout:
-        now = time.time()
+
+    async def _check():
         if request is not None and await request.is_disconnected():
             logger.info(
-                f"Client disconnected after {now - start:.0f}s; no longer "
-                f"waiting on query {query_id}."
+                f"Client disconnected after {time.time() - start:.0f}s; no "
+                f"longer waiting on query {query_id}."
             )
             raise ClientDisconnected()
-        # poll for completed status
         query_state = await get_query_state(query_id, logger)
-        if query_state is not None:
-            if query_state[9] == "COMPLETED":
-                return query_state
-        else:
-            # Debug, not warning: this fires every 0.5s while a query is still
-            # in flight (the row just isn't COMPLETED yet) and would otherwise
-            # flood the logs -- especially if the DB is unreachable.
+        if query_state is None:
+            # Debug, not warning: this fires on every check while a query is
+            # still in flight, and would flood the logs if the DB is down.
             logger.debug(f"Failed to get the query state of query id {query_id}")
-        await asyncio.sleep(0.5)
-    return None
+            return None
+        return query_state if query_state[9] == "COMPLETED" else None
+
+    # finish_query signals completion (shepherd_utils.completion), so this
+    # wakes as soon as the query is done instead of reading Postgres every
+    # 0.5s for the whole wait (#221). It still re-checks on its own, backing
+    # off to every 2s -- which also bounds how long a gone client is noticed.
+    return await completion.wait_for(
+        completion.DONE,
+        query_id,
+        _check,
+        timeout,
+        max_interval=min(SYNC_WAIT_MAX_INTERVAL_SEC, completion.MAX_INTERVAL_SEC),
+    )
 
 
 async def run_sync_query(
@@ -573,6 +636,11 @@ async def run_sync_query(
         )
     try:
         query_id, response_id, logger = await run_query(target, query_dict)
+    except TRAPIRequestError as e:
+        return ORJSONResponse(
+            content={"status": "ERROR", "description": str(e)},
+            status_code=QUERY_INVALID_CODE,
+        )
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "ERROR", "description": str(e)},
@@ -603,7 +671,7 @@ async def run_sync_query(
         # exactly like one that legitimately found nothing. Report it
         # rather than handing back a body that only says "here you go".
         status = query_state[10]
-        apply_query_status(response, status)
+        apply_query_status(response, status, query_description(query_state))
         # The body has said "status": "Error" since apply_query_status
         # went in, but the HTTP code said 200 -- so a caller that
         # checks the code (rather than parsing the payload for a status
@@ -666,6 +734,11 @@ async def run_async_query(
         )
     try:
         query_id, _, _ = await run_query(target, query, callback_url)
+    except TRAPIRequestError as e:
+        return ORJSONResponse(
+            content={"status": "Failed", "description": str(e)},
+            status_code=QUERY_INVALID_CODE,
+        )
     except QueryIntakeError as e:
         return ORJSONResponse(
             content={"status": "Failed", "description": str(e)},
@@ -799,7 +872,8 @@ async def callback(
     # have, so the rejection / parse-error paths below can persist their logs
     # too. The requested log level lives in the body -- which those paths never
     # parse -- so leave the logger at its inherited default until we have it.
-    logger = logging.getLogger(f"shepherd.{callback_id}")
+    # Unregistered, so it is freed with the request (#216).
+    logger = transient_logger(f"shepherd.{callback_id}", logging.getLogger("shepherd"))
     attach_query_handler(logger)
     max_bytes = settings.callback_max_request_size_bytes
     try:
@@ -937,20 +1011,33 @@ async def callback(
         span.set_attribute("callback.decompressed_bytes", payload_size)
         span_carrier = {}
         inject(span_carrier)
-        # add new task to merge callback response into original message
-        await add_task(
-            "merge_message",
-            {
-                "target": target,
-                "query_id": original_query[0],
-                "response_id": response_id,
-                "callback_id": callback_id,
-                "log_level": level_number,
-                "otel": json.dumps(span_carrier),
-                "metadata": json.dumps({}),
-            },
-            logger,
-        )
+        # add new task to merge callback response into original message.
+        # Strict, like the two writes above: the wake task is what gets this
+        # callback merged, so if it can't be queued the sender is told to
+        # redeliver (the save and the ready-index add are idempotent) rather
+        # than getting a 200 for results nothing will merge.
+        try:
+            await add_task(
+                "merge_message",
+                {
+                    "target": target,
+                    "query_id": original_query[0],
+                    "response_id": response_id,
+                    "callback_id": callback_id,
+                    "log_level": level_number,
+                    "otel": json.dumps(span_carrier),
+                    "metadata": json.dumps({}),
+                },
+                logger,
+                raise_on_failure=True,
+            )
+        except Exception:
+            logger.error(
+                f"[{callback_id}] could not queue the merge after retries; "
+                "asking the sender to retry delivery"
+            )
+            await save_logs(response_id, logger)
+            return Response("Failed to queue callback merge.", 500)
     # Persist the logs generated while handling this callback so they land in
     # the query's log list (keyed by response_id, the same key finish_query
     # reads). Without this, everything logged above -- the result count, the
@@ -1019,12 +1106,27 @@ async def get_query_response(
     logger = logging.getLogger("shepherd.get_query")
     logger.setLevel(level_number)
     attach_query_handler(logger)
-    response = await get_message(query_id, logger)
-    if response is None:
-        return JSONResponse(content={"error": "Not found"}, status_code=404)
-    logs = await get_logs(query_id, logger)
-    # A stored response carries no parameters (save_response); the ones to
-    # repeat are its query's.
-    parameters = await get_response_query_parameters(query_id, logger)
-    finalize_response(response, {"parameters": parameters}, logs)
-    return ORJSONResponse(content=response)
+    try:
+        # The stored bytes, not a decoded tree: decoding and re-encoding a
+        # multi-hundred-MB response held the event loop for every other
+        # request (C3-10). The envelope goes around them as finish_query's
+        # delivery does.
+        stored = await get_message(query_id, logger, raw=True)
+    except KeyError:
+        # Gone from Redis: serve the copy finish_query archived, which
+        # outlives it and carries its own query and logs
+        # (shepherd_utils/response_archive.py).
+        archive = await response_archive.load_archive(query_id, logger)
+        if archive is None:
+            return JSONResponse(content={"error": "Not found"}, status_code=404)
+        stored, logs = archive.response, archive.logs
+        parameters = dict(query_parameters(archive.query))
+        del archive
+    else:
+        logs = await get_logs(query_id, logger)
+        # A stored response carries no parameters (save_response); the ones
+        # to repeat are its query's.
+        parameters = await get_response_query_parameters(query_id, logger)
+    body = wrap_stored_response(stored, {"parameters": parameters}, logs)
+    del stored
+    return Response(content=body, media_type="application/json")

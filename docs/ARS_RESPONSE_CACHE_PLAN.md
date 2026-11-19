@@ -35,6 +35,14 @@ Revision history:
   note is stamped into the stored message once at publish time instead of
   per read; the cache lookup and claim each fold the generation read into
   one statement; actor rows are cached in-process for 60 s.
+- *Revision 3.3:* **ids are part of the key** (`CACHE_KEY_VERSION` "4").
+  A hit hands back the source tree, whose query graph and bindings use the
+  source's ids, so a caller who submitted the same structure under other ids
+  got an answer it couldn't map onto its own query graph. The structure is
+  still canonicalized (§3.2), and the label map is still recorded, but the
+  caller's ids are now in the key material: two submits share an entry only
+  if they use the same ids. A run in which an ARA timed out (598) is not
+  cached at all, since the timeout says nothing about the next run.
 
 ---
 
@@ -123,8 +131,10 @@ reach the cache: submit rejects them with a 400.
 ### 3.2 Structural canonicalization — renaming-invariant ids (`cache.canonical_graph`)
 
 Node, edge and path ids (`n0`, `sn`, `t_edge`, `p0`) are **labels**, not
-content. Two query graphs that differ only in those labels must produce the
-same key. The served tree keeps the source's labels (§5).
+content: two query graphs that differ only in those labels canonicalize to
+the same graph. The served tree keeps the source's labels (§5), so since
+revision 3.3 the caller's labels (as the label map) are part of the key
+material too, and only submits with the same labels share an entry.
 
 Algorithm (graphs are tiny — 2 to ~6 nodes — so exactness is cheap):
 

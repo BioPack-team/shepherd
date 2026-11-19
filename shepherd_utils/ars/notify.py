@@ -1,9 +1,11 @@
 """Subscriber notifications.
 
-Ported from NCATSTranslator/Relay @ 3e65975:
+Ported from NCATSTranslator/Relay @ 84a66c1:
   - models.py Message.notify_subscribers: 'D'/'E' parents override any custom
     event fields with admin/ars_error, and stats attach when the message has
     a result_count.
+  - signals.py message_post_save: last_merged_completed carries the final
+    merged version's ``results_stat`` (``merged_result_stat``).
   - tasks.py notify_subscribers_task / notify_one_client_task: the payload
     base {pk, timestamp, code}, the last_merged_completed code forcing, and
     the per-client HMAC-signed delivery happen in the ars_notify worker; this
@@ -113,6 +115,24 @@ async def notify_subscribers(
         logger.error(f"Failed to enqueue notification for {message_row['id']}: {e}")
 
 
+async def merged_result_stat(
+    parent_row: Dict[str, Any], logger: logging.Logger
+) -> Optional[Dict[str, Any]]:
+    """The ``result_stat`` of the parent's final merged version, for
+    ``last_merged_completed``'s ``results_stat`` (Relay PR #899): the
+    summary statistics of its results' confidences. None when the version
+    or its row can't be read."""
+    merged_pk = parent_row.get("merged_version")
+    if merged_pk is None:
+        return None
+    try:
+        merged = await ars_db.get_message_row(merged_pk)
+    except Exception as e:
+        logger.warning(f"Could not read merged version {merged_pk}: {e}")
+        return None
+    return merged.get("result_stat") if merged is not None else None
+
+
 def _has_real_merge(message_row: Dict[str, Any]) -> bool:
     """True when the parent finished with at least one ARA merge. The
     empty-completion branch records only [[pk, "ars"]] and upstream does not
@@ -156,6 +176,7 @@ async def replay_completion(
                 "event_type": "last_merged_completed",
                 "complete": True,
                 "merged_versions_list": message_row.get("merged_versions_list") or [],
+                "results_stat": await merged_result_stat(message_row, logger),
             },
             logger,
             client_pk=client_pk,

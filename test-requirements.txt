@@ -7,6 +7,8 @@ fakeredis
 graphviz
 httpx
 lmdb
+# an in-process S3 for the cold payload store's bucket backend
+moto[s3]
 networkx
 numpy
 pandas

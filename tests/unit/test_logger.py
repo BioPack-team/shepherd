@@ -10,6 +10,8 @@ from shepherd_utils.logger import (
     get_logging_config,
     get_query_handler,
     get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
     resolve_log_level,
 )
 
@@ -264,3 +266,27 @@ def test_handlers_are_attached_only_once(monkeypatch):
     assert config["root"]["handlers"] == ["console"]
     assert "handlers" not in config["loggers"]["shepherd"]
     assert config["loggers"]["shepherd"]["level"] == "DEBUG"
+
+
+def test_pool_task_logger_collects_records_and_detaches():
+    with pool_task_logger("test.pool", logging.INFO) as (task_logger, handler):
+        task_logger.debug("too quiet")
+        task_logger.info("first")
+        task_logger.warning("second")
+        entries = handler.drain()
+
+    assert [e["message"] for e in entries] == ["first", "second"]
+    # call-scoped: nothing is left on the child's long-lived logger
+    assert get_query_handler(task_logger) is None
+
+
+def test_ingest_query_logs_folds_child_entries_into_the_query_logs():
+    task_logger = logging.Logger("test.ingest")
+    handler = attach_query_handler(task_logger)
+
+    ingest_query_logs(task_logger, [{"message": "a"}, {"message": "b"}])
+    ingest_query_logs(task_logger, None)
+
+    assert [e["message"] for e in handler.drain()] == ["a", "b"]
+    # a logger with no query handler is left alone
+    ingest_query_logs(logging.Logger("test.bare"), [{"message": "c"}])

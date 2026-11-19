@@ -34,6 +34,7 @@ import pytest
 
 from shepherd_utils.ars import merge as ars_merge
 from shepherd_utils.ars import premerge as ars_premerge
+from shepherd_utils.ars import ranker_fusion
 from shepherd_utils.ars import scoring as ars_scoring
 from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
 from shepherd_utils.ars.trapi import validate
@@ -164,12 +165,13 @@ def test_merge_ba_parity():
 
 
 def test_merge_pipeline_parity():
-    """decorate + normalize_scores on each side, then merge -- the same
-    shape pre_merge_process + merge_received produce."""
+    """pre_merge_process on each side, then merge -- what premerge +
+    merge_received produce. Upstream's pre_merge_process also stamped each
+    ARA's infores on its edges; the port reports them instead (deviation 21),
+    so aragorn's e3 keeps the sources it was sent (a declared divergence)."""
     pipe_a, pipe_b = load("response_aragorn.json"), load("response_arax.json")
     for resp, infores in ((pipe_a, "infores:aragorn"), (pipe_b, "infores:arax")):
-        ars_premerge.decorate_edges_with_infores(resp, infores)
-        ars_premerge.normalize_scores(resp, "k", "agent")
+        ars_premerge.pre_merge_process(resp, "k", "agent", infores)
     assert_parity(jsonable(pipe_a), GOLDENS["premerged_inputs"]["aragorn"])
     assert_parity(jsonable(pipe_b), GOLDENS["premerged_inputs"]["arax"])
     merged = ars_merge.mergeMessages(
@@ -198,14 +200,15 @@ def test_get_msg_stats_parity():
 
 @pytest.mark.parametrize("case", load("decorate_cases.json"), ids=lambda c: c["name"])
 def test_decorate_parity(case):
+    """Upstream's decorate_edges_with_infores is replaced by a check
+    (deviation 21): every case whose edges upstream stamped is a declared
+    divergence whose recorded output is the input, untouched, and
+    ``missing_infores`` records the edges the port reports instead."""
     golden = next(g for g in GOLDENS["decorate"] if g["name"] == case["name"])
     data = copy.deepcopy(case["data"])
-    if "raises" in golden:
-        with pytest.raises(Exception):
-            ars_premerge.decorate_edges_with_infores(data, case["inforesid"])
-    else:
-        ars_premerge.decorate_edges_with_infores(data, case["inforesid"])
-        assert_parity(jsonable(data), golden["output"])
+    missing = ars_premerge.edges_missing_infores(data, case["inforesid"])
+    assert_parity(jsonable(data), golden["output"])
+    assert missing == golden["missing_infores"]
 
 
 @pytest.mark.parametrize("case", load("scores_cases.json"), ids=lambda c: c["name"])
@@ -241,6 +244,56 @@ def test_appraise_confidence_parity(case):
     else:
         ars_premerge.appraise_confidence(results)
         assert_parity(jsonable(results), golden["output"])
+
+
+def _run_rrf(case, config):
+    weights = case["weights"] or config["weights"]
+    c_value = case["c"] if case["c"] is not None else config["c_value"]
+    data = {"message": {"results": copy.deepcopy(case["results"])}}
+    summary = ranker_fusion.apply_weighted_rrf(
+        data, copy.deepcopy(case["rankers"]), weights, c_value
+    )
+    return summary, data
+
+
+def _tags(data):
+    return [r["tag"] for r in data["message"]["results"]]
+
+
+def test_ranker_fusion_default_config_parity(monkeypatch):
+    """Relay PR #897's defaults: on, Aragorn 0.9 / ARAX 0.1, c = 40."""
+    for var in ("ARS_RRF_ENABLED", "ARS_RRF_ARAGORN_WEIGHT", "ARS_RRF_C"):
+        monkeypatch.delenv(var, raising=False)
+    assert ranker_fusion.get_config() == GOLDENS["ranker_fusion_default_config"]
+
+
+@pytest.mark.parametrize(
+    "case", load("ranker_fusion_cases.json"), ids=lambda c: c["name"]
+)
+def test_ranker_fusion_parity(case):
+    """apply_weighted_rrf over TRAPI 2.0 bindings ({ids}) reproduces what
+    upstream's did over the same results in 1.5 form."""
+    golden = next(g for g in GOLDENS["ranker_fusion"] if g["name"] == case["name"])
+    summary, data = _run_rrf(case, GOLDENS["ranker_fusion_default_config"])
+    assert_parity(jsonable(summary), golden["summary"])
+    # order is the point: assert it exactly (assert_parity falls back to an
+    # unordered comparison for lists)
+    assert _tags(data) == _tags(golden["output"])
+    assert_parity(jsonable(data), golden["output"])
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads((CORPUS / "trapi15/ranker_fusion_cases.json").read_text()),
+    ids=lambda c: c["name"],
+)
+def test_ranker_fusion_still_reads_trapi15_bindings(case):
+    """The port reads upstream's 1.5 binding lists too, with the same result."""
+    relay = json.loads((FIXTURES / "ars_goldens/goldens_trapi15.json").read_text())
+    golden = next(g for g in relay["ranker_fusion"] if g["name"] == case["name"])
+    summary, data = _run_rrf(case, relay["ranker_fusion_default_config"])
+    assert summary == golden["summary"]
+    assert data == golden["output"]
 
 
 def test_remove_phantom_parity():
@@ -403,7 +456,6 @@ def test_divergences_are_declared():
     entries = block["entries"]
     assert set(entries) == {
         # upstream bugs the port fixes (recorded in the TRAPI 1.5 era)
-        "decorate/no_primary",
         "scores/mixed",
         "mergedicts/node_bindings",
         "mergedicts/attributes_unhashable_dict_values",
@@ -416,6 +468,15 @@ def test_divergences_are_declared():
         "scores/empty_analyses_list",
         "premerged_inputs.arax.message.results.1.analyses.0",
         "merge_pipeline_ab.message.results.1.analyses.0",
+        # the ARA's infores is reported, not stamped (deviation 21); every
+        # decorate case but already_self, which upstream left alone too
+        "decorate/no_sources_key",
+        "decorate/empty_sources",
+        "decorate/has_primary_not_self",
+        "decorate/none_inforesid",
+        "decorate/no_primary",
+        "premerged_inputs.aragorn.message.knowledge_graph.edges.e3.sources",
+        "merge_pipeline_ab.message.knowledge_graph.edges.e3.sources",
     }
     for name, reason in entries.items():
         assert reason.strip(), f"{name} has no reason recorded"
@@ -469,3 +530,17 @@ def test_no_golden_still_expects_an_upstream_crash():
         assert "raises" not in entry, f"{entry['name']} still expects a raise"
     for entry in GOLDENS["scores"]:
         assert "normalized_raises" not in entry, entry["name"]
+
+
+@pytest.mark.parametrize(
+    "first,second,golden",
+    [("aragorn", "arax", "merge_ab"), ("arax", "aragorn", "merge_ba")],
+)
+def test_merge_without_copying_inputs_matches_the_goldens(first, second, golden):
+    """The ARS fold merges freshly decoded messages in place
+    (``copy_inputs=False``) instead of deep-copying them first; the merged
+    output must not change."""
+    a = load(f"response_{first}.json")
+    b = load(f"response_{second}.json")
+    merged = ars_merge.mergeMessages([_tmsg(a), _tmsg(b)], "pk", copy_inputs=False)
+    assert_parity(jsonable(merged.to_dict()), GOLDENS[golden])

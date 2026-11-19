@@ -16,11 +16,15 @@ import httpx
 import pytest
 
 from workers.aragorn_lookup import worker as al
-from workers.aragorn_lookup.worker import (
-    AsyncResponse,
-    aragorn_lookup,
-    run_async_lookup,
-)
+from shepherd_utils import lookups as lk
+from shepherd_utils.lookups import AsyncResponse
+from workers.aragorn_lookup.worker import aragorn_lookup
+
+
+async def run_async_lookup(client, message, query_id, logger):
+    # moved to shepherd_utils.lookups (#223 C9-5); aragorn's callback route
+    return await lk.run_async_lookup(client, message, query_id, "aragorn", logger)
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +65,7 @@ INFERRED_MSG = {
 
 @pytest.mark.asyncio
 async def test_run_async_lookup_read_timeout_is_in_flight(redis_mock, mocker):
-    mocker.patch.object(al, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     client = mocker.Mock()
     client.timeout.read = 100.0
@@ -76,7 +80,7 @@ async def test_run_async_lookup_read_timeout_is_in_flight(redis_mock, mocker):
 
 @pytest.mark.asyncio
 async def test_run_async_lookup_connect_error_is_not_in_flight(redis_mock, mocker):
-    mocker.patch.object(al, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(lk, "add_callback_id", new_callable=mocker.AsyncMock)
 
     client = mocker.Mock()
     client.post = mocker.AsyncMock(side_effect=httpx.ConnectError("boom"))
@@ -103,7 +107,7 @@ async def test_aragorn_lookup_keeps_in_flight_callback_ids(redis_mock, mocker):
         ],
     )
     mocker.patch.object(
-        al,
+        lk,
         "run_async_lookup",
         new_callable=mocker.AsyncMock,
         side_effect=[
@@ -121,10 +125,10 @@ async def test_aragorn_lookup_keeps_in_flight_callback_ids(redis_mock, mocker):
         ],
     )
     mock_remove = mocker.patch.object(
-        al, "remove_callback_id", new_callable=mocker.AsyncMock
+        lk, "remove_callback_id", new_callable=mocker.AsyncMock
     )
     mocker.patch.object(
-        al, "get_running_callbacks", new_callable=mocker.AsyncMock, return_value=[]
+        lk, "get_running_callbacks", new_callable=mocker.AsyncMock, return_value=[]
     )
     await aragorn_lookup(_make_task(), logger)
     mock_remove.assert_awaited_once_with("failed-cb", logger)

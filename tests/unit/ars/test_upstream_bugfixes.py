@@ -17,76 +17,131 @@ from shepherd_utils.ars import statuses
 from shepherd_utils.ars.blocklist import remove_blocked
 
 # ---------------------------------------------------------------------------
-# premerge.decorate_edges_with_infores
+# premerge: the ARA's infores is reported, not stamped (deviation 21)
+#
+# Upstream's decorate_edges_with_infores had two bugs the port used to fix
+# (an UnboundLocalError on sources with no primary, and one shared source
+# dict whose role the last edge decided for all). The port no longer stamps
+# anything, so neither can come back; these pin that it stays that way.
 # ---------------------------------------------------------------------------
 
 
-def _edges(sources):
-    return {"message": {"knowledge_graph": {"edges": {"e1": {"sources": sources}}}}}
-
-
-def test_sources_without_a_primary_do_not_crash():
-    """Upstream read has_primary, which it only ever assigned inside the loop
-    body -- a non-empty sources list with no primary raised UnboundLocalError
-    and failed the whole callback."""
-    data = _edges(
-        [{"resource_id": "infores:x", "resource_role": "aggregator_knowledge_source"}]
-    )
-    ars_premerge.decorate_edges_with_infores(data, "infores:aragorn")
-    sources = data["message"]["knowledge_graph"]["edges"]["e1"]["sources"]
-    assert len(sources) == 2
-    # TRAPI 2.0: no null source_record_urls, no empty upstream_resource_ids
-    # (upstream set both; 2.0 forbids nulls and upstream_resource_ids has
-    # minItems 1)
-    assert sources[1] == {
-        "resource_id": "infores:aragorn",
-        "resource_role": "primary_knowledge_source",
+def test_edges_missing_the_ara_infores_are_reported_and_left_as_sent():
+    edges = {
+        # no primary: upstream raised UnboundLocalError here
+        "e1": {
+            "sources": [
+                {
+                    "resource_id": "infores:x",
+                    "resource_role": "aggregator_knowledge_source",
+                }
+            ]
+        },
+        "e2": {
+            "sources": [
+                {
+                    "resource_id": "infores:y",
+                    "resource_role": "primary_knowledge_source",
+                }
+            ]
+        },
+        "e3": {"sources": []},
+        "e4": {},
+        "ok": {
+            "sources": [
+                {
+                    "resource_id": "infores:aragorn",
+                    "resource_role": "primary_knowledge_source",
+                }
+            ]
+        },
     }
+    data = {"message": {"knowledge_graph": {"edges": edges}}}
+    sent = copy.deepcopy(data)
+    missing = ars_premerge.edges_missing_infores(data, "infores:aragorn")
+    assert missing == ["e1", "e2", "e3", "e4"]
+    assert data == sent
 
 
-def test_existing_primary_makes_self_an_aggregator():
-    data = _edges(
-        [{"resource_id": "infores:x", "resource_role": "primary_knowledge_source"}]
-    )
-    ars_premerge.decorate_edges_with_infores(data, "infores:aragorn")
-    sources = data["message"]["knowledge_graph"]["edges"]["e1"]["sources"]
-    assert sources[1]["resource_role"] == "aggregator_knowledge_source"
-
-
-def test_each_edge_gets_its_own_source_dict():
-    """Upstream built ONE self_source for the whole graph and mutated its
-    role per edge, so the last edge to need a role silently rewrote the role
-    every earlier edge had already been given."""
+def test_pre_merge_process_no_longer_stamps_the_infores():
     data = {
         "message": {
             "knowledge_graph": {
                 "edges": {
-                    # needs an aggregator role (a primary is already present)
-                    "e1": [
-                        {
-                            "resource_id": "infores:x",
-                            "resource_role": "primary_knowledge_source",
-                        }
-                    ],
-                    # needs a primary role (none present)
-                    "e2": [
-                        {
-                            "resource_id": "infores:y",
-                            "resource_role": "aggregator_knowledge_source",
-                        }
-                    ],
+                    "e1": {
+                        "sources": [
+                            {
+                                "resource_id": "infores:x",
+                                "resource_role": "primary_knowledge_source",
+                            }
+                        ]
+                    }
                 }
             }
         }
     }
-    data["message"]["knowledge_graph"]["edges"] = {
-        k: {"sources": v}
-        for k, v in data["message"]["knowledge_graph"]["edges"].items()
+    sent = copy.deepcopy(data)
+    assert ars_premerge.pre_merge_process(data, "k", "agent", "infores:aragorn") == [
+        "e1"
+    ]
+    assert data == sent
+    assert not hasattr(ars_premerge, "decorate_edges_with_infores")
+
+
+def test_an_unknown_ara_has_no_infores_to_check():
+    """Upstream stamped ``infores:unknown`` for an agent without one; there
+    is nothing to hold such an ARA's edges to."""
+    data = {"message": {"knowledge_graph": {"edges": {"e1": {"sources": []}}}}}
+    assert ars_premerge.edges_missing_infores(data, None) == []
+
+
+# ---------------------------------------------------------------------------
+# premerge.remove_phantom_support_graphs
+# ---------------------------------------------------------------------------
+
+
+def _support_graph_edge(*aux_ids):
+    return {
+        "attributes": [
+            {"attribute_type_id": "biolink:support_graphs", "value": list(aux_ids)},
+            {"attribute_type_id": "biolink:publications", "value": ["PMID:1"]},
+        ]
     }
-    ars_premerge.decorate_edges_with_infores(data, "infores:aragorn")
+
+
+def test_support_graphs_with_no_auxiliary_graphs_at_all_are_phantoms():
+    """Upstream skipped the whole pass when the response had no
+    auxiliary_graphs (a debug line only), so every support_graphs reference
+    in such a response -- all of them dangling -- went on into the merge."""
+    data = {
+        "message": {"knowledge_graph": {"edges": {"e1": _support_graph_edge("a1")}}}
+    }
+    phantoms = ars_premerge.remove_phantom_support_graphs(data)
+    assert phantoms == {"e1": ["a1"]}
+    attrs = data["message"]["knowledge_graph"]["edges"]["e1"]["attributes"]
+    assert [a["attribute_type_id"] for a in attrs] == ["biolink:publications"]
+
+
+def test_phantom_support_graphs_are_returned_for_the_report():
+    """Upstream removed them silently; the port hands back what it removed
+    (edge -> missing aux graph ids) so premerge can report it."""
+    data = {
+        "message": {
+            "knowledge_graph": {
+                "edges": {
+                    "e1": _support_graph_edge("a1", "gone", "gone"),
+                    "e2": _support_graph_edge("a1"),
+                }
+            },
+            "auxiliary_graphs": {"a1": {"edges": ["e2"]}},
+        }
+    }
+    assert ars_premerge.remove_phantom_support_graphs(data) == {"e1": ["gone"]}
     edges = data["message"]["knowledge_graph"]["edges"]
-    assert edges["e1"]["sources"][1]["resource_role"] == "aggregator_knowledge_source"
-    assert edges["e2"]["sources"][1]["resource_role"] == "primary_knowledge_source"
+    assert len(edges["e1"]["attributes"]) == 1
+    assert len(edges["e2"]["attributes"]) == 2
+    # a second pass finds nothing left to remove
+    assert ars_premerge.remove_phantom_support_graphs(data) == {}
 
 
 # ---------------------------------------------------------------------------

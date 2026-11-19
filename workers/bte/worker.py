@@ -8,9 +8,10 @@ import uuid
 from shepherd_utils.db import get_message
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
+from shepherd_utils.query_errors import UnsupportedQueryError
 from shepherd_utils.shared import (
+    run_poll_loop,
     examine_query,
-    get_tasks,
     run_task_lifecycle,
 )
 
@@ -32,7 +33,7 @@ async def bte(task, logger: logging.Logger):
     message = await get_message(query_id, logger)
     infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
     if pathfinder:
-        raise Exception("BTE does not support Pathfinder type queries.")
+        raise UnsupportedQueryError("BTE does not support Pathfinder type queries.")
 
     if workflow is None:
         if infer:
@@ -64,17 +65,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(STREAM, GROUP, CONSUMER, TASK_LIMIT, process_task)
 
 
 if __name__ == "__main__":

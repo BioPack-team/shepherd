@@ -131,10 +131,14 @@ def relabel(qg, node_map, edge_map=None, path_map=None):
     return out
 
 
-def test_renamed_labels_same_key():
+def test_renamed_labels_same_canonical_graph_but_own_key():
+    """Labels canonicalize away, but stay in the key: a hit answers in the
+    source's ids, so other ids must not share an entry (#211)."""
     renamed = relabel(QG, {"sn": "n0", "on": "n1"}, {"t_edge": "e01"})
     again = relabel(QG, {"sn": "b", "on": "a"}, {"t_edge": "x"})
-    assert key(QG) == key(renamed) == key(again)
+    graphs = [cache.canonical_graph(g)[0] for g in (QG, renamed, again)]
+    assert graphs[0] == graphs[1] == graphs[2]
+    assert len({key(QG), key(renamed), key(again)}) == 3
 
 
 def test_swapped_endpoints_differ():
@@ -174,7 +178,8 @@ def test_two_hop_with_blank_middle_nodes_is_label_invariant():
         {"a": "q", "b": "z", "c": "y", "d": "p"},
         {"e1": "k", "e2": "j", "e3": "i"},
     )
-    assert key(chain) == key(renamed)
+    assert cache.canonical_graph(chain)[0] == cache.canonical_graph(renamed)[0]
+    assert key(chain) != key(renamed)
     # the blank nodes are distinguishable by position: b touches the pinned
     # X:1 node, c touches Y:2 -- so the maps agree on structure
     _, m1 = cache.canonical_graph(chain)
@@ -183,10 +188,10 @@ def test_two_hop_with_blank_middle_nodes_is_label_invariant():
     assert m1["nodes"]["c"] == m2["nodes"]["y"]
 
 
-def test_symmetric_nodes_same_key_and_valid_map():
+def test_symmetric_nodes_same_canonical_graph_and_valid_map():
     """Two identical blank neighbors of one pinned node are interchangeable:
-    any labeling gives the same key, and the map still describes a valid
-    rename (each source label maps to a distinct canonical label)."""
+    any labeling gives the same canonical graph, and the map still describes
+    a valid rename (each source label maps to a distinct canonical label)."""
     star = {
         "nodes": {"hub": {"ids": ["X:1"]}, "l1": {}, "l2": {}},
         "edges": {
@@ -195,7 +200,7 @@ def test_symmetric_nodes_same_key_and_valid_map():
         },
     }
     renamed = relabel(star, {"hub": "h", "l1": "b", "l2": "a"}, {"e1": "y", "e2": "x"})
-    assert key(star) == key(renamed)
+    assert cache.canonical_graph(star)[0] == cache.canonical_graph(renamed)[0]
     _, m = cache.canonical_graph(star)
     assert len(set(m["nodes"].values())) == 3
     assert len(set(m["edges"].values())) == 2
@@ -213,7 +218,8 @@ def test_pathfinder_paths_relabel_like_edges():
         },
     }
     renamed = relabel(pf, {"n0": "start", "n1": "end"}, path_map={"p0": "route"})
-    assert key(pf) == key(renamed)
+    assert cache.canonical_graph(pf)[0] == cache.canonical_graph(renamed)[0]
+    assert key(pf) != key(renamed)
     graph, m = cache.canonical_graph(renamed)
     assert set(graph["paths"]) == {"p0"}
     assert m["paths"] == {"route": "p0"}
@@ -307,10 +313,10 @@ def test_run_control_parameters_excluded(parameters):
     )
 
 
-def test_cache_key_version_is_bumped_for_trapi2():
-    """The 2.0 key material differs from the 1.x one (parameters.log_level
-    and friends excluded), so every 1.x-era entry is orphaned."""
-    assert cache.CACHE_KEY_VERSION == "3"
+def test_cache_key_version_is_bumped_for_id_aware_keys():
+    """The key material now carries the caller's ids (#211), after the 2.0
+    change ("3"), so every id-blind entry is orphaned."""
+    assert cache.CACHE_KEY_VERSION == "4"
 
 
 def test_empty_parameters_matches_absent():

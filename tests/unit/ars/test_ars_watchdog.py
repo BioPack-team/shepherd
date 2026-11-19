@@ -132,3 +132,17 @@ async def test_long_stuck_message_is_still_reaped(env):
     assert call.kwargs["code"] == 598
     assert call.kwargs["status"] == "E"
     env["completion"].assert_awaited_once()
+
+
+async def test_a_child_done_since_the_scan_is_not_timed_out(env):
+    """C8-4 (#214): the timeout write is conditional on the row still being
+    Running; a child that reached Done between the scan and the write (or
+    that another watchdog replica already timed out) is left alone."""
+    row = running("ara-aragorn", 360)
+    env["get_running_messages"].return_value = [row]
+    env["update_message"].return_value = None  # the guarded UPDATE matched nothing
+
+    assert await watchdog.sweep(LOGGER) == 0
+
+    assert env["update_message"].await_args.kwargs["only_if_status"] == "R"
+    env["completion"].assert_not_awaited()

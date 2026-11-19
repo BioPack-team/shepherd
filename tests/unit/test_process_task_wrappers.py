@@ -97,10 +97,11 @@ async def test_filter_kgraph_orphans_process_task_failure_routes_to_failure_hand
 
 
 @pytest.mark.asyncio
-async def test_filter_kgraph_orphans_process_task_cancellation_does_not_route_failure(
+async def test_filter_kgraph_orphans_process_task_stray_cancellation_routes_failure(
     redis_mock, mocker
 ):
-    """A CancelledError should be logged but not routed to handle_task_failure."""
+    """A CancelledError the operation raises (not the task being cancelled)
+    fails the query instead of leaving its message pending (#213)."""
     from workers.filter_kgraph_orphans import worker as fko
 
     mocker.patch.object(
@@ -115,7 +116,7 @@ async def test_filter_kgraph_orphans_process_task_cancellation_does_not_route_fa
 
     limiter = _Limiter()
     await fko.process_task(_make_task("filter_kgraph_orphans"), None, logger, limiter)
-    assert not mock_failure.called
+    assert mock_failure.called
     assert limiter.released
 
 

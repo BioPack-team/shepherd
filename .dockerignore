@@ -1,0 +1,14 @@
+# Only what the Dockerfiles copy goes into the build context (#223 C11-5).
+# Without this every build shipped the whole checkout (.git, logs, build/,
+# local data) to the builder.
+*
+!pyproject.toml
+!shepherd_base
+!shepherd_broker
+!shepherd_db
+!shepherd_server
+!shepherd_utils
+!workers
+**/__pycache__
+**/*.pyc
+workers/*/debug

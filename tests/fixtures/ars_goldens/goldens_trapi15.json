@@ -8,9 +8,9 @@
       "mergedicts/unhashable_lists_concat": "upstream keyed a list of objects on resource_id / qualifier_type_id and dropped every object carrying neither -- from both sides, since it replaced the merged list with the keyed map's values -- so such a list merged to []",
       "scores/mixed": "upstream popped one rank per result while ranking only the score-bearing ones, so a mixed corpus raised IndexError after misassigning the ranks it did hand out; the port assigns each rank to the result it was computed from"
     },
-    "note": "Entries listed here were recorded by running this port, not the pinned upstream Relay code: each is a place where the port deliberately fixes an upstream bug. Everything else in this file still comes from scripts/ars_parity/generate_goldens.py run against Relay @ 2b2121df740a4c8bc47bb2e6bafa9e52f748f028. See docs/ARS_PARITY_REGISTER.md."
+    "note": "Entries listed here were recorded by running this port, not the pinned upstream Relay code: each is a place where the port deliberately fixes an upstream bug. Everything else in this file still comes from scripts/ars_parity/generate_goldens.py run against Relay @ 84a66c183a8ac97556b7d9030d610b4d107269ac. See docs/ARS_PARITY_REGISTER.md."
   },
-  "_relay_commit": "2b2121df740a4c8bc47bb2e6bafa9e52f748f028",
+  "_relay_commit": "84a66c183a8ac97556b7d9030d610b4d107269ac",
   "appraise_confidence": [
     {
       "name": "mixed",
@@ -30,15 +30,12 @@
         {
           "analyses": [
             {
-              "score": 0.1
-            },
-            {
-              "score": 0.3
+              "score": 0.9
             }
           ],
           "ordering_components": {
             "clinical_evidence": 0.0,
-            "confidence": 0.37,
+            "confidence": 0.9,
             "novelty": 0.0
           }
         },
@@ -60,12 +57,15 @@
         {
           "analyses": [
             {
-              "score": 0.9
+              "score": 0.1
+            },
+            {
+              "score": 0.3
             }
           ],
           "ordering_components": {
             "clinical_evidence": 0.0,
-            "confidence": 0.9,
+            "confidence": 0.37,
             "novelty": 0.0
           }
         },
@@ -147,6 +147,83 @@
           "ordering_components": {
             "clinical_evidence": 0.0,
             "confidence": 0,
+            "novelty": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "with_confidence",
+      "output": [
+        {
+          "analyses": [
+            {
+              "score": 0.8
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.8,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.7
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.7,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.6
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.6,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.5
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.5,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.4
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.4,
+            "novelty": 0.0
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.2
+            }
+          ],
+          "ordering_components": {
+            "clinical_evidence": 0.0,
+            "confidence": 0.19999999999999996,
             "novelty": 0.0
           }
         }
@@ -2850,13 +2927,7 @@
           ]
         }
       ],
-      "stat": {
-        "maximum": 0.9,
-        "mean": 0.625,
-        "median": 0.7,
-        "minimum": 0.2,
-        "stdev": 0.3403429642777023
-      }
+      "stat": {}
     },
     {
       "name": "missing_analyses_key",
@@ -2908,6 +2979,80 @@
         }
       ],
       "stat": {}
+    },
+    {
+      "name": "with_confidence",
+      "normalized": [
+        {
+          "analyses": [
+            {
+              "score": 0.2
+            }
+          ],
+          "normalized_score": 16.666666666666668,
+          "ordering_components": {
+            "confidence": 0.2
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.8
+            }
+          ],
+          "normalized_score": 100.0,
+          "ordering_components": {
+            "confidence": 0.8,
+            "novelty": 0.1
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.5
+            }
+          ],
+          "normalized_score": 50.0,
+          "ordering_components": {
+            "confidence": 0.5
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.4
+            }
+          ],
+          "normalized_score": 33.333333333333336,
+          "ordering_components": {
+            "novelty": 0.3
+          }
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.7
+            }
+          ],
+          "normalized_score": 83.33333333333333,
+          "ordering_components": []
+        },
+        {
+          "analyses": [
+            {
+              "score": 0.6
+            }
+          ],
+          "normalized_score": 66.66666666666667
+        }
+      ],
+      "stat": {
+        "maximum": 0.8,
+        "mean": 0.5,
+        "median": 0.5,
+        "minimum": 0.2,
+        "stdev": 0.30000000000000004
+      }
     }
   ],
   "sugeno_grid": [
@@ -3070,5 +3215,519 @@
     "qg_categories_not_list": false,
     "result_missing_node_bindings": false,
     "results_not_list": false
-  }
+  },
+  "ranker_fusion_default_config": {
+    "c_value": 40,
+    "enabled": true,
+    "weights": {
+      "infores:shepherd-aragorn": 0.9,
+      "infores:shepherd-arax": 0.1
+    }
+  },
+  "ranker_fusion": [
+    {
+      "name": "basic",
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:b"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 1,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.021951219512195124,
+                "infores:shepherd-arax": 0.002380952380952381
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 1,
+                "infores:shepherd-arax": 2
+              },
+              "rrf_score": 0.024332171893147507,
+              "tag": "B"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:a"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 2,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.02142857142857143
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 2
+              },
+              "rrf_score": 0.02142857142857143,
+              "tag": "A"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:c"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 3,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-arax": 0.0024390243902439024
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-arax": 1
+              },
+              "rrf_score": 0.0024390243902439024,
+              "tag": "C"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:d"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 4,
+              "rrf_ranker_contributions": {},
+              "rrf_ranker_ranks": {},
+              "rrf_score": 0.0,
+              "tag": "D"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:e"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 4,
+              "rrf_ranker_contributions": {},
+              "rrf_ranker_ranks": {},
+              "rrf_score": 0.0,
+              "tag": "E"
+            }
+          ]
+        }
+      },
+      "summary": {
+        "applied": true,
+        "c_value": 40,
+        "matched_results": 3,
+        "ranker_sources": [
+          "infores:shepherd-aragorn",
+          "infores:shepherd-arax"
+        ],
+        "result_count": 5,
+        "weights": {
+          "infores:shepherd-aragorn": 0.9,
+          "infores:shepherd-arax": 0.1
+        }
+      }
+    },
+    {
+      "name": "duplicates_and_set_keys",
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:c"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 1,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.021951219512195124
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 1
+              },
+              "rrf_score": 0.021951219512195124,
+              "tag": "C"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:b"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  },
+                  {
+                    "attributes": [],
+                    "id": "Y:2"
+                  }
+                ]
+              },
+              "rrf_rank": 2,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.020930232558139535
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 3
+              },
+              "rrf_score": 0.020930232558139535,
+              "tag": "B"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:a"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 3,
+              "rrf_ranker_contributions": {},
+              "rrf_ranker_ranks": {},
+              "rrf_score": 0.0,
+              "tag": "A"
+            }
+          ]
+        }
+      },
+      "summary": {
+        "applied": true,
+        "c_value": 40,
+        "matched_results": 2,
+        "ranker_sources": [
+          "infores:shepherd-aragorn"
+        ],
+        "result_count": 3,
+        "weights": {
+          "infores:shepherd-aragorn": 0.9
+        }
+      }
+    },
+    {
+      "name": "equal_weights_ties",
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:a"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 1,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.25,
+                "infores:shepherd-arax": 0.5
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 2,
+                "infores:shepherd-arax": 1
+              },
+              "rrf_score": 0.75,
+              "tag": "A"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:b"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 1,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-aragorn": 0.5,
+                "infores:shepherd-arax": 0.25
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-aragorn": 1,
+                "infores:shepherd-arax": 2
+              },
+              "rrf_score": 0.75,
+              "tag": "B"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:c"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 3,
+              "rrf_ranker_contributions": {},
+              "rrf_ranker_ranks": {},
+              "rrf_score": 0.0,
+              "tag": "C"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:d"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 3,
+              "rrf_ranker_contributions": {},
+              "rrf_ranker_ranks": {},
+              "rrf_score": 0.0,
+              "tag": "D"
+            }
+          ]
+        }
+      },
+      "summary": {
+        "applied": true,
+        "c_value": 0,
+        "matched_results": 2,
+        "ranker_sources": [
+          "infores:shepherd-aragorn",
+          "infores:shepherd-arax"
+        ],
+        "result_count": 4,
+        "weights": {
+          "infores:shepherd-aragorn": 0.5,
+          "infores:shepherd-arax": 0.5
+        }
+      }
+    },
+    {
+      "name": "unweighted_source_and_empty_bindings",
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:b"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 1,
+              "rrf_ranker_contributions": {
+                "infores:shepherd-arax": 0.0024390243902439024
+              },
+              "rrf_ranker_ranks": {
+                "infores:shepherd-arax": 1
+              },
+              "rrf_score": 0.0024390243902439024,
+              "tag": "B"
+            },
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:a"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "rrf_rank": 2,
+              "rrf_ranker_contributions": {},
+              "rrf_ranker_ranks": {},
+              "rrf_score": 0.0,
+              "tag": "A"
+            },
+            {
+              "node_bindings": {},
+              "rrf_rank": 2,
+              "rrf_ranker_contributions": {},
+              "rrf_ranker_ranks": {},
+              "rrf_score": 0.0,
+              "tag": "empty"
+            }
+          ]
+        }
+      },
+      "summary": {
+        "applied": true,
+        "c_value": 40,
+        "matched_results": 1,
+        "ranker_sources": [
+          "infores:shepherd-arax"
+        ],
+        "result_count": 3,
+        "weights": {
+          "infores:shepherd-arax": 0.1
+        }
+      }
+    },
+    {
+      "name": "no_matching_results",
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:a"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "tag": "A"
+            }
+          ]
+        }
+      },
+      "summary": {
+        "applied": false,
+        "reason": "no_matching_results"
+      }
+    },
+    {
+      "name": "only_unweighted_sources",
+      "output": {
+        "message": {
+          "results": [
+            {
+              "node_bindings": {
+                "n0": [
+                  {
+                    "attributes": [],
+                    "id": "X:a"
+                  }
+                ],
+                "n1": [
+                  {
+                    "attributes": [],
+                    "id": "Y:1"
+                  }
+                ]
+              },
+              "tag": "A"
+            }
+          ]
+        }
+      },
+      "summary": {
+        "applied": false,
+        "reason": "missing_ranker_results"
+      }
+    },
+    {
+      "name": "no_results",
+      "output": {
+        "message": {
+          "results": []
+        }
+      },
+      "summary": {
+        "applied": false,
+        "reason": "missing_results"
+      }
+    }
+  ]
 }

@@ -569,6 +569,105 @@ async def test_wrap_up_task_does_not_pop_for_entry_worker(redis_mock):
     assert [op["id"] for op in workflow] == ["real_op", "next_op"]
 
 
+def _workflow_task(workflow, otel="{}", **fields):
+    return [
+        "msg-otel",
+        {
+            "query_id": "q1",
+            "response_id": "r1",
+            "workflow": json.dumps(workflow),
+            "log_level": "20",
+            "otel": otel,
+            "metadata": "{}",
+            **fields,
+        },
+    ]
+
+
+def _is_under(carrier: str, span) -> bool:
+    ctx = span.get_span_context()
+    return json.loads(carrier)["traceparent"].startswith(
+        f"00-{ctx.trace_id:032x}-{ctx.span_id:016x}-"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_entry_worker_parents_its_operations_under_its_own_span(redis_mock):
+    """The ARA's operations nest under the ARA's span, not the intake span
+    every ARA of an ARS query shares."""
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    task = _workflow_task([{"id": "real_op"}], otel=json.dumps({"traceparent": "x"}))
+
+    with tracer.start_as_current_span("entry_stream") as span:
+        await wrap_up_task("entry_stream", "consumer", task, logger)
+
+    next_task = await get_task("real_op", "consumer", "test", logger)
+    assert _is_under(next_task[1]["otel"], span)
+    assert next_task[1]["otel_rooted"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_an_entry_worker_that_is_its_own_operation_still_parents(redis_mock):
+    """ARAX does the whole job itself and names itself as the one operation;
+    its finish_query belongs under it all the same."""
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    task = _workflow_task([{"id": "arax"}], otel=json.dumps({"traceparent": "x"}))
+
+    with tracer.start_as_current_span("arax") as span:
+        await wrap_up_task("arax", "consumer", task, logger)
+
+    next_task = await get_task("finish_query", "consumer", "test", logger)
+    assert _is_under(next_task[1]["otel"], span)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_entry_worker_parents_its_finish_query(redis_mock):
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    task = _workflow_task([{"id": "real_op"}], otel=json.dumps({"traceparent": "x"}))
+
+    with tracer.start_as_current_span("entry_stream") as span:
+        await handle_task_failure("entry_stream", "consumer", task, logger)
+
+    next_task = await get_task("finish_query", "consumer", "test", logger)
+    assert _is_under(next_task[1]["otel"], span)
+
+
+@pytest.mark.asyncio
+async def test_an_operation_hands_on_the_carrier_it_was_given(redis_mock):
+    """Operations stay siblings: each passes the entry worker's carrier along
+    rather than nesting the next operation under itself."""
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer(__name__)
+    otel = json.dumps({"traceparent": "from-the-entry-worker"})
+    task = _workflow_task(
+        [{"id": "stream_a"}, {"id": "stream_b"}], otel=otel, otel_rooted="1"
+    )
+
+    with tracer.start_as_current_span("stream_a"):
+        await wrap_up_task("stream_a", "consumer", task, logger)
+
+    next_task = await get_task("stream_b", "consumer", "test", logger)
+    assert next_task[1]["otel"] == otel
+
+
+@pytest.mark.asyncio
+async def test_an_entry_worker_without_a_span_keeps_the_carrier(redis_mock):
+    otel = json.dumps({"traceparent": "from-intake"})
+    task = _workflow_task([{"id": "real_op"}], otel=otel)
+
+    await wrap_up_task("entry_stream", "consumer", task, logger)
+
+    next_task = await get_task("real_op", "consumer", "test", logger)
+    assert next_task[1]["otel"] == otel
+
+
 @pytest.mark.asyncio
 async def test_handle_task_failure_routes_to_finish_query_with_error_status(redis_mock):
     task = [
@@ -616,7 +715,9 @@ def _lifecycle_task():
 
 
 @pytest.mark.asyncio
-async def test_run_task_lifecycle_success_wraps_up_and_releases(mocker):
+async def test_run_task_lifecycle_success_wraps_up_and_releases(mocker, redis_mock):
+    # redis_mock: the response-size guard reads the data store (on by default
+    # since #217).
     worker_fn = mocker.AsyncMock()
     mock_wrap = mocker.patch.object(
         shared, "wrap_up_task", new_callable=mocker.AsyncMock
@@ -664,7 +765,10 @@ async def test_run_task_lifecycle_failure_records_error_and_routes_to_handler(mo
 
 
 @pytest.mark.asyncio
-async def test_run_task_lifecycle_cancellation_does_not_route_failure(mocker):
+async def test_run_task_lifecycle_stray_cancellation_routes_failure(mocker):
+    """A CancelledError the operation raises, with the task itself not being
+    cancelled, fails the query rather than leaving its message pending (#213).
+    Cancelling the task itself is covered in test_unacked_messages.py."""
     import asyncio
 
     worker_fn = mocker.AsyncMock(side_effect=asyncio.CancelledError)
@@ -677,14 +781,13 @@ async def test_run_task_lifecycle_cancellation_does_not_route_failure(mocker):
         "some_stream", "consumer", _lifecycle_task(), None, logger, limiter, worker_fn
     )
 
-    assert not mock_fail.called
+    assert mock_fail.called
     assert limiter.released
 
 
 @pytest.mark.asyncio
 async def test_tasks_for_one_query_do_not_duplicate_each_others_logs(redis_mock):
-    """A worker gets one task per callback for the same query, and every one of
-    them builds "its" logger from the same process-wide name. Each task's flush
+    """A worker gets one task per callback for the same query. Each task's flush
     must store only what that task logged: stacking a handler per task, and
     flushing without emptying it, wrote the earlier tasks' records again every
     time -- so a single retrieval log line showed up once per later callback.
@@ -700,9 +803,10 @@ async def test_tasks_for_one_query_do_not_duplicate_each_others_logs(redis_mock)
     await save_logs("rid", first_logger)
 
     _, second_logger = _build_task_context("merge_message", "c", task("1-2"), 20)
-    assert second_logger is first_logger
-    # ...and the second task reused the handler rather than stacking another on
-    # top, which would queue every subsequent record once per attached handler.
+    # Each task now gets its own logger, freed with the task (#216), with exactly
+    # one handler: never one stacked per task, which would queue every record
+    # once per attached handler.
+    assert second_logger is not first_logger
     assert (
         len([h for h in second_logger.handlers if h.name == "query_log_handler"]) == 1
     )

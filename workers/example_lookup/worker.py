@@ -11,16 +11,22 @@ import httpx
 
 from shepherd_utils.config import settings
 from shepherd_utils.db import (
+    new_id,
     abandon_lookup_if_data_lost,
     add_callback_id,
     cleanup_callbacks,
     get_message,
     get_running_callbacks,
     save_message,
+    wait_for_lookups,
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.shared import (
+    lookup_wait_seconds,
+    run_task_lifecycle,
+    run_poll_loop,
+)
 
 # Queue name
 STREAM = "example.lookup"
@@ -56,7 +62,7 @@ async def example_lookup(task, logger: logging.Logger):
     try:
         async with httpx.AsyncClient(timeout=100) as client:
             for _ in range(5):
-                callback_id = str(uuid.uuid4())[:8]
+                callback_id = new_id()
                 try:
                     # Put callback UID and query ID in postgres
                     await add_callback_id(
@@ -97,29 +103,17 @@ async def example_lookup(task, logger: logging.Logger):
 
     # this worker might have a timeout set for if the lookups don't finish within a
     # certain amount of time
-    MAX_QUERY_TIME = message["parameters"]["timeout"]
-    start_time = time.time()
-    running_callback_ids = [""]
-    while time.time() - start_time < MAX_QUERY_TIME:
-        try:
-            # see if there are existing lookups going
-            running_callback_ids = await get_running_callbacks(query_id, logger)
-        except Exception:
-            # Brief backoff then retry the check rather than giving up
-            await asyncio.sleep(5)
-            continue
-        # fail now if the query data the callbacks merge into is gone
-        await abandon_lookup_if_data_lost(
-            query_id, response_id, running_callback_ids, logger
-        )
-        # if there aren't, lookup is complete and we need to pass on to next
-        # workflow operation
-        if len(running_callback_ids) == 0:
-            break
+    MAX_QUERY_TIME = lookup_wait_seconds(message["parameters"])
+    running_callback_ids = await wait_for_lookups(
+        query_id,
+        response_id,
+        MAX_QUERY_TIME,
+        logger,
+        get_running_callbacks,
+        abandon_lookup_if_data_lost,
+    )
 
-        await asyncio.sleep(1)
-
-    if time.time() - start_time > MAX_QUERY_TIME:
+    if running_callback_ids:
         logger.warning(
             f"Timed out getting lookup callbacks. {len(running_callback_ids)} queries were still running..."
         )
@@ -136,17 +130,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(STREAM, GROUP, CONSUMER, TASK_LIMIT, process_task)
 
 
 if __name__ == "__main__":

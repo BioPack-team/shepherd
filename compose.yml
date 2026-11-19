@@ -10,27 +10,71 @@
 # sizes huge, and none of the sizing / OOM / recovery behavior reproduces.
 # Docker refuses to start a container whose `cpus` exceeds the host's cores, so
 # the stack needs a machine (or Docker Desktop VM) with at least 6 CPUs.
+#
+# Published ports: the datastores, RedisInsight, the monitor and Jaeger listen
+# on 127.0.0.1 only -- they run with development credentials (or none), so they
+# must not be reachable from other machines. Reach them from elsewhere with an
+# SSH tunnel. The API server (5439) stays on every interface: subservices call
+# back to it through host.docker.internal, which a loopback-only port refuses.
 # The production values live in the Helm chart -- keep the two in step.
 # To run without limits locally, override them in a gitignored
 # compose.override.yml (`cpus: 0` / `mem_limit: 0` means unlimited).
+#
+# Init: every worker runs with `init: true`, so a small init (tini) is PID 1
+# rather than `python worker.py`. Processes orphaned inside the container are
+# re-parented to PID 1, and Python never reaps children it didn't start, so
+# without an init they pile up as <defunct> entries.
+
+# Postgres connection budget (#223 C11-3). Every process's pool max is its
+# share of one fleet-wide budget -- budget x POSTGRES_POOL_SHARES /
+# POSTGRES_FLEET_SHARES -- instead of a hand-set size per container, so the
+# fleet stays inside max_connections (400, see shepherd_db) however it is
+# scaled. 360 leaves 37 of the 397 usable connections (3 are
+# superuser-reserved) for migrations, psql and slack.
+#
+# FLEET_SHARES is the sum of every DB-connecting process's shares with the
+# `ars` profile on: 24 workers and the monitor at 1, the two lookup workers at
+# 3, and the server's 4 uvicorn processes (WEB_CONCURRENCY) at 1 each -- 35,
+# so 10 connections a share. Without the profile the fleet is 30 shares and
+# the pools are simply sized conservatively. Adding a DB-connecting service or
+# changing a share means changing this total;
+# tests/unit/test_connection_budget.py checks it against this file. In a
+# deployment, compute it from the replica counts, so scaling a deployment
+# shrinks every pool instead of overrunning max_connections.
+x-postgres-budget: &postgres_budget
+  POSTGRES_CONNECTION_BUDGET: 360
+  POSTGRES_FLEET_SHARES: 35
 
 services:
+  # The shared base image (shepherd_base/Dockerfile) every Shepherd image is
+  # built on, through `additional_contexts` -- compose builds it first. It is
+  # never run: `scale: 0` gives it no container. (It used to be kept out of
+  # `up` with a profile instead, but some Compose versions drop a
+  # profile-disabled service before resolving `additional_contexts`, and then
+  # every image that builds on it fails with "declares unknown service
+  # shepherd_base as additional contexts".)
+  shepherd_base:
+    image: shepherd_base
+    build:
+      context: .
+      dockerfile: shepherd_base/Dockerfile
+      args:
+        PYTHON_IMAGE: ${SHEPHERD_PYTHON_IMAGE:-ghcr.io/translatorsri/renci-python-image:3.12.13}
+    scale: 0
+
   shepherd_server:
     container_name: shepherd_server
     cpus: 3
     mem_limit: 5g
     platform: linux/amd64
     environment:
+      <<: *postgres_budget
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecretpassw0rd}
       # The server handles every client request (sync-query status polling,
-      # /callback lookups) so it needs more aggregate Postgres capacity than
-      # the workers' default of 10. These sizes are PER PROCESS and the
-      # server runs WEB_CONCURRENCY=4 uvicorn workers (see its Dockerfile),
-      # so the container's worst case is 4 x 10 = 40 connections. Budget:
-      # each process has its own pool, so keep (sum of pool max sizes) under
-      # Postgres max_connections below.
+      # /callback lookups). Pools are PER PROCESS and the server runs
+      # WEB_CONCURRENCY=4 uvicorn workers (see its Dockerfile), so it holds 4
+      # of the fleet's shares (x-postgres-budget above): 4 x 10 connections.
       POSTGRES_POOL_MIN_SIZE: 3
-      POSTGRES_POOL_MAX_SIZE: 10
       # Durable ARS payloads live in files on a volume every ARS process
       # shares (the server reads them; ars_fanout/premerge/merge write them;
       # ars_watchdog evicts them), not in Postgres. See
@@ -45,6 +89,8 @@ services:
     build:
       context: .
       dockerfile: shepherd_server/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -88,7 +134,7 @@ services:
       context: .
       dockerfile: shepherd_db/Dockerfile
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
@@ -96,19 +142,32 @@ services:
       timeout: 2s
       retries: 5
       start_period: 60s
+    # A named volume, not a bind mount of ./pgdata, for the same reason as the
+    # broker's: on Docker Desktop a bind mount goes through the host
+    # file-sharing layer, whose fsync doesn't make Postgres's WAL durable, so
+    # an unclean stop could corrupt the database. A new volume is initialized
+    # from shepherd_db/*.sql. Wipe it with `docker volume rm shepherd_db_data`.
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql/data
   shepherd_broker:
     container_name: shepherd_broker
     cpus: 2
-    mem_limit: 25g
+    # About twice redis.conf's maxmemory (2gb): an AOF rewrite forks, and
+    # fragmentation and client buffers sit on top of the data. Raise both
+    # together (REDIS_MAXMEMORY in .env, and this in compose.override.yml).
+    mem_limit: 4g
     build:
       context: .
       dockerfile: shepherd_broker/Dockerfile
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-supersecretpassword}
+      # empty keeps redis.conf's maxmemory
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-}
+      # Truncate a damaged AOF at startup instead of restart-looping on it
+      # (see shepherd_broker/entrypoint.sh).
+      REDIS_AOF_AUTOFIX: ${REDIS_AOF_AUTOFIX:-yes}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     restart: unless-stopped
     # The default ``redis-cli ping`` healthcheck silently passed even before
     # Redis was ready, because (a) it didn't authenticate (NOAUTH error still
@@ -124,23 +183,37 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
+    # A named volume, not a bind mount of ./data: on Docker Desktop (Windows,
+    # macOS) a bind mount goes through the host file-sharing layer, whose
+    # fsync doesn't make the AOF durable, so an unclean stop could leave it
+    # corrupt. A named volume lives on the Docker VM's own disk. Wipe it with
+    # `docker compose down -v` (or `docker volume rm shepherd_broker_data`).
     volumes:
-      - ./data:/data
+      - broker_data:/data
   shepherd_broker_insight:
     image: redislabs/redisinsight:latest
     container_name: shepherd_broker_insight
     restart: unless-stopped
     ports:
-      - '5540:5540'
+      - '127.0.0.1:5540:5540'
+    # Its own volume: nesting it inside the broker's data directory mixed
+    # RedisInsight's files into Redis's, and made Docker create both host
+    # directories at once, which Docker Desktop can fail at ("error while
+    # creating mount source path ...: file exists").
     volumes:
-      - ./data/redisinsight:/db
+      - broker_insight_data:/db
   shepherd_monitor:
     container_name: shepherd_monitor
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 2g
     build:
       context: .
       dockerfile: workers/monitor/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -148,7 +221,7 @@ services:
       shepherd_broker:
         condition: service_healthy
     ports:
-      - "5440:5440"
+      - "127.0.0.1:5440:5440"
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
@@ -157,9 +230,9 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:1.55
     ports:
-      - "16686:16686" # UI
-      - "4317:4317" # OTLP gRPC
-      - "6381:6381/udp" # Agent UDP (Jaeger native)
+      - "127.0.0.1:16686:16686" # UI
+      - "127.0.0.1:4317:4317" # OTLP gRPC
+      - "127.0.0.1:6381:6381/udp" # Agent UDP (Jaeger native)
     environment:
       - COLLECTOR_OTLP_ENABLED=true
       - LOG_LEVEL=error
@@ -168,12 +241,17 @@ services:
   ########## Shared Workers
   merge_message:
     container_name: merge_message
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 2
     mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/merge_message/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -186,12 +264,17 @@ services:
       - ./.env:/app/.env
   sort_results_score:
     container_name: sort_results_score
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/sort_results_score/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -203,12 +286,17 @@ services:
       - ./.env:/app/.env
   filter_results_top_n:
     container_name: filter_results_top_n
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/filter_results_top_n/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -220,12 +308,17 @@ services:
       - ./.env:/app/.env
   filter_kgraph_orphans:
     container_name: filter_kgraph_orphans
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/filter_kgraph_orphans/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -238,15 +331,21 @@ services:
       - ./.env:/app/.env
   finish_query:
     container_name: finish_query
+    init: true
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/finish_query/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       CALLBACK_ALLOWED_HOSTS: *callback_allowed_hosts
+      # finish_query archives every finished ARA response to the cold store
+      ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -255,13 +354,19 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+      - ./ars_payloads:/app/ars_payloads
   filter_analyses_top_n:
     container_name: filter_analyses_top_n
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     build:
       context: .
       dockerfile: workers/filter_analyses_top_n/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -273,11 +378,16 @@ services:
       - ./.env:/app/.env
   score_paths:
     container_name: score_paths
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 6
     mem_limit: 22g
     build:
       context: .
       dockerfile: workers/score_paths/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -296,10 +406,15 @@ services:
   ######### Example ARA
   example_ara:
     container_name: example_ara
+    init: true
+    environment:
+      <<: *postgres_budget
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_ara/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -311,10 +426,15 @@ services:
       - ./.env:/app/.env
   example_lookup:
     container_name: example_lookup
+    init: true
+    environment:
+      <<: *postgres_budget
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_lookup/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -326,10 +446,15 @@ services:
       - ./.env:/app/.env
   example_score:
     container_name: example_score
+    init: true
+    environment:
+      <<: *postgres_budget
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/example_score/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -344,12 +469,17 @@ services:
   ######### ARAGORN
   aragorn:
     container_name: aragorn
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -361,21 +491,26 @@ services:
       - ./.env:/app/.env
   aragorn_lookup:
     container_name: aragorn_lookup
+    init: true
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_lookup/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       # Lookup fan-out issues far more concurrent DB ops than the default
       # 10-connection pool: at 40 concurrent queries the pool queued ~4k
       # requests (2,620s cumulative wait vs 739s of actual DB work) and
-      # acquisitions timed out. Postgres allows 400 connections fleet-wide,
-      # so the hot lookup workers get server-sized pools.
+      # acquisitions timed out, so the hot lookup workers take a larger
+      # share of the fleet's connection budget.
       POSTGRES_POOL_MIN_SIZE: 10
-      POSTGRES_POOL_MAX_SIZE: 30
+      # three shares of the fleet budget (x-postgres-budget): 30 connections
+      POSTGRES_POOL_SHARES: 3
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -387,12 +522,17 @@ services:
       - ./.env:/app/.env
   aragorn_pathfinder:
     container_name: aragorn_pathfinder
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 5g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_pathfinder/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -410,6 +550,9 @@ services:
       - ./pathfinder_embeddings:/app/pathfinder_embeddings
   aragorn_omnicorp:
     container_name: aragorn_omnicorp
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 2 # -> pool sizes to 2; confirm via the "process pool sized to 2 worker(s)" startup log
     mem_limit: 6g # -> a child exceeding this is cgroup-OOM-killed (kernel), parent survives
     # Robustness-test knobs: uncomment per test (see scripts/seed_omnicorp.py).
@@ -431,13 +574,12 @@ services:
       # Broker-wedge self-heal window (default 300s). Lower it, then
       # `docker compose stop shepherd_broker`, to see the worker exit + restart.
       # BROKER_UNHEALTHY_EXIT_SEC: "30"
-      # Force the pair overlay to run even on huge queries (default 1_000_000),
-      # so a big message does the full memory-heavy work instead of being skipped.
-      # OMNICORP_MAX_CURIE_PAIRS: "1000000000"
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_omnicorp/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -454,12 +596,17 @@ services:
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
   aragorn_score:
     container_name: aragorn_score
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 4
     mem_limit: 10g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/aragorn_score/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -474,12 +621,14 @@ services:
   ######### ARAX
   arax:
     container_name: arax
+    init: true
     # Runs ARAX's whole plan in-process (DEC-14): one pool child per query, so
     # cpus is how many queries run at once. A large multi-hop answer's KG and
     # results live in one child, hence about 3 GB per child.
     cpus: 4
     mem_limit: 12g
     environment:
+      <<: *postgres_budget
       # ARAX puts no ceiling on a query, and Expand waits up to 120 s per hop,
       # so the shared 300 s default would kill slow multi-hop queries.
       POOL_TASK_TIMEOUT_SEC: "900"
@@ -487,6 +636,8 @@ services:
     build:
       context: .
       dockerfile: workers/arax/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -505,11 +656,16 @@ services:
       - ./arax_dbs:/app/arax_dbs
   arax_pathfinder:
     container_name: arax_pathfinder
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 6
     mem_limit: 22g
     build:
       context: .
       dockerfile: workers/arax_pathfinder/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -532,11 +688,16 @@ services:
 
   arax_rank:
     container_name: arax_rank
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 4
     mem_limit: 10g
     build:
       context: .
       dockerfile: workers/arax_rank/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -550,12 +711,17 @@ services:
 ######### BTE
   bte:
     container_name: bte
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/bte/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -568,17 +734,22 @@ services:
   
   bte_lookup:
     container_name: bte_lookup
+    init: true
     cpus: 1
     mem_limit: 1g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/bte_lookup/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       # same lookup fan-out profile as aragorn_lookup (see its note)
       POSTGRES_POOL_MIN_SIZE: 10
-      POSTGRES_POOL_MAX_SIZE: 30
+      # three shares of the fleet budget (x-postgres-budget): 30 connections
+      POSTGRES_POOL_SHARES: 3
     depends_on:
       shepherd_db:
         condition: service_healthy
@@ -592,12 +763,17 @@ services:
 ######### SIPR
   sipr:
     container_name: sipr
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 1
     mem_limit: 2g
     platform: linux/amd64
     build:
       context: .
       dockerfile: workers/sipr/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -614,14 +790,18 @@ services:
   # `docker compose --profile ars up --build` (or COMPOSE_PROFILES=ars).
   ars_fanout:
     container_name: ars_fanout
+    init: true
     cpus: 1
     mem_limit: 2g
     profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_fanout/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -635,14 +815,18 @@ services:
 
   ars_premerge:
     container_name: ars_premerge
+    init: true
     cpus: 2
     mem_limit: 5g
     profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_premerge/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -656,14 +840,18 @@ services:
 
   ars_merge:
     container_name: ars_merge
+    init: true
     cpus: 2
     mem_limit: 5g
     profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_merge/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -677,14 +865,18 @@ services:
 
   ars_watchdog:
     container_name: ars_watchdog
+    init: true
     cpus: 0.5
     mem_limit: 1g
     profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_watchdog/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     environment:
+      <<: *postgres_budget
       ARS_PAYLOAD_DIR: /app/ars_payloads
     depends_on:
       shepherd_db:
@@ -698,12 +890,17 @@ services:
 
   ars_notify:
     container_name: ars_notify
+    init: true
+    environment:
+      <<: *postgres_budget
     cpus: 0.5
     mem_limit: 1g
     profiles: [ars]
     build:
       context: .
       dockerfile: workers/ars_notify/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
     restart: unless-stopped
     depends_on:
       shepherd_db:
@@ -713,3 +910,8 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
+
+volumes:
+  db_data:
+  broker_data:
+  broker_insight_data:

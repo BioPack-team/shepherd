@@ -34,6 +34,7 @@ braces rather than a hard requirement.
 import argparse
 import copy
 import json
+import os
 import pathlib
 import sys
 import types
@@ -44,7 +45,7 @@ CORPUS = REPO / "tests/fixtures/ars_corpus/trapi15"
 GOLDENS = REPO / "tests/fixtures/ars_goldens"
 GOLDENS_FILE = "goldens_trapi15.json"
 DEFAULT_RELAY = pathlib.Path("/home/user/ncatstranslator/relay")
-RELAY_COMMIT = "2b2121df740a4c8bc47bb2e6bafa9e52f748f028"
+RELAY_COMMIT = "84a66c183a8ac97556b7d9030d610b4d107269ac"
 
 
 def bootstrap_django(relay: pathlib.Path):
@@ -222,6 +223,28 @@ def main():
             entry["raises"] = type(e).__name__
         conf_cases.append(entry)
     out["appraise_confidence"] = conf_cases
+
+    # ---------------- ranker_fusion (weighted RRF, Relay PR #897) ----------
+    # The pure fusion step post_process applies to a merged message; the
+    # case's weights / c, or upstream's defaults (ARS_RRF_* unset).
+    from tr_ars import ranker_fusion
+
+    for var in ("ARS_RRF_ENABLED", "ARS_RRF_ARAGORN_WEIGHT", "ARS_RRF_C"):
+        os.environ.pop(var, None)
+    config = ranker_fusion.get_config()
+    out["ranker_fusion_default_config"] = jsonable(config)
+    rrf_cases = []
+    for case in load("ranker_fusion_cases.json"):
+        weights = case["weights"] or config["weights"]
+        c_value = case["c"] if case["c"] is not None else config["c_value"]
+        data = {"message": {"results": copy.deepcopy(case["results"])}}
+        summary = ranker_fusion.apply_weighted_rrf(
+            data, copy.deepcopy(case["rankers"]), weights, c_value
+        )
+        rrf_cases.append(
+            {"name": case["name"], "summary": jsonable(summary), "output": jsonable(data)}
+        )
+    out["ranker_fusion"] = rrf_cases
 
     # ---------------- scoring ----------------
     oc_cases = []

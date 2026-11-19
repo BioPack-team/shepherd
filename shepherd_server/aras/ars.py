@@ -39,6 +39,7 @@ from opentelemetry.propagate import inject
 
 import shepherd_utils.ars.cache as cache
 import shepherd_utils.ars.db as ars_db
+import shepherd_utils.ars.lifecycle as lifecycle
 import shepherd_utils.broker as broker
 import shepherd_utils.db as shepherd_db
 from shepherd_utils.ars import aras, crypto
@@ -251,46 +252,59 @@ async def submit(request: Request) -> Response:
             logger,
             "submit message insert",
         )
-        # STRICT save + enqueue: our 201 promises a stored query and a
-        # queued fanout. A swallowed failure on either would return success
-        # for a query that then sits Running forever (parents are
-        # watchdog-exempt) -- raise into the catch-all's honest 400 instead.
-        await ars_db.save_message_data(
-            message["id"], data, logger, raise_on_failure=True
-        )
-        # Root the query's trace here and remember the carrier: every later
-        # stage (fanout now; premerge/merge/notify from the response side)
-        # rejoins this trace, giving one end-to-end trace per query even when
-        # an ARA doesn't propagate traceparent into its callback.
-        carrier: Dict[str, str] = {}
-        inject(carrier)
-        await ars_db.save_otel_carrier(message["id"], carrier, logger)
-        # Claim leadership of the key (or, having lost that race to a
-        # concurrent identical submit, get the winner's answer instead --
-        # our own row is discarded in that case).
-        outcome, message, payload = await cache.claim_or_serve(message, data, logger)
-        if outcome == cache.DISPATCH:
-            # post_save broadcast -> the ars_fanout worker
-            await broker.add_task(
-                "ars.fanout",
-                {
-                    "parent_pk": str(message["id"]),
-                    # query_id keys the shared task-context builder + log store
-                    "query_id": str(message["id"]),
-                    "log_level": resolve_log_level(
-                        query_log_level(data), resolve_log_level(settings.log_level)
-                    ),
-                    "otel": json.dumps(carrier),
-                },
-                logger,
-                raise_on_failure=True,
-            )
-        return dj_json(message_envelope(message, data=payload), 201)
+        try:
+            return await _store_and_dispatch(message, data)
+        except Exception:
+            # The client gets a 400 and never learns this pk, but a cache
+            # leader's pk may already have been handed to identical submits
+            # (WAITING). Nothing will ever fan this parent out, and parents
+            # are watchdog-exempt: end it E/500 rather than leaving it --
+            # and its pending cache entry -- Running forever.
+            await lifecycle.fail_parent(message["id"], logger)
+            raise
     except Exception as e:
         logger.error(f"submit failed: {e}", exc_info=True)
         return text(
             "failing due to %s with the message %s" % (e.__cause__, str(e)), 400
         )
+
+
+async def _store_and_dispatch(message, data) -> Response:
+    """Submit's steps once the parent row exists: store the query, claim (or
+    lose) the cache key, queue the fanout. Raises on a storage or broker
+    failure (the caller fails the parent and answers 400)."""
+    # STRICT save + enqueue: our 201 promises a stored query and a queued
+    # fanout. A swallowed failure on either would return success for a query
+    # that then sits Running forever (parents are watchdog-exempt).
+    await ars_db.save_message_data(message["id"], data, logger, raise_on_failure=True)
+    # Root the query's trace here and remember the carrier: every later
+    # stage (fanout now; premerge/merge/notify from the response side)
+    # rejoins this trace, giving one end-to-end trace per query even when
+    # an ARA doesn't propagate traceparent into its callback.
+    carrier: Dict[str, str] = {}
+    inject(carrier)
+    await ars_db.save_otel_carrier(message["id"], carrier, logger)
+    # Claim leadership of the key (or, having lost that race to a
+    # concurrent identical submit, get the winner's answer instead --
+    # our own row is discarded in that case).
+    outcome, message, payload = await cache.claim_or_serve(message, data, logger)
+    if outcome == cache.DISPATCH:
+        # post_save broadcast -> the ars_fanout worker
+        await broker.add_task(
+            "ars.fanout",
+            {
+                "parent_pk": str(message["id"]),
+                # query_id keys the shared task-context builder + log store
+                "query_id": str(message["id"]),
+                "log_level": resolve_log_level(
+                    query_log_level(data), resolve_log_level(settings.log_level)
+                ),
+                "otel": json.dumps(carrier),
+            },
+            logger,
+            raise_on_failure=True,
+        )
+    return dj_json(message_envelope(message, data=payload), 201)
 
 
 # ---------------------------------------------------------------------------
@@ -838,6 +852,17 @@ async def query_event_subscribe(request: Request) -> Response:
                         out["failure"][key] = "Query already complete"
                 else:
                     await ars_db.add_subscription(mesg["id"], client["id"])
+                    # Re-read once subscribed. A query that finished between
+                    # the read above and the insert has already notified
+                    # (and cleared) the subscribers it found, so this client
+                    # would never hear of it: replay the completion to it.
+                    # A client whose insert landed just before the completion
+                    # read its subscribers can be told twice, which beats
+                    # never.
+                    latest = await ars_db.get_message_row(mesg["id"])
+                    if latest is not None and latest["status"] in ("D", "E"):
+                        await ars_db.remove_subscription(mesg["id"], client["id"])
+                        await replay_completion(latest, client["id"], logger)
                     out["success"].append(key)
             out["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             out, status = _analyze_response(out)

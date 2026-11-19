@@ -250,7 +250,7 @@ def test_expand_aragorn_query_includes_direct_query_with_no_expansions(mocker):
     """Without any matching AMIE rule, expand_aragorn_query still emits a single
     direct (non-inferred) query."""
     mocker.patch(
-        "workers.aragorn_lookup.worker.json.load",
+        "workers.aragorn_lookup.worker._amie_expansions",
         return_value={},  # empty AMIE expansions
     )
     msg = copy.deepcopy(creative_query)
@@ -294,7 +294,7 @@ def test_expand_aragorn_query_appends_amie_rule_template(mocker):
     }
 
     mocker.patch(
-        "workers.aragorn_lookup.worker.json.load",
+        "workers.aragorn_lookup.worker._amie_expansions",
         return_value={
             json.dumps({"predicate": "biolink:treats"}): [{"template": rule_template}],
         },
@@ -330,7 +330,7 @@ def test_expand_aragorn_query_does_not_forward_top_level_log_level(mocker):
         }
     }
     mocker.patch(
-        "workers.aragorn_lookup.worker.json.load",
+        "workers.aragorn_lookup.worker._amie_expansions",
         return_value={
             json.dumps({"predicate": "biolink:treats"}): [{"template": rule_template}],
         },
@@ -402,11 +402,11 @@ async def test_aragorn_lookup_pure_lookup_path_calls_kg_retrieval(redis_mock, mo
         return_value=msg,
     )
     mocker.patch(
-        "workers.aragorn_lookup.worker.add_callback_id",
+        "shepherd_utils.lookups.add_callback_id",
         new_callable=mocker.AsyncMock,
     )
     mock_running = mocker.patch(
-        "workers.aragorn_lookup.worker.get_running_callbacks",
+        "shepherd_utils.lookups.get_running_callbacks",
         new_callable=mocker.AsyncMock,
         return_value=[],
     )

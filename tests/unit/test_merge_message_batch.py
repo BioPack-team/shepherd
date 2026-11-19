@@ -12,6 +12,7 @@ Covers:
 import copy
 import logging
 
+import fakeredis as sync_fakeredis
 import pytest
 
 from shepherd_utils.db import (
@@ -38,16 +39,13 @@ logger = logging.getLogger(__name__)
 
 
 def _patch_sync_store(mocker):
-    """Route the sync data-db client through an in-memory dict (as the real
-    ProcessPoolExecutor worker would hit Redis)."""
-    storage = {}
-    sync_client = mocker.Mock()
-    sync_client.set.side_effect = lambda key, blob, ex=None: storage.__setitem__(
-        key, blob
-    )
-    sync_client.get.side_effect = lambda key: storage.get(key)
+    """Route the sync data-db client through an in-memory fakeredis (as the
+    real ProcessPoolExecutor worker would hit Redis). A real client rather
+    than a Mock of get/set: a save is a WATCH/MULTI/EXEC transaction that
+    checks the response's seal (``seal_response``)."""
+    sync_client = sync_fakeredis.FakeRedis()
     mocker.patch("shepherd_utils.db._get_sync_data_db", return_value=sync_client)
-    return storage
+    return sync_client
 
 
 def test_merge_messages_by_ids_equivalent_to_sequential(mocker):
@@ -488,9 +486,10 @@ async def test_add_task_strict_raises_and_default_swallows(redis_mock, mocker):
 async def test_save_message_strict_raises_after_retries(redis_mock, mocker):
     import shepherd_utils.db as db_module
 
+    # Every message write goes through the seal-checking transaction.
     mocker.patch.object(
-        db_module.data_db_client,
-        "set",
+        db_module,
+        "_set_unless_sealed",
         side_effect=TimeoutError("Timeout reading from shepherd_broker:6379"),
     )
     mocker.patch("asyncio.sleep")

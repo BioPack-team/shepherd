@@ -1,6 +1,7 @@
 """Shared Shepherd Utility Functions."""
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -8,11 +9,11 @@ import signal
 import sys
 import threading
 import time
-from typing import AsyncGenerator, Dict, List, Tuple
+from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
 
 from opentelemetry import trace
 from opentelemetry.context.context import Context
-from opentelemetry.propagate import extract
+from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import Status, StatusCode
 
 from .broker import (
@@ -24,14 +25,22 @@ from .broker import (
 )
 from .config import settings
 from .db import (
+    ResponseSealedError,
     ResponseTooLargeError,
     enforce_response_size_limit,
     initialize_db,
+    is_response_sealed,
     save_logs,
 )
 from .heartbeat import Heartbeat
-from .logger import attach_query_handler, resolve_log_level, setup_logging
+from .logger import (
+    attach_query_handler,
+    resolve_log_level,
+    setup_logging,
+    transient_logger,
+)
 from .reclaim import reclaim_orphaned
+from .query_errors import QueryError, error_status
 from .response_limit import fail_response_too_large
 from .trapi import binding_ids, edge_support_graphs
 from .task_deadline import (
@@ -98,6 +107,18 @@ _loop_watchdog: "LoopWatchdog | None" = None
 
 def is_shutting_down() -> bool:
     return _shutdown.is_set()
+
+
+# Coroutine functions run by the graceful drain just before the process exits,
+# after the in-flight tasks drained (or the drain timed out). For a worker that
+# has to settle state belonging to work it is about to abandon.
+_shutdown_hooks: list = []
+
+
+def on_graceful_shutdown(hook) -> None:
+    """Register ``hook`` (an argument-less coroutine function) to run when the
+    worker exits through the graceful drain. Not run on a hard exit."""
+    _shutdown_hooks.append(hook)
 
 
 def _request_shutdown() -> None:
@@ -250,6 +271,12 @@ async def _drain_and_exit(
             "running; leaving them in the stream for Redis reclaim."
         )
 
+    for hook in list(_shutdown_hooks):
+        try:
+            await hook()
+        except Exception as e:
+            logger.warning(f"Shutdown hook {hook} failed: {e}")
+
     hb = _active_heartbeat
     if hb is not None:
         try:
@@ -330,6 +357,27 @@ def get_next_operation(
     return next_op, workflow
 
 
+def lookup_wait_seconds(parameters: Dict) -> float:
+    """How long a lookup waits for its callbacks.
+
+    The query's ``parameters.timeout``, or ``lookup_timeout`` when it has
+    none. TRAPI reads a negative timeout as "drop the server's default", which
+    a lookup can't do -- it has to stop waiting some time -- so that gets the
+    default too, rather than being taken as a wait of less than nothing (which
+    abandoned every callback at once). ``/query`` treats it the same way.
+    """
+    timeout = parameters.get("timeout")
+    if timeout is None or isinstance(timeout, bool):
+        return float(settings.lookup_timeout)
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        return float(settings.lookup_timeout)
+    if timeout != timeout or timeout < 0:  # NaN or negative
+        return float(settings.lookup_timeout)
+    return timeout
+
+
 def _build_task_context(
     stream: str,
     consumer: str,
@@ -337,14 +385,16 @@ def _build_task_context(
     level_number: int,
 ) -> Tuple[Context, logging.Logger]:
     """Build the per-task logger and otel context for a fetched/reclaimed task."""
-    task_logger = logging.getLogger(
-        f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}"
+    # One logger per task, unregistered so it is freed with the task: named
+    # loggers live for the whole process, one per query (#216). Each task
+    # flushes its own handler, so concurrent tasks for one query each store
+    # just their own records.
+    task_logger = transient_logger(
+        f"shepherd.{stream}.{consumer}.{ara_task[1]['query_id']}",
+        logging.getLogger(f"shepherd.{stream}.{consumer}"),
     )
     task_log_level = int(ara_task[1].get("log_level", level_number))
     task_logger.setLevel(task_log_level)
-    # One handler per logger: this logger is shared by every task this worker
-    # runs for the query, and stacking a handler per task made each flush
-    # re-persist the previous tasks' records.
     attach_query_handler(task_logger)
     task_logger.debug(f"Doing task {ara_task}")
     ctx = extract(json.loads(ara_task[1].get("otel", "{}")))
@@ -535,11 +585,17 @@ class TaskSlots:
     ``in_flight`` is what the heartbeat surfaces as "Running". A plain
     :class:`asyncio.Semaphore` interface (``acquire``/``release``) is preserved
     so the drain path and workers keep working unchanged.
+
+    ``dispatch(msg_id)`` also records which message is running and returns a
+    :class:`_TaskPermit` whose ``release`` clears it. ``in_flight_ids`` is what
+    lets reclaim tell this consumer's running messages apart from ones it left
+    pending and will never come back to (#213).
     """
 
     def __init__(self, task_limit: int):
         self._sem = asyncio.Semaphore(task_limit)
         self._in_flight = 0
+        self._ids: Dict[str, int] = {}
 
     async def acquire(self) -> None:
         await self._sem.acquire()
@@ -548,9 +604,17 @@ class TaskSlots:
         """Free a slot reserved for polling but never dispatched to a worker."""
         self._sem.release()
 
-    def dispatch(self) -> None:
-        """Mark a reserved slot as an actively-running task (about to be yielded)."""
+    def dispatch(self, msg_id: Optional[str] = None) -> "_TaskPermit | None":
+        """Mark a reserved slot as an actively-running task (about to be yielded).
+
+        Given the message id, returns the permit to hand the worker in place of
+        this limiter, so the id is cleared when the worker releases it.
+        """
         self._in_flight += 1
+        if msg_id is None:
+            return None
+        self._ids[msg_id] = self._ids.get(msg_id, 0) + 1
+        return _TaskPermit(self, msg_id)
 
     def release(self) -> None:
         """A dispatched task finished: clear its in-flight mark and free its slot."""
@@ -558,9 +622,42 @@ class TaskSlots:
             self._in_flight -= 1
         self._sem.release()
 
+    def _finish(self, msg_id: str) -> None:
+        count = self._ids.get(msg_id, 0) - 1
+        if count > 0:
+            self._ids[msg_id] = count
+        else:
+            self._ids.pop(msg_id, None)
+        self.release()
+
     @property
     def in_flight(self) -> int:
         return self._in_flight
+
+    @property
+    def in_flight_ids(self) -> Set[str]:
+        """Ids of the messages this consumer is running right now."""
+        return set(self._ids)
+
+
+class _TaskPermit:
+    """One dispatched task's hold on a :class:`TaskSlots` slot.
+
+    Workers only ever call ``release()`` on what ``get_tasks`` hands them, once,
+    in their ``finally``; a second call is ignored so it can't free a slot that
+    belongs to another task.
+    """
+
+    def __init__(self, slots: TaskSlots, msg_id: str):
+        self._slots = slots
+        self.msg_id = msg_id
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._slots._finish(self.msg_id)
 
 
 async def get_tasks(
@@ -569,7 +666,9 @@ async def get_tasks(
     consumer: str,
     task_limit: int,
     reclaim_min_idle_sec: int = None,
-) -> AsyncGenerator[Tuple[Tuple[str, str], Context, logging.Logger, "TaskSlots"], None]:
+) -> AsyncGenerator[
+    Tuple[Tuple[str, str], Context, logging.Logger, "_TaskPermit"], None
+]:
     """Continually monitor the ara queue for tasks.
 
     ``reclaim_min_idle_sec`` overrides the per-stream default for how long a
@@ -638,6 +737,7 @@ async def get_tasks(
                     worker_logger,
                     min_idle_sec=reclaim_min_idle_sec,
                     delivery_counts=delivery_counts,
+                    in_flight_ids=task_limiter.in_flight_ids,
                 )
             except Exception as e:
                 worker_logger.error(f"Reclaim sweep failed for {stream}: {e}")
@@ -688,8 +788,8 @@ async def get_tasks(
                     continue
                 # Dispatching real work: count it as in-flight until the worker
                 # releases the slot in its finally.
-                task_limiter.dispatch()
-                yield ara_task, ctx, task_logger, task_limiter
+                permit = task_limiter.dispatch(ara_task[0])
+                yield ara_task, ctx, task_logger, permit
 
         # check if we can take another task
         await task_limiter.acquire()
@@ -728,12 +828,97 @@ async def get_tasks(
                 continue
             # send the task to a async background task
             # this could be async, multi-threaded, etc.
-            task_limiter.dispatch()
-            yield ara_task, ctx, task_logger, task_limiter
+            permit = task_limiter.dispatch(ara_task[0])
+            yield ara_task, ctx, task_logger, permit
         else:
             # Poll returned nothing (idle): free the reserved slot. Nothing was
             # dispatched, so the in-flight count is untouched.
             task_limiter.release_slot()
+
+
+async def run_poll_loop(
+    stream: str,
+    group: str,
+    consumer: str,
+    task_limit: int,
+    handler,
+    on_stop=None,
+) -> None:
+    """Every worker's poll loop: dispatch each task to ``handler`` until cancelled.
+
+    ``handler(task, parent_ctx, logger, limiter)`` returns the coroutine that
+    runs one task; each runs as its own asyncio task, referenced here until it
+    finishes. The loops this replaces (#223, C5-4) were copied into every
+    worker, and two things were wrong with the copies:
+
+    - they called ``asyncio.create_task`` without keeping the task, and the
+      event loop holds only a weak reference to a running task, so one could
+      be garbage-collected part way through;
+    - ``except CancelledError`` fell through into ``while True``, so the loop
+      could never be cancelled.
+
+    On cancellation the in-flight tasks are cancelled, ``on_stop`` runs (a
+    plain or async callable: shutting down a process pool, flushing pending
+    deliveries) and the loop returns. Any other error is logged and the loop
+    resumes after a short back-off. A graceful shutdown (SIGTERM) still ends
+    inside ``get_tasks``, which drains the in-flight tasks and exits.
+    """
+    poll_logger = logging.getLogger(f"shepherd.{stream}")
+    inflight: set = set()
+    while True:
+        try:
+            async for task, parent_ctx, logger, limiter in get_tasks(
+                stream, group, consumer, task_limit
+            ):
+                running = asyncio.create_task(
+                    handler(task, parent_ctx, logger, limiter)
+                )
+                inflight.add(running)
+                running.add_done_callback(inflight.discard)
+        except asyncio.CancelledError:
+            poll_logger.info("Poll loop cancelled, shutting down.")
+            for running in list(inflight):
+                running.cancel()
+            if on_stop is not None:
+                stopped = on_stop()
+                if inspect.isawaitable(stopped):
+                    await stopped
+            return
+        except Exception as e:
+            poll_logger.error(f"Error in task polling loop: {e}", exc_info=True)
+            await asyncio.sleep(5)  # back off before retrying
+
+
+# Task field set once a query's entry worker has handed on its span, so the
+# operations after it pass that carrier along instead of replacing it.
+TRACE_ROOTED_FIELD = "otel_rooted"
+
+
+def _operation_trace_fields(fields: dict) -> dict:
+    """The trace fields a task hands the query's next operation.
+
+    Every operation in a workflow is handed the same carrier, so they all show
+    up as siblings under one span. That carrier used to be whatever the query
+    arrived with -- the intake span. Fine while one request ran one ARA, but
+    under the ARS one intake span fans out to several ARAs, and their
+    operations all landed under it, interleaved, with nothing tying an
+    operation to its ARA: each ARA's own span was an empty leaf beside them.
+
+    So the first worker to hand a query on -- its entry worker (``aragorn``,
+    ``bte``, ``arax``, ...) -- hands on *its own* span's context, and marks
+    the task so everything after passes that along: the ARA's operations nest
+    under the ARA. "First" rather than "not in the workflow", because an entry
+    worker can do the whole job itself and name itself as the one operation
+    (``arax``), and its finish_query belongs under it all the same. With no
+    span to hand on (tracing off) the carrier is kept as it came.
+    """
+    otel = fields.get("otel", "{}")
+    if not fields.get(TRACE_ROOTED_FIELD):
+        carrier: dict = {}
+        inject(carrier)
+        if carrier:
+            otel = json.dumps(carrier)
+    return {"otel": otel, TRACE_ROOTED_FIELD: "1"}
 
 
 async def wrap_up_task(
@@ -762,13 +947,17 @@ async def wrap_up_task(
             "response_id": task[1]["response_id"],
             "workflow": json.dumps(workflow),
             "log_level": task[1].get("log_level", 20),
-            "otel": task[1]["otel"],
+            **_operation_trace_fields(task[1]),
             "metadata": task[1]["metadata"],
             # The budget is measured from intake, so it travels with the query
             # rather than restarting at each operation.
             **carry_deadline(task[1]),
         },
         logger,
+        # Strict: ACKing this task after a failed hand-off would leave the
+        # query with no next step. On failure this raises before the ACK, so
+        # the message stays pending instead of being dropped.
+        raise_on_failure=True,
     )
 
     await mark_task_as_complete(stream, group, task[0], logger)
@@ -781,26 +970,52 @@ async def handle_task_failure(
     group: str,
     task: Tuple[str, dict],
     logger: logging.Logger,
+    error: "BaseException | None" = None,
 ) -> None:
-    """Handle any full query failures."""
+    """Handle any full query failures.
+
+    ``error`` is what the operation failed with. A ``QueryError`` names the
+    HTTP code and client-safe description the query should end with (BTE
+    refusing Pathfinder is a 501, not a 500), and both ride on to
+    ``finish_query``; any other exception fails the query as a plain
+    ``ERROR`` (500), as before.
+    """
+    failure = {"status": error_status()}
+    if isinstance(error, QueryError):
+        failure["status"] = getattr(error, "query_status", None) or error_status(
+            error.status_code
+        )
+        failure["description"] = error.description
+    logger.error("Sending task straight to finish_query.")
+    # Enqueue the wrap-up before ACKing, strictly: ACKing first and then
+    # failing to enqueue would drop the query with nobody told. If the
+    # hand-off can't be made, the task is left un-ACKed rather than lost.
+    try:
+        await add_task(
+            "finish_query",
+            {
+                "query_id": task[1]["query_id"],
+                "response_id": task[1]["response_id"],
+                "workflow": "[]",
+                "log_level": task[1].get("log_level", 20),
+                **_operation_trace_fields(task[1]),
+                **failure,
+                "metadata": task[1]["metadata"],
+                **carry_deadline(task[1]),
+            },
+            logger,
+            raise_on_failure=True,
+        )
+    except Exception as e:
+        logger.error(
+            f"Task {task[0]}: could not hand the failed query to finish_query; "
+            f"leaving the task un-ACKed: {e}"
+        )
+        await save_logs(task[1]["response_id"], logger)
+        return
     await mark_task_as_complete(stream, group, task[0], logger)
     await save_logs(task[1]["response_id"], logger)
     await _record_task_duration(stream, task[1].get("_started_at", ""), logger)
-    logger.error("Sending task straight to finish_query.")
-    await add_task(
-        "finish_query",
-        {
-            "query_id": task[1]["query_id"],
-            "response_id": task[1]["response_id"],
-            "workflow": "[]",
-            "log_level": task[1].get("log_level", 20),
-            "otel": task[1]["otel"],
-            "status": "ERROR",
-            "metadata": task[1]["metadata"],
-            **carry_deadline(task[1]),
-        },
-        logger,
-    )
 
 
 # Proxy tracer: resolves to whatever provider the worker process set up via
@@ -843,6 +1058,59 @@ async def _guard_response_size(
         raise
 
 
+async def _stop_if_finished(task: Tuple[str, dict], logger: logging.Logger) -> None:
+    """Raise ``ResponseSealedError`` if this task's query has already finished.
+
+    A redelivered or reclaimed task, or one queued behind a query that was
+    finished another way (failed, timed out, recovered), would otherwise run
+    its whole operation only to have the save refused at the end. Checking the
+    seal first saves that work. Best-effort: if the check itself fails the
+    task runs, and the seal check every save makes still keeps the response
+    as it was delivered.
+    """
+    fields = task[1] if len(task) > 1 and isinstance(task[1], dict) else {}
+    response_id = fields.get("response_id")
+    if not response_id:
+        return
+    try:
+        sealed = await is_response_sealed(response_id)
+    except Exception as e:
+        logger.debug(f"Could not check whether {response_id} is sealed: {e}")
+        return
+    if sealed:
+        raise ResponseSealedError(response_id)
+
+
+async def stop_task_for_finished_query(
+    stream: str,
+    group: str,
+    task: Tuple[str, dict],
+    logger: logging.Logger,
+    error: ResponseSealedError,
+) -> None:
+    """End a task whose query finished while (or before) it ran.
+
+    The query's response is sealed (``shepherd_utils.db.seal_response``), so
+    whatever this task produced is refused and the response stays as it was
+    delivered. Nothing is left to do for the query: the task is ACKed, and the
+    query is not handed on, neither to its next operation (which would only
+    be refused in turn) nor to ``finish_query`` (which already ran; its claim
+    would refuse a second delivery, but only after this read as an ERROR).
+
+    One WARNING, in this worker's output. It is deliberately not flushed to
+    the query's log list: that list was delivered and archived with the
+    response, and appending to it would reset the TTL ``release_hot_copies``
+    shortened.
+    """
+    fields = task[1] if len(task) > 1 and isinstance(task[1], dict) else {}
+    logger.warning(
+        f"{stream}: query {fields.get('query_id')} has already finished; "
+        f"stopping task {task[0]} without handing the query on ({error})."
+    )
+    await mark_task_as_complete(stream, group, task[0], logger)
+    await _record_task_duration(stream, fields.get("_started_at", ""), logger)
+
+
 async def run_task_lifecycle(
     stream: str,
     group: str,
@@ -858,7 +1126,9 @@ async def run_task_lifecycle(
     manual child spans nest under it, records exceptions + ERROR status on the
     span, runs ``worker_fn(task, logger)`` then ``wrap_up_task`` on success or
     ``handle_task_failure`` on an unhandled error, and always releases the
-    limiter.
+    limiter. A task whose query has already finished -- found before it runs,
+    or when its save is refused -- is stopped instead
+    (``stop_task_for_finished_query``).
 
     ``worker_fn`` is an async callable ``(task, logger) -> None`` holding the
     per-worker logic (or a closure for workers that dispatch to a process pool).
@@ -866,22 +1136,62 @@ async def run_task_lifecycle(
     start = time.time()
     with _tracer.start_as_current_span(stream, context=parent_ctx) as span:
         try:
+            await _stop_if_finished(task, logger)
             await _guard_response_size(stream, task, logger)
             await worker_fn(task, logger)
-            # Always wrap up the task to ACK it in the broker
-            try:
-                await wrap_up_task(stream, group, task, logger)
-            except Exception as e:
-                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+        except ResponseSealedError as e:
+            # Not a failure: the query finished and was delivered without
+            # this task. Ahead of the catch-all so it never reaches
+            # handle_task_failure.
+            span.set_attribute("query.already_finished", True)
+            await stop_task_for_finished_query(stream, group, task, logger, e)
         except asyncio.CancelledError:
-            logger.warning(f"Task {task[0]} was cancelled")
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                # This task itself is being cancelled: the worker is going
+                # down. Leave the message pending -- once this consumer's
+                # heartbeat stops, a peer reclaims and reruns it -- and let
+                # the cancellation propagate.
+                logger.warning(f"Task {task[0]} was cancelled")
+                raise
+            # A cancellation from something the operation awaited, not from
+            # this task being cancelled (e.g. a pool future cancelled when its
+            # executor was replaced). Swallowing it left the message pending
+            # under this live consumer, where nothing would ever retry it.
+            span.set_status(Status(StatusCode.ERROR, "cancelled"))
+            logger.error(
+                f"Task {task[0]} failed: an operation it awaited was cancelled"
+            )
+            await handle_task_failure(stream, group, task, logger)
+        except QueryError as e:
+            # A failure the worker raised on purpose, naming how the query
+            # should end (e.g. 501 for a query the ARA doesn't implement).
+            # Not a crash, so no traceback.
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            logger.error(f"Task {task[0]} failed ({e.status_code}): {e.description}")
+            await handle_task_failure(stream, group, task, logger, error=e)
         except Exception as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
             logger.error(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
             )
-            await handle_task_failure(stream, group, task, logger)
+            await handle_task_failure(stream, group, task, logger, error=e)
+        else:
+            # Hand the query on to its next operation and ACK this task.
+            # wrap_up_task only raises before the hand-off is made (the strict
+            # add_task, or fields it can't read); everything after it logs
+            # and carries on. So a raise here means nothing downstream has the
+            # query: end it rather than leave the message pending under this
+            # live consumer, where it used to sit until the query timed out.
+            try:
+                await wrap_up_task(stream, group, task, logger)
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, str(e)))
+                logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+                await handle_task_failure(stream, group, task, logger, error=e)
         finally:
             limiter.release()
             logger.debug(f"Finished task {task[0]} in {time.time() - start}")

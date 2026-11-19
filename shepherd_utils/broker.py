@@ -2,68 +2,39 @@
 
 import asyncio
 import logging
-import socket
 import time
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
+from . import redis_clients
 from .config import settings
 
-
-def _keepalive_options() -> dict:
-    """TCP keepalive tuning so a dead broker connection is detected in ~tens of
-    seconds instead of relying on Linux's 2-hour default keepalive idle time.
-
-    Without these, a half-open connection -- the broker pod moved, or a stateful
-    firewall/conntrack entry silently dropped the flow -- is only noticed via the
-    per-command ``socket_timeout``, and reconnecting keeps hitting the same dead
-    endpoint. Probing the peer actively lets the kernel tear the socket down so
-    redis-py rebuilds it against a live endpoint. Only options the running
-    platform defines are included (``TCP_KEEPIDLE`` and friends are Linux-only;
-    macOS spells it ``TCP_KEEPALIVE``), so importing this on a dev laptop or in
-    CI doesn't raise. Net effect on Linux: ~30s idle + 3 failed probes 10s apart
-    => a dead connection is reaped in ~60s.
-    """
-    opts = {}
-    if hasattr(socket, "TCP_KEEPIDLE"):
-        opts[socket.TCP_KEEPIDLE] = 30
-    if hasattr(socket, "TCP_KEEPINTVL"):
-        opts[socket.TCP_KEEPINTVL] = 10
-    if hasattr(socket, "TCP_KEEPCNT"):
-        opts[socket.TCP_KEEPCNT] = 3
-    return opts
-
-
+# Kept under their old names for callers and tests; the tuning itself lives
+# with the rest of the client construction (redis_clients.keepalive_options).
+_keepalive_options = redis_clients.keepalive_options
 _KEEPALIVE_OPTIONS = _keepalive_options()
 
-broker_redis_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=0,
-    password=settings.redis_password,
+# Which Redis each of these talks to -- one shared server by default, a Redis
+# per role or a Sentinel-managed primary when configured -- is decided in
+# shepherd_utils/redis_clients.py.
+broker_redis_pool = redis_clients.async_pool(
+    redis_clients.BROKER,
     max_connections=10,
     timeout=30,
     socket_timeout=7,  # Needs to be greater than get_task xgroupread timeout
     socket_connect_timeout=10,
-    socket_keepalive=True,
-    socket_keepalive_options=_KEEPALIVE_OPTIONS,
     health_check_interval=30,
     decode_responses=True,
     retry_on_timeout=True,
 )
 
-lock_redis_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=2,
-    password=settings.redis_password,
+lock_redis_pool = redis_clients.async_pool(
+    redis_clients.LOCK,
     max_connections=10,
     timeout=30,
     socket_timeout=5,
     socket_connect_timeout=10,
-    socket_keepalive=True,
-    socket_keepalive_options=_KEEPALIVE_OPTIONS,
     health_check_interval=30,
     decode_responses=True,
     retry_on_timeout=True,
@@ -120,24 +91,37 @@ async def create_consumer_group(stream, group, logger: logging.Logger):
         pass
 
 
+# Attempts for a strict (``raise_on_failure``) enqueue: rides out a brief
+# broker blip (0.1s, then 0.2s between tries) before giving up.
+STRICT_ADD_ATTEMPTS = 3
+
+
 async def add_task(queue, payload, logger: logging.Logger, raise_on_failure=False):
     """Put a payload on the queue for a worker to pick up.
 
-    ``raise_on_failure`` is for callers whose success response PROMISES the
-    task exists (e.g. ARS submit returning 201): swallowing the enqueue
-    failure there leaves a query permanently Running with no worker ever
-    woken. Default stays swallow-and-log for fire-and-forget callers.
+    ``raise_on_failure`` is for callers that must not carry on as if the task
+    exists when it doesn't: a hand-off that ACKs its own task afterwards, or a
+    success response that promises the work is queued (ARS submit returning
+    201, intake returning Accepted). Swallowing the failure there leaves a
+    query with no next step and nobody told. Such callers get a few retries
+    first, then the error. Default stays swallow-and-log for fire-and-forget
+    callers.
     """
-    try:
-        # print(f"Putting {payload} on {queue} stream")
-        await broker_client.xadd(queue, payload)
-    except Exception as e:
-        # failed to put message on ara stream
-        logger.error(
-            f"Failed to put new task on the queue: {e}, inputs: {queue}, {payload}"
-        )
-        if raise_on_failure:
-            raise
+    attempts = STRICT_ADD_ATTEMPTS if raise_on_failure else 1
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(0.1 * (2 ** (attempt - 1)))
+        try:
+            await broker_client.xadd(queue, payload)
+            return
+        except Exception as e:
+            # failed to put message on ara stream
+            logger.error(
+                f"Failed to put new task on the queue (attempt {attempt + 1}/"
+                f"{attempts}): {e}, inputs: {queue}, {payload}"
+            )
+            if attempt == attempts - 1 and raise_on_failure:
+                raise
 
 
 async def get_task(stream, group, consumer, logger: logging.Logger):

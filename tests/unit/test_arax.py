@@ -326,14 +326,20 @@ async def test_query_runs_in_the_pool_when_given_one(db, span, mocker):
     store = db(OPERATIONS_QUERY)
     pool = mocker.MagicMock()
 
-    async def run(loop, fn, *args):
+    async def run(loop, task_fields, step, fn, *args):
         return fn(*args)
 
-    pool.run = mocker.AsyncMock(side_effect=run)
-    await arax(_task(), logger, pool=pool)
+    # bounded by the query's budget (#245)
+    pool.run_within_budget = mocker.AsyncMock(side_effect=run)
+    task = _task()
+    await arax(task, logger, pool=pool)
 
-    assert pool.run.await_args.args[1] is worker.arax_query_task
-    query_id, response_id, carrier, submitted_at = pool.run.await_args.args[2:]
+    loop, task_fields, step, fn = pool.run_within_budget.await_args.args[:4]
+    assert task_fields is task[1]
+    assert fn is worker.arax_query_task
+    query_id, response_id, carrier, submitted_at = (
+        pool.run_within_budget.await_args.args[4:]
+    )
     assert (query_id, response_id) == ("query_id", "response_id")
     # the task span's context, for the child's spans, and the submit time
     assert isinstance(carrier, dict)
@@ -443,6 +449,8 @@ def remote_arax(mocker):
             side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
         )
         mocker.patch.object(worker.settings, "arax_url", "http://arax.test/query")
+        # failed calls are retried; don't wait between the tries
+        mocker.patch.object(worker, "ARAX_RETRY_DELAY", 0)
         return sent
 
     return _setup

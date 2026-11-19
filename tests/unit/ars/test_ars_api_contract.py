@@ -816,6 +816,66 @@ async def test_submit_payload_save_failure_is_honest_400(
     assert "failing due to" in resp.text
 
 
+@pytest.mark.parametrize("failure", ["save", "enqueue"])
+async def test_submit_failure_after_insert_ends_the_parent(
+    client, db, mocker, redis_mock, failure
+):
+    """A parent whose query could not be stored, or whose fanout could not be
+    queued, is never fanned out -- and parents are watchdog-exempt, so left
+    alone it would stay Running forever (holding its pending cache entry,
+    and any identical submit WAITING on it). Submit ends it E/500."""
+    import shepherd_utils.broker as broker_mod
+
+    if failure == "save":
+        db["save_message_data"].side_effect = TimeoutError("redis down")
+    else:
+        mocker.patch.object(
+            broker_mod.broker_client, "xadd", side_effect=TimeoutError("broker down")
+        )
+    fail_parent = mocker.patch.object(lifecycle, "fail_parent", new_callable=AsyncMock)
+    resp = await client.post("/api/submit", json=QUERY)
+    assert resp.status_code == 400
+    created = db["create_message"].await_count
+    assert created == 1
+    fail_parent.assert_awaited_once()
+    assert fail_parent.await_args.args[0] is not None
+
+
+async def test_fail_parent_errors_notifies_and_drops_the_cache_entry(mocker):
+    claimed = make_message(agent="ars-default-agent", status="E", code=500)
+    claim = mocker.patch.object(
+        ars_db,
+        "claim_terminal_transition",
+        new_callable=AsyncMock,
+        return_value=claimed,
+    )
+    clear = mocker.patch.object(ars_db, "clear_subscriptions", new_callable=AsyncMock)
+    notify = mocker.patch.object(
+        lifecycle, "notify_subscribers", new_callable=AsyncMock
+    )
+    failed = mocker.patch.object(
+        lifecycle.cache, "on_parent_failed", new_callable=AsyncMock
+    )
+    log = _logging_for_tests()
+    assert await lifecycle.fail_parent("p", log) is True
+    claim.assert_awaited_once_with("p", "E", 500)
+    notify.assert_awaited_once_with(claimed, None, log)
+    clear.assert_awaited_once_with("p")
+    failed.assert_awaited_once_with(claimed, log)
+
+    # already terminal: nothing more happens
+    claim.return_value = None
+    notify.reset_mock()
+    assert await lifecycle.fail_parent("p", log) is False
+    notify.assert_not_awaited()
+
+
+def _logging_for_tests():
+    import logging
+
+    return logging.getLogger("test.fail_parent")
+
+
 # ---------------------------------------------------------------------------
 # response cache (Shepherd-native; docs/ARS_RESPONSE_CACHE_PLAN.md)
 # ---------------------------------------------------------------------------
@@ -1146,6 +1206,40 @@ async def test_subscribe_to_running_pk_still_subscribes(
     assert resp.status_code == 200
     db["add_subscription"].assert_awaited_once()
     assert await _notify_tasks() == []
+
+
+async def test_subscribe_racing_completion_still_hears_of_it(
+    client, db, redis_mock, subscriber
+):
+    """C8-8 (#214): the query was Running when read but finished before the
+    subscription was inserted, so completion never saw this client. The
+    endpoint re-reads after subscribing and replays the completion."""
+    source, merged, _ = _source_tree(db)
+    running = dict(source, status="R", code=202)
+    rows = {str(source["id"]): running}
+    db["get_message_row"].side_effect = lambda pk: rows.get(str(pk))
+
+    async def _completes_meanwhile(message_id, client_pk):
+        rows[str(source["id"])] = source
+
+    db["add_subscription"].side_effect = _completes_meanwhile
+    body = json.dumps({"client_id": "ui", "pks": [str(source["id"])]})
+    resp = await client.post(
+        "/api/query_event_subscribe",
+        content=body,
+        headers={"x-event-signature": "sig", "content-type": "application/json"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == [str(source["id"])]
+    # the stale subscription is dropped and the completion replayed to it
+    db["remove_subscription"].assert_awaited_once()
+    tasks = await _notify_tasks()
+    assert [json.loads(t["fields"])["event_type"] for t in tasks] == [
+        "last_merged_completed",
+        "admin",
+    ]
+    assert all(json.loads(t["client_pks"]) == ["7"] for t in tasks)
 
 
 async def test_subscribe_to_done_pk_refused_when_cache_disabled(

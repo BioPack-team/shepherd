@@ -88,5 +88,66 @@
         "analyses": []
       }
     ]
+  },
+  {
+    "name": "with_confidence",
+    "results": [
+      {
+        "analyses": [
+          {
+            "score": 0.2
+          }
+        ],
+        "ordering_components": {
+          "confidence": 0.2
+        }
+      },
+      {
+        "analyses": [
+          {
+            "score": 0.8
+          }
+        ],
+        "ordering_components": {
+          "confidence": 0.8,
+          "novelty": 0.1
+        }
+      },
+      {
+        "analyses": [
+          {
+            "score": 0.5
+          }
+        ],
+        "ordering_components": {
+          "confidence": 0.5
+        }
+      },
+      {
+        "analyses": [
+          {
+            "score": 0.4
+          }
+        ],
+        "ordering_components": {
+          "novelty": 0.3
+        }
+      },
+      {
+        "analyses": [
+          {
+            "score": 0.7
+          }
+        ],
+        "ordering_components": []
+      },
+      {
+        "analyses": [
+          {
+            "score": 0.6
+          }
+        ]
+      }
+    ]
   }
 ]

@@ -99,6 +99,9 @@ async def test_batch_is_discarded_after_max_attempts(mocker):
     sleep = mocker.patch(
         "workers.merge_message.worker.asyncio.sleep", new=mocker.AsyncMock()
     )
+    delete = mocker.patch(
+        "workers.merge_message.worker.delete_messages", new=mocker.AsyncMock()
+    )
 
     last = settings.merge_max_attempts - 1
     await _handle_merge_failure(_task(last), "rid", ["cb1", "cb2"], logger)
@@ -107,6 +110,9 @@ async def test_batch_is_discarded_after_max_attempts(mocker):
     # callbacks table, so the next drain pass can't pick them up again.
     assert {c.args[1] for c in clear.await_args_list} == {"cb1", "cb2"}
     assert {c.args[0] for c in remove.await_args_list} == {"cb1", "cb2"}
+    # Their payloads stay in the data store: they are the evidence of what
+    # could not be merged.
+    delete.assert_not_awaited()
     # No point sleeping: this batch isn't being retried.
     sleep.assert_not_awaited()
     # A wake task still goes back so anything else ready still gets merged --
@@ -145,3 +151,36 @@ async def test_garbled_attempt_field_does_not_break_the_retry(mocker):
 
     _, fields, _ = add_task.await_args.args
     assert fields[MERGE_ATTEMPT_FIELD] == "1"
+
+
+async def test_a_folded_batch_has_its_payloads_deleted(redis_mock, mocker):
+    """#252: a callback's payload is read once, by the fold. Once the batch
+    is cleared its payloads go too, instead of sitting in Redis for the rest
+    of ``redis_ttl``; the response they were folded into is untouched."""
+    from shepherd_utils import db
+    from workers.merge_message.worker import _clear_batch
+
+    mocker.patch(
+        "workers.merge_message.worker.remove_callback_id", new=mocker.AsyncMock()
+    )
+    for key in ("cb1", "cb2", "rid", "other-callback"):
+        await db.data_db_client.set(key, b"payload")
+    await db.add_ready_callback("rid", "cb1", logger)
+
+    await _clear_batch("rid", ["cb1", "cb2"], logger)
+
+    assert await db.data_db_client.exists("cb1", "cb2") == 0
+    assert await db.data_db_client.exists("rid", "other-callback") == 2
+    assert await db.get_ready_callbacks("rid", logger) == []
+
+
+async def test_deleting_payloads_never_fails_the_merge(mocker):
+    from shepherd_utils import db
+
+    mocker.patch.object(
+        db.data_db_client,
+        "delete",
+        new=mocker.AsyncMock(side_effect=ConnectionError("redis is down")),
+    )
+    await db.delete_messages(["cb1"], logger)
+    await db.delete_messages([], logger)

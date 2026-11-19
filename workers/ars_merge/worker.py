@@ -1,7 +1,7 @@
 """ARS merge worker: fold each validated ARA result into the query's merged
 message and post-process the new version.
 
-Port of NCATSTranslator/Relay @ 3e65975 utils.py merge_and_post_process
+Port of NCATSTranslator/Relay @ 84a66c1 utils.py merge_and_post_process
 (lock + bookkeeping), merge_received (the fold), and post_process (the tail
 that upstream ran in the same Celery task): one merge at a time per parent,
 a fresh merge-child row per fold, parent.merged_version /
@@ -10,10 +10,12 @@ merged_version_available notifications, and the parent completion check.
 
 Post-processing runs on the merged message right after the fold, in the
 same process-pool child that holds it: blocklist removal, node annotation,
-local confidence calculation, and score stats, with upstream's exact
-stage-failure codes (cleanup stages and the stat calc mark the merged child
-'E'/444, and the 444 sticks; appraise_confidence failures are logged and
-swallowed; a failed final save is E/422). On success the 202 shell flips to
+local confidence calculation (results ordered by confidence), weighted RRF
+ranker fusion over the ARAs' own rankings (Relay PR #897;
+shepherd_utils.ars.ranker_fusion), and stats over the confidences, with
+upstream's exact stage-failure codes (cleanup stages and the stat calc mark
+the merged child 'E'/444, and the 444 sticks; appraise_confidence and ranker
+fusion failures are logged and swallowed; a failed final save is E/422). On success the 202 shell flips to
 'D'/200. The external Appraiser call and the Sugeno scoring pass were
 removed upstream (Relay PRs #884/#883) -- ordering components come from
 appraise_confidence -- and so was the null-attribute scrub (Relay PR #885).
@@ -50,6 +52,7 @@ merge_received exception -- the 8-minute watchdog 598s it.
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,7 +61,7 @@ from opentelemetry.propagate import extract, inject
 
 import shepherd_utils.ars.db as ars_db
 import shepherd_utils.ars.lifecycle as lifecycle
-from shepherd_utils.ars import aras
+from shepherd_utils.ars import aras, ranker_fusion
 from shepherd_utils.ars.annotate import annotate_nodes
 from shepherd_utils.ars.blocklist import load_blocklist, remove_blocked
 from shepherd_utils.ars.merge import (
@@ -84,10 +87,10 @@ from shepherd_utils.broker import (
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_logs, save_message_sync
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import get_worker_logger, transient_logger
 from shepherd_utils.otel import setup_pool_child_tracer, setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks
+from shepherd_utils.shared import run_poll_loop
 from shepherd_utils.trapi import finalize_response, query_parameters
 
 STREAM = "ars.merge"
@@ -106,20 +109,36 @@ _loop = None
 # ---------------------------------------------------------------------------
 
 
-def _fold(current_pk, child_pk) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def _fold(
+    current_pk, child_pk
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """merge_received's data path: the incoming child blob's ``message``
     part is the newcomer; when a merged version already exists its
     ``message`` part is folded in via mergeMessages, otherwise the newcomer
-    becomes the first merged version. Returns (merged dict, stats)."""
-    to_merge = get_message_sync(str(child_pk))["message"]
+    becomes the first merged version. Returns (merged dict, stats, the
+    incoming ``message``'s ranking), the last for the post-process's ranker
+    fusion, as upstream hands merge_and_post_process's message_to_merge on
+    to post_process.
+
+    Both messages are decoded fresh for this fold and dropped after it, so
+    they are merged in place rather than deep-copied first (upstream's
+    ``mergeMessages`` copies every input, which for two multi-MB messages
+    costs more than decoding them). The fold mutates the incoming results,
+    so what the fusion reads of them is snapshotted before it runs."""
+    # the child's premerged working copy, not the child's own entry (which
+    # is its ARA's response, as sent)
+    to_merge = get_message_sync(ars_db.premerged_key(child_pk))["message"]
+    incoming_ranking = ranker_fusion.ranking_snapshot(get_safe(to_merge, "results"))
     t_to_merge = TranslatorMessage(to_merge)
     if current_pk is not None:
         current = get_message_sync(str(current_pk))["message"]
-        merged = mergeMessages([TranslatorMessage(current), t_to_merge], "")
+        merged = mergeMessages(
+            [TranslatorMessage(current), t_to_merge], "", copy_inputs=False
+        )
     else:
         merged = t_to_merge
     merged_dict = merged.to_dict()
-    return merged_dict, get_msg_stats(merged_dict)
+    return merged_dict, get_msg_stats(merged_dict), incoming_ranking
 
 
 def _finalize(merged_dict, parameters) -> None:
@@ -138,7 +157,7 @@ def merge_in_child(current_pk, child_pk, new_pk, parameters=None):
     """Pool-side fold only: fetch by id, merge, save once; only stats cross
     IPC. (merge_and_postprocess_in_child is what production runs; this is
     the fold on its own, kept for the golden-backed fold test.)"""
-    merged_dict, stats = _fold(current_pk, child_pk)
+    merged_dict, stats, _ = _fold(current_pk, child_pk)
     _finalize(merged_dict, parameters)
     save_message_sync(str(new_pk), merged_dict)
     return stats
@@ -167,8 +186,86 @@ def _post_processing_error(merged_row, data, text):
     add_log_entry(data, [text, stamp, "DEBUG"])
 
 
+def _load_ranker_results(child_pk) -> Optional[List[Dict[str, Any]]]:
+    """A ranker child's own results, in its ARA's order. Premerge saved
+    their node bindings -- all the fusion reads -- as the child's ranking
+    (``ars_db.ranking_key``); without one (a child premerged before rankings
+    were kept), the child's entry: its ARA's whole response as sent, hot in
+    Redis while its query runs. Indirection for tests."""
+    try:
+        return get_safe(get_message_sync(ars_db.ranking_key(child_pk)), "results")
+    except KeyError:
+        pass
+    return get_safe(get_message_sync(str(child_pk)), "message", "results")
+
+
+def apply_ranker_fusion(
+    data, agent_name, logger, incoming_message=None, rankers=None
+) -> Dict[str, Any]:
+    """utils.apply_ranker_fusion (Relay PR #897): reorder the merged
+    message's results by weighted RRF over the rankings of the query's
+    weighted ARAs.
+
+    The rankings are the incoming child's results (``incoming_message``,
+    the ``message`` the fold just merged) and, overriding it, each finished
+    child's own results: ``rankers`` is the query's ARA children with
+    status D, oldest first (``{id, agent, inforesid}``), as upstream
+    queries them. Upstream's two other skips (no parent; not an ARS merged
+    message) cannot happen to a merged version here. A ranker child whose
+    response can no longer be read is left out, with a warning, rather
+    than failing the fusion.
+    """
+    config = ranker_fusion.get_config()
+    if not config["enabled"]:
+        return {"applied": False, "reason": "disabled"}
+
+    weights = config["weights"]
+    ranker_results_by_source = {}
+
+    incoming_source = ranker_fusion.configured_source(None, agent_name, weights)
+    if incoming_source is not None and incoming_message is not None:
+        incoming_results = get_safe(incoming_message, "results")
+        if incoming_results is None:
+            incoming_results = get_safe(incoming_message, "message", "results")
+        if incoming_results:
+            ranker_results_by_source[incoming_source] = incoming_results
+
+    for child in rankers or []:
+        source = ranker_fusion.configured_source(
+            child.get("inforesid"), child.get("agent"), weights
+        )
+        if source is None:
+            continue
+        if "result_count" in child and not child["result_count"]:
+            # finished with no results: nothing to rank, nothing to load
+            continue
+        try:
+            child_results = _load_ranker_results(child["id"])
+        except KeyError:
+            logger.warning(
+                f"Ranker fusion: the response of {child['id']} ({source}) is "
+                "gone; ranking without it"
+            )
+            continue
+        if child_results:
+            ranker_results_by_source[source] = child_results
+
+    if not ranker_results_by_source:
+        return {"applied": False, "reason": "no_configured_ranker_children"}
+
+    return ranker_fusion.apply_weighted_rrf(
+        data, ranker_results_by_source, weights, config["c_value"]
+    )
+
+
 async def postprocess_message(
-    data, merged_row, agent_name, logger, annotate: bool = True
+    data,
+    merged_row,
+    agent_name,
+    logger,
+    annotate: bool = True,
+    incoming_message=None,
+    rankers=None,
 ) -> Dict[str, Any]:
     """Run upstream's post_process stages over a merged message in place.
 
@@ -181,6 +278,8 @@ async def postprocess_message(
     a fresh shell) and updated_at (for the error log stamps). ``annotate``
     False skips node annotation (``ars_annotation_mode`` "premerge", where
     each response was annotated before it reached the merge, or "off").
+    ``incoming_message`` and ``rankers`` feed the ranker fusion
+    (``apply_ranker_fusion``).
     """
     # local code/status mirror upstream's sticky variables
     code = None
@@ -244,6 +343,37 @@ async def postprocess_message(
                 f"confidence calculations failed mesg for agent {agent_name} "
                 f"is {row_code}"
             )
+        # weighted RRF over the ARAs' own rankings (Relay PR #897); its
+        # order replaces the confidence order. Failures are logged and
+        # swallowed, as upstream.
+        try:
+            rrf_summary = apply_ranker_fusion(
+                data, agent_name, logger, incoming_message, rankers
+            )
+            if rrf_summary.get("applied"):
+                logger.info(
+                    f"Weighted RRF ranker fusion applied for agent {agent_name} "
+                    f"pk {merged_row.get('id')}: {rrf_summary}"
+                )
+                add_log_entry(
+                    data,
+                    [
+                        f"Weighted RRF ranker fusion applied: {rrf_summary}",
+                        log_timestamp(),
+                        "DEBUG",
+                    ],
+                )
+                results = get_safe(data, "message", "results")
+            else:
+                logger.info(
+                    f"Weighted RRF ranker fusion skipped for agent {agent_name} "
+                    f"pk {merged_row.get('id')}: {rrf_summary}"
+                )
+        except Exception:
+            logger.exception(
+                f"Weighted RRF ranker fusion failed for agent {agent_name} "
+                f"pk {merged_row.get('id')}"
+            )
         try:
             result_count = len(results)
             result_stat = ScoreStatCalc(results)
@@ -301,18 +431,25 @@ def merge_and_postprocess_in_child(
     otel_carrier=None,
     parameters=None,
     annotate=True,
+    rankers=None,
 ) -> Dict[str, Any]:
-    """Pool-side fold + post-process. Fetches the blobs by pk, saves the
-    fold (so a post-process crash still leaves a merged payload, as
-    upstream's fold-time save did), post-processes the dict it already
-    holds, and saves the final version. Only the stats, the outcome, and
-    the stage log lines cross IPC.
+    """Pool-side fold + post-process. Fetches the blobs by pk, folds,
+    post-processes the dict it already holds, and saves the final version
+    once. Only the stats, the outcome, and the stage log lines cross IPC.
+
+    Upstream also saved the bare fold before post-processing. Nothing reads
+    that copy: a post-process that raises fails the whole pool call, and
+    the merge then ends the version E/500 without ever pointing the parent
+    at it. Only a failed FINAL save (E/422, which does become the parent's
+    merged_version) would fall back on it -- so that save is retried
+    instead, and each fold encodes and writes its multi-MB result once
+    rather than twice.
 
     ``otel_carrier`` is the parent's span context (W3C traceparent); the
     fold and post-process spans start under it so the child's work shows up
     in the query's trace. ``parameters`` is the submitted query's TRAPI 2.0
     ``parameters``, which every saved version echoes (``_finalize``).
-    ``annotate`` is postprocess_message's.
+    ``annotate`` and ``rankers`` are postprocess_message's.
     """
     setup_pool_child_tracer(STREAM)
     parent_ctx = extract(otel_carrier) if otel_carrier else None
@@ -322,15 +459,16 @@ def merge_and_postprocess_in_child(
         span.set_attribute("merge.child_pk", str(child_pk))
         span.set_attribute("merge.new_pk", str(new_pk))
         span.set_attribute("merge.first", current_pk is None)
-        merged_dict, stats = _fold(current_pk, child_pk)
-        _finalize(merged_dict, parameters)
-        save_message_sync(str(new_pk), merged_dict)
+        merged_dict, stats, incoming_message = _fold(current_pk, child_pk)
         for key in ("results", "knowledge_graph_nodes", "knowledge_graph_edges"):
             if key in stats:
                 span.set_attribute(f"merge.{key}", stats[key])
 
     capture = _CaptureHandler()
-    child_logger = logging.getLogger(f"shepherd.ars.merge.child.{new_pk}")
+    # Unregistered, so this long-lived pool child doesn't keep one per merge.
+    child_logger = transient_logger(
+        f"shepherd.ars.merge.child.{new_pk}", logging.getLogger("shepherd")
+    )
     child_logger.setLevel(logging.DEBUG)
     child_logger.propagate = False
     child_logger.addHandler(capture)
@@ -347,12 +485,18 @@ def merge_and_postprocess_in_child(
             # The loop's tasks inherit this span as their current context.
             outcome = asyncio.run(
                 postprocess_message(
-                    merged_dict, merged_row, agent_name, child_logger, annotate
+                    merged_dict,
+                    merged_row,
+                    agent_name,
+                    child_logger,
+                    annotate,
+                    incoming_message,
+                    rankers,
                 )
             )
             _finalize(merged_dict, parameters)
             try:
-                save_message_sync(str(new_pk), merged_dict)
+                _save_final(str(new_pk), merged_dict)
             except Exception:
                 # upstream's DatabaseError on the final save -> E/422
                 child_logger.exception("Final save failed")
@@ -367,6 +511,22 @@ def merge_and_postprocess_in_child(
     outcome["stats"] = stats
     outcome["logs"] = capture.lines
     return outcome
+
+
+FINAL_SAVE_ATTEMPTS = 3
+
+
+def _save_final(new_pk, merged_dict) -> None:
+    """Save a merged version, retrying through transient Redis trouble: it
+    is the only copy (see merge_and_postprocess_in_child)."""
+    for attempt in range(FINAL_SAVE_ATTEMPTS):
+        try:
+            save_message_sync(new_pk, merged_dict)
+            return
+        except Exception:
+            if attempt == FINAL_SAVE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.5 * (attempt + 1))
 
 
 def _warm_pool_child():
@@ -384,6 +544,7 @@ async def _run_merge_in_pool(
     otel_carrier,
     logger,
     parameters=None,
+    rankers=None,
 ) -> Dict[str, Any]:
     """Indirection for tests; production runs the fold + post-process in
     the pool. The merge annotates only in ``ars_annotation_mode`` "merge"
@@ -398,6 +559,7 @@ async def _run_merge_in_pool(
         otel_carrier,
         parameters,
         annotate,
+        rankers,
     )
     if _pool is not None and _loop is not None:
         return await _pool.run(_loop, merge_and_postprocess_in_child, *args)
@@ -422,14 +584,23 @@ LOCK_TTL_MS = 45_000
 LOCK_REFRESH_SEC = 15.0
 
 
-async def _keep_lock_alive(key: str, logger: logging.Logger):
-    """Refresh our own lock every LOCK_REFRESH_SEC until cancelled."""
+async def _keep_lock_alive(
+    key: str, logger: logging.Logger, lost: Optional[asyncio.Event] = None
+):
+    """Refresh our own lock every LOCK_REFRESH_SEC until cancelled.
+
+    If a refresh finds the lock gone (it lapsed, and someone else may hold it
+    now), ``lost`` is set so the drain stops before folding another child:
+    folding on without the lock is what lets two workers both write a new
+    merged version of the same parent.
+    """
     while True:
         await asyncio.sleep(LOCK_REFRESH_SEC)
         try:
             if not await refresh_lock(key, CONSUMER, LOCK_TTL_MS, logger):
-                # someone else holds it now -- nothing we can do but say so
                 logger.warning(f"Lost the merge lock {key} before finishing")
+                if lost is not None:
+                    lost.set()
                 return
         except Exception as e:  # never let the keep-alive kill the merge
             logger.debug(f"Lock refresh for {key} failed: {e}")
@@ -452,9 +623,35 @@ async def _query_parameters(parent_pk, logger: logging.Logger) -> Dict[str, Any]
     return dict(query_parameters(query if isinstance(query, dict) else None))
 
 
-async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
+async def _ranker_children(parent_pk, logger: logging.Logger) -> List[Dict[str, Any]]:
+    """The parent's finished ARA children, oldest first, for the ranker
+    fusion: upstream's ``filter(ref_id=parent, status="D")`` excluding the
+    ARS's own merged versions. ``[]`` if they can't be read: the fusion
+    then ranks by the incoming child alone."""
+    try:
+        children = await ars_db.get_children(parent_pk)
+    except Exception as e:
+        logger.warning(f"Merge: could not list the children of {parent_pk}: {e}")
+        return []
+    return [
+        {
+            "id": str(child["id"]),
+            "agent": child.get("agent"),
+            "inforesid": child.get("inforesid"),
+            "result_count": child.get("result_count"),
+        }
+        for child in children
+        if child.get("status") == "D" and child.get("agent") != aras.MERGE_AGENT
+    ]
+
+
+async def merge_one(
+    parent_pk, child_pk, logger: logging.Logger, parameters=None
+) -> None:
     """Fold one validated child into the parent's merged message and
-    post-process the new version: merge_and_post_process for one result."""
+    post-process the new version: merge_and_post_process for one result.
+    ``parameters`` is the query's (``_query_parameters``), read here when
+    the caller has not already."""
     parent = await ars_db.get_message_row(parent_pk)
     if parent is None:
         logger.error(f"Merge: parent {parent_pk} does not exist; skipping")
@@ -477,7 +674,9 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
     # (and the annotator's httpx calls) nest under the current task span
     carrier: Dict[str, str] = {}
     inject(carrier)
-    parameters = await _query_parameters(parent_pk, logger)
+    if parameters is None:
+        parameters = await _query_parameters(parent_pk, logger)
+    rankers = await _ranker_children(parent_pk, logger)
     try:
         outcome = await _run_merge_in_pool(
             str(current_pk) if current_pk else None,
@@ -488,12 +687,18 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
             carrier,
             logger,
             parameters,
+            rankers,
         )
     except Exception as e:
-        # merge_received swallows and returns {} -- the shell merge child
-        # stays Running for the watchdog to reap
+        # Upstream's merge_received swallows this and returns {}, leaving the
+        # shell merge child Running for the watchdog: every such query then
+        # took at least the 8-minute merge timeout to complete. End the shell
+        # now (E/500) and run the completion check the watchdog would have.
         logger.error(f"problem with merging for {agent_name}: {e}", exc_info=True)
         await ars_db.update_message(parent_pk, merge_semaphore=False)
+        await ars_db.update_message(new_pk, status="E", code=500)
+        await ars_db.persist_data_copy(new_pk, logger)
+        await lifecycle.check_parent_completion(parent_pk, logger)
         return
     _replay_child_logs(outcome.get("logs"), logger)
     stats = outcome.get("stats") or {}
@@ -536,6 +741,12 @@ async def merge_one(parent_pk, child_pk, logger: logging.Logger) -> None:
         final_updates["result_stat"] = outcome["result_stat"]
     await ars_db.update_message(new_pk, skip_coercion=False, **final_updates)
     await ars_db.persist_data_copy(new_pk, logger)
+    if ars_db.lean() and current_pk is not None and final_updates["status"] == "D":
+        # Only the newest merged version is kept in the cold store. The one
+        # this fold superseded stays in Redis for as long as the tree is
+        # hot, for a client reading it from merged_versions_list. A version
+        # that did not finish cleanly supersedes nothing.
+        await ars_db.drop_durable_copy(current_pk, logger)
 
     if result_count is not None:
         # Carry the merge's result count up to the parent. Nothing used to
@@ -576,22 +787,33 @@ async def ars_merge(task, logger: logging.Logger):
         logger.debug(f"Merge lock busy for {parent_pk}; the holder will drain it")
         return
 
-    keepalive = asyncio.create_task(_keep_lock_alive(key, logger))
+    lost = asyncio.Event()
+    keepalive = asyncio.create_task(_keep_lock_alive(key, logger, lost))
     folded = 0
+    # the query, and so its parameters, is the same for every fold
+    parameters = None
     try:
         # Drain the parent to empty, one merged version per child, oldest
         # first. Re-reading the index each pass sweeps up children that
-        # validated while we were folding.
-        while True:
+        # validated while we were folding. Stops early if the lock is lost:
+        # whoever holds it now drains the rest.
+        while not lost.is_set():
             ready = await ars_db.get_ready_children(parent_pk, logger)
             if not ready:
                 break
             for child_pk in ready:
+                if lost.is_set():
+                    logger.warning(
+                        f"Stopping the merge of {parent_pk}: its lock was lost"
+                    )
+                    break
                 try:
                     with tracer.start_as_current_span("ars.merge.one") as span:
                         span.set_attribute("merge.parent_pk", str(parent_pk))
                         span.set_attribute("merge.child_pk", str(child_pk))
-                        await merge_one(parent_pk, child_pk, logger)
+                        if parameters is None:
+                            parameters = await _query_parameters(parent_pk, logger)
+                        await merge_one(parent_pk, child_pk, logger, parameters)
                     folded += 1
                 except Exception as e:
                     logger.error(
@@ -602,6 +824,8 @@ async def ars_merge(task, logger: logging.Logger):
                     # attempted once, whatever happened: a child the merge
                     # cannot take must not wedge the drain
                     await ars_db.clear_ready_child(parent_pk, child_pk, logger)
+                    # and its premerged working copy has no reader left
+                    await ars_db.discard_premerged(child_pk, logger)
     finally:
         keepalive.cancel()
         try:
@@ -661,19 +885,9 @@ async def poll_for_tasks():
         ),
         warmup=_warm_pool_child if settings.pool_prewarm else None,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-            _pool.shutdown()
-            return
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)
+    await run_poll_loop(
+        STREAM, GROUP, CONSUMER, max_workers, process_task, on_stop=_pool.shutdown
+    )
 
 
 if __name__ == "__main__":

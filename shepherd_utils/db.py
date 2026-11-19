@@ -4,8 +4,9 @@ import asyncio
 import io
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import orjson
 import redis
@@ -14,9 +15,15 @@ import zstandard
 from psycopg import OperationalError
 from psycopg_pool import AsyncConnectionPool
 
+from . import completion, redis_clients
 from .config import settings
 from .logger import get_query_handler, resolve_log_level
-from .trapi import prepare_stored_response, query_log_level, query_parameters
+from .trapi import (
+    empty_message,
+    prepare_stored_response,
+    query_log_level,
+    query_parameters,
+)
 
 PG_RETRIES = 5
 # Retries for the handful of Redis writes that are correctness-critical
@@ -31,6 +38,18 @@ REDIS_RETRIES = 3
 # a cluster-wide outage caused by a full disk is obvious in every worker's logs
 # instead of hiding behind generic "connection error" noise.
 PG_DISK_FULL_SQLSTATE = "53100"
+
+
+def new_id() -> str:
+    """A fresh query, response or callback id.
+
+    These all key the same data store (Redis db 1) and live there for
+    ``redis_ttl``. They used to be the first 8 hex characters of a UUID --
+    32 bits, which at Shepherd's volumes makes a collision likely, and a
+    collision silently overwrote another query's stored query, response or
+    callback. A full random UUID (122 bits) makes that negligible.
+    """
+    return str(uuid.uuid4())
 
 
 def is_disk_full_error(exc: BaseException) -> bool:
@@ -78,11 +97,38 @@ async def check_connection(conn):
     await conn.execute("SELECT 1")
 
 
+def pool_sizes(config=settings) -> Tuple[int, int]:
+    """This process's (min, max) Postgres pool size.
+
+    With a fleet connection budget (#223 C11-3) the max is this process's
+    share of it, ``budget x pool_shares // fleet_shares`` (at least 1), and
+    the min is capped at that max. Otherwise the explicit sizes.
+    """
+    budget = config.postgres_connection_budget
+    fleet = config.postgres_fleet_shares
+    if budget <= 0:
+        return config.postgres_pool_min_size, config.postgres_pool_max_size
+    if fleet <= 0:
+        raise ValueError(
+            "POSTGRES_CONNECTION_BUDGET is set but POSTGRES_FLEET_SHARES is not: "
+            "the budget can't be divided without the fleet's total shares"
+        )
+    if config.postgres_pool_shares > fleet:
+        raise ValueError(
+            f"POSTGRES_POOL_SHARES ({config.postgres_pool_shares}) exceeds "
+            f"POSTGRES_FLEET_SHARES ({fleet})"
+        )
+    max_size = max(1, budget * config.postgres_pool_shares // fleet)
+    return min(config.postgres_pool_min_size, max_size), max_size
+
+
+POOL_MIN_SIZE, POOL_MAX_SIZE = pool_sizes()
+
 pool = AsyncConnectionPool(
     conninfo=CONNINFO,
     timeout=settings.postgres_pool_timeout,
-    min_size=settings.postgres_pool_min_size,
-    max_size=settings.postgres_pool_max_size,
+    min_size=POOL_MIN_SIZE,
+    max_size=POOL_MAX_SIZE,
     max_idle=300,
     max_lifetime=3600,
     check=check_connection,
@@ -150,31 +196,25 @@ async def monitor_event_loop_lag(logger: logging.Logger) -> None:
             logger.warning(f"EVENT_LOOP_LAG lag_ms={lag * 1000:.0f}")
 
 
-data_db_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=1,
-    password=settings.redis_password,
+# Which Redis each of these talks to is decided in
+# shepherd_utils/redis_clients.py (one shared server by default).
+data_db_pool = redis_clients.async_pool(
+    redis_clients.DATA,
     max_connections=10,
     timeout=30,
     socket_timeout=5,
     socket_connect_timeout=10,
-    socket_keepalive=True,
     socket_keepalive_options={},
     health_check_interval=30,
     retry_on_timeout=True,
 )
 
-logs_db_pool = aioredis.BlockingConnectionPool(
-    host=settings.redis_host,
-    port=settings.redis_port,
-    db=3,
-    password=settings.redis_password,
+logs_db_pool = redis_clients.async_pool(
+    redis_clients.LOGS,
     max_connections=10,
     timeout=30,
     socket_timeout=5,
     socket_connect_timeout=10,
-    socket_keepalive=True,
     socket_keepalive_options={},
     health_check_interval=30,
     retry_on_timeout=True,
@@ -199,11 +239,8 @@ def _get_sync_data_db() -> redis.Redis:
     """Return a process-local sync Redis client for the data db."""
     global _sync_data_db_client
     if _sync_data_db_client is None:
-        _sync_data_db_client = redis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            db=1,
-            password=settings.redis_password,
+        _sync_data_db_client = redis_clients.sync_client(
+            redis_clients.DATA,
             socket_timeout=5,
             socket_connect_timeout=10,
             socket_keepalive=True,
@@ -232,6 +269,11 @@ def decompress_frame(blob: bytes) -> bytes:
     if zstandard.frame_content_size(blob) == -1:
         return decompress_zstd(blob)
     return zstandard.decompress(blob)
+
+
+# Compressed size over which ``get_message`` decompresses in a thread. Below
+# it, the thread hop costs more than the decompression it moves.
+OFF_LOOP_DECOMPRESS_BYTES = 1 << 20
 
 
 def decode_message(blob: bytes) -> Any:
@@ -506,9 +548,45 @@ async def apply_schema_upgrades() -> None:
         await conn.commit()
 
 
+async def check_connection_budget() -> None:
+    """Log loudly when the fleet budget can't fit the server (#223 C11-3).
+
+    A budget over what Postgres accepts means the fleet can still exhaust
+    max_connections, which is the failure the budget exists to prevent.
+    """
+    logger = logging.getLogger("shepherd.db")
+    budget = settings.postgres_connection_budget
+    if budget <= 0:
+        return
+    try:
+        async with pool.connection(settings.postgres_pool_timeout) as conn:
+            cur = await conn.execute(
+                "SELECT current_setting('max_connections')::int, "
+                "current_setting('superuser_reserved_connections')::int"
+            )
+            max_connections, reserved = await cur.fetchone()
+    except Exception as e:
+        logger.warning(f"Could not check the Postgres connection budget: {e}")
+        return
+    usable = max_connections - reserved
+    if budget > usable:
+        logger.error(
+            f"POSTGRES_CONNECTION_BUDGET ({budget}) exceeds what Postgres "
+            f"accepts ({max_connections} max_connections - {reserved} reserved "
+            f"= {usable}); the fleet can still run it out of connections"
+        )
+    else:
+        logger.info(
+            f"Postgres pool {POOL_MIN_SIZE}-{POOL_MAX_SIZE}: "
+            f"{settings.postgres_pool_shares}/{settings.postgres_fleet_shares} "
+            f"of a {budget}-connection budget ({usable} usable)"
+        )
+
+
 async def initialize_db() -> None:
     """Open connection and create db."""
     await pool.open()
+    await check_connection_budget()
     for attempt in range(PG_RETRIES):
         try:
             await apply_schema_upgrades()
@@ -556,10 +634,16 @@ async def add_query(
     try:
         await data_db_client.set(query_id, encode_message(query), ex=settings.redis_ttl)
         # The response starts as the query's message; the query-level members
-        # stay on the query only (see prepare_stored_response).
+        # stay on the query only (see prepare_stored_response). It gets an
+        # empty knowledge graph and results if the query has none, so every
+        # operation sees a complete message even when nothing is ever merged
+        # into it (e.g. a lookup that gets no answers back).
+        message = dict(query.get("message") or {})
+        for key, value in empty_message().items():
+            if message.get(key) is None:
+                message[key] = value
         response = prepare_stored_response(
-            {k: v for k, v in query.items() if k != "message"}
-            | {"message": dict(query.get("message") or {})}
+            {k: v for k, v in query.items() if k != "message"} | {"message": message}
         )
         await data_db_client.set(
             response_id, encode_message(response), ex=settings.redis_ttl
@@ -588,6 +672,150 @@ async def add_query(
             logger.error(f"Failed to save initial query state to db: {e}")
         raise Exception("Failed to save initial query state.")
     logger.debug(f"Adding query took {time.time() - start} seconds")
+
+
+# ---------------------------------------------------------------------------
+# Response seal
+#
+# Once finish_query has claimed a query (``claim_query_finish``) its response
+# is final: it is about to be POSTed to a callback, handed to the ARS, read by
+# a sync caller and archived. Nothing else kept it that way. Delivery is at
+# least once, so a redelivered or reclaimed task, a merge pass already in
+# flight, a late callback or a slow operation could all still save over it.
+# finish_query therefore seals the response right after its own last write,
+# and every write of a message blob from then on checks the seal and is
+# refused (``ResponseSealedError``) instead of landing.
+#
+# The check and the write are one optimistic transaction (WATCH the seal,
+# check it, MULTI/SET/EXEC, retry on WatchError), so a writer that checked
+# just before the seal went on cannot slip its write in after it: setting the
+# seal changes the watched key, its EXEC is aborted, and the retry sees the
+# seal. Not a Lua script, which would be one round trip fewer but which the
+# fakeredis the tests run on cannot execute.
+#
+# The guard is in the lowest-level writers (``save_encoded_message`` and
+# ``save_message_sync``), not just ``save_response``, so no path that stores a
+# blob by a sealed id gets around it. An id that is never sealed -- a query, a
+# callback payload, an ARS message -- costs one EXISTS on top of the SET.
+# ``add_query`` writes the initial response with a plain SET: nothing can be
+# sealed before the query exists.
+# ---------------------------------------------------------------------------
+
+_SEALED_PREFIX = "response_sealed:"
+# WatchError retries before giving up on a write. The seal is set once per
+# query, so a second abort is already unlikely; this only bounds a pathological
+# churn of the seal key. A give-up raises the WatchError, which the callers'
+# ordinary failure handling (retries, then raise or log) deals with.
+SEAL_WATCH_ATTEMPTS = 5
+
+
+def sealed_key(response_id: str) -> str:
+    return f"{_SEALED_PREFIX}{response_id}"
+
+
+class ResponseSealedError(Exception):
+    """A write to a response whose query has already finished was refused.
+
+    Its own type, rather than a plain failure, because it is not one: the
+    query is done and its response is exactly what was delivered, so the
+    writer has nothing to retry and nothing to report to the caller. Treated
+    as a failure it would be retried, and then sent to ``finish_query`` as an
+    ERROR -- which is refused by the claim anyway, but only after logging an
+    error with a traceback for a query that went fine. The task lifecycle
+    (``run_task_lifecycle``) and the merge worker catch it, log it once at
+    WARNING, ACK the task and stop, without handing the query on to its next
+    operation. It always propagates out of the save functions, whatever
+    ``raise_on_failure`` says: that flag is about losing a write to a storage
+    failure, and here there is nothing lost.
+
+    Built from the id alone so it pickles: process-pool children raise it to
+    their parent.
+    """
+
+    def __init__(self, response_id: str):
+        super().__init__(response_id)
+        self.response_id = response_id
+
+    def __str__(self) -> str:
+        return (
+            f"response {self.response_id} is sealed: its query has already "
+            "finished, so the write was refused"
+        )
+
+
+async def seal_response(response_id: str, logger: logging.Logger) -> bool:
+    """Seal ``response_id``: from now on every write of it is refused.
+
+    Lives ``redis_ttl`` from now. The response's own TTL was set by its last
+    write, which came before this (later ones are refused), and is only ever
+    shortened after that (``release_hot_copies``), so the seal always outlives
+    the response it protects. Idempotent: a finish_query that takes over a
+    crashed finisher's claim seals again, which only pushes the seal's expiry
+    further out.
+
+    True once sealed. A Redis failure is retried and then logged, not raised:
+    the seal protects the delivery, and losing it must not cost the caller
+    their response.
+    """
+    for attempt in range(REDIS_RETRIES):
+        try:
+            await data_db_client.set(
+                sealed_key(response_id), b"1", ex=settings.redis_ttl
+            )
+            return True
+        except Exception as e:
+            if attempt == REDIS_RETRIES - 1:
+                logger.error(
+                    f"Could not seal response {response_id}; a late task could "
+                    f"still overwrite it: {e}"
+                )
+                return False
+            await asyncio.sleep(0.1 * (2**attempt))
+    return False
+
+
+async def is_response_sealed(response_id: str) -> bool:
+    """Whether ``response_id``'s query has finished (``seal_response``)."""
+    return bool(await data_db_client.exists(sealed_key(response_id)))
+
+
+async def _set_unless_sealed(message_id: str, blob: bytes) -> None:
+    """SET ``message_id`` for ``redis_ttl``, atomically with a check that it
+    is not sealed. Raises ``ResponseSealedError`` if it is."""
+    seal = sealed_key(message_id)
+    async with data_db_client.pipeline(transaction=True) as pipe:
+        for attempt in range(SEAL_WATCH_ATTEMPTS):
+            try:
+                await pipe.watch(seal)
+                if await pipe.exists(seal):
+                    raise ResponseSealedError(message_id)
+                pipe.multi()
+                pipe.set(message_id, blob, ex=settings.redis_ttl)
+                await pipe.execute()
+                return
+            except redis.WatchError:
+                # The seal changed between the check and the EXEC; nothing
+                # was written. Look again.
+                if attempt == SEAL_WATCH_ATTEMPTS - 1:
+                    raise
+
+
+def _set_unless_sealed_sync(message_id: str, blob: bytes) -> None:
+    """``_set_unless_sealed`` for the process-pool workers."""
+    seal = sealed_key(message_id)
+    with _get_sync_data_db().pipeline(transaction=True) as pipe:
+        for attempt in range(SEAL_WATCH_ATTEMPTS):
+            try:
+                pipe.watch(seal)
+                if pipe.exists(seal):
+                    raise ResponseSealedError(message_id)
+                pipe.multi()
+                pipe.set(message_id, blob, ex=settings.redis_ttl)
+                pipe.execute()
+                return
+            except redis.WatchError:
+                if attempt == SEAL_WATCH_ATTEMPTS - 1:
+                    raise
 
 
 async def save_message(
@@ -630,11 +858,14 @@ async def save_encoded_message(
     raise_on_failure: bool = False,
 ):
     """Store an already-encoded message blob, retrying as ``save_message``
-    does."""
+    does. Raises ``ResponseSealedError``, without retrying, for a sealed
+    response (``seal_response``)."""
     start = time.time()
     try:
-        await data_db_client.set(message_id, blob, ex=settings.redis_ttl)
+        await _set_unless_sealed(message_id, blob)
         logger.debug(f"Saving message took {time.time() - start} seconds")
+    except ResponseSealedError:
+        raise
     except Exception as e:
         # failed to put message in db
         if num_tries < 4:
@@ -692,8 +923,31 @@ async def save_response(
     Every write of a response goes through here (or ``save_response_sync``):
     it is what guarantees a stored response carries no delivery envelope, so
     ``finish_query`` can add one to the stored bytes without decoding them.
+
+    Raises once ``save_message``'s retries are spent, unless the caller passes
+    ``raise_on_failure=False``. A response that silently fails to save lets
+    the workflow carry on from the previous one, as if the operation had
+    produced nothing; raising sends the query to ``finish_query`` as an error
+    instead.
+
+    Once the query has finished its response is sealed, and this raises
+    ``ResponseSealedError`` (whatever ``raise_on_failure`` says) and leaves
+    the stored response as it was delivered.
     """
+    kwargs.setdefault("raise_on_failure", True)
     await save_message(response_id, prepare_stored_response(response), logger, **kwargs)
+
+
+async def delete_messages(message_ids: List[str], logger: logging.Logger) -> None:
+    """Delete stored payloads that nothing will read again (a query's
+    callback payloads, once folded into its response). Best-effort: one this
+    misses simply lives out its TTL."""
+    if not message_ids:
+        return
+    try:
+        await data_db_client.delete(*message_ids)
+    except Exception as e:
+        logger.warning(f"Failed to delete {len(message_ids)} stored payloads: {e}")
 
 
 class ResponseTooLargeError(Exception):
@@ -760,6 +1014,37 @@ async def get_response_size(message_id: str) -> int:
     return int(await data_db_client.strlen(message_id))
 
 
+async def get_response_sizes(message_ids: List[str]) -> List[int]:
+    """``get_response_size`` for many blobs in one round trip.
+
+    The header probes go out in one pipeline rather than one request per
+    blob (#218, C4-8); only a blob whose header carries no content size
+    costs a second request, for its ``STRLEN``.
+    """
+    if not message_ids:
+        return []
+    async with data_db_client.pipeline(transaction=False) as pipe:
+        for message_id in message_ids:
+            pipe.getrange(message_id, 0, _ZSTD_HEADER_PROBE_BYTES - 1)
+        headers = await pipe.execute()
+    sizes = []
+    for message_id, header in zip(message_ids, headers):
+        if not header:
+            sizes.append(0)
+            continue
+        if isinstance(header, str):
+            header = header.encode("latin-1")
+        try:
+            size = zstandard.frame_content_size(header)
+        except zstandard.ZstdError:
+            size = -1
+        if size and size > 0:
+            sizes.append(int(size))
+        else:
+            sizes.append(int(await data_db_client.strlen(message_id)))
+    return sizes
+
+
 async def enforce_response_size_limit(
     response_id: str,
     logger: logging.Logger,
@@ -803,13 +1088,23 @@ async def get_message(
     if blob is None:
         raise KeyError(f"Failed to get {message_id} from db")
 
-    if raw:
-        result = decompress_frame(blob)
-        logger.debug(f"Getting raw message took {time.time() - start} seconds")
-        return result
-
     start_decomp = time.time()
-    message = decode_message(blob)
+    if len(blob) > OFF_LOOP_DECOMPRESS_BYTES:
+        # zstd releases the GIL, so a big blob decompresses in a thread while
+        # the loop keeps serving heartbeats, db connections and other tasks.
+        # On the loop, a multi-hundred-MB response stalled all of them.
+        data = await asyncio.to_thread(decompress_frame, blob)
+    else:
+        data = decompress_frame(blob)
+    del blob
+    if raw:
+        logger.debug(f"Getting raw message took {time.time() - start} seconds")
+        return data
+
+    # orjson holds the GIL for the whole parse, so moving it to a thread would
+    # stall the loop all the same; callers that only forward the payload
+    # should ask for ``raw`` instead.
+    message = orjson.loads(data)
     logger.debug(f"Decompression took {time.time() - start_decomp}")
     logger.debug(f"Getting message took {time.time() - start} seconds")
     return message
@@ -1030,16 +1325,14 @@ def get_message_sync(message_id: str) -> Dict:
 
 
 def save_message_sync(message_id: str, message: dict[str, Any]) -> None:
-    """Synchronously encode and store a message in the data db."""
-    _get_sync_data_db().set(
-        message_id,
-        encode_message(message),
-        ex=settings.redis_ttl,
-    )
+    """Synchronously encode and store a message in the data db. Raises
+    ``ResponseSealedError`` for a sealed response (``seal_response``)."""
+    _set_unless_sealed_sync(message_id, encode_message(message))
 
 
 def save_response_sync(response_id: str, response: dict[str, Any]) -> None:
-    """``save_response`` for the process-pool workers."""
+    """``save_response`` for the process-pool workers. Raises
+    ``ResponseSealedError`` once the query has finished."""
     save_message_sync(response_id, prepare_stored_response(response))
 
 
@@ -1212,13 +1505,17 @@ async def remove_callback_id(
     for attempt in range(PG_RETRIES):
         try:
             async with timed_connection("remove_callback_id", logger) as conn:
-                await conn.execute(
+                cursor = await conn.execute(
                     """
-                DELETE FROM callbacks WHERE callback_id = %s
+                DELETE FROM callbacks WHERE callback_id = %s RETURNING query_id
                 """,
                     (callback_id,),
                 )
+                row = await cursor.fetchone()
                 await conn.commit()
+            if row is not None:
+                # Wake the lookup worker waiting on this query's callbacks.
+                await completion.signal(completion.CALLBACKS, row[0])
             break
         except OperationalError as e:
             if is_disk_full_error(e):
@@ -1333,6 +1630,7 @@ async def cleanup_callbacks(
                     (query_id,),
                 )
                 await conn.commit()
+            await completion.signal(completion.CALLBACKS, query_id)
             break
         except OperationalError as e:
             if is_disk_full_error(e):
@@ -1351,6 +1649,47 @@ async def cleanup_callbacks(
 
 class QueryDataLostError(KeyError):
     """A running query's query or response blob is gone from the data db."""
+
+
+async def wait_for_lookups(
+    query_id: str,
+    response_id: str,
+    max_wait: float,
+    logger: logging.Logger,
+    get_running=None,
+    abandon=None,
+) -> List[str]:
+    """Wait for every lookup callback of ``query_id`` to be merged.
+
+    Returns the callbacks still running: empty once all are back, else what
+    was outstanding when ``max_wait`` ran out. ``abandon_lookup_if_data_lost``
+    runs on every check, and its ``QueryDataLostError`` propagates.
+
+    Woken by ``completion.CALLBACKS`` whenever a callback row is removed, so
+    a lookup moves on as soon as its last callback is merged rather than on
+    the next one-second poll; it still re-checks on its own, backing off to
+    every few seconds (#221). The lookup workers pass their own module's
+    ``get_running_callbacks`` / ``abandon_lookup_if_data_lost``.
+    """
+    get_running = get_running or get_running_callbacks
+    abandon = abandon or abandon_lookup_if_data_lost
+    running: List[str] = [""]
+
+    async def _check():
+        nonlocal running
+        try:
+            running = await get_running(query_id, logger)
+        except Exception:
+            # Try again on the next check rather than giving up.
+            return None
+        # fail now if the query data the callbacks merge into is gone
+        await abandon(query_id, response_id, running, logger)
+        return True if len(running) == 0 else None
+
+    if await completion.wait_for(completion.CALLBACKS, query_id, _check, max_wait):
+        logger.debug("Got all lookups back. Continuing...")
+        return []
+    return running
 
 
 async def abandon_lookup_if_data_lost(
@@ -1547,6 +1886,23 @@ async def find_queries_with_lost_data(
     return lost
 
 
+async def find_unfinished_queries(min_age_sec: float) -> List[Dict[str, Any]]:
+    """Every unfinished query started more than ``min_age_sec`` ago, as
+    ``{"qid", "response_id"}``. Errors propagate."""
+    async with pool.connection(settings.postgres_pool_timeout) as conn:
+        cur = await conn.execute(
+            """
+            SELECT b.qid, b.response_id
+            FROM shepherd_brain b
+            WHERE b.state NOT IN ('COMPLETED', 'ABANDONED')
+              AND b.start_time < NOW() - make_interval(secs => %s)
+            """,
+            (float(min_age_sec),),
+        )
+        rows = await cur.fetchall()
+    return [{"qid": qid, "response_id": response_id} for qid, response_id in rows]
+
+
 async def purge_old_queries(
     retention_days: int, logger: logging.Logger
 ) -> Dict[str, int]:
@@ -1722,25 +2078,102 @@ async def get_query_state(
     return query_state
 
 
+# How long a finish claim (state FINISHING) is honoured before another
+# finish_query may take it over: longer than one delivery can take (two 120s
+# callback attempts plus backoff), so a live delivery is never doubled, but
+# short enough that a task reclaimed after its finisher crashed still
+# delivers well before the abandoned-query reaper.
+FINISH_CLAIM_TIMEOUT_SEC = 600
+
+
+async def claim_query_finish(query_id: str, logger: logging.Logger) -> bool:
+    """Claim the right to finish ``query_id``: True for exactly one caller.
+
+    The pipeline delivers tasks at least once, and several paths can each
+    queue a finish_query for the same query (deadline expiry, the failure
+    path, a reclaimed task), so a query could be delivered to its caller
+    twice. The claim moves the query to FINISHING in one conditional UPDATE,
+    so only the winner delivers. A COMPLETED query, or one another finisher
+    claimed within ``FINISH_CLAIM_TIMEOUT_SEC``, is not claimed again. An
+    ABANDONED one is: the reaper never told its caller, so a late finish
+    still should. ``stop_time`` doubles as the claim time until completion
+    overwrites it.
+
+    Raises ``DatabaseUnavailableError`` when Postgres can't be reached.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(PG_RETRIES):
+        try:
+            async with timed_connection("claim_query_finish", logger) as conn:
+                cursor = await conn.execute(
+                    """
+                UPDATE shepherd_brain SET state = 'FINISHING', stop_time = NOW()
+                WHERE qid = %s
+                  AND state <> 'COMPLETED'
+                  AND NOT (
+                    state = 'FINISHING'
+                    AND stop_time > NOW() - make_interval(secs => %s)
+                  )
+                RETURNING qid
+                """,
+                    (query_id, float(FINISH_CLAIM_TIMEOUT_SEC)),
+                )
+                row = await cursor.fetchone()
+                await conn.commit()
+            return row is not None
+        except OperationalError as e:
+            last_error = e
+            if is_disk_full_error(e):
+                log_pg_disk_full(logger, "claim_query_finish", e)
+                break
+            logger.error(
+                f"Connection error claiming query finish (attempt {attempt}): {e}"
+            )
+            await asyncio.sleep(0.1 * (2**attempt))
+    raise DatabaseUnavailableError(
+        f"Couldn't claim the finish of query {query_id}: {last_error}"
+    ) from last_error
+
+
 async def set_query_completed(
     query_id: str,
     status: str,
     logger: logging.Logger,
+    description: Optional[str] = None,
 ):
-    """This query is done."""
+    """This query is done.
+
+    ``description`` is the client-safe reason a failed query gave (see
+    ``shepherd_utils.query_errors``); ``/query`` and ``/asyncquery_status``
+    report it. Left alone when not given.
+    """
     for attempt in range(PG_RETRIES):
         try:
             async with timed_connection("set_query_completed", logger) as conn:
-                await conn.execute(
-                    """
+                if description is None:
+                    await conn.execute(
+                        """
                 UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s WHERE qid = %s
                 """,
-                    (
-                        status,
-                        query_id,
-                    ),
-                )
+                        (
+                            status,
+                            query_id,
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                UPDATE shepherd_brain SET stop_time = NOW(), state = 'COMPLETED', status = %s, description = %s WHERE qid = %s
+                """,
+                        (
+                            status,
+                            description,
+                            query_id,
+                        ),
+                    )
                 await conn.commit()
+            # Wake whoever waits on this query (sync /query, ARAX streams).
+            await completion.signal(completion.DONE, query_id)
             break
         except OperationalError as e:
             if is_disk_full_error(e):

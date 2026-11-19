@@ -5,6 +5,7 @@ import logging.config
 import multiprocessing
 import os
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
@@ -137,6 +138,33 @@ def resolve_log_level(name, default: int = logging.INFO) -> int:
     return LOG_LEVELS.get(str(name).upper(), default)
 
 
+def transient_logger(name: str, parent: logging.Logger) -> logging.Logger:
+    """A logger for one task or request, freed once nothing references it.
+
+    ``logging.getLogger`` registers every name it is given with the logging
+    manager for the life of the process. Named per query, task or callback,
+    those loggers -- and the query log handler and its queue hanging off each
+    -- were never freed, so a pod's memory grew with every query it served
+    (#216). This one is built directly and never registered: records still
+    propagate to ``parent`` (and from there to the console), and the logger
+    goes away with the task or request that holds it.
+    """
+    logger = _TransientLogger(name)
+    logger.parent = parent
+    return logger
+
+
+class _TransientLogger(logging.Logger):
+    """A logger the logging manager doesn't track (see ``transient_logger``)."""
+
+    def setLevel(self, level):
+        super().setLevel(level)
+        # The manager clears the level caches of the loggers it tracks, which
+        # don't include this one: clear ours, or a level raised or lowered
+        # after the first record would be ignored.
+        self._cache.clear()
+
+
 def get_query_handler(logger: logging.Logger):
     """Return the query log handler attached to ``logger``, or None."""
     return next(
@@ -161,6 +189,38 @@ def attach_query_handler(logger: logging.Logger) -> QueryLogHandler:
         handler = QueryLogger().log_handler
         logger.addHandler(handler)
     return handler
+
+
+@contextmanager
+def pool_task_logger(stream: str, log_level: int):
+    """The logger for one task run in a process-pool child, and its handler.
+
+    A task's own logger can't be handed to a pool child: it is unregistered
+    (see ``transient_logger``), so it can't be pickled, and its query log
+    handler lives in the parent anyway. A pool entrypoint takes the task's log
+    *level* instead, logs through this, and returns ``handler.drain()`` for the
+    parent to fold into the query's logs with ``ingest_query_logs``.
+
+    ``logging.getLogger`` hands back the same object for the whole life of the
+    child, so the handler is call-scoped and removed on exit -- otherwise
+    handlers would accumulate across the child's successive tasks and one
+    query's logs would leak into the next.
+    """
+    handler = QueryLogger().log_handler
+    logger = get_worker_logger(f"{stream}.worker.{os.getpid()}")
+    logger.setLevel(log_level)
+    logger.addHandler(handler)
+    try:
+        yield logger, handler
+    finally:
+        logger.removeHandler(handler)
+
+
+def ingest_query_logs(logger: logging.Logger, entries) -> None:
+    """Fold a pool child's drained log entries into ``logger``'s query logs."""
+    handler = get_query_handler(logger)
+    if handler is not None and entries:
+        handler.ingest(entries)
 
 
 def get_logging_config():

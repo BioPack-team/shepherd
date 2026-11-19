@@ -10,6 +10,7 @@ deadlock the worker.
 
 import asyncio
 import os
+import time
 
 from concurrent.futures.process import BrokenProcessPool
 
@@ -61,14 +62,14 @@ async def test_manager_recovers_after_child_dies():
         # Healthy pool runs a task fine.
         assert await pool.run(loop, _echo, "before") == "before"
 
-        first = pool._executor
+        first = pool._slots[0]
 
         # A child dying surfaces as BrokenProcessPool for the triggering task...
         with pytest.raises(BrokenProcessPool):
             await pool.run(loop, _suicide, None)
 
         # ...but the manager swaps in a fresh executor...
-        assert pool._executor is not first
+        assert pool._slots[0] is not first
 
         # ...so the next task runs on the healthy pool instead of re-raising.
         assert await pool.run(loop, _echo, "after") == "after"
@@ -86,14 +87,14 @@ async def test_run_times_out_kills_child_and_recovers():
     loop = asyncio.get_running_loop()
     pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=1.0)
     try:
-        first = pool._executor
+        first = pool._slots[0]
 
         # Child sleeps well past the 1s limit -> the run must time out.
         with pytest.raises(asyncio.TimeoutError):
             await pool.run(loop, _sleep, 30)
 
-        # The stuck child was killed and the pool replaced...
-        assert pool._executor is not first
+        # The stuck child was killed and its slot replaced...
+        assert pool._slots[0] is not first
 
         # ...so the next task runs on a healthy pool.
         assert await pool.run(loop, _echo, "after") == "after"
@@ -117,16 +118,16 @@ async def test_replace_is_idempotent_for_the_same_broken_pool():
     pool = ProcessPoolManager(max_workers=2, name="test pool")
     try:
         await pool.run(loop, _echo, "warmup")
-        broken = pool._executor
+        broken = pool._slots[0]
 
         # Two callers both observed `broken`; the first swaps it, the second is
         # a no-op (identity guard) rather than churning a second fresh pool.
-        await pool._replace(broken)
-        replaced_once = pool._executor
-        await pool._replace(broken)
+        await pool._replace(0, broken)
+        replaced_once = pool._slots[0]
+        await pool._replace(0, broken)
 
         assert replaced_once is not broken
-        assert pool._executor is replaced_once
+        assert pool._slots[0] is replaced_once
     finally:
         pool.shutdown()
 
@@ -135,18 +136,22 @@ def _noop():
     return None
 
 
+def _children(pool):
+    return sum(len(executor._processes) for executor in pool._slots)
+
+
 async def test_warmup_spawns_every_child_up_front():
     """With a warmup hook every child is spawned when the pool is built (and
     rebuilt), not lazily on the first real tasks."""
     loop = asyncio.get_running_loop()
     pool = ProcessPoolManager(max_workers=2, name="test pool", warmup=_noop)
     try:
-        assert len(pool._executor._processes) == 2
-        first = pool._executor
+        assert _children(pool) == 2
+        first = list(pool._slots)
         with pytest.raises(BrokenProcessPool):
             await pool.run(loop, _suicide, None)
-        assert pool._executor is not first
-        assert len(pool._executor._processes) == 2
+        assert pool._slots != first
+        assert _children(pool) == 2
         assert await pool.run(loop, _echo, "ok") == "ok"
     finally:
         pool.shutdown()
@@ -155,6 +160,285 @@ async def test_warmup_spawns_every_child_up_front():
 async def test_no_warmup_keeps_children_lazy():
     pool = ProcessPoolManager(max_workers=2, name="test pool")
     try:
-        assert len(pool._executor._processes) == 0
+        assert _children(pool) == 0
     finally:
         pool.shutdown()
+
+
+# --- one task's death or timeout costs only that task (#212) --------------
+
+
+async def _until_spawned(pool, count, timeout=20.0):
+    """Wait until ``count`` warmed-up children have finished starting."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        started = [
+            executor
+            for executor in pool._slots
+            if executor._processes and executor._idle_worker_semaphore._value > 0
+        ]
+        if len(started) >= count:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("pool children did not start")
+
+
+def _slow_echo(value):
+    import time
+
+    time.sleep(1.5)
+    return value
+
+
+def _die_soon(_):
+    import time
+
+    time.sleep(0.3)
+    os._exit(1)
+
+
+async def test_a_child_dying_does_not_fail_the_task_beside_it():
+    """An OOM kill of one task's child used to break the shared executor and
+    fail every task in flight with it."""
+    loop = asyncio.get_running_loop()
+    # Warmed up so both children exist before either task starts: spawned on
+    # demand, the second task can queue behind the first in a single child,
+    # and the two never overlap.
+    pool = ProcessPoolManager(max_workers=2, name="test pool", warmup=_noop)
+    try:
+        await _until_spawned(pool, 2)
+        bystander = asyncio.ensure_future(pool.run(loop, _slow_echo, "survived"))
+        await asyncio.sleep(0.1)
+        with pytest.raises(BrokenProcessPool):
+            await pool.run(loop, _die_soon, None)
+        assert await bystander == "survived"
+    finally:
+        pool.shutdown()
+
+
+async def test_a_timeout_does_not_kill_the_task_beside_it():
+    """A timed-out task's child is killed; the other running task is not."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(
+        max_workers=2, name="test pool", task_timeout=1.0, warmup=_noop
+    )
+    try:
+        await _until_spawned(pool, 2)
+        stuck = asyncio.ensure_future(pool.run(loop, _sleep, 30))
+        await asyncio.sleep(0.6)
+        bystander = asyncio.ensure_future(pool.run(loop, _echo, "survived"))
+        with pytest.raises(asyncio.TimeoutError):
+            await stuck
+        assert await bystander == "survived"
+    finally:
+        pool.shutdown()
+
+
+async def test_the_timeout_starts_when_the_task_gets_a_slot():
+    """Waiting for a busy slot doesn't count against a task's timeout."""
+    loop = asyncio.get_running_loop()
+    # Warmed up and waited for: spawning the child on the first task's clock
+    # could push it past 2s on a loaded CI runner, which isn't what this test
+    # is about.
+    pool = ProcessPoolManager(
+        max_workers=1, name="test pool", task_timeout=2.0, warmup=_noop
+    )
+    try:
+        await _until_spawned(pool, 1)
+        first = asyncio.ensure_future(pool.run(loop, _slow_echo, "first"))
+        await asyncio.sleep(0.1)
+        second = asyncio.ensure_future(pool.run(loop, _slow_echo, "second"))
+        assert await first == "first"
+        assert await second == "second"
+    finally:
+        pool.shutdown()
+
+
+async def test_a_per_call_timeout_tightens_the_pools():
+    """run(..., timeout=) cuts this call short of the pool's own ceiling."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    try:
+        started = loop.time()
+        with pytest.raises(asyncio.TimeoutError):
+            await pool.run(loop, _sleep, 30, timeout=1.0)
+        assert loop.time() - started < 20
+        assert await pool.run(loop, _echo, "after") == "after"
+    finally:
+        pool.shutdown()
+
+
+# --- run_within_budget (#245) ------------------------------------------------
+
+
+def _fields(seconds_left):
+    from shepherd_utils.task_deadline import DEADLINE_FIELD
+
+    return {DEADLINE_FIELD: f"{time.time() + seconds_left:.3f}"}
+
+
+async def test_a_query_budget_shorter_than_the_pool_timeout_bounds_the_task():
+    """The task is cut off when its query's budget runs out and the query is
+    told so (TIMEOUT, naming the step), not held for the pool's full ceiling."""
+    from shepherd_utils.query_errors import QueryTimedOut
+
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    try:
+        started = loop.time()
+        with pytest.raises(QueryTimedOut) as raised:
+            await pool.run_within_budget(loop, _fields(1.0), "Test step", _sleep, 30)
+        assert loop.time() - started < 20
+        assert raised.value.query_status == "TIMEOUT"
+        assert raised.value.description.startswith("Test step")
+        # the slot was rebuilt and works
+        assert await pool.run(loop, _echo, "after") == "after"
+    finally:
+        pool.shutdown()
+
+
+async def test_the_pool_timeout_still_applies_when_the_budget_is_longer():
+    """A task slower than the pool's ceiling while its query still has time is
+    the task's failure, not the query's TIMEOUT."""
+    from shepherd_utils.query_errors import QueryTimedOut
+
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=1.0)
+    try:
+        with pytest.raises(asyncio.TimeoutError) as raised:
+            await pool.run_within_budget(loop, _fields(3600), "Test step", _sleep, 30)
+        assert not isinstance(raised.value, QueryTimedOut)
+    finally:
+        pool.shutdown()
+
+
+async def test_a_query_already_out_of_budget_is_not_started(mocker):
+    from shepherd_utils.query_errors import QueryTimedOut
+
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    run = mocker.spy(pool, "run")
+    try:
+        with pytest.raises(QueryTimedOut):
+            await pool.run_within_budget(loop, _fields(-1), "Test step", _echo, "x")
+        run.assert_not_called()
+    finally:
+        pool.shutdown()
+
+
+async def test_a_task_without_a_deadline_just_runs():
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=60.0)
+    try:
+        assert await pool.run_within_budget(loop, {}, "Test step", _echo, "x") == "x"
+    finally:
+        pool.shutdown()
+
+
+async def test_a_slot_is_held_for_its_block_and_runs_in_it():
+    """slot() claims a child for the whole block: run() waits behind it, and
+    the block's own work runs without queueing again."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        async with pool.slot() as slot:
+            other = asyncio.ensure_future(pool.run(loop, _echo, "other"))
+            await asyncio.sleep(0.2)
+            assert not other.done()
+            assert await slot.run(loop, _echo, "mine") == "mine"
+        assert await asyncio.wait_for(other, timeout=30) == "other"
+    finally:
+        pool.shutdown()
+
+
+async def test_a_slot_is_released_when_its_block_raises():
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        with pytest.raises(RuntimeError):
+            async with pool.slot():
+                raise RuntimeError("boom")
+        assert await asyncio.wait_for(pool.run(loop, _echo, 1), timeout=30) == 1
+    finally:
+        pool.shutdown()
+
+
+# A task that starts processes of its own (catrax-pathfinder runs each BFS leg
+# in a nested pool). Killing only the child used to orphan them, and they kept
+# querying the retriever long after their task had been failed.
+def _start_grandchild_then(path, then):
+    import subprocess
+
+    grandchild = subprocess.Popen(["sleep", "60"])
+    with open(path, "w") as f:
+        f.write(str(grandchild.pid))
+    if then == "die":
+        os._exit(1)
+    time.sleep(60)
+
+
+def _gone(pid):
+    """True once ``pid`` has exited (a zombie nobody reaped counts as exited)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] in ("Z", "X")
+    except FileNotFoundError:
+        return True
+
+
+async def _grandchild_pid(path, timeout=20.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if os.path.exists(path) and open(path).read():
+            return int(open(path).read())
+        await asyncio.sleep(0.05)
+    raise AssertionError("the task never started its grandchild")
+
+
+async def _until_gone(pid, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not _gone(pid):
+        await asyncio.sleep(0.05)
+    return _gone(pid)
+
+
+async def test_a_timeout_kills_what_the_task_started(tmp_path):
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool", task_timeout=3.0)
+    path = str(tmp_path / "grandchild.pid")
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await pool.run(loop, _start_grandchild_then, path, "sleep")
+        grandchild = await _grandchild_pid(path)
+        assert await _until_gone(grandchild)
+    finally:
+        pool.shutdown()
+
+
+async def test_a_dead_childs_processes_are_killed_with_it(tmp_path):
+    """The OOM case: the child is already gone, what it started is not."""
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    path = str(tmp_path / "grandchild.pid")
+    try:
+        with pytest.raises(BrokenProcessPool):
+            await pool.run(loop, _start_grandchild_then, path, "die")
+        grandchild = await _grandchild_pid(path)
+        assert await _until_gone(grandchild)
+    finally:
+        pool.shutdown()
+
+
+async def test_a_child_leads_its_own_process_group():
+    loop = asyncio.get_running_loop()
+    pool = ProcessPoolManager(max_workers=1, name="test pool")
+    try:
+        pid, pgid = await pool.run(loop, _pid_and_pgid, None)
+        assert pgid == pid != os.getpgrp()
+    finally:
+        pool.shutdown()
+
+
+def _pid_and_pgid(_):
+    return os.getpid(), os.getpgrp()

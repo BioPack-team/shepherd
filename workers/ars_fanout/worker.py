@@ -34,7 +34,7 @@ from shepherd_utils.logger import get_worker_logger, resolve_log_level
 from shepherd_utils.task_deadline import deadline_field, query_deadline
 from shepherd_utils.trapi import query_log_level
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import get_tasks
+from shepherd_utils.shared import run_poll_loop
 
 STREAM = "ars.fanout"
 GROUP = "consumer"
@@ -44,10 +44,11 @@ tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
 
-async def _finalize_child(child_pk, parent_pk, payload, updates, logger):
-    """Persist a child transition; run the completion check when terminal."""
-    if payload is not None:
-        await ars_db.save_message_data(child_pk, payload, logger)
+async def _finalize_child(child_pk, parent_pk, updates, logger):
+    """Persist a child transition; run the completion check when terminal.
+
+    Nothing is saved under the child: its entry in the data store is its
+    ARA's response, which only the ARA's pipeline writes."""
     updated = await ars_db.update_message(child_pk, **updates)
     if updated and updated["status"] in ("D", "S", "E", "U"):
         await ars_db.persist_data_copy(child_pk, logger)
@@ -64,8 +65,11 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
     """
     callback = handoff_callback_url(child_pk)
     data["callback"] = callback
-    query_id = str(uuid.uuid4())[:8]
-    response_id = str(uuid.uuid4())[:8]
+    query_id = shepherd_db.new_id()
+    # The child IS the ARA's response: one id, one entry in the data store.
+    # The ARA's pipeline writes it, finish_query seals and archives it, and
+    # the ARS serves it as the child's payload without ever writing it.
+    response_id = str(child_pk)
     # TRAPI 2.0: the client's log level is parameters.log_level
     level_number = resolve_log_level(
         query_log_level(data), resolve_log_level(settings.log_level)
@@ -98,7 +102,7 @@ async def dispatch(ara: aras.ARA, child_pk, parent, data, logger):
             exc_info=True,
         )
         await _finalize_child(
-            child_pk, parent["id"], data, {"status": "E", "code": 500}, logger
+            child_pk, parent["id"], {"status": "E", "code": 500}, logger
         )
 
 
@@ -134,10 +138,45 @@ async def ars_fanout(task, logger: logging.Logger):
         logger.warning(f"No ARAs enabled; completing {parent_pk} empty")
         await lifecycle.check_parent_completion(parent["id"], logger)
         return
+    # A redelivered fanout task (this worker died mid-fanout and the task was
+    # reclaimed) must not create a second child per ARA and send the query
+    # out again: fan out only to the ARAs that have no child yet.
+    fanned = {child["agent"] for child in await ars_db.get_children(parent_pk)}
+    missing = [ara for ara in targets if ara.agent not in fanned]
+    if len(missing) < len(targets):
+        logger.warning(
+            f"{parent_pk} already has children for "
+            f"{[a.name for a in targets if a not in missing]}; fanning out "
+            f"only to {[a.name for a in missing]}"
+        )
+    if not missing:
+        return
     parent_data = await ars_db.load_message_data(parent_pk, logger)
     await asyncio.gather(
-        *(send_to_ara(ara, parent, parent_data, logger) for ara in targets)
+        *(send_to_ara(ara, parent, parent_data, logger) for ara in missing)
     )
+
+
+async def fail_unfanned_parent(parent_pk, logger: logging.Logger) -> None:
+    """End a parent whose fanout failed before it created any children.
+
+    Parents are exempt from the watchdog, so a parent with no children has
+    nothing that will ever move it: it would stay Running forever (and, as a
+    cache leader, hold identical submits WAITING on it). It goes to E/500 like
+    any failed query, with the ars_error notification and the cache cleanup
+    the completion path gives an errored parent. A fanout that got as far as
+    creating children is left alone: those children reach a terminal status
+    (the watchdog times them out if nothing else) and complete the parent.
+    """
+    try:
+        if await ars_db.get_children(parent_pk):
+            return
+        if await lifecycle.fail_parent(parent_pk, logger):
+            logger.error(
+                f"Fanout for {parent_pk} failed with no children; parent E/500"
+            )
+    except Exception as e:
+        logger.error(f"Could not fail parent {parent_pk} after its fanout: {e}")
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
@@ -147,6 +186,8 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
             await ars_fanout(task, logger)
         except Exception as e:
             logger.error(f"Task {task[0]} failed: {e}", exc_info=True)
+            if task[1].get("parent_pk"):
+                await fail_unfanned_parent(task[1]["parent_pk"], logger)
         finally:
             try:
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
@@ -157,17 +198,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 
 async def poll_for_tasks():
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)
+    await run_poll_loop(STREAM, GROUP, CONSUMER, TASK_LIMIT, process_task)
 
 
 if __name__ == "__main__":

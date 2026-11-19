@@ -58,6 +58,14 @@ class CallbackURLError(ValueError):
     """
 
 
+class CallbackResolutionError(CallbackURLError):
+    """The callback's host could not be resolved (or not in time).
+
+    Unlike the other refusals this says nothing about the URL itself -- DNS
+    can fail briefly -- so a delivery that hits it is worth retrying.
+    """
+
+
 def parse_allowlist(value: str) -> Tuple[Set[str], List[IPNetwork]]:
     """Split ``callback_allowed_hosts`` into hostnames and networks.
 
@@ -150,14 +158,16 @@ async def resolve_host(host: str, port: int) -> List[IPAddress]:
             RESOLVE_TIMEOUT_SEC,
         )
     except (OSError, asyncio.TimeoutError, UnicodeError) as e:
-        raise CallbackURLError(
+        raise CallbackResolutionError(
             "Invalid callback URL: its host could not be resolved."
         ) from e
     # sockaddr[0] can carry an IPv6 zone ("fe80::1%eth0"); the zone is not part
     # of the address.
     addresses = {ipaddress.ip_address(info[4][0].split("%")[0]) for info in infos}
     if not addresses:
-        raise CallbackURLError("Invalid callback URL: its host could not be resolved.")
+        raise CallbackResolutionError(
+            "Invalid callback URL: its host could not be resolved."
+        )
     return list(addresses)
 
 

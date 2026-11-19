@@ -107,3 +107,57 @@ async def test_collect_heartbeats_reaps_dead_persistent_keys(redis_mock, monkeyp
     assert [w["consumer"] for w in workers] == ["live"]
     # The dead worker's key was reaped from the keyspace.
     assert await broker.get(dead_key) is None
+
+
+def test_rollup_reports_distinct_versions():
+    """Each replica's image version is carried through, and the bucket lists the
+    distinct versions so the dashboard can flag a mixed fleet mid-rollout.
+    Replicas that predate version reporting show as "unknown"."""
+    workers = [
+        {**_hb("c1", in_flight=0, rss=1, cpu=0.0), "version": "v1.2.0"},
+        {**_hb("c2", in_flight=0, rss=1, cpu=0.0), "version": "v1.3.0"},
+        {**_hb("c3", in_flight=0, rss=1, cpu=0.0), "version": "v1.3.0"},
+        _hb("c4", in_flight=0, rss=1, cpu=0.0),
+    ]
+
+    bucket = poller._rollup_workers(workers)["merge_message"]
+
+    assert bucket["versions"] == ["unknown", "v1.2.0", "v1.3.0"]
+    consumers = {c["consumer"]: c for c in bucket["consumers"]}
+    assert consumers["c1"]["version"] == "v1.2.0"
+    assert consumers["c4"]["version"] is None
+
+
+def _load(xlen, pending, task_limit_total=10):
+    rollup = {"merge_message": {"task_limit_total": task_limit_total}}
+    poller._attach_load_to_workers(
+        rollup, {"merge_message": {"xlen": xlen, "pending": pending}}
+    )
+    return rollup["merge_message"]
+
+
+def test_backlog_excludes_tasks_already_running():
+    """XLEN still counts entries a worker has read but not finished (they're
+    XDEL'd on completion), so one task in progress must not also show as
+    backlog."""
+    info = _load(xlen=1, pending=1)
+    assert info["backlog"] == 0
+    assert info["xlen"] == 1
+
+    info = _load(xlen=7, pending=3)
+    assert info["backlog"] == 4
+
+
+def test_backlog_never_negative():
+    """XLEN and XPENDING aren't read atomically; a skewed pair clamps to zero."""
+    assert _load(xlen=2, pending=5)["backlog"] == 0
+
+
+def test_utilization_counts_running_and_waiting():
+    """Utilization stays total load vs capacity, so a saturated worker type with
+    an empty queue still reads as busy."""
+    info = _load(xlen=10, pending=10, task_limit_total=10)
+    assert info["backlog"] == 0
+    assert info["utilization"] == 1.0
+    assert _load(xlen=3, pending=0, task_limit_total=0)["utilization"] == 1.0
+    assert _load(xlen=0, pending=0, task_limit_total=0)["utilization"] == 0.0

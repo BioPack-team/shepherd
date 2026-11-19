@@ -9,6 +9,8 @@
 #               | db_capacity | redis_eviction | stuck_pending
 #               | payload_store_capacity
 #   metric:     for type=threshold: xlen | callbacks_pending | pg_connection_count
+#               | pg_connection_pct (client backends, % of max_connections
+#               less the superuser-reserved slots)
 #   stream:     redis stream name (for xlen / queue_pending / stuck_pending;
 #               stuck_pending scans all streams when omitted)
 #   worker:     worker type name (for heartbeat_lost)
@@ -19,6 +21,18 @@
 #   duration:   how long the condition must hold before firing (e.g. 60s, 5m)
 #   cooldown:   how long to suppress repeat fires (default 10m)
 #   severity:   info | warning | critical
+#
+# Redis instances. Shepherd's four Redis roles (broker, data, lock, logs) are
+# one server by default and can each be given a Redis of their own
+# (REDIS_<ROLE>_HOST / REDIS_<ROLE>_SENTINEL_MASTER). Everything the monitor
+# checks about Redis -- the redis_eviction rule below and the automatic alerts
+# described in the comments -- is checked per instance, with separate state
+# (grace periods, cooldowns) for each. The instance serving the broker role
+# keeps the alert names used here (`redis_evicting`, `redis_memory_high`, ...);
+# any other instance's alerts have its name appended, e.g.
+# `redis_evicting@shepherd_data:6379` or `redis_memory_high@sentinel:payloads`,
+# and their text says which instance and which roles. With a single Redis
+# nothing is renamed or reworded.
 
 rules:
   # Queue backlog: any ARA entry stream that piles up for a minute.
@@ -107,9 +121,29 @@ rules:
   # fires at a time, re-notifies at most once a day while elevated, and emits a
   # redis_memory_recovered alert when usage falls back below the warning line.
   # Tune via the monitor_redis_memory_* settings (thresholds, grace, cooldown).
+  # Evaluated for every Redis instance. The footprint side of the check needs
+  # the container's memory limit: REDIS_MEMORY_LIMIT for the instance serving
+  # the broker role, REDIS_DATA_MEMORY_LIMIT / REDIS_LOCK_MEMORY_LIMIT /
+  # REDIS_LOGS_MEMORY_LIMIT for a role with a Redis of its own (unset skips
+  # the footprint check for that instance; data-vs-maxmemory still runs).
+  #
+  # Also automatic, per instance, when it is at or above
+  # MONITOR_REDIS_EVICTION_WINDOW_NEAR_CAP_PCT (90%) of maxmemory:
+  # `redis_eviction_window_short` (critical) when maxmemory / write rate --
+  # how long a newly written key survives once the instance is full and
+  # evicting -- is shorter than the longest query budget times a safety factor
+  # (ARS_TIMEOUT_MERGE_SEC x MONITOR_REDIS_EVICTION_WINDOW_SAFETY_FACTOR = 16
+  # minutes by default; or set MONITOR_REDIS_EVICTION_WINDOW_MIN_SEC). Below
+  # that, eviction takes the payloads of queries still running. The write
+  # rate is smoothed over MONITOR_REDIS_WRITE_RATE_WINDOW_SEC and the condition
+  # must hold for MONITOR_REDIS_MEMORY_GRACE_SEC, so a burst doesn't trip it.
+  # `redis_eviction_window_recovered` (info) when it clears.
 
   # Redis eviction: with volatile-ttl, any eviction means the cap was reached
   # and blobs are being shed. threshold 0 => alert on the first eviction.
+  # One rule covers every Redis instance: each has its own `duration` streak
+  # and cooldown, and an instance other than the broker role's alerts as
+  # `redis_evicting@<instance>`.
   - name: redis_evicting
     type: redis_eviction
     threshold: 0
@@ -133,19 +167,18 @@ rules:
 
   # Postgres health: connection saturation.
   #
-  # This counts backends on the database, so it has to clear the fleet's IDLE
-  # FLOOR -- every container holds POSTGRES_POOL_MIN_SIZE connections open for
-  # its whole life -- or it fires around the clock on a healthy system. With
-  # the full compose topology (including the `ars` profile; 29 DB-connecting
-  # containers: 26 at the default min 2, the two lookup workers at 10, the
-  # server at 3) that floor is ~75, and the
-  # all-pools-saturated ceiling is ~330 against max_connections=400. 250 sits
-  # well clear of the floor and of normal load while still warning before the
-  # cap. Recheck both numbers when workers are added or pool sizes change.
+  # Client backends as a share of what Postgres accepts (max_connections less
+  # superuser_reserved_connections), read live from the server (#223 C11-3).
+  # It used to be a raw count (250) that had to be recomputed by hand against
+  # the fleet's idle floor and max_connections whenever workers, pool sizes or
+  # replicas changed. The idle floor (every process holds its pool's min size
+  # open) is ~20% of max_connections on the compose topology, so 80% fires on
+  # load, not at rest, and still ahead of the point where new connections
+  # start being refused.
   - name: pg_connection_saturation
     type: threshold
-    metric: pg_connection_count
-    threshold: 250
+    metric: pg_connection_pct
+    threshold: 80
     duration: 1m
     severity: warning
 
@@ -154,10 +187,15 @@ rules:
   # these rules are a no-op until that env var is configured. The percentage is
   # based on pg_database_size + WAL, which under-counts true filesystem usage --
   # treat as early warning, not a replacement for an infra-level volume alert.
+  #
+  # Disk usage moves slowly and isn't fixed in minutes, so these re-notify far
+  # less often than the 10m default: the warning once a day, the critical tier
+  # every 2h while it holds.
   - name: pg_disk_almost_full
     type: db_capacity
     threshold: 80
     duration: 2m
+    cooldown: 24h
     severity: warning
     message: "Postgres data volume is over 80% full. Plan to grow the PVC soon."
 
@@ -165,6 +203,7 @@ rules:
     type: db_capacity
     threshold: 90
     duration: 1m
+    cooldown: 2h
     severity: critical
     message: "Postgres data volume is over 90% full. Grow the PVC now to avoid a crash."
 
@@ -200,5 +239,42 @@ rules:
 # (workers/monitor/recovery.py), and fires a `redis_restarted` (warning) alert:
 # Redis comes back from its last snapshot, so everything written after it is
 # gone. Once it has loaded, and MONITOR_REDIS_RESTART_GRACE_SEC later, queries
-# that lost their data in it are finished as errors, with one
-# `query_data_lost` (warning) alert per query, batched.
+# that lost their data in it -- or the task that would have moved them on --
+# are finished as errors, with one `query_data_lost` (warning) alert per
+# query, batched.
+#
+# Every Redis instance's run_id is watched, and what a restart sets off
+# depends on the roles the instance serves: the data role's instance holds the
+# payloads, so its restart runs the lost-data sweep; the broker role's holds
+# the task streams, so its restart runs the lost-task sweep; one serving only
+# locks and/or logs alerts and sweeps nothing. One shared Redis runs both, as
+# before. An instance other than the broker role's alerts as
+# `redis_restarted@<instance>`.
+#
+# Behind Sentinel a failover changes the run_id as well (another server is the
+# primary), and loses whatever the old primary had not replicated, so it
+# triggers the same sweeps. When the new primary is recognisably the old one's
+# promoted replica (its secondary replication id is the old primary's id) the
+# alert is `redis_failover` (warning) instead; when that can't be told, the
+# `redis_restarted` text says "restarted or failed over".
+#
+# Redis persistence is monitored automatically too, per instance:
+# `redis_persistence_failing` says which save failed and what it costs --
+#   * "AOF write failing: writes are not being persisted" (critical);
+#   * "AOF rewrite failed: no data lost yet, but the AOF will keep growing"
+#     (warning when it is the only failure);
+#   * "RDB snapshot failed" (critical), with whether an AOF still covers it.
+# It fires once, again if a warning becomes critical, and
+# `redis_persistence_recovered` (info) fires when every save succeeds again.
+#
+# Redis replication is monitored automatically, per instance, and is a no-op
+# for an instance that has never had a connected replica (the single-server
+# default). All of it is debounced by MONITOR_REDIS_REPLICA_GRACE_SEC (60s)
+# in both directions:
+#   * `redis_replicas_lost` when an instance has fewer connected replicas
+#     than it has had since the monitor started (warning; critical at zero),
+#     and `redis_replicas_recovered` (info) when they are all back;
+#   * `redis_replica_lagging` (warning) when a replica is still syncing, has
+#     not been heard from for MONITOR_REDIS_REPLICA_LAG_SEC (30s), or is more
+#     than MONITOR_REDIS_REPLICA_LAG_BYTES (256 MiB; 0 disables) behind, and
+#     `redis_replica_caught_up` (info) when none is.

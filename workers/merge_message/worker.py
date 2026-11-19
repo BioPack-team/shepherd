@@ -24,14 +24,18 @@ from shepherd_utils.broker import (
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import (
+    ResponseSealedError,
     bump_merge_crashes,
     clear_merge_crashes,
     clear_ready_callback,
     get_existing_callback_ids,
     get_merge_crashes,
+    delete_messages,
     get_message_sync,
     get_ready_callbacks,
     get_response_size,
+    get_response_sizes,
+    is_response_sealed,
     message_exists,
     remove_callback_id,
     save_logs,
@@ -50,7 +54,12 @@ from shepherd_utils.response_limit import (
     fail_response_too_large,
     get_too_large_reason,
 )
-from shepherd_utils.shared import filter_kgraph_orphans, get_tasks, merge_kgraph
+from shepherd_utils.shared import (
+    run_poll_loop,
+    filter_kgraph_orphans,
+    merge_kgraph,
+    on_graceful_shutdown,
+)
 from shepherd_utils.trapi import (
     add_binding_ids,
     binding_ids,
@@ -67,6 +76,11 @@ STREAM = "merge_message"
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
+# In-flight wake tasks per pool child. Enough that one child's next pass is
+# queued while its current one runs, and lock losers can ack without waiting
+# behind merges; few enough that, with several replicas, one pod doesn't pull
+# backlog it can't start on while another pod sits idle.
+TASKS_PER_POOL_CHILD = 2
 # Task field carrying how many times this wake task's merge has failed in a
 # row. See _reenqueue_wake_task.
 MERGE_ATTEMPT_FIELD = "merge_attempt"
@@ -91,8 +105,9 @@ def create_aux_graph(analysis):
     return aux_graph_id, aux_graph
 
 
-def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
-    """Create a new knowledge edge in the result message, with the aux graph ids as support."""
+def _inferred_edge(target, result_message, aux_graph_ids, answer):
+    """The knowledge edge Shepherd infers for ``answer``: the original query
+    edge's statement, supported by ``aux_graph_ids``."""
     # Find the subject, object, and predicate of the original query
     query_graph = result_message["message"]["query_graph"]
     # get the first key and value from the edges
@@ -115,8 +130,6 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
     # first set, as a KG edge's ``[{qualifier_type_id, qualifier_value}]``.
     qualifier_sets = qedge_qualifier_sets(qedge)
     qualifiers = qualifier_sets[0] if qualifier_sets else None
-    # Create a new knowledge edge
-    new_edge_id = str(uuid.uuid4())
     source = f"infores:shepherd-{target}"
     new_edge = {
         "subject": qnode_subject,
@@ -139,8 +152,63 @@ def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
     }
     if qualifiers:
         new_edge["qualifiers"] = qualifiers
-    result_message["message"]["knowledge_graph"]["edges"][new_edge_id] = new_edge
+    return new_edge
+
+
+def add_knowledge_edge(target, result_message, aux_graph_ids, answer):
+    """Create a new knowledge edge in the result message, with the aux graph ids as support."""
+    new_edge_id = str(uuid.uuid4())
+    result_message["message"]["knowledge_graph"]["edges"][new_edge_id] = _inferred_edge(
+        target, result_message, aux_graph_ids, answer
+    )
     return new_edge_id
+
+
+def _statement(edge) -> tuple:
+    """What an edge asserts: subject, predicate, object and qualifiers."""
+    return (
+        edge.get("subject"),
+        edge.get("predicate"),
+        edge.get("object"),
+        orjson.dumps(edge.get("qualifiers") or [], option=orjson.OPT_SORT_KEYS),
+    )
+
+
+def _support_attribute(edge) -> Optional[dict]:
+    for attribute in edge.get("attributes") or []:
+        if attribute.get("attribute_type_id") == "biolink:support_graphs":
+            return attribute
+    return None
+
+
+def _earlier_inferred_edges(target, result_message, lookup_results) -> dict:
+    """The edges Shepherd already inferred for this answer in an earlier fold,
+    by the statement they make.
+
+    They are bound in the accumulated result for the answer, which reaches
+    ``merge_answer`` among the ``lookup`` results. Reusing one -- rather than
+    minting another edge with the same statement on every fold -- is what
+    makes the merged answer the same however its rule callbacks happened to
+    be batched, as in ARAGORN's reference merge, which folds them all at once
+    (#218, C4-5).
+    """
+    kg_edges = result_message["message"]["knowledge_graph"]["edges"]
+    source = f"infores:shepherd-{target}"
+    found = {}
+    for result in lookup_results:
+        for analysis in result.get("analyses") or []:
+            for edge_id in edge_binding_ids(analysis):
+                edge = kg_edges.get(edge_id)
+                if edge is None or _support_attribute(edge) is None:
+                    continue
+                if not any(
+                    s.get("resource_id") == source
+                    and s.get("resource_role") == "primary_knowledge_source"
+                    for s in edge.get("sources") or []
+                ):
+                    continue
+                found.setdefault(_statement(edge), edge_id)
+    return found
 
 
 def merge_answer(target, result_message, answer, results, qnode_ids):
@@ -173,7 +241,16 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
     # also unify that.   If we decide to pass rules along with the answers, we'll have to be a bit
     # more careful.
     lookup_edgesets = [get_edgeset(result) for result in results["lookup"]]
-    creative_edgesets = set()
+    earlier = _earlier_inferred_edges(target, result_message, results["lookup"])
+    kg_edges = result_message["message"]["knowledge_graph"]["edges"]
+    aux_graphs = result_message["message"].get("auxiliary_graphs") or {}
+    # A rule result an earlier fold already turned into support for this
+    # answer is a repeat, as it would be within one fold.
+    creative_edgesets = {
+        frozenset((aux_graphs.get(aux_id) or {}).get("edges") or [])
+        for edge_id in earlier.values()
+        for aux_id in _support_attribute(kg_edges[edge_id]).get("value") or []
+    }
     creative_results = []
     for result in results["creative"]:
         creative_edges = get_edgeset(result)
@@ -213,6 +290,16 @@ def merge_answer(target, result_message, answer, results, qnode_ids):
     if len(aux_graph_ids) > 0:
         # only do this if there are creative results.  There could just be a lookup
         for nid in answer:
+            statement = _statement(
+                _inferred_edge(target, result_message, aux_graph_ids, nid)
+            )
+            existing_id = earlier.get(statement)
+            if existing_id is not None:
+                # Already inferred in an earlier fold (and bound through the
+                # lookup results below): add the new support to it.
+                support = _support_attribute(kg_edges[existing_id])
+                support["value"] = list(support.get("value") or []) + aux_graph_ids
+                continue
             knowledge_edge_id = add_knowledge_edge(
                 target, result_message, aux_graph_ids, nid
             )
@@ -442,11 +529,14 @@ def remove_promiscuous_knode_results(MAX_C, qnode, response):
         # MAX_C results)
         if max_count > MAX_C:
             still_going = True
-            # These are the indices of the results that we want to remove
-            mapped_result_indices = prom_counter[max_knode]
-            # Remove them from right to left, otherwise the indices change on you
-            for index in reversed(mapped_result_indices):
-                del response["message"]["results"][index]
+            # Rebuild the list without those results: deleting them one index
+            # at a time shifted the rest of the list on every delete (#218).
+            drop = set(prom_counter[max_knode])
+            response["message"]["results"] = [
+                result
+                for result_i, result in enumerate(response["message"]["results"])
+                if result_i not in drop
+            ]
 
 
 def filter_promiscuous_results(response, logger: logging.Logger):
@@ -486,83 +576,108 @@ def merge_messages(
     new_response: dict[str, Any],
     logger: logging.Logger,
 ):
-    pydantic_kgraph = {"nodes": {}, "edges": {}}
+    """Fold one callback's response into the accumulated ``response``."""
+    return merge_pass(target, original_query_graph, response, [new_response], logger)
+
+
+def _merge_aux_graphs(merged_aux: dict, src_aux: Optional[dict], logger) -> None:
+    """Fold ``src_aux`` into ``merged_aux`` in place. Reference adoption is
+    safe: the input messages are discarded after merging."""
+    if not src_aux:
+        return
+    for aux_id, aux_dict in src_aux.items():
+        existing = merged_aux.get(aux_id)
+        if existing is None:
+            merged_aux[aux_id] = aux_dict
+            continue
+        for key, val in aux_dict.items():
+            if key in existing:
+                if isinstance(existing[key], list):
+                    # combine both lists and then list/set it for uniqueness
+                    existing[key] = list(set(existing[key] + val))
+                else:
+                    logger.warning(f"Message had an invalid aux graph property: {key}")
+            else:
+                existing[key] = val
+
+
+def merge_pass(
+    target: str,
+    original_query_graph: dict[str, Any],
+    response: dict[str, Any],
+    new_responses: list[dict[str, Any]],
+    logger: logging.Logger,
+):
+    """Fold every callback of a merge pass into the accumulated ``response``.
+
+    Each fold used to rebuild the knowledge graph from scratch and regroup
+    and re-merge every accumulated result, so a query whose rule callbacks
+    arrived over many passes cost roughly callbacks x response size (#218,
+    C4-4). The knowledge graphs and aux graphs of the pass are now merged
+    into the accumulator in place, and the results are grouped and merged
+    once, at the end -- as ARAGORN's reference merge does with all of a
+    query's rule results.
+    """
     source = f"infores:shepherd-{target}"
-    filter_repeated_nodes(new_response, logger)
-    filter_promiscuous_results(new_response, logger)
-    for result_message in [response, new_response]:
-        result_kgraph = (
-            result_message["message"]["knowledge_graph"]
-            if result_message["message"].get("knowledge_graph") is not None
-            else {"nodes": {}, "edges": {}}
+    # Re-adopting the accumulated graph once a pass is what folding into a
+    # fresh one did: edges stored without the aggregator source gain it.
+    kgraph = merge_kgraph(
+        {"nodes": {}, "edges": {}},
+        response["message"].get("knowledge_graph") or {"nodes": {}, "edges": {}},
+        source,
+        logger,
+    )
+    merged_aux: dict = {}
+    _merge_aux_graphs(merged_aux, response["message"].get("auxiliary_graphs"), logger)
+
+    is_creative = "edges" in original_query_graph
+    answer_node_id = get_answer_node(original_query_graph) if is_creative else None
+    lookup_results = response["message"].get("results") or []
+    creative_results: list = []
+    last_response = None
+    for new_response in new_responses:
+        filter_repeated_nodes(new_response, logger)
+        filter_promiscuous_results(new_response, logger)
+        kgraph = merge_kgraph(
+            kgraph,
+            new_response["message"].get("knowledge_graph")
+            or {"nodes": {}, "edges": {}},
+            source,
+            logger,
         )
-        pydantic_kgraph = merge_kgraph(pydantic_kgraph, result_kgraph, source, logger)
-    # Construct the final result message, currently empty. There is no
-    # "logs" here: the query's logs live in the log store and are added when
-    # the response is delivered.
+        _merge_aux_graphs(
+            merged_aux, new_response["message"].get("auxiliary_graphs"), logger
+        )
+        if is_creative:
+            # The result with the direct lookup needs to be handled
+            # specially. It's the one with the lookup query graph.
+            if queries_equivalent(
+                new_response["message"]["query_graph"], original_query_graph
+            ):
+                lookup_results.extend(new_response["message"]["results"])
+            else:
+                creative_results.extend(new_response["message"].get("results") or [])
+        last_response = new_response
+
+    # Construct the final result message. There is no "logs" here: the
+    # query's logs live in the log store and are added when the response is
+    # delivered.
     result = {
         "message": {
             "query_graph": original_query_graph,
-            "knowledge_graph": pydantic_kgraph,
-            "results": [],
+            "knowledge_graph": kgraph,
+            "results": creative_results,
         },
     }
-    merged_aux = {}
-    for result_message in [response, new_response]:
-        src_aux = result_message["message"].get("auxiliary_graphs")
-        if not src_aux:
-            continue
-        # Reference adoption is safe: the input messages are discarded after
-        # merging, so nothing else is going to mutate these structures.
-        for aux_id, aux_dict in src_aux.items():
-            existing = merged_aux.get(aux_id)
-            if existing is None:
-                merged_aux[aux_id] = aux_dict
-                continue
-            for key, val in aux_dict.items():
-                if key in existing:
-                    if isinstance(existing[key], list):
-                        # combine both lists and then list/set it for uniqueness
-                        existing[key] = list(set(existing[key] + val))
-                    else:
-                        logger.warning(
-                            f"Message had an invalid aux graph property: {key}"
-                        )
-                else:
-                    existing[key] = val
     if merged_aux:
         result["message"]["auxiliary_graphs"] = merged_aux
 
-    # Determine type of message
-    if "edges" in original_query_graph:
-        # The result with the direct lookup needs to be handled specially.   It's the one with the lookup query graph
-        lookup_results = (
-            response["message"]["results"]
-            if response["message"].get("results") is not None
-            else []
-        )
-        is_direct_lookup = queries_equivalent(
-            new_response["message"]["query_graph"], original_query_graph
-        )
-        if is_direct_lookup:
-            lookup_results.extend(new_response["message"]["results"])
-        else:
-            result["message"]["results"].extend(
-                new_response["message"]["results"]
-                if new_response["message"].get("results") is not None
-                else []
-            )
-
-        answer_node_id = get_answer_node(original_query_graph)
+    if is_creative:
         if answer_node_id is None:
-            # This was a direct lookup outside of a creative query, just return it
-            merged_messages = new_response
-        else:
-            merged_messages = merge_results_by_node(
-                target, result, answer_node_id, lookup_results
-            )
-
-        return merged_messages
+            # A direct lookup outside of a creative query: the latest
+            # callback is the answer, as folding one at a time left it.
+            return last_response if last_response is not None else response
+        return merge_results_by_node(target, result, answer_node_id, lookup_results)
     elif "paths" in original_query_graph:
         # Pathfinder query: each callback is one of aragorn.pathfinder's edge
         # lookups, so only the knowledge graph accumulates here. The paths are
@@ -570,7 +685,7 @@ def merge_messages(
         _, og_path = next(iter(original_query_graph["paths"].items()))
         if og_path.get("subject") is None or og_path.get("object") is None:
             raise KeyError("Missing either subject or object from path.")
-        result["message"]["results"] = response["message"].get("results") or []
+        result["message"]["results"] = lookup_results
         return result
 
     raise TypeError("Unsupported query type.")
@@ -741,6 +856,7 @@ def merge_messages_by_ids(
         worker_logger.setLevel(query_level)
         merged: list[str] = []
         callback_log_entries: list[dict] = []
+        callback_responses: list[dict] = []
         for callback_id in callback_ids:
             callback_response = read_callback_response(callback_id, worker_logger)
             if callback_response is None:
@@ -750,16 +866,19 @@ def merge_messages_by_ids(
                     callback_response, callback_id, query_level, worker_logger
                 )
             )
-            accumulator = merge_messages(
-                target,
-                original_query_graph,
-                accumulator,
-                callback_response,
-                worker_logger,
-            )
+            callback_responses.append(callback_response)
             merged.append(callback_id)
 
         if merged:
+            # One fold for the whole pass (C4-4).
+            accumulator = merge_pass(
+                target,
+                original_query_graph,
+                accumulator,
+                callback_responses,
+                worker_logger,
+            )
+            del callback_responses
             save_response_sync(response_id, accumulator)
         # drain() hands back oldest-first, which is the order the parent's
         # handler.ingest wants. The retrieval logs describe work that happened
@@ -784,16 +903,50 @@ def merge_messages_by_id(
     return bool(merged)
 
 
-async def _clear_batch(response_id, callback_ids, logger):
-    """Drop a processed batch from the ready index and callbacks table.
+async def _clear_batch(response_id, callback_ids, logger, keep_payloads=False):
+    """Drop a processed batch from the ready index and callbacks table, and
+    delete its payloads.
 
     Every callback we attempted is removed (not just the ones that merged)
     so a callback whose payload has vanished can't wedge the drain loop.
+    ``keep_payloads`` leaves the payloads in the data store (until their
+    TTL) for a batch being given up on as unmergeable: they are the evidence
+    of what could not be merged.
     """
     await asyncio.gather(
         *(clear_ready_callback(response_id, cb, logger) for cb in callback_ids)
     )
     await asyncio.gather(*(remove_callback_id(cb, logger) for cb in callback_ids))
+    # A callback's payload is read once, by the fold that just ran; what it
+    # carried is in the response now. Deleted last, so a crash before this
+    # leaves a payload nobody reads rather than an index entry with nothing
+    # behind it.
+    if not keep_payloads:
+        await delete_messages(callback_ids, logger)
+
+
+async def _drop_callbacks_of_finished_query(
+    callback_id: str, error: ResponseSealedError, logger
+) -> None:
+    """Stand down for a query that finished while its callbacks waited.
+
+    Its response is sealed (``seal_response``): it was delivered as it stood,
+    and nothing merged now could change that. The ready callbacks are
+    dropped, payloads and all, rather than retried: a retry would only be
+    refused again, and as a merge failure it would back off, re-enqueue and
+    finally log the batch as unmergeable. One WARNING, in this worker's
+    output.
+    """
+    logger.warning(f"[{callback_id}] {STREAM}: {error}; dropping its ready callbacks.")
+    try:
+        orphans = await get_ready_callbacks(error.response_id, logger)
+        await _clear_batch(error.response_id, orphans, logger)
+    except Exception as e:
+        # They age out of the ready index with the query's other keys.
+        logger.error(
+            f"[{callback_id}] Failed to drop the ready callbacks of "
+            f"{error.response_id}: {e}"
+        )
 
 
 async def _handle_merge_failure(task, response_id, ready, logger):
@@ -825,7 +978,7 @@ async def _handle_merge_failure(task, response_id, ready, logger):
             f"discarding {len(ready)} unmergeable callback(s): "
             f"{', '.join(ready)}"
         )
-        await _clear_batch(response_id, ready, logger)
+        await _clear_batch(response_id, ready, logger, keep_payloads=True)
         # Counter reset: the poison batch is gone, so whatever else is
         # ready deserves a clean run of attempts.
         await _reenqueue_wake_task(task, logger)
@@ -873,7 +1026,7 @@ async def _fit_batch_to_budget(
     """Size a merge pass to ``max_response_size``, or say why it can't be run.
 
     Sizes are read from each blob's zstd frame header (``get_response_size``:
-    a few bytes, no load), so this costs one round trip per callback and never
+    a few bytes, no load), so this costs one pipelined round trip for the batch and never
     materializes anything. Returns ``(batch, None)`` with the longest prefix
     of ``ready`` whose uncompressed sizes fit alongside the accumulator within
     the cap -- always at least one callback, so a pass can only overshoot by a
@@ -890,8 +1043,7 @@ async def _fit_batch_to_budget(
         return [], _over_cap_reason("the accumulated response", accumulated, max_bytes)
     batch: list[str] = []
     total = accumulated
-    for callback_id in ready:
-        size = await get_response_size(callback_id)
+    for callback_id, size in zip(ready, await get_response_sizes(ready)):
         if size > max_bytes:
             return [], _over_cap_reason(f"callback {callback_id}", size, max_bytes)
         if batch and total + size > max_bytes:
@@ -903,6 +1055,32 @@ async def _fit_batch_to_budget(
         batch.append(callback_id)
         total += size
     return batch, None
+
+
+async def _next_batch(
+    response_id: str, logger: logging.Logger
+) -> tuple[list[str], Optional[str]]:
+    """The callbacks for this query's next merge pass.
+
+    Returns ``(batch, None)`` -- an empty batch when nothing (wanted) is ready
+    -- or ``([], reason)`` when the query has to be failed as too large. Read
+    with a pool child already claimed, so the batch is as fresh as it can be.
+    """
+    ready = await get_ready_callbacks(response_id, logger)
+    if not ready:
+        return [], None
+    if settings.merge_max_fold > 0:
+        ready = ready[: settings.merge_max_fold]
+    ready = await _drop_unwanted_callbacks(response_id, ready, logger)
+    if not ready:
+        # Nothing wanted in this slice. Stop rather than re-read: if clearing
+        # the stale entries failed they would come straight back and the drain
+        # would spin. The post-drain check kicks one wake for anything still
+        # ready.
+        return [], None
+    # Size the pass to the response budget; a batch that can't fit means the
+    # query is failed, not trimmed.
+    return await _fit_batch_to_budget(response_id, ready, logger)
 
 
 async def _drop_unwanted_callbacks(
@@ -974,15 +1152,78 @@ async def _reenqueue_wake_task(task, logger, attempt: int = 0):
     await add_task(STREAM, fields, logger)
 
 
+# The per-query merge lock's TTL. A single merge pass can run for up to
+# ``pool_task_timeout_sec`` -- far longer than this -- so the lock is kept
+# alive by ``_keep_lock_alive`` for as long as it is held, rather than by a
+# TTL long enough for the slowest pass (which would leave a crashed holder's
+# query blocked for that long).
+LOCK_TTL_SEC = 45
+
+
+async def _keep_lock_alive(
+    response_id: str, lost: asyncio.Event, logger: logging.Logger
+) -> None:
+    """Refresh our lock every third of its TTL until cancelled.
+
+    A pass that outlived the lock let another worker take it and merge the
+    same response from the same stored accumulator: whichever save landed
+    last won, and the other batch's callbacks -- already cleared from the
+    ready set -- were gone. If a refresh finds the lock gone anyway (this
+    process stalled past the TTL), ``lost`` is set and the drain stops.
+    """
+    while True:
+        await asyncio.sleep(LOCK_TTL_SEC / 3)
+        try:
+            held = await refresh_lock(
+                response_id, CONSUMER, int(LOCK_TTL_SEC * 1000), logger
+            )
+        except Exception as e:  # a failed refresh is retried next tick
+            logger.debug(f"Lock refresh for {response_id} failed: {e}")
+            continue
+        if not held:
+            logger.error(f"Lost the merge lock for {response_id} mid-drain")
+            lost.set()
+            return
+
+
+async def _stop_keepalive(keepalive: "asyncio.Task | None") -> None:
+    if keepalive is None or keepalive.done():
+        return
+    keepalive.cancel()
+    try:
+        await keepalive
+    except asyncio.CancelledError:
+        pass
+
+
+# Responses with a merge pass running in this process right now. A pass is
+# counted as a crash before it starts and uncounted when it returns, so a pass
+# a rollout cuts short (SIGTERM, then the drain timeout) would otherwise read
+# as a crash next time -- and three rollouts during a long merge failed a
+# healthy query as RESPONSE_TOO_LARGE. The graceful-shutdown hook below
+# uncounts them; a process that really dies never runs it.
+_PASSES_IN_FLIGHT: set = set()
+
+
+async def _uncount_interrupted_passes() -> None:
+    for response_id in list(_PASSES_IN_FLIGHT):
+        try:
+            await clear_merge_crashes(response_id)
+        except Exception as e:
+            LOGGER.warning(
+                f"Couldn't uncount the interrupted merge of {response_id}: {e}"
+            )
+
+
 async def poll_for_tasks():
     loop = asyncio.get_running_loop()
-    # Size by the pod's actual CPU allocation (cgroup limit), not os.cpu_count()
-    # which reports the whole node's cores. This one value drives both the pool
-    # and the in-flight task limit below: each merge runs a child that loads the
-    # growing response blob, so pool size == concurrency bounds peak memory.
-    # POOL_MAX_WORKERS overrides.
+    # Size the pool by the pod's actual CPU allocation (cgroup limit), not
+    # os.cpu_count() which reports the whole node's cores. Each merge runs a
+    # child that loads the growing response blob, so the pool size is what
+    # bounds CPU and peak memory. POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
     LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    on_graceful_shutdown(_uncount_interrupted_passes)
     # Shared self-healing pool: spawn-context executor that replaces itself in
     # place on a BrokenProcessPool (same implementation the aragorn.omnicorp /
     # aragorn.score / arax.rank workers use). run() swaps the dead pool before
@@ -1015,6 +1256,23 @@ async def poll_for_tasks():
         target = task[1]["target"]
         log_level = int(task[1].get("log_level", logging.INFO))
         drained = 0
+        keepalive = None
+        lock_lost = asyncio.Event()
+        # Whether this task holds the query's lock and hasn't released it yet;
+        # the catch-all below uses it to clean up after an unexpected error.
+        holding = False
+        # Whether the query turned out to be finished already (its response
+        # sealed). Its logs were delivered and archived; nothing is added.
+        finished = False
+
+        async def _release_lock() -> None:
+            nonlocal holding
+            holding = False
+            # Stop refreshing before deleting, so the keep-alive doesn't
+            # find its own lock gone and report it lost.
+            await _stop_keepalive(keepalive)
+            await remove_lock(response_id, CONSUMER, logger)
+
         try:
             with tracer.start_as_current_span(STREAM, context=parent_ctx) as span:
                 span.set_attribute("callback.id", callback_id)
@@ -1022,7 +1280,9 @@ async def poll_for_tasks():
 
                 # Non-blocking: never wait on the lock. The worker that holds it
                 # drains the whole query, so a loser has nothing useful to add.
-                got_lock = await try_lock(response_id, CONSUMER, logger)
+                got_lock = await try_lock(
+                    response_id, CONSUMER, logger, ttl_sec=LOCK_TTL_SEC
+                )
                 if not got_lock:
                     # Someone else holds this query's lock and drains its ready
                     # set to empty, so our callback (added to the set before this
@@ -1039,7 +1299,19 @@ async def poll_for_tasks():
                     )
                     return
 
+                holding = True
                 logger.debug(f"[{callback_id}] Obtained lock for {response_id}.")
+                keepalive = asyncio.create_task(
+                    _keep_lock_alive(response_id, lock_lost, logger)
+                )
+                # The query may have finished already (failed, timed out, or
+                # finished by its lookup while these callbacks waited): its
+                # response is then sealed, and a pass would load it, fold
+                # into it and have the save refused. Stop before all that.
+                # The seal check on the save covers a query that finishes
+                # during the pass.
+                if await is_response_sealed(response_id):
+                    raise ResponseSealedError(response_id)
                 # Sanity check: if the original query or the response it
                 # accumulates into is gone (e.g. lost when Redis restarted and
                 # reloaded an older snapshot), every ready callback for it is
@@ -1063,7 +1335,7 @@ async def poll_for_tasks():
                     )
                     orphans = await get_ready_callbacks(response_id, logger)
                     await _clear_batch(response_id, orphans, logger)
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     return
 
                 async def _give_up(reason: str) -> None:
@@ -1078,7 +1350,7 @@ async def poll_for_tasks():
                     span.set_attribute("merge.too_large", True)
                     await fail_response_too_large(query_id, response_id, reason, logger)
                     await clear_merge_crashes(response_id)
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
 
                 # A query already discarded as too large keeps nothing that
                 # arrives afterwards: drop the ready callbacks instead of
@@ -1091,7 +1363,7 @@ async def poll_for_tasks():
                     )
                     orphans = await get_ready_callbacks(response_id, logger)
                     await _clear_batch(response_id, orphans, logger)
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     return
 
                 # Durable crash breaker. A pass is counted in Redis before it
@@ -1112,53 +1384,49 @@ async def poll_for_tasks():
                 # Drain the query to empty: one load + one save per iteration.
                 # Re-reading the set each pass sweeps up callbacks that arrived
                 # while we were merging, so the holder does all of this query's
-                # ready work.
+                # ready work. Nothing waits for more callbacks: each pass first
+                # claims a pool child and only then reads its batch, so
+                # whatever landed while the previous pass ran, or while this
+                # task queued for a free child, joins it. Batching comes from
+                # time the worker spends busy, never from time it idles.
                 try:
                     while True:
-                        ready = await get_ready_callbacks(response_id, logger)
-                        if not ready:
-                            break
-                        if settings.merge_max_fold > 0:
-                            ready = ready[: settings.merge_max_fold]
-                        ready = await _drop_unwanted_callbacks(
-                            response_id, ready, logger
-                        )
-                        if not ready:
-                            # Nothing wanted in this slice. Stop rather than
-                            # re-read: if clearing the stale entries failed
-                            # they would come straight back and this loop
-                            # would spin. The post-drain check below kicks
-                            # one wake for anything still ready.
-                            break
-                        # Size the pass to the response budget; a batch that
-                        # can't fit means the query is failed, not trimmed.
-                        ready, too_large = await _fit_batch_to_budget(
-                            response_id, ready, logger
-                        )
+                        too_large = None
+                        async with pool.slot() as slot:
+                            ready, too_large = await _next_batch(response_id, logger)
+                            if ready and too_large is None:
+                                await bump_merge_crashes(response_id)
+                                _PASSES_IN_FLIGHT.add(response_id)
+                                try:
+                                    merged, merge_logs = await slot.run(
+                                        loop,
+                                        merge_messages_by_ids,
+                                        target,
+                                        query_id,
+                                        response_id,
+                                        ready,
+                                        log_level,
+                                    )
+                                except (BrokenProcessPool, asyncio.TimeoutError):
+                                    # The child died or was killed: leave the
+                                    # crash count in place for the next
+                                    # attempt to read.
+                                    raise
+                                except Exception:
+                                    # The child came back with a Python error.
+                                    # That isn't a crash; the task-field retry
+                                    # counter in _handle_merge_failure owns
+                                    # that case.
+                                    await clear_merge_crashes(response_id)
+                                    raise
+                                finally:
+                                    _PASSES_IN_FLIGHT.discard(response_id)
+                        # Out of the slot before any follow-up Redis work.
                         if too_large is not None:
                             await _give_up(too_large)
                             return
-                        await bump_merge_crashes(response_id)
-                        try:
-                            merged, merge_logs = await pool.run(
-                                loop,
-                                merge_messages_by_ids,
-                                target,
-                                query_id,
-                                response_id,
-                                ready,
-                                log_level,
-                            )
-                        except (BrokenProcessPool, asyncio.TimeoutError):
-                            # The child died or was killed: leave the crash
-                            # count in place for the next attempt to read.
-                            raise
-                        except Exception:
-                            # The child came back with a Python error. That
-                            # isn't a crash; the task-field retry counter in
-                            # _handle_merge_failure owns that case.
-                            await clear_merge_crashes(response_id)
-                            raise
+                        if not ready:
+                            break
                         await clear_merge_crashes(response_id)
                         _ingest_merge_logs(logger, merge_logs)
                         await _clear_batch(response_id, ready, logger)
@@ -1167,10 +1435,16 @@ async def poll_for_tasks():
                         if too_large is not None:
                             await _give_up(too_large)
                             return
-                        # Keep our lock alive across a long multi-pass drain.
-                        await refresh_lock(response_id, CONSUMER, 45000, logger)
+                        if lock_lost.is_set():
+                            # Someone else may hold the lock now; they drain
+                            # whatever is left. Don't start another pass.
+                            logger.error(
+                                f"[{callback_id}] Stopping the drain of "
+                                f"{response_id}: its merge lock was lost"
+                            )
+                            break
                 except BrokenProcessPool:
-                    # pool.run already swapped in a fresh executor. If this
+                    # The slot already swapped in a fresh executor. If this
                     # response has now crashed the merge too many times, fail
                     # it here rather than handing it to yet another pod;
                     # otherwise release the lock and retry the batch. Counted
@@ -1182,16 +1456,20 @@ async def poll_for_tasks():
                     if _too_many_crashes(crashes):
                         await _give_up(_crash_reason(crashes))
                         return
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     span.set_attribute("merge.drained_callbacks", drained)
                     await _handle_merge_failure(task, response_id, ready, logger)
                     return
+                except ResponseSealedError:
+                    # The query finished during the pass and the save was
+                    # refused; handled below, not retried as a failure.
+                    raise
                 except Exception:
                     logger.error(
                         f"[{callback_id}] Error merging messages: "
                         f"{traceback.format_exc()}"
                     )
-                    await remove_lock(response_id, CONSUMER, logger)
+                    await _release_lock()
                     span.set_attribute("merge.drained_callbacks", drained)
                     await _handle_merge_failure(task, response_id, ready, logger)
                     return
@@ -1201,7 +1479,7 @@ async def poll_for_tasks():
                     f"[{callback_id}] Merged {drained} callback(s) in "
                     f"{time.time() - lock_time:.2f}s"
                 )
-                await remove_lock(response_id, CONSUMER, logger)
+                await _release_lock()
                 # Close the race where a callback landed in the ready set after
                 # our final drain pass read it empty but before we released the
                 # lock: that callback's own wake task would have found the lock
@@ -1219,11 +1497,48 @@ async def poll_for_tasks():
                         "post-drain; kicking one wake task."
                     )
                     await _reenqueue_wake_task(task, logger)
+        except ResponseSealedError as e:
+            finished = True
+            if holding:
+                try:
+                    await _release_lock()
+                except Exception as release_error:
+                    logger.error(
+                        f"[{callback_id}] Failed to release the merge lock: "
+                        f"{release_error}"
+                    )
+            await _drop_callbacks_of_finished_query(callback_id, e, logger)
         except Exception as e:
             logger.error(
                 f"Task {task[0]} failed with unhandled error: {e}", exc_info=True
             )
+            if holding:
+                # Failed while holding the lock, outside the drain's own
+                # handling: one of the checks before it (a Redis blip in
+                # message_exists, say) or giving up as too large. The wake
+                # tasks that lost the race for this lock were acked on the
+                # promise that the holder drains the query, so unless this
+                # one retries, the ready callbacks wait unmerged until the
+                # lookup times out. Free the lock now rather than at its TTL,
+                # and retry like any other failed merge.
+                try:
+                    await _release_lock()
+                except Exception as release_error:
+                    logger.error(
+                        f"[{callback_id}] Failed to release the merge lock: "
+                        f"{release_error}"
+                    )
+                try:
+                    await _handle_merge_failure(task, response_id, [], logger)
+                except Exception as retry_error:
+                    logger.error(
+                        f"[{callback_id}] Failed to re-enqueue the merge: "
+                        f"{retry_error}"
+                    )
         finally:
+            # Whatever path got here, never leave a keep-alive refreshing a
+            # lock this task has stopped working under.
+            await _stop_keepalive(keepalive)
             try:
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
             except Exception as e:
@@ -1234,32 +1549,28 @@ async def poll_for_tasks():
             # them here (keyed by response_id, the key finish_query reads) so the
             # parent's own lines *and* the folded-in merge-child logs make it
             # into the query's log list.
-            await save_logs(response_id, logger)
+            if not finished:
+                await save_logs(response_id, logger)
             limiter.release()
 
-    inflight = set()
-    while True:
-        try:
-            # Dispatch each wake task concurrently. Distinct queries never share
-            # a lock, so their merges run in parallel on the process pool; the
-            # task_limiter semaphore (sized to max_workers) bounds concurrency.
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                t = asyncio.create_task(
-                    process_query(task, parent_ctx, logger, limiter)
-                )
-                inflight.add(t)
-                t.add_done_callback(inflight.discard)
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-            for t in inflight:
-                t.cancel()
-            pool.shutdown()
-            return
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    # Each wake task runs concurrently. Distinct queries never share a lock,
+    # so their merges run in parallel on the process pool, which alone bounds
+    # the CPU- and memory-heavy work (pool.slot waits for a free child). The
+    # in-flight task limit is deliberately larger than the pool: part of a
+    # task's life is not pool work -- Redis round trips, and lock losers that
+    # just ack. Capping in-flight tasks at the pool size let those hold the
+    # slots while the pool sat idle. The parent only handles callback ids, so
+    # the extra tasks cost no memory. It stays a small multiple of the pool,
+    # though: every task in flight here is one other replicas can't take.
+    # The TASK_LIMIT env var overrides.
+    await run_poll_loop(
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max_workers * TASKS_PER_POOL_CHILD,
+        process_query,
+        on_stop=pool.shutdown,
+    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,660 @@
+[
+  {
+    "name": "basic",
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:a",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "A"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:b",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "B"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:c",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "C"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:d",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "D"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:e",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "E"
+      }
+    ],
+    "rankers": {
+      "infores:shepherd-aragorn": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:b",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "b"
+        },
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:a",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "a"
+        },
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:z",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "z"
+        }
+      ],
+      "infores:shepherd-arax": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:c",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "c"
+        },
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:b",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "b"
+        }
+      ]
+    },
+    "weights": null,
+    "c": null
+  },
+  {
+    "name": "duplicates_and_set_keys",
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:a",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "A"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:b",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            },
+            {
+              "id": "Y:2",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "B"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:c",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "C"
+      }
+    ],
+    "rankers": {
+      "infores:shepherd-aragorn": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:c",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "c"
+        },
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:c",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "c-again"
+        },
+        {
+          "node_bindings": {
+            "m0": [
+              {
+                "id": "Y:2",
+                "attributes": []
+              }
+            ],
+            "m1": [
+              {
+                "id": "X:b",
+                "attributes": []
+              },
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "b"
+        }
+      ]
+    },
+    "weights": null,
+    "c": null
+  },
+  {
+    "name": "equal_weights_ties",
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:a",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "A"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:b",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "B"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:c",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "C"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:d",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "D"
+      }
+    ],
+    "rankers": {
+      "infores:shepherd-aragorn": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:b",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "b"
+        },
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:a",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "a"
+        }
+      ],
+      "infores:shepherd-arax": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:a",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "a"
+        },
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:b",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "b"
+        }
+      ]
+    },
+    "weights": {
+      "infores:shepherd-aragorn": 0.5,
+      "infores:shepherd-arax": 0.5
+    },
+    "c": 0
+  },
+  {
+    "name": "unweighted_source_and_empty_bindings",
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:a",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "A"
+      },
+      {
+        "node_bindings": {},
+        "tag": "empty"
+      },
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:b",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "B"
+      }
+    ],
+    "rankers": {
+      "infores:shepherd-bte": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:a",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "a"
+        }
+      ],
+      "infores:shepherd-arax": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:b",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "b"
+        }
+      ]
+    },
+    "weights": null,
+    "c": null
+  },
+  {
+    "name": "no_matching_results",
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:a",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "A"
+      }
+    ],
+    "rankers": {
+      "infores:shepherd-aragorn": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:q",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "q"
+        }
+      ]
+    },
+    "weights": null,
+    "c": null
+  },
+  {
+    "name": "only_unweighted_sources",
+    "results": [
+      {
+        "node_bindings": {
+          "n0": [
+            {
+              "id": "X:a",
+              "attributes": []
+            }
+          ],
+          "n1": [
+            {
+              "id": "Y:1",
+              "attributes": []
+            }
+          ]
+        },
+        "tag": "A"
+      }
+    ],
+    "rankers": {
+      "infores:shepherd-bte": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:a",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "a"
+        }
+      ]
+    },
+    "weights": null,
+    "c": null
+  },
+  {
+    "name": "no_results",
+    "results": [],
+    "rankers": {
+      "infores:shepherd-aragorn": [
+        {
+          "node_bindings": {
+            "n0": [
+              {
+                "id": "X:a",
+                "attributes": []
+              }
+            ],
+            "n1": [
+              {
+                "id": "Y:1",
+                "attributes": []
+              }
+            ]
+          },
+          "tag": "a"
+        }
+      ]
+    },
+    "weights": null,
+    "c": null
+  }
+]

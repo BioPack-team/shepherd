@@ -3,11 +3,68 @@
 The behavior contract for Shepherd's hosted port of the Translator ARS
 ([NCATSTranslator/Relay](https://github.com/NCATSTranslator/Relay)).
 
-**Pinned upstream commit:** `2b2121df740a4c8bc47bb2e6bafa9e52f748f028`
-(master, re-pinned 2026-09-23 from the 2026-09-05 pin at
-`3e65975db287a73afa4388b7dbaf3c64d0d218c4`, itself re-pinned from the
-original 2026-09-01 pin at `dd1e71b8284de746f9d11e4fc823bf57861e081f`;
-goldens are regenerated from a fresh clone of the pinned commit).
+**Pinned upstream commit:** `84a66c183a8ac97556b7d9030d610b4d107269ac`
+(master, re-pinned 2026-11-12 from the 2026-09-23 pin at
+`2b2121df740a4c8bc47bb2e6bafa9e52f748f028`, itself re-pinned from
+`3e65975db287a73afa4388b7dbaf3c64d0d218c4` (2026-09-05) and the original
+2026-09-01 pin at `dd1e71b8284de746f9d11e4fc823bf57861e081f`; goldens are
+regenerated from a fresh clone of the pinned commit).
+
+Behavioral changes accepted with the 2026-11-12 re-pin:
+
+- **Relay PR #891 (orderingByConfidence)**: `appraise_confidence` now
+  sorts the merged results by `ordering_components.confidence`, highest
+  first (a stable sort). `ScoreStatCalc` computes its median / mean /
+  stdev / min / max over the results' `ordering_components.confidence`
+  instead of their analyses' scores; a result without that dict or that
+  member contributes nothing. So a merged version's `result_stat` is the
+  confidence stats, and an ARA child's (computed from its answer as sent,
+  which carries no ordering components) is `{}`. Goldens: `scores.*.stat`,
+  `appraise_confidence`, and a new `scores/with_confidence` corpus case.
+- **Relay PRs #894/#895 (pathfinderHotfix)**: an arriving response whose
+  knowledge graph has no nodes counts as having no results (`[]`),
+  whatever its results list says -- a Pathfinder answer could come back
+  with one "result" and an empty graph. The `ara_response_complete`
+  notification reports 0, and the child completes D/200 without being
+  merged (`premerge.response_results`).
+- **Relay PR #897 (876-add-RRF)**: post-processing fuses the hosted
+  rankers' orderings with weighted Reciprocal Rank Fusion after the
+  confidence step, so the RRF order replaces the confidence order. Each
+  merged result scores `weight / (c + rank)` for every ranker that
+  returned the same answer (same set of bound node ids), and gains
+  `rrf_score`, `rrf_rank` (tied scores share one), `rrf_ranker_ranks` and
+  `rrf_ranker_contributions`. Rankers: Aragorn (0.9) and ARAX (0.1), c =
+  40; BTE has no weight. The rankings are the incoming child's answer and
+  each finished (D) ARA child's own answer, as upstream queries them.
+  Configured by upstream's environment variables, read on each merge, on
+  the `ars_merge` container: `ARS_RRF_ENABLED` (default `true`),
+  `ARS_RRF_ARAGORN_WEIGHT` (ARAX gets `1 - weight`), `ARS_RRF_C`; an
+  invalid value logs a warning and falls back to the default. A failure
+  is logged and swallowed. Ported as `shepherd_utils/ars/ranker_fusion.py`
+  and `ars_merge`'s `apply_ranker_fusion`; the 2.0 binding read is in
+  deviation 18. A ranker child whose response can no longer be read is
+  left out with a warning (upstream would have read its row's payload).
+  Goldens: `ranker_fusion` (new corpus file `ranker_fusion_cases.json`)
+  and `ranker_fusion_default_config`.
+- **Relay PR #898 (removePreProcess)**: the callback no longer runs
+  `pre_merge_process` (score normalization; the infores stamping the
+  port had already replaced with a report) or
+  `remove_phantom_support_graphs` before validation. The port follows
+  exactly: an ARA's answer is validated and merged as sent, results carry
+  no `normalized_score`, dangling `biolink:support_graphs` references are
+  neither removed nor reported, and the missing-infores report is gone
+  with the stage that made it. This supersedes those parts of deviation
+  21. The functions stay in `premerge.py` with their goldens, uncalled.
+- **Relay PR #899 (results_stat_to_pub_sub)**: `last_merged_completed`
+  carries `results_stat`, the final merged version's `result_stat`
+  (`notify.merged_result_stat`; null when that row can't be read). The
+  replay to a late subscriber of a cached answer carries it too.
+- Nothing to port: PR #896 (an `ARS_DISABLE_OTEL` switch for upstream's
+  own tracing; Shepherd's tracing has its own configuration), PR #903
+  (`ANNOTATOR_QUERY_BACKEND` passed to upstream's Celery workers as well;
+  Shepherd's annotator already runs in-process and reads the container's
+  environment, see the PR #888 note below), PR #892 and the conftest
+  change (README / test scaffolding).
 
 Behavioral changes accepted with the 2026-09-23 re-pin:
 
@@ -70,6 +127,19 @@ $ python scripts/ars_parity/upconvert_goldens.py      # Shepherd venv -> goldens
 Re-pinning to a newer Relay commit means: update the SHA here and in
 `generate_goldens.py`, regenerate, review the golden diff, and consciously
 accept each behavioral change.
+
+`scripts/ars_parity/trapi2.py` and `upconvert_goldens.py`, which the steps
+above and `build_corpus.py` use, are not in the repository. The 2026-11-12
+re-pin was therefore done in place: `generate_goldens.py` ran at the new
+commit (and, as a check, at the old one, where it reproduced the committed
+record except for the declared divergences and wall-clock timestamps); the
+entries upstream changed (`scores.*.stat`, `appraise_confidence`, all bare
+result lists that the translation leaves as they are) and the new ones were
+copied into both golden files. The new `ranker_fusion` goldens' 2.0 form is
+the 2.0 corpus results in upstream's order with upstream's `rrf_*` members
+(each result carries a `tag`, which the fusion ignores). The new corpus
+files were written from `build_corpus.py`'s functions without the missing
+module.
 
 ### Golden fixtures and TRAPI 2.0
 
@@ -166,7 +236,9 @@ are valid TOM 2.0 Responses.
   repeated results, and errored child are skips (upstream's 200 text /
   409 / 400); validation failure flips the child E/422 (upstream's inline
   422 `Problem with TRAPI Validation`); `results: null` →
-  `result_count = 0` while `results: []` leaves it None.
+  `result_count = 0` while `results: []` leaves it None; a response whose
+  knowledge graph has no nodes is read as `results: []` (Relay PRs
+  #894/#895).
 - **Timeouts** — parents exempt; merge children 8 min; everything else
   **5 min including pathfinder** (upstream's code, not its log message);
   code 598. Upstream's 15-minute ceiling on *creation* time is **not**
@@ -175,9 +247,11 @@ are valid TOM 2.0 Responses.
 - **Known-broken endpoints** — **none are reproduced any more.** Every
   upstream route that could only fail is either fixed or dropped; see the
   Endpoints table under the divergences below.
-- **Upstream error-behavior parity** — a failed merge fold leaves the shell
-  merge child Running for the watchdog. The crash-and-drop behaviors this
-  row used to list (`decorate_edges_with_infores`'s UnboundLocalError,
+- **Upstream error-behavior parity** — a failed merge fold ends the shell
+  merge child at once (E/500) instead of leaving it Running for the
+  watchdog; see divergence 6. The crash-and-drop behaviors this
+  row used to list (`decorate_edges_with_infores`'s UnboundLocalError --
+  the function itself is gone since deviation 21 --
   `normalizeScores`'s IndexError, the `node_bindings` for/else, the
   `attributes`/`analyses` early returns) are **no longer reproduced** — see
   "Deliberate divergences from upstream" below.
@@ -189,7 +263,7 @@ Infrastructure substitutions (behavior-preserving by definition):
 | Upstream | Port |
 |---|---|
 | Celery on RabbitMQ (+beat) | Redis Streams workers (`ars.fanout`, `ars.premerge`, `ars.merge`, `ars.notify`) + the `ars_watchdog` loop |
-| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` when set, else `ars_message.data` bytea |
+| MySQL rows with inline zstd blobs | Postgres `ars_*` rows; blobs in Redis (hot) + a durable copy written at terminal status: a file under `ARS_PAYLOAD_DIR` (or an object in `PAYLOAD_S3_BUCKET`) when set, else `ars_message.data` bytea. With a cold store set, only the query, the newest merged version and each ARA's archived response are kept (deviation 20) |
 | `merge_semaphore` + `select_for_update` + celery retry | broker lock per parent, lock-and-drain: `ars_premerge` records each validated child in a merge-ready index and wakes `ars.merge`; the worker that wins the parent's lock folds every ready child in arrival order and a loser simply acks (the semaphore column is still maintained for envelope parity; see deviation 17) |
 | `expensive_gate` 12-token redis ZSET | per-worker `TASK_LIMIT` / pool sizing |
 | self-proxy views `/ara-*/api/runquery`, SmartAPI discovery, HTTP dispatch to each ARA and the `POST /ars/api/messages/<pk>` result callback | **de-federated**: the ARS fans out only to the ARAs this Shepherd deployment hosts, by enqueueing each ARA's worker task, and receives every response over the broker (see deviation 16) |
@@ -234,9 +308,13 @@ Behavioral deviations:
    hits when a child already has stored `data` (a `str in bytes` TypeError
    → 500) is not reproduced.
 6. **merge failure retries**: upstream celery-retries `merge_and_post_process`
-   up to 20× (creating a fresh merge child per attempt); the port fails once
-   and leaves the shell merge child for the watchdog — the terminal outcome
-   (E/598 merge child decrementing `orig_count`) is the same shape.
+   up to 20× (creating a fresh merge child per attempt), and a final failure
+   leaves the shell merge child Running for the watchdog. The port fails
+   once and ends the shell merge child right away as E/500, then runs the
+   completion check, instead of waiting out the 8-minute merge timeout
+   (#214). The terminal shape (an errored merge child decrementing
+   `orig_count`) is the same; only the code (500, not 598) and the timing
+   differ.
 7. **notify stats on a custom-fields-less call**: upstream raises TypeError
    when `result_count` is set and no fields dict exists; the port carries
    the stats in a fresh dict.
@@ -256,7 +334,8 @@ Behavioral deviations:
     oldest first and cache-backed last, when the payload volume passes
     `ars_payload_evict_high_pct`. A message whose payload was dropped reads
     exactly as one past the age window (item 11). Retained trees are never
-    touched.
+    touched. A tree's payloads include the archives of its children's ARA
+    responses (deviation 22), which are kept and dropped with it.
 11. **Payload inclusion in envelopes**: a single message GET loads its
     payload from the blob store, and one evicted from Redis with no durable
     copy renders `fields.data: null` (upstream MySQL always had it inline).
@@ -307,7 +386,8 @@ Behavioral deviations:
     numpy.float64 through stdlib json (which accepts it as a float
     subclass); Shepherd's orjson blob codec rejects numpy scalars, so the
     port casts via ``.tolist()`` at the production site. Identical numeric
-    values; regression-tested against the blob codec round-trip.
+    values; regression-tested against the blob codec round-trip. (Moot in
+    production since Relay PR #898: score normalization no longer runs.)
 14. **Pre-merge processing is asynchronous** (post-parity change, accepted
     2026-09-08 after load testing): upstream runs pre_merge_process +
     phantom removal + TRAPI validation inline in its callback view; the
@@ -360,10 +440,15 @@ Behavioral deviations:
     `ars_public_host`. Differences in kind: the HTTP-level answers nobody
     read (the callback's dup-200 text, 409, 400, 422) become logged skips
     or asynchronous terminal states; a dispatch failure is the same child
-    E/500 upstream recorded for a failed POST; an intake whose response
+    E/500 upstream recorded for a failed POST; an ARA query whose
+    operation failed (finish_query passes `ara_status` along) errors the
+    child with the code its worker named -- E/501 for BTE refusing a
+    Pathfinder query (`shepherd_utils.query_errors`), E/500 otherwise --
+    as upstream records an HTTP ARA answering non-200, instead of the
+    clean D/200 with no results it used to read as; an intake whose response
     blob is missing leaves the child Running for the watchdog (the shape
-    of a callback that never arrived); a `get_logs` failure delivers the
-    response without spliced logs; and a submit with no enabled ARA
+    of a callback that never arrived); the child's payload carries no
+    query logs (deviation 21); and a submit with no enabled ARA
     completes empty at fan-out time instead of sitting Running forever.
     Schema: `ars_message.actor` (FK) became `ars_message.agent` (the
     agent name), and the `ars_agent`/`ars_channel`/`ars_actor` tables are
@@ -432,11 +517,12 @@ Behavioral deviations:
       null member (not descending into free-form `value`s) before
       pre-merge processing, validated or not, so a null on an optional
       member is harmless, a null on a required member fails as a missing
-      one, and nothing downstream ever carries a null. Forbidden empty
-      containers (`analyses: []`, `ids: []`, `logs: []`,
+      one, and nothing downstream ever carries a null (each strip is now
+      reported, and the step slated for removal: deviation 21). Forbidden
+      empty containers (`analyses: []`, `ids: []`, `logs: []`,
       `upstream_resource_ids: []` ...) are **not** repaired: they fail
-      validation (E/422), as the 2.0 schema says. The intake omits `logs`
-      when the query logged nothing rather than setting `logs: []`.
+      validation (E/422), as the 2.0 schema says. The intake adds no
+      `logs` to the child's payload at all (deviation 21).
     - **Merge**: node bindings union `ids` per query node; the result map
       keys on single-id bindings (upstream: single-element binding lists).
       **KL/AT conflict policy**: upstream turned any conflicting scalar
@@ -454,6 +540,16 @@ Behavioral deviations:
       graphs instead of emitting `{}`; `get_msg_stats` reports the same
       keys regardless (0 when absent). A message without a knowledge graph
       or results (both optional in 2.0) merges instead of raising.
+    - **Ranker fusion** (Relay PR #897) keys a result on the set of node
+      ids it binds. Upstream reads 1.5 binding lists (`[{"id": ...}]`);
+      read literally, a 2.0 binding (`{"ids": [...]}`) yields no ids, so
+      every result would be unmatched and the fusion would never apply.
+      `ranker_fusion._binding_ids` reads the 2.0 shape (and still the 1.5
+      one), giving the same key upstream builds: the 2.0 goldens are
+      upstream's output on the 1.5 form of the same results
+      (`test_ranker_fusion_parity`, `test_ranker_fusion_still_reads_trapi15_bindings`).
+      The four `rrf_*` members are extra Result members, which TOM's 2.0
+      models allow.
     - **Every stored ARS payload is a 2.0 Response**: each merged version
       goes through `finalize_response` (schema / biolink version stamps,
       the query's `parameters` echoed as 2.0 requires, nulls and forbidden
@@ -463,7 +559,8 @@ Behavioral deviations:
       `auxiliary_graphs`, no query-only members like `workflow` /
       `submitter`) instead of the re-saved query with components emptied.
       `add_attribute` (node annotations) and the edge self-source
-      (`_self_source`) no longer emit null / empty members; the blocklist
+      (`_self_source`, removed since with the infores stamping, deviation
+      21) no longer emit null / empty members; the blocklist
       drops a binding's removed ids and removes the analysis when none
       remain (upstream could leave an empty binding list), and drops an
       emptied `support_graphs` / `auxiliary_graphs`. Log entries the ARS
@@ -507,6 +604,128 @@ Behavioral deviations:
     `ars_premerge` / `ars_merge` pool children at startup, so the first
     response a fresh worker handles no longer pays the spawn's module
     re-import (~1.2-1.5s each, in both workers).
+20. **With a cold store, Redis holds only what is hot** (post-parity
+    change, #252; applies only when `ARS_PAYLOAD_DIR` or
+    `PAYLOAD_S3_BUCKET` is set). Upstream keeps every message's payload in
+    MySQL for good. With a cold store configured the port keeps, durably,
+    only the parent's query, the final merged version, and the archive
+    `finish_query` writes of each ARA's response. Two things read
+    differently once a tree's Redis copies have expired (`REDIS_HOT_TTL`
+    after it completes); what a child serves is deviation 22 and does not
+    depend on the store:
+    - **a superseded merged version has no payload** (`fields.data: null`,
+      as item 11): each new merged version that finishes Done drops the
+      durable copy of the one it supersedes, so `merged_versions_list`
+      entries other than the last resolve only while the tree is hot;
+    - **a merge cannot be rebuilt from the cold store**: the premerged
+      children it folded are gone.
+    Without a cold store every message keeps a durable copy in Postgres,
+    and its Redis copy for `REDIS_TTL`.
+21. **Premerge leaves an ARA's answer as sent, and reports what is wrong
+    with it** (post-parity change, #258). The de-federated ARS only
+    premerges the answers of ARAs this deployment hosts, so what upstream
+    patched up in every federated ARA's answer is now either unnecessary
+    or a bug to fix in the ARA:
+    - **no query logs in the child's payload.** Upstream's callback
+      received the payload with the query's logs spliced in; the intake
+      used to read them from the query's log list and splice them in the
+      same way. Nothing used them there: the merge folds only each child's
+      `message`, and the logs stay in the query's log list. The premerged
+      copy carries none; a child, when read, is served with them
+      (deviation 22).
+    - **one load, one save.** Intake and premerge were two pool calls,
+      each decoding and re-encoding the multi-MB response. They are one:
+      the pool child loads the ARA's response once, counts its results and
+      computes the score statistics, runs the premerge stages, and saves
+      once, as the merge's working copy (deviation 22). The intake state machine is unchanged
+      (guards, the `ara_response_complete` notification, the counts
+      before the hand-off, the terminal shapes); the notification now
+      follows the premerge stages instead of preceding them. A premerge
+      stage failure still ends E/500 after the notification and the
+      counts. A redelivery premerges again from the ARA's response, and
+      every stage is idempotent.
+    - **null stripping is reported, and slated for removal.** TRAPI 2.0
+      forbids nulls, so a null is an ARA bug; but Shepherd's own response
+      pruning is targeted, not recursive, so a deep null can survive it.
+      Premerge still strips them all (deviation 18), and when it removes
+      any it logs one WARNING on the ARS query naming the ARA, the child
+      and the count. Once those stay quiet the step goes.
+    - **the ARA's infores is no longer stamped on edge sources.** Upstream
+      (`decorate_edges_with_infores`) appended a retrieval source for the
+      ARA to every edge whose `sources` did not name it, and made the ARA
+      the primary source of an edge with none. The port leaves sources as
+      sent. An edge with no sources at all is no longer repaired, so it
+      now fails validation (E/422) as the 2.0 schema says. Merged edges no
+      longer gain an `aggregator_knowledge_source` for the ARA that
+      returned them; goldens `decorate/*`,
+      `premerged_inputs.aragorn...e3.sources` and
+      `merge_pipeline_ab...e3.sources` are declared divergences. (The port
+      also logged a WARNING naming such edges, `edges_missing_infores`,
+      until upstream stopped running the stage at all, Relay PR #898; the
+      report went with it.)
+    - **phantom support graphs** were removed and reported as an ERROR
+      until the 2026-11-12 re-pin. Upstream no longer removes them (Relay
+      PR #898), and neither does the port: a dangling
+      `biolink:support_graphs` reference is validated and merged as sent
+      (the merge only unions auxiliary graphs, so nothing there depends on
+      it), and nothing is reported.
+    The null-strip report is logged in the pool child and folded into the
+    task's query logs, so it reaches the ARS query's stored logs. Score
+    normalization no longer runs (Relay PR #898); TRAPI validation and node
+    annotation are unchanged.
+    Tests: `tests/unit/ars/test_ars_premerge.py` (single load/save, no
+    logs, redelivery, the null report on and off, reaching the query's
+    logs, infores and phantom support graphs left as sent),
+    `test_upstream_bugfixes.py`, `test_golden_parity.py`.
+22. **An ARA child is its ARA's response** (post-parity change, #252,
+    depends on #257). Upstream gave each child its own payload: the ARA's
+    answer after the ARS had premerged it. Here a child's pk is the
+    response id its ARA's query is dispatched with, so the child and the
+    ARA's response are one entry in the data store. The ARA's pipeline
+    writes it, `finish_query` seals it before handing it over, and the ARS
+    never writes it.
+    - **a child's payload is the ARA's answer as the ARA would deliver
+      it**: its response with the query's `parameters` and logs, a TRAPI
+      2.0 Response, without anything premerge does (no normalized scores,
+      no node annotations; nulls and phantom support graphs are as sent).
+      It reads the same from Redis while the response is hot and from
+      `finish_query`'s archive afterwards.
+    - **a child has no payload until it is terminal** (`fields.data: null`
+      while Running): until then its entry holds a response the ARA is
+      still building. Upstream showed the query it had been sent.
+    - **the premerged form is the merge's working copy**, stored beside the
+      child (`ars:premerged:<pk>`), saved only when the response validated,
+      and deleted once the merge has attempted the child. It is never
+      served. A redelivered intake always starts again from the sealed
+      response.
+    - **the "Internal ARS Server Error" log entry** of a child that ends
+      E/500 is written to the ARS query's logs, not into the child's
+      payload, which the ARS does not write. The child's status and code
+      are unchanged.
+    - **a child whose dispatch failed** has whatever its ARA's query got as
+      far as storing (its initial, empty response, or nothing), not a copy
+      of the query.
+
+23. **The fold does less redundant work per merged version** (post-parity
+    change; behavior-preserving). Upstream's merge path copied and stored
+    more than it read:
+    - `mergeMessages` deep-copies every input. The fold decodes both
+      messages fresh just for that merge and drops them after, so it merges
+      them in place (`mergeMessages(..., copy_inputs=False)`); deep-copying
+      two multi-MB messages cost more than decoding them. The goldens are
+      checked both ways (`test_merge_without_copying_inputs_matches_the_goldens`).
+    - the bare fold was saved before post-processing and the final version
+      saved over it. Nothing reads the bare copy: a post-process that raises
+      fails the pool call and the version ends E/500 without the parent
+      ever pointing at it. The version is now encoded and written once, and
+      that one save is retried (`FINAL_SAVE_ATTEMPTS`) before it is E/422.
+    - ranker fusion read each weighted ARA child's whole response, decoded,
+      on every fold, to use only its results' node bindings. Premerge now
+      saves those (`ranker_fusion.ranking_snapshot`) beside the premerged
+      copy (`ars:ranking:<pk>`, deleted when the tree completes); the fusion
+      reads them, falling back to the response, and skips a finished child
+      with no results without reading anything. The rankings are the same.
+    - the query's `parameters` are read once per drain, not once per fold.
 
 ## Deliberate divergences from upstream (upstream bugs NOT reproduced)
 
@@ -524,9 +743,9 @@ bug is deviation 18.
 
 | Upstream | Port |
 |---|---|
-| `decorate_edges_with_infores` read `has_primary`, only ever assigned inside its loop → `UnboundLocalError` on any non-empty `sources` with no `primary_knowledge_source`, failing the whole callback | `has_primary` is initialized; the agent adds itself as primary, which is what the unreachable branch intended |
-| `decorate_edges_with_infores` shared ONE `self_source` dict across the whole graph, so the last edge to need a role rewrote the role of every earlier edge | a fresh source dict per edge (`_self_source`) |
-| `normalizeScores` ranked only score-bearing results but popped one rank per RESULT → `IndexError` on any mixed response, after misassigning the ranks it did hand out | each rank goes to the result it was computed from; unscored results get no `normalized_score` |
+| `decorate_edges_with_infores` read `has_primary`, only ever assigned inside its loop → `UnboundLocalError` on any non-empty `sources` with no `primary_knowledge_source`, failing the whole callback | moot: the port no longer stamps the infores at all (deviation 21); `edges_missing_infores` only reports such edges. (It used to initialize `has_primary` and add the agent as primary.) |
+| `decorate_edges_with_infores` shared ONE `self_source` dict across the whole graph, so the last edge to need a role rewrote the role of every earlier edge | moot, as above (it used to build a fresh source dict per edge) |
+| `normalizeScores` ranked only score-bearing results but popped one rank per RESULT → `IndexError` on any mixed response, after misassigning the ranks it did hand out | each rank goes to the result it was computed from; unscored results get no `normalized_score`. Since Relay PR #898 nothing calls it (in either); the fix is kept with the function |
 | `remove_blocked` bound `nodes_to_remove` / `edges_to_remove` / `aux_graphs_to_remove` / `results_to_remove` inside conditional branches and read them unconditionally → `UnboundLocalError` on any response without `auxiliary_graphs` (an ordinary shape), without a knowledge graph, or with a null `edges` map | every accumulator bound up front |
 | `remove_blocked`'s pathfinder branch raised `UnboundLocalError` on an empty `path_bindings` | the removal loop is inside the per-path loop, so there is nothing to leave unbound |
 | `QueryGraph` / `KnowledgeGraph` / `Results` returned early on a `None` input, leaving every attribute unset → `AttributeError` from the next getter | they initialize empty |
@@ -541,6 +760,7 @@ bug is deviation 18.
 | `mergeDicts` keyed a list of objects on `resource_id` / `qualifier_type_id` and dropped every object carrying neither — from **both** sides, since it replaced the merged list with the keyed map's values — so a list of objects of any other shape merged to `[]` | unkeyed objects are carried through, deduped, after the keyed ones; the keyed path is unchanged |
 | `TranslatorMessage.to_dict` emitted `"results": {}` for a message with no results | `[]`, as TRAPI requires (and, in 2.0, an absent query graph / knowledge graph / auxiliary graphs is omitted rather than emitted as `{}`) |
 | `remove_blocked` pruned pathfinder `path_bindings` for only the last path id (its removal loop was dedented out of the per-path loop and shadowed the dict with its own values) | every path id is pruned |
+| `remove_phantom_support_graphs` skipped the whole pass (a debug line only) when the response had no `auxiliary_graphs`, so every `biolink:support_graphs` reference in it -- all dangling -- went on into the merge; where it did remove one, it did so silently | a missing `auxiliary_graphs` is read as empty, so those references are removed too, and the function returns what it removed. Since Relay PR #898 neither upstream nor the port calls it; the fix is kept with the function |
 | `remove_blocked` matched analysis-level `support_graphs` (aux graph ids) against removed EDGE ids — never a match — so support graphs that really had gone away stayed on the analysis | matched against removed aux graph ids |
 | The notification `stats` block keyed off the parent's `result_count`, which nothing ever set, and counted aux graphs from a `data` argument no caller passed — so stats were never attached, and would have read 0 if they had been | `ars_merge` carries the merge's result count up to the parent after post-processing; the aux count comes from the `params.stats` the merge already recorded |
 
@@ -554,6 +774,10 @@ bug is deviation 18.
 | — (Shepherd-native) The merge lock's 45s TTL was shorter than a large fold, so a lapsed lock let two `ars_merge` tasks fold the same parent and the later UPDATE dropped the other ARA's merge | the lock is refreshed every 15s for as long as it is held |
 | — (Shepherd-native) Ready cache entries never expired, and a live entry exempts its whole tree from the payload purge, so the cache pinned the payloads of every distinct query it had ever seen | `ars_cache_ready_max_age_sec` (7 days) retires them; expired entries stop answering immediately and the watchdog purges them |
 | — (Shepherd-native) The cache key covered only the query graph and `workflow`, but the fanout forwards `parameters` verbatim to every ARA, so two submits differing only there shared an entry and one got the other's answer | `parameters` is part of the key (minus `overwrite_cache`, which steers the cache, not the query); `CACHE_KEY_VERSION` bumped to `2`. With TRAPI 2.0 (deviation 18) `bypass_cache`, `log_level` and `timeout` moved into `parameters` and are excluded from the key too; `CACHE_KEY_VERSION` `3` |
+
+| `message_post_save` counted a Done merged version toward `merge_count` only when it had `result_count > 0`. A merge whose results the blocklist removed entirely ends Done with no count, so `merge_count` stayed one short of `orig_count` and the parent never completed (upstream pinned this in its own arithmetic; here parents are also watchdog-exempt, so it was forever) | a Done `ars-ars-agent` child always counts: every merged version folds exactly one result-bearing ARA child (`completion.evaluate_completion`) |
+| — (Shepherd-native) `/submit` answered 400 when the query could not be stored or the fanout could not be queued, but left the parent row it had already inserted Running — forever, since parents are watchdog-exempt, and as a cache leader holding every identical submit WAITING on it | the parent is ended E/500 (`lifecycle.fail_parent`: ars_error notification, subscriptions cleared, pending cache entry dropped), as a fanout that dies before creating a child already did |
+| — (Shepherd-native) A child the watchdog timed out (E/598) while `ars_premerge` was still processing its response was flipped back to Done and handed to the merge anyway — after its parent could already have completed without it, so a merged version landed under a finished parent, and every other terminal flip in intake overwrote the 598 the response cache reads as "do not cache" | premerge re-reads the child after its pool call and rejects a response for a child that is no longer Running, as the intake rejects one for an errored child; the intake's terminal flips are conditional on Running. Once a child has been handed to the merge it is still flipped Done unconditionally: its merged version only balances against a Done origin |
 
 ### Endpoints
 

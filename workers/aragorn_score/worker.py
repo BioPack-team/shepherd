@@ -1,7 +1,6 @@
 """Aragorn ARA scoring module."""
 
 import asyncio
-import copy
 import json
 import logging
 import math
@@ -14,10 +13,14 @@ import numpy as np
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.db import get_message_sync, save_response_sync
-from shepherd_utils.logger import get_worker_logger
+from shepherd_utils.logger import (
+    get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
 from shepherd_utils.trapi import binding_ids, edge_support_graphs
 
 # Queue name
@@ -431,6 +434,9 @@ class Ranker:
         # These are used to find numeric values of edges
         self.node_pubs = dict()
         self.edge_values = dict()
+        # The probes depend only on the query graph: computed once per ranker
+        # rather than once per answer (#220).
+        self._probes = None
 
     def rank(self, answers, jaccard_like=False):
         """Generate a sorted list and scores for a set of subgraphs."""
@@ -439,8 +445,21 @@ class Ranker:
         answers_ = []
         scores_for_sort = []
 
+        failed = 0
         for answer in answers:
-            scored_answer, _ = self.score(answer, jaccard_like=jaccard_like)
+            try:
+                scored_answer, _ = self.score(answer, jaccard_like=jaccard_like)
+            except Exception as e:
+                # One answer the ranker can't handle (a probe qnode with no
+                # binding, an edge whose node isn't in the KG, an attribute of
+                # an unexpected type) used to abort the loop, leaving every
+                # later answer unscored. Score this one 0 and carry on;
+                # analyses it did score before failing keep their score.
+                failed += 1
+                self.logger.warning(f"Could not score an answer, scoring it 0: {e}")
+                for analysis in answer.get("analyses") or []:
+                    analysis.setdefault("score", 0)
+                scored_answer = answer
             answers_.append(scored_answer)
             # get the highest scored analysis for this answer
             scores_for_sort.append(
@@ -448,6 +467,11 @@ class Ranker:
                     analysis["score"]
                     for analysis in answer.get("analyses") or [{"score": 0}]
                 )
+            )
+        if failed:
+            self.logger.warning(
+                f"{failed} of {len(answers)} answer(s) could not be scored and "
+                "were given a score of 0."
             )
         # order the answers by score (rank)
         answers = [
@@ -460,6 +484,12 @@ class Ranker:
         return answers
 
     def probes(self):
+        """The q_node pairs scoring measures between (cached per ranker)."""
+        if self._probes is None:
+            self._probes = self._find_probes()
+        return list(self._probes)
+
+    def _find_probes(self):
 
         # Identify Probes
         #################
@@ -594,43 +624,57 @@ class Ranker:
             ]
         )
 
-        # Now go through these edges
-        # Turn each value into an edge weight
-        # Then calculate the graph laplacian
-        laplacian = np.zeros((num_nodes, num_nodes))
+        # Turn each value into an edge weight and fill the weight matrix.
+        # Only node pairs joined by a q_edge or a k_edge carry a weight, so
+        # only those are visited: the loop used to go over every node pair in
+        # Python, and indexing edge_values_mat for each one created an entry
+        # per pair -- n**2 time and memory per analysis (#220). Each pair's
+        # weight is summed exactly as before, so scores are unchanged.
+        index = {node: i for i, node in enumerate(nodes)}
         weight_mat = np.zeros((num_nodes, num_nodes))  # For debugging
+        pairs = set()
+        for sub_r_node_id, by_object in edge_values_mat.items():
+            for obj_r_node_id in by_object:
+                pairs.add((sub_r_node_id, obj_r_node_id))
+        for qnode_pair in qedge_qnode_ids:
+            members = list(qnode_pair)
+            if len(members) == 1:
+                pairs.add((members[0], members[0]))
+            else:
+                pairs.add((members[0], members[1]))
+                pairs.add((members[1], members[0]))
 
-        # for each item in the weight matrix (edge weight between i and j)
-        for i, sub_r_node_id in enumerate(nodes):
-            for j, obj_r_node_id in enumerate(nodes):
-                # If these r_nodes correspond to q_nodes and there is a q_edge
-                # between then we set a default weight for this weight
-                # Otherwise we set the default weight to 0
-                # This ensures that bound q_edges (which match to provided
-                # k_edges) get a weight
-                edge_qnode_ids = frozenset((sub_r_node_id, obj_r_node_id))
+        for sub_r_node_id, obj_r_node_id in pairs:
+            i = index.get(sub_r_node_id)
+            j = index.get(obj_r_node_id)
+            if i is None or j is None:
+                continue
+            # If these r_nodes correspond to q_nodes and there is a q_edge
+            # between then we set a default weight for this weight
+            # Otherwise we set the default weight to 0
+            # This ensures that bound q_edges (which match to provided
+            # k_edges) get a weight
+            edge_qnode_ids = frozenset((sub_r_node_id, obj_r_node_id))
 
-                weight = (
-                    self.DEFAULT_WEIGHT if edge_qnode_ids in qedge_qnode_ids else 0.0
-                )
+            weight = self.DEFAULT_WEIGHT if edge_qnode_ids in qedge_qnode_ids else 0.0
 
-                for edge_id, edge in edge_values_mat[sub_r_node_id][
-                    obj_r_node_id
-                ].items():
-                    for source, properties in edge.items():
-                        for property, values in properties.items():
-                            w = values["weight"]
+            by_object = edge_values_mat.get(sub_r_node_id)
+            edges_here = by_object.get(obj_r_node_id) if by_object else None
+            for edge_id, edge in (edges_here or {}).items():
+                for source, properties in edge.items():
+                    for property, values in properties.items():
+                        w = values["weight"]
 
-                            if w >= 1:  # > as an emergency
-                                w = 0.9999999  # 1 causes numerical issues
+                        if w >= 1:  # > as an emergency
+                            w = 0.9999999  # 1 causes numerical issues
 
-                            # -1 / np.log(source_weighted) is our mapping from
-                            # a [0,1] weight to an admittance.
-                            # These admittances just add since they are all in
-                            # parallel which is equivalent to a noisy or.
-                            weight = weight + -1 / (np.log(w))
+                        # -1 / np.log(source_weighted) is our mapping from
+                        # a [0,1] weight to an admittance.
+                        # These admittances just add since they are all in
+                        # parallel which is equivalent to a noisy or.
+                        weight = weight + -1 / (np.log(w))
 
-                weight_mat[i, j] += weight  # For debugging
+            weight_mat[i, j] += weight  # For debugging
 
         # Using weight_mat you can calculate the laplacian
         # We could do this in the loop above, but let's be explicit
@@ -662,8 +706,13 @@ class Ranker:
         return laplacian[keep, :][:, keep], probe_inds, details
 
     def get_rgraph(self, result):
-        """Get "ranker" subgraph."""
-        answer = copy.deepcopy(result)
+        """Get "ranker" subgraph.
+
+        Built from local sets and lists: the whole result used to be deep-
+        copied, per answer, only so the scratch keys below didn't land on it
+        (#220). ``result`` is read, never written.
+        """
+        answer = result
 
         # All analyses share some common r_graph nodes. We can make those now
         r_graph_shared = dict()
@@ -688,7 +737,10 @@ class Ranker:
         # Result.analyses is optional in TRAPI 2.0.
         for anal in answer.get("analyses") or []:
             # Copy this list of globally bound nodes
-            anal_kg = copy.deepcopy(result_kg_shared)
+            anal_kg = {
+                "node_ids": _copy_set(result_kg_shared["node_ids"]),
+                "edge_ids": _copy_set(result_kg_shared["edge_ids"]),
+            }
 
             # Walk and find all edges in this analysis
             for eb_id, eb in (anal.get("edge_bindings") or {}).items():
@@ -717,7 +769,7 @@ class Ranker:
             # We need to find any additional support graphs
             # We will do that with this recursive function call
             # Since results_kg uses sets, things will not get duplicated
-            current_edge_ids = copy.deepcopy(anal_kg["edge_ids"])
+            current_edge_ids = _copy_set(anal_kg["edge_ids"])
             for edge_id in current_edge_ids:
                 anal_kg = get_edge_support_kg(
                     edge_id, self.kgraph, self.agraphs, anal_kg
@@ -731,24 +783,22 @@ class Ranker:
             # To make things simpler below it is helpful if will build a
             # complete list of additional nodes and edges that have been added
             # as part of support
-            anal["support_nodes"] = copy.deepcopy(anal_kg["node_ids"])
-            anal["support_edges"] = copy.deepcopy(anal_kg["edge_ids"])
+            support_nodes = _copy_set(anal_kg["node_ids"])
+            support_edges = _copy_set(anal_kg["edge_ids"])
 
             # remove support graph edges which are already in edge bindings
             # so they are not double-counted
             for eb_id, eb in (anal.get("edge_bindings") or {}).items():
                 for e_id in binding_ids(eb):
-                    if e_id in anal["support_edges"]:
-                        anal["support_edges"].remove(e_id)
+                    support_edges.discard(e_id)
 
             # same for nodes
             for nb_id, nb in (answer.get("node_bindings") or {}).items():
                 for n_id in binding_ids(nb):
-                    if n_id in anal["support_nodes"]:
-                        anal["support_nodes"].remove(n_id)
+                    support_nodes.discard(n_id)
 
             # It is also convenient to have a list of all edges that were bound
-            anal["bound_edges"] = anal_kg["edge_ids"] - anal["support_edges"]
+            bound_edges = anal_kg["edge_ids"] - support_edges
 
             # We need to build the r_graph which is a little different than the
             # analysis graph. In the list of nodes in the analysis we need to
@@ -764,12 +814,18 @@ class Ranker:
             # up the origin k_node ids in the nodes_map
 
             # First we copy over the shared nodes
-            anal_r_graph = copy.deepcopy(r_graph_shared)
+            anal_r_graph = {
+                "nodes": _copy_set(r_graph_shared["nodes"]),
+                "nodes_map": defaultdict(
+                    list,
+                    {k: list(v) for k, v in r_graph_shared["nodes_map"].items()},
+                ),
+            }
 
             # Add in support nodes to the r_graph
             # We will make an r_graph node
             # And a mapping to that r_graph node
-            for sn in anal["support_nodes"]:
+            for sn in support_nodes:
                 r_graph_node_id = f"support_node_{sn}"
                 anal_r_graph["nodes"].add(r_graph_node_id)
                 anal_r_graph["nodes_map"][sn].append(r_graph_node_id)
@@ -779,7 +835,7 @@ class Ranker:
             # We will use a tuple for these as a sparse matrix type of thing
             # Bound edges will go between non support nodes
             anal_r_graph["edges"] = set()
-            for e_id in anal["bound_edges"] | anal["support_edges"]:
+            for e_id in bound_edges | support_edges:
                 e = self.kgraph["edges"].get(e_id)
                 if not e:
                     self.logger.warning(f"Edge {e_id} not found in knowledge graph")
@@ -1095,6 +1151,14 @@ class Ranker:
         return this_edge_vals
 
 
+def _copy_set(items: set) -> set:
+    """A copy of ``items`` built as ``copy.deepcopy`` built it (from a list),
+    so it iterates in the same order: the r_graph's node order is the
+    Laplacian's row order, and a different one changes scores in the last
+    bit."""
+    return set(list(items))
+
+
 def kirchhoff(L, probes):
     """Compute Kirchhoff index, including only specific nodes."""
     try:
@@ -1172,7 +1236,7 @@ def get_edge_support_kg(edge_id, kg, aux_graphs, edge_kg=None):
     return edge_kg
 
 
-def aragorn_score(response_id: str, logger: logging.Logger) -> None:
+def aragorn_score(response_id: str, log_level: int = logging.INFO) -> list[dict]:
     """Process-pool entrypoint: load, score, and save entirely in the child.
 
     Only the small ``response_id`` string crosses the process-pool boundary; the
@@ -1183,44 +1247,51 @@ def aragorn_score(response_id: str, logger: logging.Logger) -> None:
     pickle buffers, and the child. Reading and writing here keeps the payload
     off the parent's heap entirely. When there are no results to score the
     message is saved back unchanged.
+
+    The task's logger can't cross the boundary either (it isn't picklable), so
+    the child logs at the task's ``log_level`` through its own logger and
+    returns the formatted records, oldest-first, for the parent to fold into
+    the query's logs.
     """
-    in_message = get_message_sync(response_id)
+    with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
+        in_message = get_message_sync(response_id)
 
-    # these timestamps are causing json serialization issues so here we
-    # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
-    # empty list is never created.
-    for log in in_message.get("logs") or []:
-        log["timestamp"] = str(log["timestamp"])
+        # these timestamps are causing json serialization issues so here we
+        # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
+        # empty list is never created.
+        for log in in_message.get("logs") or []:
+            log["timestamp"] = str(log["timestamp"])
 
-    message = in_message["message"]
-    if ("results" not in message) or (message["results"] is None):
-        # No results to weight; save unchanged and abort.
-        logger.info("No results to score. Saving unscored.")
+        message = in_message["message"]
+        if ("results" not in message) or (message["results"] is None):
+            # No results to weight; save unchanged and abort.
+            logger.info("No results to score. Saving unscored.")
+            save_response_sync(response_id, in_message)
+            return query_log_handler.drain()
+
+        # get a reference to the results
+        answers = message["results"]
+
+        try:
+            # resistance distance ranking
+            pr = Ranker(message, logger)
+
+            # rank the answers. there should be a score for each bound result after this
+            # TODO: is this right?
+            jaccard_like = False
+            answers = pr.rank(answers, jaccard_like=jaccard_like)
+
+            # save the results
+            message["results"] = answers
+        except Exception as e:
+            # put the error in the response
+            logger.exception(f"Aragorn-ranker/score exception {e}")
+            # save any log entries
+            # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
+
+        logger.info("Score complete. Saving.")
         save_response_sync(response_id, in_message)
-        return
-
-    # get a reference to the results
-    answers = message["results"]
-
-    try:
-        # resistance distance ranking
-        pr = Ranker(message, logger)
-
-        # rank the answers. there should be a score for each bound result after this
-        # TODO: is this right?
-        jaccard_like = False
-        answers = pr.rank(answers, jaccard_like=jaccard_like)
-
-        # save the results
-        message["results"] = answers
-    except Exception as e:
-        # put the error in the response
-        logger.exception(f"Aragorn-ranker/score exception {e}")
-        # save any log entries
-        # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
-
-    logger.info("Score complete. Saving.")
-    save_response_sync(response_id, in_message)
+        return query_log_handler.drain()
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):
@@ -1237,7 +1308,16 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        await pool.run(loop, aragorn_score, response_id, logger)
+        # Held no longer than the query can use the answer (#245).
+        entries = await pool.run_within_budget(
+            loop,
+            task[1],
+            "ARAGORN's scoring",
+            aragorn_score,
+            response_id,
+            logger.getEffectiveLevel(),
+        )
+        ingest_query_logs(logger, entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
@@ -1256,19 +1336,14 @@ async def poll_for_tasks():
         name="aragorn.score process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, pool)
-                )
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max_workers,
+        lambda *task_args: process_task(*task_args, loop, pool),
+        on_stop=pool.shutdown,
+    )
 
 
 if __name__ == "__main__":

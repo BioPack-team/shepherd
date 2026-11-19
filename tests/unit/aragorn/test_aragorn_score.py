@@ -18,9 +18,8 @@ def test_aragorn_ranker_loads_scores_and_saves(mocker):
         return_value=copy.deepcopy(response_1),
     )
     save = mocker.patch("workers.aragorn_score.worker.save_response_sync")
-    logger = logging.getLogger(__name__)
 
-    aragorn_score("resp-1", logger)
+    aragorn_score("resp-1", logging.INFO)
 
     save.assert_called_once()
     saved_id, message = save.call_args.args
@@ -45,9 +44,8 @@ def test_aragorn_score_saves_unchanged_when_no_results(mocker):
         return_value=copy.deepcopy(no_results),
     )
     save = mocker.patch("workers.aragorn_score.worker.save_response_sync")
-    logger = logging.getLogger(__name__)
 
-    aragorn_score("resp-2", logger)
+    aragorn_score("resp-2", logging.INFO)
 
     # The loaded message is saved back (not None); scoring was skipped because
     # there were no results. No empty logs list is added (invalid in TRAPI 2.0).

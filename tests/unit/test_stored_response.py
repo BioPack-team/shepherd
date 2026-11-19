@@ -9,6 +9,7 @@ them, so every write of a response goes through ``save_response`` /
 
 import logging
 
+import fakeredis
 import pytest
 
 from shepherd_utils import db
@@ -83,13 +84,9 @@ async def test_save_response_stores_the_stored_form(redis_mock):
 
 
 def test_save_response_sync_stores_the_stored_form(mocker):
-    storage = {}
-    sync_client = mocker.Mock()
-    sync_client.set.side_effect = lambda key, blob, ex=None: storage.__setitem__(
-        key, blob
+    mocker.patch(
+        "shepherd_utils.db._get_sync_data_db", return_value=fakeredis.FakeRedis()
     )
-    sync_client.get.side_effect = lambda key: storage.get(key)
-    mocker.patch("shepherd_utils.db._get_sync_data_db", return_value=sync_client)
 
     db.save_response_sync("rid", _full_response())
 
@@ -118,7 +115,11 @@ async def test_add_query_keeps_query_members_on_the_query_only(redis_mock, mocke
     assert stored_query == query
     stored_response = await db.get_message("rid", logger)
     assert stored_response == {
-        "message": {"query_graph": QUERY_GRAPH},
+        "message": {
+            "query_graph": QUERY_GRAPH,
+            "knowledge_graph": {"nodes": {}, "edges": {}},
+            "results": [],
+        },
         "workflow": [{"id": "lookup"}],
     }
     # The query dict the caller handed in is not modified.

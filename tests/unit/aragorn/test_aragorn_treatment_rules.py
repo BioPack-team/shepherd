@@ -71,8 +71,8 @@ def test_treatment_expansion_preserves_lookup_without_shared_regulator(pinned_no
 
     expanded = worker.expand_aragorn_query(message, logging.getLogger(__name__))
 
-    # Eleven retained templates plus the original direct treatment lookup.
-    assert len(expanded) == 12
+    # Ten retained templates plus the original direct treatment lookup.
+    assert len(expanded) == 11
     direct_query = copy.deepcopy(original["message"]["query_graph"])
     direct_query["edges"]["e0"].pop("knowledge_type")
     assert expanded[0]["message"]["query_graph"] == direct_query

@@ -153,9 +153,13 @@ def test_score_passes_skip_results_without_analyses():
         100.0,
         pytest.approx(200 / 3),
     ]
-    stat = ars_premerge.ScoreStatCalc(copy.deepcopy(results))
-    assert stat["minimum"] == 0.2 and stat["maximum"] == 0.8
-    assert stat["mean"] == pytest.approx(0.5)
+    # the stats are over the confidences now (Relay PR #891), which
+    # appraise_confidence gives every result; one without analyses has 0
+    confident = copy.deepcopy(results)
+    ars_premerge.appraise_confidence(confident)
+    stat = ars_premerge.ScoreStatCalc(confident)
+    assert stat["minimum"] == 0.0 and stat["maximum"] == 0.8
+    assert stat["mean"] == pytest.approx(0.375)
 
 
 # ---------------------------------------------------------------------------

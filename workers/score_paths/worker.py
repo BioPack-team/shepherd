@@ -14,11 +14,19 @@ import torch
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
 from shepherd_utils.data_download import ensure_pathfinder_embeddings
-from shepherd_utils.db import get_message_sync, save_response_sync
-from shepherd_utils.logger import QueryLogger, get_query_handler, get_worker_logger
+from shepherd_utils.db import (
+    ResponseSealedError,
+    get_message_sync,
+    save_response_sync,
+)
+from shepherd_utils.logger import (
+    get_worker_logger,
+    ingest_query_logs,
+    pool_task_logger,
+)
 from shepherd_utils.otel import setup_tracer
 from shepherd_utils.process_pool import ProcessPoolManager
-from shepherd_utils.shared import get_tasks, run_task_lifecycle
+from shepherd_utils.shared import run_task_lifecycle, run_poll_loop
 
 import scorer
 
@@ -155,6 +163,9 @@ def score_paths(response_id, logger):
         try:
             save_response_sync(response_id, message)
             break
+        except ResponseSealedError:
+            # The query has finished; retrying cannot change that.
+            raise
         except Exception as e:
             if attempt < 4:
                 logger.warning(
@@ -162,7 +173,10 @@ def score_paths(response_id, logger):
                 )
                 time.sleep(0.5)
             else:
+                # Raise, as save_response does: swallowing it here let the
+                # workflow carry on from the unscored response.
                 logger.error(f"Failed to save a message into redis: {e}")
+                raise
 
 
 def score_paths_task(response_id: str, log_level: int = logging.INFO) -> list[dict]:
@@ -182,20 +196,10 @@ def score_paths_task(response_id: str, log_level: int = logging.INFO) -> list[di
     the parent to fold into the query's logs -- the child can't reach the
     parent's query log handler itself.
     """
-    # logging.getLogger hands back the same object for the whole life of the
-    # child, so attach a call-scoped handler and remove it in finally --
-    # otherwise handlers accumulate across the child's successive tasks and one
-    # query's logs leak into the next.
-    query_log_handler = QueryLogger().log_handler
-    logger = get_worker_logger(f"{STREAM}.worker.{os.getpid()}")
-    logger.setLevel(log_level)
-    logger.addHandler(query_log_handler)
-    try:
+    with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
         _ensure_scoring_state(logger)
         score_paths(response_id, logger)
         return query_log_handler.drain()
-    finally:
-        logger.removeHandler(query_log_handler)
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):
@@ -209,12 +213,16 @@ async def process_task(task, parent_ctx, logger, limiter, loop, pool):
 
     async def _run(task, logger):
         response_id = task[1]["response_id"]
-        entries = await pool.run(
-            loop, score_paths_task, response_id, logger.getEffectiveLevel()
+        # Held no longer than the query can use the answer (#245).
+        entries = await pool.run_within_budget(
+            loop,
+            task[1],
+            "Path scoring",
+            score_paths_task,
+            response_id,
+            logger.getEffectiveLevel(),
         )
-        handler = get_query_handler(logger)
-        if handler is not None and entries:
-            handler.ingest(entries)
+        ingest_query_logs(logger, entries)
 
     await run_task_lifecycle(STREAM, GROUP, task, parent_ctx, logger, limiter, _run)
 
@@ -240,19 +248,14 @@ async def poll_for_tasks():
         name="score_paths process pool",
         task_timeout=settings.score_paths_task_timeout_sec,
     )
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, max_workers
-            ):
-                asyncio.create_task(
-                    process_task(task, parent_ctx, logger, limiter, loop, pool)
-                )
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)
+    await run_poll_loop(
+        STREAM,
+        GROUP,
+        CONSUMER,
+        max_workers,
+        lambda *task_args: process_task(*task_args, loop, pool),
+        on_stop=pool.shutdown,
+    )
 
 
 if __name__ == "__main__":

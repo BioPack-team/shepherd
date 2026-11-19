@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from shepherd_utils import db
+from shepherd_utils import db, lookups
 from shepherd_utils.db import (
     QueryDataLostError,
     abandon_lookup_if_data_lost,
@@ -131,13 +131,16 @@ def _task():
 def lookup(request, redis_mock, cleanup, mocker):
     """Run one lookup worker with its outbound calls mocked."""
     module, entry, query = WORKERS[request.param]
+    # The ARAGORN and BTE workers submit and wait through shepherd_utils.lookups
+    # (#223 C9-5); the example worker still has its own copies.
+    owner = module if hasattr(module, "add_callback_id") else lookups
     mocker.patch.object(
         module,
         "get_message",
         new_callable=mocker.AsyncMock,
         side_effect=lambda *a, **k: json.loads(json.dumps(query)),
     )
-    mocker.patch.object(module, "add_callback_id", new_callable=mocker.AsyncMock)
+    mocker.patch.object(owner, "add_callback_id", new_callable=mocker.AsyncMock)
     if hasattr(module, "save_message"):
         mocker.patch.object(module, "save_message", new_callable=mocker.AsyncMock)
     mocker.patch(
@@ -153,7 +156,7 @@ def lookup(request, redis_mock, cleanup, mocker):
         pool.run = mocker.AsyncMock(return_value=[])
         mocker.patch.object(module, "POOL", pool)
     running = mocker.patch.object(
-        module,
+        owner,
         "get_running_callbacks",
         new_callable=mocker.AsyncMock,
         side_effect=[["cb1"], []],

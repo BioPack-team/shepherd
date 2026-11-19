@@ -46,15 +46,22 @@ def evaluate_completion(children: List[Dict[str, Any]]) -> CompletionDecision:
         result_count = child.get("result_count")
         if status not in TERMINAL_STATUSES:
             finished = False
-        if (
+        if status == "D" and agent_name == MERGE_AGENT_NAME:
+            # Every merged version folds exactly one result-bearing ARA child,
+            # so a Done one satisfies its origin whatever its own count.
+            # Upstream also required result_count > 0 here, which a merge
+            # whose results the blocklist removed entirely (count None) never
+            # has: merge_count stayed one short of orig_count and the parent
+            # -- watchdog-exempt -- stayed Running forever. (The synthesized
+            # empty merge is created only once the counts already agree, and
+            # the parent is Done before anything reads them again.)
+            merge_count += 1
+        elif (
             status == "D"
             and agent_name.startswith("ar")
             and (result_count is not None and result_count > 0)
         ):
-            if agent_name == MERGE_AGENT_NAME:
-                merge_count += 1
-            else:
-                orig_count += 1
+            orig_count += 1
         if status == "E" and agent_name == MERGE_AGENT_NAME:
             if child["code"] == 444:
                 merge_count += 1

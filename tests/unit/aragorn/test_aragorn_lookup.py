@@ -15,10 +15,9 @@ async def test_aragorn_creative_lookup(redis_mock, mocker):
     """Aragorn lookup runs an inferred-edge query and hands off to aragorn.score."""
     mock_callback_response = mocker.patch("workers.aragorn_lookup.worker.get_message")
     mock_callback_response.return_value = copy.deepcopy(creative_query)
-    mocker.patch("workers.aragorn_lookup.worker.save_message")
-    mocker.patch("workers.aragorn_lookup.worker.add_callback_id")
+    mocker.patch("shepherd_utils.lookups.add_callback_id")
     mock_running_callbacks = mocker.patch(
-        "workers.aragorn_lookup.worker.get_running_callbacks"
+        "shepherd_utils.lookups.get_running_callbacks"
     )
     mock_running_callbacks.return_value = []
     mock_response = mocker.Mock()

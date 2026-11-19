@@ -19,6 +19,7 @@ itself against fakeredis blobs with the annotator package mocked.
 """
 
 import asyncio
+import copy
 import datetime
 import json
 import logging
@@ -310,6 +311,27 @@ async def test_drain_folds_every_ready_child_in_arrival_order(env, redis_mock):
     assert await _merge_tasks() == []
 
 
+async def test_a_childs_premerged_copy_is_deleted_once_the_merge_has_attempted_it(
+    env, redis_mock
+):
+    """#252: the premerged form is the merge's working copy, not the child's
+    payload. Once the child is folded -- or the fold has failed -- nothing
+    reads it again; the child's own entry (its ARA's response) stays."""
+    import shepherd_utils.db as shepherd_db
+
+    for child in (env["child_pk"], env["child2_pk"]):
+        await shepherd_db.data_db_client.set(str(child), b"the ARA's response")
+        await shepherd_db.data_db_client.set(ars_db.premerged_key(child), b"premerged")
+    env["run_merge"].side_effect = [_outcome(), RuntimeError("fold failed")]
+    await _ready(env, env["child_pk"], env["child2_pk"])
+
+    await merge_worker.ars_merge(_task(env), LOGGER)
+
+    for child in (env["child_pk"], env["child2_pk"]):
+        assert await shepherd_db.data_db_client.get(ars_db.premerged_key(child)) is None
+        assert await shepherd_db.data_db_client.get(str(child)) is not None
+
+
 async def test_lock_busy_acks_without_reenqueue(env, redis_mock):
     """A worker that loses the parent's lock does nothing: its child is in
     the index and the holder drains it. No re-enqueue, no wait."""
@@ -348,9 +370,10 @@ async def test_child_arriving_after_the_final_read_gets_one_wake(
     assert "_started_at" not in tasks[0][1]
 
 
-async def test_merge_failure_leaves_merge_child_running(env, redis_mock):
-    """Upstream merge_received swallows the failure and returns {}; the shell
-    merge child stays Running (the 8-minute watchdog eventually 598s it),
+async def test_merge_failure_ends_the_merge_child_at_once(env, redis_mock):
+    """Upstream merge_received swallows the failure and returns {}, leaving the
+    shell merge child Running until the 8-minute watchdog 598s it. C8-7
+    (#214): the shell goes to E/500 right away and the completion check runs,
     the semaphore is released, and the drain goes on to the next child."""
     await _ready(env, env["child_pk"], env["child2_pk"])
 
@@ -363,12 +386,15 @@ async def test_merge_failure_leaves_merge_child_running(env, redis_mock):
     await merge_worker.ars_merge(_task(env), LOGGER)
 
     failed_shell, good = env["merge_pks"]
-    # no final state for the failed shell, no bookkeeping pointing at it
-    assert not any("status" in u for u in _updates_for(env, failed_shell))
+    # the failed shell is ended, with no bookkeeping pointing at it
+    assert [u for u in _updates_for(env, failed_shell) if "status" in u] == [
+        {"status": "E", "code": 500}
+    ]
     assert env["rows"][str(env["parent_pk"])]["merged_version"] == str(good)
     assert env["rows"][str(env["parent_pk"])]["merge_semaphore"] is False
     assert _events(env) == ["merged_version_begun", "merged_version_available"]
-    env["completion"].assert_awaited_once()
+    # once for the failed shell, once for the good merge
+    assert env["completion"].await_count == 2
     # both attempted, both cleared: a poison child cannot wedge the drain
     assert await ars_db.get_ready_children(env["parent_pk"], LOGGER) == []
 
@@ -438,13 +464,13 @@ def test_merge_in_child_folds_messages(sync_blobs):
     current_pk = "22222222-2222-2222-2222-222222222222"
     new_pk = "33333333-3333-3333-3333-333333333333"
 
-    shepherd_db.save_message_sync(child_pk, aragorn)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), aragorn)
     stats = merge_worker.merge_in_child(None, child_pk, current_pk)
     first = shepherd_db.get_message_sync(current_pk)
     assert first["message"]["results"] == aragorn["message"]["results"]
     assert stats["results"] == 2
 
-    shepherd_db.save_message_sync(child_pk, arax)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), arax)
     stats = merge_worker.merge_in_child(
         current_pk, child_pk, new_pk, {"log_level": "DEBUG"}
     )
@@ -516,9 +542,9 @@ def test_merge_in_child_resolves_knowledge_level_conflicts(sync_blobs):
     current_pk = "22222222-2222-2222-2222-222222222222"
     child_pk = "11111111-1111-1111-1111-111111111111"
     new_pk = "33333333-3333-3333-3333-333333333333"
-    shepherd_db.save_message_sync(child_pk, aragorn)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), aragorn)
     merge_worker.merge_in_child(None, child_pk, current_pk)
-    shepherd_db.save_message_sync(child_pk, arax)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), arax)
     merge_worker.merge_in_child(current_pk, child_pk, new_pk)
     merged = shepherd_db.get_message_sync(new_pk)
     e1 = merged["message"]["knowledge_graph"]["edges"]["e1"]
@@ -688,6 +714,184 @@ async def test_postprocess_without_annotation(bt_annotator):
     assert all("ordering_components" in r for r in data["message"]["results"])
 
 
+# ---------------------------------------------------------------------------
+# weighted RRF ranker fusion in post-process (Relay PR #897)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def rrf_defaults(monkeypatch):
+    for var in ("ARS_RRF_ENABLED", "ARS_RRF_ARAGORN_WEIGHT", "ARS_RRF_C"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _on_curie(result):
+    return result["node_bindings"]["on"]["ids"][0]
+
+
+def _ranking(data, *curies):
+    """``data``'s results reordered as an ARA's own ranking."""
+    by_curie = {_on_curie(r): r for r in data["message"]["results"]}
+    return [copy.deepcopy(by_curie[c]) for c in curies]
+
+
+async def test_postprocess_ranker_fusion_orders_by_the_incoming_ranking(
+    bt_annotator, rrf_defaults
+):
+    """Confidence puts CHEBI first; Aragorn's own answer ranked the gene
+    first, and the fused order follows Aragorn's."""
+    data = load_corpus("response_aragorn.json")
+    incoming = {"results": _ranking(data, "NCBIGene:5468", "CHEBI:6801")}
+
+    outcome = await merge_worker.postprocess_message(
+        data, _merged_row(), "ara-shepherd-aragorn", LOGGER, True, incoming, []
+    )
+
+    results = data["message"]["results"]
+    assert [_on_curie(r) for r in results] == ["NCBIGene:5468", "CHEBI:6801"]
+    assert [r["rrf_rank"] for r in results] == [1, 2]
+    assert results[0]["rrf_ranker_ranks"] == {"infores:shepherd-aragorn": 1}
+    assert results[0]["rrf_score"] == pytest.approx(0.9 / 41)
+    assert results[1]["rrf_ranker_contributions"] == {
+        "infores:shepherd-aragorn": pytest.approx(0.9 / 42)
+    }
+    assert any(
+        e["message"].startswith("Weighted RRF ranker fusion applied")
+        and e["level"] == "DEBUG"
+        for e in data["logs"]
+    )
+    # the stats are over the confidences appraise_confidence set
+    assert (outcome["status"], outcome["code"]) == ("D", 200)
+    assert outcome["result_stat"]["mean"] == pytest.approx((0.83 + 0.41) / 2)
+
+
+async def test_postprocess_ranker_fusion_reads_the_finished_children(
+    bt_annotator, rrf_defaults, mocker, caplog
+):
+    """A finished child's own answer overrides the incoming one for its
+    source; a child without a weight is not read; a child whose response
+    is gone is left out with a warning."""
+    data = load_corpus("response_aragorn.json")
+    incoming = {"results": _ranking(data, "NCBIGene:5468", "CHEBI:6801")}
+    answers = {
+        "c-aragorn": _ranking(data, "CHEBI:6801", "NCBIGene:5468"),
+        "c-arax": KeyError("c-arax"),
+    }
+
+    def load(child_pk):
+        answer = answers[child_pk]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    loader = mocker.patch.object(merge_worker, "_load_ranker_results", side_effect=load)
+    rankers = [
+        {
+            "id": "c-aragorn",
+            "agent": "ara-shepherd-aragorn",
+            "inforesid": "infores:shepherd-aragorn",
+        },
+        {
+            "id": "c-bte",
+            "agent": "ara-shepherd-bte",
+            "inforesid": "infores:shepherd-bte",
+        },
+        {
+            "id": "c-arax",
+            "agent": "ara-shepherd-arax",
+            "inforesid": "infores:shepherd-arax",
+        },
+    ]
+    with caplog.at_level(logging.WARNING):
+        await merge_worker.postprocess_message(
+            data, _merged_row(), "ara-shepherd-aragorn", LOGGER, True, incoming, rankers
+        )
+
+    assert [c.args[0] for c in loader.call_args_list] == ["c-aragorn", "c-arax"]
+    results = data["message"]["results"]
+    assert [_on_curie(r) for r in results] == ["CHEBI:6801", "NCBIGene:5468"]
+    assert all(
+        set(r["rrf_ranker_ranks"]) == {"infores:shepherd-aragorn"} for r in results
+    )
+    assert "c-arax" in caplog.text
+
+
+async def test_postprocess_ranker_fusion_can_be_switched_off(
+    bt_annotator, rrf_defaults, monkeypatch
+):
+    monkeypatch.setenv("ARS_RRF_ENABLED", "false")
+    data = load_corpus("response_aragorn.json")
+    incoming = {"results": _ranking(data, "NCBIGene:5468", "CHEBI:6801")}
+    await merge_worker.postprocess_message(
+        data, _merged_row(), "ara-shepherd-aragorn", LOGGER, True, incoming, []
+    )
+    results = data["message"]["results"]
+    # the confidence order (Relay PR #891), untouched
+    assert [_on_curie(r) for r in results] == ["CHEBI:6801", "NCBIGene:5468"]
+    assert not any(k.startswith("rrf_") for r in results for k in r)
+
+
+async def test_postprocess_ranker_fusion_failure_only_logged(
+    bt_annotator, rrf_defaults, mocker
+):
+    mocker.patch.object(
+        merge_worker.ranker_fusion,
+        "apply_weighted_rrf",
+        side_effect=RuntimeError("rrf boom"),
+    )
+    data = load_corpus("response_aragorn.json")
+    incoming = {"results": _ranking(data, "NCBIGene:5468", "CHEBI:6801")}
+    outcome = await merge_worker.postprocess_message(
+        data, _merged_row(), "ara-shepherd-aragorn", LOGGER, True, incoming, []
+    )
+    assert (outcome["status"], outcome["code"]) == ("D", 200)
+    assert outcome["result_count"] == 2
+
+
+async def test_ranker_children_are_the_finished_ara_children(mocker):
+    mocker.patch.object(
+        merge_worker.ars_db,
+        "get_children",
+        new_callable=AsyncMock,
+        return_value=[
+            {
+                "id": "a",
+                "status": "D",
+                "agent": "ara-shepherd-aragorn",
+                "inforesid": "infores:shepherd-aragorn",
+            },
+            {
+                "id": "m",
+                "status": "D",
+                "agent": "ars-ars-agent",
+                "inforesid": "infores:ars",
+            },
+            {
+                "id": "r",
+                "status": "R",
+                "agent": "ara-shepherd-arax",
+                "inforesid": "infores:shepherd-arax",
+            },
+            {
+                "id": "e",
+                "status": "E",
+                "agent": "ara-shepherd-bte",
+                "inforesid": "infores:shepherd-bte",
+            },
+        ],
+    )
+    assert await merge_worker._ranker_children("p", LOGGER) == [
+        {
+            "id": "a",
+            "agent": "ara-shepherd-aragorn",
+            "inforesid": "infores:shepherd-aragorn",
+            "result_count": None,
+        }
+    ]
+    merge_worker.ars_db.get_children.side_effect = RuntimeError("pg down")
+    assert await merge_worker._ranker_children("p", LOGGER) == []
+
+
 @pytest.mark.parametrize(
     "mode,annotate", [("merge", True), ("premerge", False), ("off", False)]
 )
@@ -697,7 +901,8 @@ async def test_merge_annotates_only_in_merge_mode(monkeypatch, mocker, mode, ann
         merge_worker, "merge_and_postprocess_in_child", return_value={}
     )
     await merge_worker._run_merge_in_pool(None, "c", "n", "ara-x", None, {}, LOGGER)
-    assert child.call_args.args[-1] is annotate
+    # (..., parameters, annotate, rankers)
+    assert child.call_args.args[-2] is annotate
 
 
 def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):
@@ -707,7 +912,9 @@ def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):
     shepherd_db = sync_blobs
     child_pk = "11111111-1111-1111-1111-111111111111"
     new_pk = "33333333-3333-3333-3333-333333333333"
-    shepherd_db.save_message_sync(child_pk, load_corpus("response_aragorn.json"))
+    shepherd_db.save_message_sync(
+        ars_db.premerged_key(child_pk), load_corpus("response_aragorn.json")
+    )
 
     outcome = merge_worker.merge_and_postprocess_in_child(
         None,
@@ -731,6 +938,8 @@ def test_merge_and_postprocess_in_child(sync_blobs, bt_annotator):
     for entry in merged["logs"]:
         assert entry["timestamp"].endswith("Z")
     assert all("ordering_components" in r for r in merged["message"]["results"])
+    # the incoming child (Aragorn's own answer) ranked the results (RRF)
+    assert [r["rrf_rank"] for r in merged["message"]["results"]] == [1, 2]
     nodes = merged["message"]["knowledge_graph"]["nodes"]
     assert any(
         a.get("attribute_type_id") == "biothings_annotations"
@@ -743,19 +952,104 @@ def test_merge_and_postprocess_in_child_final_save_failure_is_422(
 ):
     shepherd_db = sync_blobs
     child_pk = "11111111-1111-1111-1111-111111111111"
-    shepherd_db.save_message_sync(child_pk, load_corpus("response_aragorn.json"))
+    shepherd_db.save_message_sync(
+        ars_db.premerged_key(child_pk), load_corpus("response_aragorn.json")
+    )
     real_save = merge_worker.save_message_sync
     calls = {"n": 0}
 
-    def _flaky(pk, payload):
+    def _broken(pk, payload):
         calls["n"] += 1
-        if calls["n"] == 2:
-            raise RuntimeError("redis full")
-        real_save(pk, payload)
+        raise RuntimeError("redis full")
 
-    mocker.patch.object(merge_worker, "save_message_sync", side_effect=_flaky)
+    mocker.patch.object(merge_worker, "save_message_sync", side_effect=_broken)
+    mocker.patch.object(merge_worker.time, "sleep")
     outcome = merge_worker.merge_and_postprocess_in_child(
         None, child_pk, str(uuid.uuid4()), "ara-shepherd-aragorn", None
     )
     assert outcome["status"] == "E"
     assert outcome["code"] == 422
+    # the only save of the version (no bare-fold save before it), retried
+    assert calls["n"] == merge_worker.FINAL_SAVE_ATTEMPTS
+
+
+def test_merge_and_postprocess_in_child_retries_a_transient_save_failure(
+    sync_blobs, bt_annotator, mocker
+):
+    shepherd_db = sync_blobs
+    child_pk = "11111111-1111-1111-1111-111111111111"
+    new_pk = str(uuid.uuid4())
+    shepherd_db.save_message_sync(
+        ars_db.premerged_key(child_pk), load_corpus("response_aragorn.json")
+    )
+    real_save = merge_worker.save_message_sync
+    calls = {"n": 0}
+
+    def _flaky(pk, payload):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("redis blip")
+        real_save(pk, payload)
+
+    mocker.patch.object(merge_worker, "save_message_sync", side_effect=_flaky)
+    mocker.patch.object(merge_worker.time, "sleep")
+    outcome = merge_worker.merge_and_postprocess_in_child(
+        None, child_pk, new_pk, "ara-shepherd-aragorn", None
+    )
+    assert outcome["status"] == "D"
+    assert calls["n"] == 2
+    assert shepherd_db.get_message_sync(new_pk)["message"]["results"]
+
+
+def test_fold_hands_the_fusion_the_incoming_ranking_as_sent(sync_blobs):
+    """The fold merges in place, which unions node bindings on the incoming
+    results; the ranking it hands the fusion is snapshotted first."""
+    shepherd_db = sync_blobs
+    aragorn = load_corpus("response_aragorn.json")
+    arax = load_corpus("response_arax.json")
+    child_pk = "11111111-1111-1111-1111-111111111111"
+    current_pk = "22222222-2222-2222-2222-222222222222"
+    shepherd_db.save_message_sync(current_pk, aragorn)
+    shepherd_db.save_message_sync(ars_db.premerged_key(child_pk), arax)
+
+    _, _, ranking = merge_worker._fold(current_pk, child_pk)
+
+    assert ranking == {
+        "results": [
+            {"node_bindings": r["node_bindings"]} for r in arax["message"]["results"]
+        ]
+    }
+
+
+def test_ranker_results_come_from_the_ranking_when_there_is_one(sync_blobs):
+    shepherd_db = sync_blobs
+    child_pk = "33333333-3333-3333-3333-333333333333"
+    response = load_corpus("response_aragorn.json")
+    shepherd_db.save_message_sync(child_pk, response)
+    # no ranking yet: the whole response is read
+    assert merge_worker._load_ranker_results(child_pk) == response["message"]["results"]
+    ranking = {"results": [{"node_bindings": {"n0": {"ids": ["X:1"]}}}]}
+    shepherd_db.save_message_sync(ars_db.ranking_key(child_pk), ranking)
+    assert merge_worker._load_ranker_results(child_pk) == ranking["results"]
+
+
+async def test_ranker_fusion_skips_children_without_results(
+    bt_annotator, rrf_defaults, mocker
+):
+    data = load_corpus("response_aragorn.json")
+    loader = mocker.patch.object(merge_worker, "_load_ranker_results")
+    merge_worker.apply_ranker_fusion(
+        data,
+        "ara-shepherd-aragorn",
+        LOGGER,
+        None,
+        [
+            {
+                "id": "c-aragorn",
+                "agent": "ara-shepherd-aragorn",
+                "inforesid": "infores:shepherd-aragorn",
+                "result_count": 0,
+            }
+        ],
+    )
+    loader.assert_not_called()

@@ -138,7 +138,7 @@ def wrap_up_spy(monkeypatch):
     """Capture the broker/db calls the expiry path makes, in order."""
     calls = {"added": [], "acked": [], "saved_logs": [], "order": []}
 
-    async def _fake_add_task(queue, payload, _logger):
+    async def _fake_add_task(queue, payload, _logger, **_kwargs):
         calls["added"].append((queue, payload))
         calls["order"].append("add_task")
 
@@ -327,7 +327,7 @@ async def test_run_query_stamps_the_deadline_on_the_first_task(monkeypatch):
     async def _fake_add_query(*args, **kwargs):
         return None
 
-    async def _fake_add_task(queue, payload, _logger):
+    async def _fake_add_task(queue, payload, _logger, **_kwargs):
         added.append((queue, payload))
 
     monkeypatch.setattr(base_routes, "add_query", _fake_add_query)
@@ -350,7 +350,7 @@ async def test_run_query_leaves_the_task_unstamped_when_disabled(monkeypatch):
     async def _fake_add_query(*args, **kwargs):
         return None
 
-    async def _fake_add_task(queue, payload, _logger):
+    async def _fake_add_task(queue, payload, _logger, **_kwargs):
         added.append((queue, payload))
 
     monkeypatch.setattr(base_routes, "add_query", _fake_add_query)

@@ -66,6 +66,17 @@ The Translator ARS services (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_wat
 - `docker compose --profile ars up --build`, or
 - set `COMPOSE_PROFILES=ars` in your `.env` to always include them.
 
+Every Shepherd image builds on one shared base image, `shepherd_base/Dockerfile`: the Python
+image, runtime settings and Shepherd's dependencies (read from `pyproject.toml`), but no Shepherd
+code. Compose builds it first on its own. A code change then rebuilds only each image's last few
+layers, and only a `pyproject.toml` change reinstalls the dependencies. To build one image without
+compose, build and tag the base first:
+
+```
+docker build -f shepherd_base/Dockerfile -t shepherd_base .
+docker build -f workers/merge_message/Dockerfile -t merge_message .
+```
+
 Every service in `compose.yml` carries prod-matching CPU / memory limits (see the header of
 `compose.yml` for why), so the stack needs a machine (or Docker Desktop VM) with at least 6 CPUs.
 To lift them locally, override `cpus` / `mem_limit` (0 = unlimited) in a gitignored
@@ -73,6 +84,27 @@ To lift them locally, override `cpus` / `mem_limit` (0 = unlimited) in a gitigno
 
 If you want to add a new operation/worker, add a new service in `compose.yml` under `services`
 (with `profiles: [ars]` if it's part of the ARS).
+
+Data volumes: Postgres, Redis and RedisInsight keep their data in the named volumes
+`shepherd_db_data`, `shepherd_broker_data` and `shepherd_broker_insight_data`, not in `./pgdata`
+and `./data` folders (a bind mount on Docker Desktop doesn't make their writes durable, so an
+unclean stop could corrupt them). Docker Desktop's Volumes tab can browse and download their files. With
+`REDIS_AOF_AUTOFIX=yes` (the compose default) the broker repairs a damaged AOF at startup, keeping
+the damaged files in `/data/appendonlydir.damaged`, instead of restart-looping on it. To start
+empty, run `docker compose down -v`, or `docker volume rm` just the volume to reset (e.g.
+`shepherd_broker_data`).
+
+Credentials and admin access:
+
+- The broker's password comes from `REDIS_PASSWORD` (`shepherd_broker/entrypoint.sh` passes it
+  to `redis-server`; it is not in `redis.conf`). The broker refuses to start without it, and every
+  service must be given the same value. Compose supplies a development default.
+- The monitor's `POST /api/admin/*` routes require `Authorization: Bearer $MONITOR_ADMIN_TOKEN`,
+  and are disabled until `MONITOR_ADMIN_TOKEN` is set. Its dashboard and read-only API need no
+  token.
+- In compose, Postgres, Redis, RedisInsight, the monitor and Jaeger listen on `127.0.0.1` only;
+  use an SSH tunnel to reach them from another machine. The API server (5439) is published on
+  every interface.
 
 ### Worker data (LMDB / sqlite) downloads
 
@@ -234,6 +266,11 @@ every merged version), or `off`. Nodes that already carry a
 configured by its own environment variables (`SERVICE_PROVIDER_API_HOST`,
 `ANNOTATOR_QUERY_BACKEND`), set on the `ars_premerge` and `ars_merge`
 containers.
+Each merged version's results are ordered by weighted Reciprocal Rank
+Fusion of the hosted ARAs' own rankings (Aragorn 0.9, ARAX 0.1, as
+upstream), configured on the `ars_merge` container by upstream's variables:
+`ARS_RRF_ENABLED` (default `true`), `ARS_RRF_ARAGORN_WEIGHT` (ARAX gets the
+rest) and `ARS_RRF_C` (default 40).
 
 The ARS is **de-federated**: it talks only to the ARAs this same Shepherd
 deployment hosts (`shepherd_utils/ars/aras.py` -- Aragorn, ARAX, BTE), and
@@ -284,10 +321,86 @@ results stay readable after the Redis copy expires. Set `ARS_PAYLOAD_DIR` to
 keep those copies as files on a volume instead of in Postgres -- a single
 stress run of large merged results otherwise fills a small Postgres volume,
 and space freed inside Postgres is never returned to the disk. The directory
-must be shared by the server and every `ars_*` worker that writes or reads
-payloads (`ars_fanout`, `ars_premerge`, `ars_merge`, `ars_watchdog`), so in
+must be shared by the server, `finish_query` and every `ars_*` worker that
+writes or reads payloads (`ars_fanout`, `ars_premerge`, `ars_merge`,
+`ars_watchdog`), so in
 Kubernetes it is a `ReadWriteMany` volume; compose mounts `./ars_payloads`.
 Copies already in Postgres stay readable. Unset, payloads stay in Postgres.
+
+Set `PAYLOAD_S3_BUCKET` to keep the same store in an S3 bucket instead (with
+both set, the bucket is used). Objects keep the directory layout as their
+keys, under `PAYLOAD_S3_PREFIX`, so a directory can be copied into a bucket
+as it is. Credentials and region come from the standard AWS chain (the pod's
+IAM role); `PAYLOAD_S3_ENDPOINT_URL` points it at an S3-compatible service.
+A bucket cannot fill, so the disk-pressure eviction below does not apply to
+it.
+
+##### Archived ARA responses
+
+The same store archives every ARA response. When a query's pipeline finishes,
+`finish_query` keeps the response exactly as the pipeline left it -- before a
+callback envelope or the ARS's premerge touches it -- for queries submitted
+directly and ones the ARS dispatched alike. `GET /response/{id}` falls back
+to that copy once the Redis one has expired, so an ARA's answer stays
+readable for `ARA_RESPONSE_RETENTION_DAYS` rather than `REDIS_TTL`.
+
+Each query is one self-contained object under `ara/`, beside the ARS
+payloads: three zstd frames back to back -- the stored response, the query
+(which carries the `parameters` a served response repeats), and a tail with
+the query's final `status`, `description` and `logs`. The first two are the
+compressed bytes Redis held, copied without being decompressed, so archiving
+costs `finish_query` only the compressed size of a response. The routes take
+the object apart; clients get an ordinary TRAPI Response. To look at one
+directly: `zstd -dc <file> | jq -s .` prints the three documents.
+
+Archiving is best-effort: a failed write is retried (for at most 30 seconds),
+logged, and the query is delivered regardless. It needs the store configured
+for `finish_query` as well as the server (the same volume mounted, or the
+same bucket settings); with no store configured, nothing is archived.
+
+##### What stays in Redis
+
+With a store configured, Redis only holds a payload while it is hot. Without
+one, none of this applies: every payload stays in Redis for `REDIS_TTL` and
+every ARS message keeps a durable copy in Postgres.
+
+- **A finished query.** Once `finish_query` has archived it, its query,
+  response and logs are left `REDIS_HOT_TTL` (default 30 minutes) in Redis
+  instead of the rest of `REDIS_TTL`. If the archive write failed they keep
+  the full `REDIS_TTL`, since Redis is then the only copy.
+- **A finished ARS tree.** When the parent completes, every Redis copy in the
+  tree gets `REDIS_HOT_TTL`: long enough for clients still polling it. A
+  later read comes from the cold store and re-warms Redis for the same
+  window.
+- **ARS children.** A child and its ARA's response are one entry: the
+  child's pk is the response id its ARA's query was given. The ARS never
+  writes it. A child's payload is the ARA's own answer, as the ARA would
+  deliver it (with the query's parameters and logs, without the ARS's score
+  normalization or node annotation), read from Redis while hot and from the
+  archive afterwards; a child that is still running has no payload yet.
+  What premerge makes of a child is the merge's working copy
+  (`ars:premerged:<pk>`), deleted once the merge has attempted it. A child
+  whose ARA never answered keeps a small durable copy of whatever its entry
+  held.
+- **Merged versions.** Only the newest keeps a durable copy; each new one
+  drops the copy of the version it supersedes. Earlier entries in
+  `merged_versions_list` are readable only while the tree is hot.
+- **Lookup callbacks.** A callback's payload is deleted as soon as it has
+  been folded into its query's response (this one applies with or without a
+  store). A batch given up on as unmergeable keeps its payloads until
+  `REDIS_TTL`, as evidence.
+
+`REDIS_TTL` (default 4 hours) remains the TTL of anything still in flight or
+never finished; it only has to outlast the longest query.
+
+The defaults are sized for a local stack, and a deployment sets its own:
+
+| Setting | Default | For a deployment |
+| --- | --- | --- |
+| `REDIS_TTL` | `14400` (4 hours) | How long unfinished work stays in Redis to be looked at. Without a cold store it is also how long a finished response is readable at all, so set it much longer there (it used to be 3 days). |
+| `REDIS_HOT_TTL` | `1800` (30 minutes) | How long finished work stays in Redis after its cold copy exists. |
+| `REDIS_MAXMEMORY` (broker container) | unset: `redis.conf`'s `2gb` | The broker's `maxmemory`, e.g. `25gb`. Keep it at about half the container's memory limit and a third of its volume. |
+| `REDIS_MEMORY_LIMIT` (monitor) | unset | The broker container's memory limit, for the monitor's footprint alert. |
 
 The ARS watchdog keeps it bounded, always working on whole finished trees
 (a parent with every child and merged version under it) so a tree is never
@@ -295,9 +408,21 @@ left half there, and never touching retained trees:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `ARS_PAYLOAD_EVICT_HIGH_PCT` / `ARS_PAYLOAD_EVICT_LOW_PCT` | `80` / `65` | Checked every pass (`ARS_WATCHDOG_INTERVAL_SEC`): once the payload volume is this full, evict tree payloads -- uncached oldest first, then cache-backed least recently used (dropping their cache entries) -- until it is back under the low mark. |
+| `ARS_PAYLOAD_EVICT_HIGH_PCT` / `ARS_PAYLOAD_EVICT_LOW_PCT` | `80` / `65` | Checked every pass (`ARS_WATCHDOG_INTERVAL_SEC`): once the payload volume is this full, evict archived ARA responses (oldest first) and then tree payloads -- uncached oldest first, then cache-backed least recently used (dropping their cache entries) -- until it is back under the low mark. |
 | `ARS_DATA_RETENTION_DAYS` | `30` | Hourly: drop the payloads of trees finished this long ago. Rows stay. |
 | `ARS_ROW_RETENTION_DAYS` | `90` | Hourly: delete the rows of trees finished this long ago. |
+| `ARA_RESPONSE_RETENTION_DAYS` | `30` | Hourly: delete the archived responses of directly submitted queries written this long ago. Under disk pressure they are evicted, oldest first, before any tree. |
+
+Every object in the store has one owner. An ARS child's pk is its ARA's
+response id, so the archive of that response belongs to the child's tree: it
+is kept as long as the tree keeps its payloads (`ARS_DATA_RETENTION_DAYS`, a
+retained tree, a live cache entry) and dropped with them, and its size counts
+toward what evicting the tree frees. The archive of a query submitted
+directly has no tree, and is the only kind `ARA_RESPONSE_RETENTION_DAYS`
+applies to. Ownership is decided by asking Postgres, so it works the same on
+a volume and in a bucket; for that reason do not put a bucket lifecycle rule
+on `ara/` (it would delete a retained tree's answers), or set one far longer
+than every retention above as a backstop.
 
 The rest of the database is aged out by the monitor's janitor
 (`QUERY_RETENTION_DAYS` for queries and callbacks, 30 days of monitor
@@ -391,8 +516,9 @@ A TRAPI response is held in memory as a Python object tree several times the
 size of its JSON, by every worker that touches it, and `merge_message` reloads
 the whole accumulated response on every pass. One big enough is OOM-killed and
 then retried on the next pod, which dies the same way. Two caps bound that, and
-both are **off by default** — set them per deployment (Helm) from the pod's
-memory limit:
+both default to **250M** — tune them per deployment (Helm) from the pod's
+memory limit (`0` turns a cap off; a value that doesn't parse also reads as
+`0`, and is logged as a warning):
 
 | Setting | Meaning |
 | --- | --- |
@@ -434,6 +560,36 @@ a response's merge has crashed `MAX_TASK_DELIVERIES` (default 3) times without
 completing, the query is failed `RESPONSE_TOO_LARGE` instead of being retried.
 This is the always-on backstop for the case the caps were set too high to
 catch.
+
+##### A finished response is sealed
+
+Tasks are delivered at least once, so work for a query can still be running
+after the query has finished: a merge pass already in flight, a late
+callback, a redelivered or reclaimed task, a slow operation that outlived its
+query. Once `finish_query` has claimed a query it seals the response (a
+`response_sealed:<response_id>` key next to it in the data store), after its
+own last write -- the too-large rewrite, when there is one -- and before it
+reads the response to deliver, hand to the ARS or archive. What the caller
+gets is then exactly what stays stored.
+
+Every write of a stored message checks the seal in the same Redis
+transaction as the write (`WATCH`/`MULTI`/`EXEC`, retried on a conflict), so
+a writer cannot slip in between the check and the seal. A refused write
+leaves the response untouched and raises `ResponseSealedError`; the task
+lifecycle (and `merge_message`, which drops the query's ready callbacks)
+logs it once at WARNING with the worker and query, ACKs the task, and stops
+-- the query is not handed to its next operation, and not to `finish_query`
+again. Standard workers also check the seal before running an operation, so
+a task for a finished query is skipped rather than run for nothing.
+
+The seal lives `REDIS_TTL` from the moment it is set, so it always outlives
+the response (whose TTL was set by an earlier write, and is only ever
+shortened after archiving). The initial response written at intake comes
+before any seal; the abandoned-query reaper does not seal (a late
+`finish_query` may still claim and deliver an abandoned query), and every
+other way a query ends -- a failed or timed-out operation, a response
+discarded as too large, the post-restart recovery -- goes through
+`finish_query` and is sealed there.
 
 ##### Query intake limits
 
@@ -481,11 +637,144 @@ practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
 default, so raising `TASK_LIMIT` for those only deepens the intake queue rather
 than adding parallelism.
 
+### Monitoring Redis
+
+The monitor (`workers/monitor/`) watches Redis per *instance*. By default the
+four Redis roles (broker, data, lock, logs) are one server, and the monitor
+reports and alerts on it exactly as it always has. When a role is given a Redis
+of its own (`REDIS_<ROLE>_HOST`, or `REDIS_<ROLE>_SENTINEL_MASTER` behind
+Sentinel), every distinct server is polled with one `INFO` and evaluated on its
+own:
+
+- **Snapshot.** `/api/snapshot` keeps `redis` (the instance serving the broker
+  role) and adds `redis_instances`, keyed by instance (`host:port`, or
+  `sentinel:<master>`), each with the roles it serves. An instance that can't
+  be reached reports an `error` in its own entry. The dashboard shows a block
+  per instance when there is more than one.
+- **Alert names.** The broker role's instance keeps today's names
+  (`redis_memory_high`, `redis_evicting`, `redis_restarted`, ...). Any other
+  instance's alerts append it -- `redis_memory_critical@shepherd_data:6379` --
+  and say which instance and roles in the text. Each instance has its own
+  grace periods and cooldowns, so one never masks another.
+- **History.** The broker role's instance keeps the `redis:<metric>` series;
+  others record `redis@<instance>:<metric>`.
+- **Memory.** `REDIS_MEMORY_LIMIT` is the container limit of the instance
+  serving the broker role. For a role with a Redis of its own set
+  `REDIS_DATA_MEMORY_LIMIT` (or `REDIS_LOCK_MEMORY_LIMIT` /
+  `REDIS_LOGS_MEMORY_LIMIT`); without it that instance is still checked
+  against its `maxmemory`, just not against a container limit.
+- **Restarts and failovers.** A restart of the data role's instance finishes,
+  as errors, the queries whose payloads it lost; a restart of the broker
+  role's instance finishes the ones whose next task it lost; a shared Redis
+  does both. Behind Sentinel a failover is handled the same way, since writes
+  the old primary had not replicated are gone, and is reported as
+  `redis_failover` where it can be told from a restart.
+
+Alerts added for multi-server and replicated deployments (all automatic, all
+no-ops on a single unreplicated Redis unless noted; thresholds in
+`shepherd_utils/config.py`, documented in
+`workers/monitor/monitor_alerts.yaml`):
+
+| Alert | Fires when |
+| --- | --- |
+| `redis_failover` | Sentinel promoted a replica; unreplicated writes are lost and the recovery sweep runs |
+| `redis_replicas_lost` / `redis_replicas_recovered` | an instance has fewer connected replicas than it had (critical at zero) for `MONITOR_REDIS_REPLICA_GRACE_SEC` |
+| `redis_replica_lagging` / `redis_replica_caught_up` | a replica is syncing, silent for `MONITOR_REDIS_REPLICA_LAG_SEC`, or `MONITOR_REDIS_REPLICA_LAG_BYTES` behind |
+| `redis_eviction_window_short` / `redis_eviction_window_recovered` | an instance near its `maxmemory` would evict keys younger than the longest query budget (any deployment with `maxmemory` set) |
+
+`redis_persistence_failing` now says which save failed: a failed AOF *write*
+("writes are not being persisted", critical), a failed AOF *rewrite* ("no data
+lost yet, but the AOF will keep growing", warning), or a failed RDB snapshot
+(critical).
+
 ### Message Broker Streams
 
 Shepherd uses Redis Streams for its message broker. More info on Redis Streams can be found [here](https://redis.io/docs/latest/develop/data-types/streams/)
 Each worker type listens to its own message stream/queue. The shared workers can just use their Translator workflow name for their stream name. For workers that share the same workflow but are for different ARAs need their own custom stream name. The current convention is to use the format `{ara_name}.{workflow_name}`.
 Multiple workers of the same type can be in the same `GROUP`, and redis will make sure not to give out the same task to more than one worker in that group. The current convention is to call the group `consumer`.
+
+#### Redis roles
+
+Shepherd uses Redis for four jobs: the **broker** (task streams, worker
+heartbeats, the monitor's state), **data** (query, response and callback
+payloads while they are hot), **locks**, and **logs**. By default they are one
+Redis, `REDIS_HOST`, told apart by database number (0-3).
+
+Each role can be given a Redis of its own, so the small, latency-critical
+broker and locks stop sharing a command thread and a `maxmemory` with
+multi-megabyte payload transfers. Set any of:
+
+| Setting | Role |
+| --- | --- |
+| `REDIS_BROKER_HOST` | streams, heartbeats, monitor state |
+| `REDIS_DATA_HOST` | payloads |
+| `REDIS_LOCK_HOST` | locks |
+| `REDIS_LOGS_HOST` | query logs |
+
+Each has an optional `..._PORT` and `..._PASSWORD`, defaulting to `REDIS_PORT`
+and `REDIS_PASSWORD`. A role keeps its database number wherever it lives, so
+moving one is a configuration change only. **Every process must be given the
+same values** (the server and every worker), and a role must be moved while
+nothing is in flight: its existing keys are not migrated.
+
+A reasonable split is the broker and locks together on one small Redis and
+the data role on another. They want different settings:
+
+- **Broker and locks:** `maxmemory-policy noeviction`. Nothing there may be
+  evicted (a task, a heartbeat, a lock), and the dataset is small. This is the
+  Redis to make highly available first.
+- **Data:** `maxmemory-policy volatile-ttl`, as `shepherd_broker/redis.conf`
+  has it, so the oldest payloads go first if the cap is ever reached. With a
+  cold store configured it only holds payloads while they are hot (see "What
+  stays in Redis").
+
+#### Redis high availability (Sentinel)
+
+A single Redis is a single point of failure: if its node dies, every query in
+flight is lost and nothing recovers until it is back. With Redis Sentinel (one
+primary, two replicas, three Sentinels, each on a different node), a replica
+is promoted in about 15-30 seconds.
+
+Point Shepherd at the Sentinels instead of at Redis:
+
+```
+REDIS_SENTINELS=sentinel-0:26379,sentinel-1:26379,sentinel-2:26379
+REDIS_SENTINEL_MASTER=shepherd      # the name the Sentinels monitor it under
+REDIS_PASSWORD=...                  # the Redis password, as before
+REDIS_SENTINEL_PASSWORD=...         # only if the Sentinels require auth
+```
+
+Clients then ask Sentinel for the current primary and follow it across a
+failover; `REDIS_HOST` is not used. With roles split, a role with its own
+Redis names its master with `REDIS_<ROLE>_SENTINEL_MASTER` (watched by the
+same Sentinels). For each role the most specific setting wins: its own
+sentinel master, then its own host, then `REDIS_SENTINEL_MASTER`, then
+`REDIS_HOST`. Unset, nothing changes: compose and the tests connect directly.
+
+What a failover costs:
+
+- **Seconds of errors.** Commands fail while no primary is reachable. Workers
+  retry as they do through a broker restart.
+- **The last writes.** Replication is asynchronous, so writes the replica had
+  not received are lost, as are writes the old primary accepted in the moment
+  before it was demoted. The monitor treats a failover like a restart and
+  fails the queries whose payloads are gone.
+- **Possibly a lock.** A lock taken just before the failover may not have
+  reached the replica, so for a moment two workers could merge the same
+  response. This is rare and accepted.
+
+Redis settings to use on each node, on top of `shepherd_broker/redis.conf`:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `repl-backlog-size` | `1gb` | A replica that briefly disconnects can catch up without a full resync. |
+| `client-output-buffer-limit` | `replica 4gb 2gb 120` | The default 256mb overflows with large payloads during a full sync, which would restart the resync forever. |
+| `appendonly` | `yes` (already) | A primary without persistence that restarts empty before a failover is copied to its replicas, wiping the dataset. |
+| `masterauth` | the Redis password | So a demoted primary can sync from the new one. |
+
+Sentinel: quorum `2`, `down-after-milliseconds 10000`, `failover-timeout
+60000`. Use a maintained Sentinel Helm chart or operator rather than
+hand-rolling the failover, and spread the pods with anti-affinity.
 
 ### Creating your own ARA
 
@@ -502,7 +791,7 @@ Creating a brand new ARA is fairly straightforward. Here are the steps to create
   - Within the `example_score` funciton in that file, replace the contents with your ARA's scoring logic.
 - If you have other custom operations you want to perform that are in your `workflow` above, pick a similar folder to copy and adjust the code inside to fit your needs.
 - If you want to use shared workers (i.e. `workers/sort_results_score`, `workers/filter_results_top_n`), you don't need to do anything other than include them in your workflow. They will automatically pick up your query and pass it along like your other operations.
-- Open the `compose.yml` file in the root directory, and for each ARA folder you created, add a `service` (or copy an existing one), and make sure that the `container_name` and `build/dockerfile` reflect you worker names and the path to your worker Dockerfile
+- Open the `compose.yml` file in the root directory, and for each ARA folder you created, add a `service` (or copy an existing one), and make sure that the `container_name` and `build/dockerfile` reflect you worker names and the path to your worker Dockerfile (keep the copied `build/additional_contexts` entry: worker Dockerfiles build `FROM shepherd_base`)
 - Run Shepherd with `docker compose up --build`
 
 ### Testing your ARA

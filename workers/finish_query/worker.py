@@ -14,8 +14,13 @@ from opentelemetry.trace import Status, StatusCode, get_current_span
 
 from shepherd_utils.ars.handoff import parse_handoff_callback
 from shepherd_utils.broker import add_task, mark_task_as_complete
-from shepherd_utils.callback_url import CallbackURLError, validate_callback_url
+from shepherd_utils.callback_url import (
+    CallbackResolutionError,
+    CallbackURLError,
+    validate_callback_url,
+)
 from shepherd_utils.db import (
+    claim_query_finish,
     DatabaseUnavailableError,
     ResponseTooLargeError,
     cleanup_callbacks,
@@ -23,8 +28,15 @@ from shepherd_utils.db import (
     get_logs,
     get_message,
     get_query_state,
+    get_response_size,
     save_logs,
+    seal_response,
     set_query_completed,
+)
+from shepherd_utils.response_archive import (
+    archive_query,
+    capture_response,
+    release_hot_copies,
 )
 from shepherd_utils.response_limit import (
     TOO_LARGE_STATUS,
@@ -32,11 +44,11 @@ from shepherd_utils.response_limit import (
     get_too_large_reason,
     write_too_large_response,
 )
-from shepherd_utils.shared import get_tasks
+from shepherd_utils.config import settings
+from shepherd_utils.shared import run_poll_loop
 from shepherd_utils.trapi import (
-    BIOLINK_VERSION,
-    SCHEMA_VERSION,
-    query_parameters,
+    apply_query_status,
+    wrap_stored_response,
 )
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
@@ -100,6 +112,72 @@ async def _wait_for_query_state(query_id: str, logger: logging.Logger):
                 f"{DB_RETRY_SEC}s: {e}"
             )
             await asyncio.sleep(DB_RETRY_SEC)
+
+
+async def _wait_for_claim(query_id: str, logger: logging.Logger) -> bool:
+    """``claim_query_finish``, waiting out a Postgres outage like
+    ``_wait_for_query_state``."""
+    deadline = time.time() + DB_WAIT_SEC
+    while True:
+        try:
+            return await claim_query_finish(query_id, logger)
+        except DatabaseUnavailableError as e:
+            if time.time() >= deadline:
+                raise
+            logger.warning(
+                f"Postgres unavailable claiming {query_id}; retrying in "
+                f"{DB_RETRY_SEC}s: {e}"
+            )
+            await asyncio.sleep(DB_RETRY_SEC)
+
+
+# Attempts at resolving the callback's host before giving up on delivery. A
+# resolution failure says nothing about the URL -- DNS fails briefly -- so it
+# is retried (1s, then 2s), unlike a refusal of the URL itself.
+CALLBACK_RESOLVE_ATTEMPTS = 3
+
+
+async def _check_callback_url(callback_url: str, logger: logging.Logger) -> bool:
+    """Whether ``callback_url`` may be delivered to now.
+
+    Checked at intake too; re-checked here because the host's DNS can have
+    changed since (rebinding), and for queries accepted before intake checked
+    at all. See shepherd_utils/callback_url.py.
+    """
+    for attempt in range(CALLBACK_RESOLVE_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(2 ** (attempt - 1))
+        try:
+            await validate_callback_url(callback_url)
+            return True
+        except CallbackResolutionError as e:
+            logger.warning(
+                f"Couldn't resolve {callback_url} (attempt {attempt + 1}/"
+                f"{CALLBACK_RESOLVE_ATTEMPTS}): {e}"
+            )
+        except CallbackURLError as e:
+            logger.error(f"Not sending the response to {callback_url}: {e}")
+            return False
+    logger.error(
+        f"Not sending the response to {callback_url}: its host could not be "
+        f"resolved after {CALLBACK_RESOLVE_ATTEMPTS} attempts."
+    )
+    return False
+
+
+def stamp_failure(stored: bytes, status: str, description: "str | None") -> bytes:
+    """``stored`` with a failed query's status stamped on, as ``/query`` does.
+
+    A stored response says nothing about how the query ended, so a caller of
+    an async query that failed or timed out got a body indistinguishable from
+    a clean answer. Only a failed query's response is decoded for this; an OK
+    one is delivered as stored.
+    """
+    response = orjson.loads(stored)
+    if not isinstance(response, dict):
+        return stored
+    apply_query_status(response, status, description)
+    return orjson.dumps(response)
 
 
 # ``status`` recorded in ``shepherd_brain`` for a query whose response was lost
@@ -185,42 +263,8 @@ def _is_retryable(e: Exception) -> bool:
     return True
 
 
-def delivery_payload(stored: bytes, query: "dict | None", logs: "list[dict]") -> bytes:
-    """The TRAPI 2.0 Response delivered for ``stored``, without decoding it.
-
-    A stored response never carries the delivery envelope (see
-    ``shepherd_utils.trapi.prepare_stored_response``) and its content is
-    already valid 2.0, so the envelope -- ``schema_version``,
-    ``biolink_version``, the query's ``parameters`` (which 2.0 says the server
-    MUST repeat) -- is written in front of the stored members, and the logs
-    after them. ``logs`` are last so ``_append_log_entry`` can extend them,
-    and absent when there are none (``Response.logs`` has a ``minItems`` of
-    1). One allocation of the payload's size; the slices are views. Anything
-    that is not a JSON object is returned untouched.
-    """
-    envelope: dict = {
-        "schema_version": SCHEMA_VERSION,
-        "biolink_version": BIOLINK_VERSION,
-    }
-    parameters = query_parameters(query)
-    if parameters:
-        envelope["parameters"] = parameters
-    head = orjson.dumps(envelope)
-    view = memoryview(stored)
-    # ``stored`` is one JSON object as orjson wrote it: no whitespace, so its
-    # members are everything between the outer braces.
-    if stored[:1] != b"{" or stored[-1:] != b"}":
-        # Not something a worker stored; deliver it untouched rather than
-        # guess at its structure.
-        return stored
-    members = view[1:-1]
-    parts = [memoryview(head)[:-1]]
-    if len(members):
-        parts += [b",", members]
-    if logs:
-        parts += [b',"logs":', orjson.dumps(logs)]
-    parts.append(b"}")
-    return b"".join(parts)
+# Kept under its old name: the envelope is now shared with GET /response.
+delivery_payload = wrap_stored_response
 
 
 def _append_log_entry(payload: bytes, entry: dict, has_logs: bool = True) -> bytes:
@@ -244,6 +288,73 @@ def _append_log_entry(payload: bytes, entry: dict, has_logs: bool = True) -> byt
     if payload.endswith(b"]}"):
         return payload[:-2] + b"," + entry_bytes + b"]}"
     return payload
+
+
+# One HTTP client for every delivery, rather than a new client (and new
+# connections) per attempt.
+_client: "tuple[asyncio.AbstractEventLoop, httpx.AsyncClient] | None" = None
+
+
+def _http_client() -> httpx.AsyncClient:
+    """The shared callback client, made on (and kept to) the running loop."""
+    global _client
+    loop = asyncio.get_running_loop()
+    if _client is None or _client[0] is not loop or _client[1].is_closed:
+        _client = (loop, httpx.AsyncClient(timeout=CALLBACK_TIMEOUT))
+    return _client[1]
+
+
+class _ByteBudget:
+    """Admits work by the bytes it will hold rather than by count (C5-3).
+
+    Every finish_query task holds its whole response for the length of its
+    callback attempts, so ten at once, each near ``max_response_size``, could
+    OOM the pod. A task waits until its bytes fit the budget; one that is
+    larger than the whole budget runs alone rather than never.
+    """
+
+    def __init__(self) -> None:
+        self._used = 0
+        self._changed: "asyncio.Condition | None" = None
+
+    def _condition(self) -> asyncio.Condition:
+        if self._changed is None:
+            self._changed = asyncio.Condition()
+        return self._changed
+
+    async def acquire(self, size: int, limit: int) -> int:
+        if limit <= 0 or size <= 0:
+            return 0
+        async with self._condition():
+            await self._changed.wait_for(
+                lambda: self._used == 0 or self._used + size <= limit
+            )
+            self._used += size
+        return size
+
+    async def release(self, size: int) -> None:
+        if not size:
+            return
+        async with self._condition():
+            self._used -= size
+            self._changed.notify_all()
+
+    @property
+    def used(self) -> int:
+        return self._used
+
+
+_inflight = _ByteBudget()
+
+
+async def _response_bytes(response_id: str, discarded: bool) -> int:
+    """Uncompressed size of the response a delivery will hold (0 if unknown)."""
+    if discarded:
+        return 0
+    try:
+        return await get_response_size(response_id)
+    except Exception:
+        return 0
 
 
 async def send_callback(
@@ -285,22 +396,22 @@ async def send_callback(
         attempts = attempt
         attempt_start = time.time()
         try:
-            async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT) as client:
-                response = await client.post(
-                    callback_url,
-                    content=message_bytes,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                elapsed = time.time() - attempt_start
-                wait += elapsed
-                logger.info(
-                    f"Sent response back to {callback_url} in {elapsed:.3f}s "
-                    f"({len(message_bytes)} bytes, "
-                    f"attempt {attempt}/{CALLBACK_ATTEMPTS})"
-                )
-                delivered = True
-                break
+            client = _http_client()
+            response = await client.post(
+                callback_url,
+                content=message_bytes,
+                headers=headers,
+            )
+            response.raise_for_status()
+            elapsed = time.time() - attempt_start
+            wait += elapsed
+            logger.info(
+                f"Sent response back to {callback_url} in {elapsed:.3f}s "
+                f"({len(message_bytes)} bytes, "
+                f"attempt {attempt}/{CALLBACK_ATTEMPTS})"
+            )
+            delivered = True
+            break
         except Exception as e:
             elapsed = time.time() - attempt_start
             wait += elapsed
@@ -390,11 +501,25 @@ async def finish_query(task, logger: logging.Logger):
     # given a task, get the message from the db
     query_id = task[1]["query_id"]
     response_id = task[1]["response_id"]
+    # The response's compressed bytes, kept to archive once the query is
+    # delivered. Only the task that finishes the query has them.
+    archive_blob = None
     status = task[1].get("status", "OK")
+    # Client-safe reason a failed operation gave for how the query ends (a
+    # QueryError's description, e.g. "BTE does not support Pathfinder type
+    # queries."); stored beside the status so every way out can report it.
+    description = task[1].get("description") or None
     query_state = await _wait_for_query_state(query_id, logger)
 
     if query_state is None:
         logger.error(f"Query id {query_id} not found in db.")
+    elif not await _wait_for_claim(query_id, logger):
+        # Another finish_query has this query (or already finished it): a
+        # second delivery would send the caller its response twice.
+        logger.info(
+            f"Query {query_id} is already finished or being finished; "
+            "not delivering it again."
+        )
     else:
         too_large = await _too_large_reason(query_id, response_id, logger)
         if too_large is not None:
@@ -403,14 +528,29 @@ async def finish_query(task, logger: logging.Logger):
             # and what gets delivered is the empty message saying so. It is
             # rewritten here rather than trusted: a merge pass that was
             # already in flight when the query was failed can have saved the
-            # big accumulator over the top of it.
+            # big accumulator over the top of it before this claim. Once the
+            # response is sealed below, no such write can land any more.
             status = TOO_LARGE_STATUS
+            description = None
             logger.error(
                 f"Query {query_id} finishing with status {status}: {too_large}"
             )
             too_large_response = await write_too_large_response(
                 query_id, response_id, too_large, logger
             )
+        # From here on the response is final: seal it, so a task still
+        # running for this query (a merge pass in flight, a late callback, a
+        # redelivered or slow operation) has its write refused instead of
+        # replacing what is delivered. After the rewrite above, the last
+        # legitimate write; before anything below reads the response, so
+        # what is archived, handed to the ARS, POSTed to the callback or read
+        # by a sync caller are all the bytes that stay stored.
+        await seal_response(response_id, logger)
+        # What gets archived is the response as the pipeline left it, so it
+        # is read before anyone downstream is handed it (the ARS's premerge
+        # processes what it gets). Compressed bytes only -- nothing is
+        # decoded here -- and written at the end, with the complete logs.
+        archive_blob = await capture_response(response_id, logger)
         callback_url = query_state[8]
         ars_child_pk = parse_handoff_callback(callback_url)
         if ars_child_pk is not None:
@@ -423,6 +563,11 @@ async def finish_query(task, logger: logging.Logger):
             # undeliverable HTTP callback.
             carrier: dict = {}
             inject(carrier)
+            # How the ARA query ended rides along, so the ARS child records
+            # a failed one as E/<code> rather than D/200 with no results.
+            outcome = {"ara_status": status}
+            if description:
+                outcome["ara_description"] = description
             try:
                 await add_task(
                     "ars.premerge",
@@ -431,6 +576,7 @@ async def finish_query(task, logger: logging.Logger):
                         "response_id": response_id,
                         "query_id": query_id,
                         "otel": orjson.dumps(carrier).decode(),
+                        **outcome,
                     },
                     logger,
                     raise_on_failure=True,
@@ -446,57 +592,69 @@ async def finish_query(task, logger: logging.Logger):
                 )
         elif callback_url is not None:
             # this was an async query, need to send message back
+            # Admit by the bytes this delivery will hold, not just by count.
+            admitted = await _inflight.acquire(
+                await _response_bytes(response_id, too_large is not None),
+                settings.finish_query_inflight_bytes_value,
+            )
             try:
-                original_query = await get_message(query_id, logger)
-            except Exception as e:
-                # The query blob can have expired under a long-running query;
-                # that must not cost the caller their response, only the
-                # parameters echo.
-                logger.warning(
-                    f"Couldn't load query {query_id} to echo its parameters: {e}"
-                )
-                original_query = None
-            if too_large is not None:
-                message_bytes = orjson.dumps(too_large_response)
-            else:
                 try:
-                    message_bytes = await get_message(response_id, logger, raw=True)
-                except KeyError as e:
-                    # The response is gone (e.g. Redis restarted and reloaded
-                    # an older snapshot). Tell the caller instead of crashing
-                    # here, which left the query unfinished and the caller
-                    # waiting until the abandoned-query reaper -- which never
-                    # tells them either.
-                    status = LOST_STATUS
-                    logger.error(
-                        f"Query {query_id} finishing with status {status}: "
-                        f"its response is gone ({e})"
+                    original_query = await get_message(query_id, logger)
+                except Exception as e:
+                    # The query blob can have expired under a long-running query;
+                    # that must not cost the caller their response, only the
+                    # parameters echo.
+                    logger.warning(
+                        f"Couldn't load query {query_id} to echo its parameters: {e}"
                     )
-                    message_bytes = orjson.dumps(build_lost_response(original_query))
-            logs = await get_logs(response_id, logger)
-            # Build the TRAPI 2.0 Response around the stored bytes rather
-            # than decoding them: the decoded tree is several times the size
-            # of its JSON, and this worker holds many responses at once.
-            # Rebinding releases the stored buffer as soon as the payload is
-            # built, so only one full copy stays resident for the (up to
-            # 120s x retries) POST below.
-            message_bytes = delivery_payload(message_bytes, original_query, logs)
-            has_logs = bool(logs)
-            del logs, original_query
+                    original_query = None
+                if too_large is not None:
+                    message_bytes = orjson.dumps(too_large_response)
+                else:
+                    try:
+                        message_bytes = await get_message(response_id, logger, raw=True)
+                    except KeyError as e:
+                        # The response is gone (e.g. Redis restarted and reloaded
+                        # an older snapshot). Tell the caller instead of crashing
+                        # here, which left the query unfinished and the caller
+                        # waiting until the abandoned-query reaper -- which never
+                        # tells them either.
+                        status = LOST_STATUS
+                        description = LOST_DESCRIPTION
+                        logger.error(
+                            f"Query {query_id} finishing with status {status}: "
+                            f"its response is gone ({e})"
+                        )
+                        message_bytes = orjson.dumps(
+                            build_lost_response(original_query)
+                        )
+                    else:
+                        if status != "OK":
+                            message_bytes = stamp_failure(
+                                message_bytes, status, description
+                            )
+                logs = await get_logs(response_id, logger)
+                # Build the TRAPI 2.0 Response around the stored bytes rather
+                # than decoding them: the decoded tree is several times the size
+                # of its JSON, and this worker holds many responses at once.
+                # Rebinding releases the stored buffer as soon as the payload is
+                # built, so only one full copy stays resident for the (up to
+                # 120s x retries) POST below.
+                message_bytes = delivery_payload(message_bytes, original_query, logs)
+                has_logs = bool(logs)
+                del logs, original_query
 
-            # Checked at intake too; re-checked here because the host's DNS can
-            # have changed since (rebinding), and for queries accepted before
-            # intake checked at all. See shepherd_utils/callback_url.py.
-            try:
-                await validate_callback_url(callback_url)
-            except CallbackURLError as e:
-                logger.error(f"Not sending the response to {callback_url}: {e}")
-            else:
-                await send_callback(callback_url, message_bytes, logger, has_logs)
-            # Release the payload before the remaining db round trips.
-            del message_bytes
+                if await _check_callback_url(callback_url, logger):
+                    await send_callback(callback_url, message_bytes, logger, has_logs)
+                # Release the payload before the remaining db round trips.
+                del message_bytes
+            finally:
+                await _inflight.release(admitted)
 
-        await set_query_completed(query_id, status, logger)
+        if description:
+            await set_query_completed(query_id, status, logger, description=description)
+        else:
+            await set_query_completed(query_id, status, logger)
 
     # Always reap any callback rows tied to this query. Lookup workers do this
     # on timeout, but successful queries previously left rows behind forever.
@@ -517,6 +675,15 @@ async def finish_query(task, logger: logging.Logger):
         await save_logs(response_id, logger)
     except Exception as e:
         logger.error(f"Failed to save logs for {response_id}: {e}")
+    if archive_blob is not None:
+        # After the flush above, so the archived logs include this worker's.
+        # Best-effort and bounded in time: it never fails the task.
+        if await archive_query(
+            query_id, response_id, archive_blob, status, description, logger
+        ):
+            # The cold copy exists, so Redis only has to hold this query
+            # while it is hot.
+            await release_hot_copies(query_id, response_id, logger)
 
 
 async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
@@ -545,17 +712,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
-    while True:
-        try:
-            async for task, parent_ctx, logger, limiter in get_tasks(
-                STREAM, GROUP, CONSUMER, TASK_LIMIT
-            ):
-                asyncio.create_task(process_task(task, parent_ctx, logger, limiter))
-        except asyncio.CancelledError:
-            LOGGER.info("Poll loop cancelled, shutting down.")
-        except Exception as e:
-            LOGGER.error(f"Error in task polling loop: {e}", exc_info=True)
-            await asyncio.sleep(5)  # back off before retrying
+    await run_poll_loop(STREAM, GROUP, CONSUMER, TASK_LIMIT, process_task)
 
 
 if __name__ == "__main__":
