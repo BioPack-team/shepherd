@@ -45,6 +45,7 @@ class _Limiter:
         ),
         ("workers.arax_pathfinder.worker", "arax_pathfinder_task", None),
         ("workers.aragorn_omnicorp.worker", "aragorn_omnicorp", None),
+        ("workers.aragorn_coalesce.worker", "aragorn_coalesce", None),
     ],
 )
 async def test_the_worker_runs_within_its_querys_budget(

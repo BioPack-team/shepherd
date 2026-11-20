@@ -329,6 +329,7 @@ SUPPORTED_WORKFLOW_OPERATIONS = frozenset(
     [
         "lookup",  # just for O&O ranker comparison work
         "score",  # Ditto
+        "aragorn.coalesce",
         "aragorn.lookup",
         "aragorn.pathfinder",
         "aragorn.omnicorp",

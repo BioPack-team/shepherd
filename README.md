@@ -112,6 +112,7 @@ A couple of workers read from large, read-only sqlite databases and LMDB dataset
 commit to git (they're gitignored and volume-mounted from the host):
 
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
+- **`aragorn_coalesce`** → `./answer_coalesce/` (`answer-coalesce.duckdb`; no download, see below)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
 - **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`, `general_concepts.json`)
 - **arax** (the in-process ARAX port) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0_<tier-version>-all_with_paths.db`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`), plus the arax_pathfinder sqlite dbs in `./arax_pathfinder_dbs/`. The server's ARAX API fetches `autocomplete_v1.0_<tier-version>.sqlite` into the same `./arax_dbs/` (and keeps its meta-KG backups there). The arax worker also caches the Biolink model and ARAX's Biolink lookup map in `./arax_dbs/biolink/`, built at startup so it survives restarts (`ARAX_BIOLINK_CACHE_DIR` moves it).
@@ -171,6 +172,24 @@ band, so it's unaffected).
 Downloads are bounded by `DATASET_DOWNLOAD_TIMEOUT_SEC` (default 60), which applies per socket
 operation rather than to the whole transfer — a large file downloads for as long as it needs, but a
 connection that opens and then stalls fails loudly instead of hanging worker startup.
+
+**`aragorn_coalesce`'s DuckDB graph** has no download: put the database at
+`./answer_coalesce/answer-coalesce.duckdb` (mounted read-only at `/app/answer_coalesce`;
+`ANSWER_COALESCE_DUCKDB_PATH` moves it). A database built by AnswerCoalesce (schema 7) works as is.
+To build one from a KGX node/edge JSONL pair (needs network access for the Biolink model and the
+Translator blocklist):
+
+```bash
+python -m workers.aragorn_coalesce.build_duckdb \
+  --nodes nodes.jsonl --edges edges.jsonl \
+  --output answer_coalesce/answer-coalesce.duckdb
+```
+
+The builder is AnswerCoalesce's, plus each edge's `knowledge_level` and `agent_type` (schema 8), which
+TRAPI 2.0 requires on every edge; on a schema 7 database the support edges report `not_provided`.
+Building takes several GB of memory and spill space (`--memory-limit`, `--max-temp-directory-size`).
+At query time each pool child is limited by `ANSWER_COALESCE_DUCKDB_MEMORY_LIMIT` (default `1GB`),
+`ANSWER_COALESCE_DUCKDB_THREADS` (2) and `ANSWER_COALESCE_DUCKDB_MAX_TEMP_DIRECTORY_SIZE` (`8GB`).
 
 #### ARAX's KP response cache
 
@@ -633,7 +652,7 @@ single large pod. On Kubernetes the memory `limit` (OOMKilled + restart) plus
 regular rollouts already recycle pods, so leaked-resource cleanup comes for free
 — add an RSS-based `livenessProbe` only if the monitor shows OOMKills in
 practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
-`aragorn_score`, `aragorn_omnicorp`) size their process pools from the in-code
+`aragorn_score`, `aragorn_omnicorp`, `aragorn_coalesce`) size their process pools from the in-code
 default, so raising `TASK_LIMIT` for those only deepens the intake queue rather
 than adding parallelism.
 

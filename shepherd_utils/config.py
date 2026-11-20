@@ -305,6 +305,17 @@ class Settings(BaseSettings):
     omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.lmdb"
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
 
+    # aragorn.coalesce (set enrichment): the read-only AnswerCoalesce DuckDB
+    # graph, volume-mounted like the omnicorp LMDBs (build one with
+    # `python -m workers.aragorn_coalesce.build_duckdb`). The limits apply per
+    # pool child, so the worker's memory is about pool size x memory_limit.
+    answer_coalesce_duckdb_path: str = "/app/answer_coalesce/answer-coalesce.duckdb"
+    answer_coalesce_duckdb_memory_limit: str = "1GB"
+    answer_coalesce_duckdb_max_temp_directory_size: str = "8GB"
+    answer_coalesce_duckdb_threads: int = 2
+    # Where DuckDB spills; empty uses /tmp/answer-coalesce-duckdb-<pid>.
+    answer_coalesce_duckdb_temp_directory: str = ""
+
     pathfinder_embeddings_dir: str = "/app/pathfinder_embeddings"
     pathfinder_search_graph_dir: str = "/app/pathfinder_search_graph"
 

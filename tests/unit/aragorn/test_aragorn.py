@@ -38,3 +38,50 @@ async def test_aragorn_entrypoint(redis_mock, mocker):
         "filter_results_top_n",
         "filter_kgraph_orphans",
     ]
+
+
+@pytest.mark.asyncio
+async def test_aragorn_routes_set_input_queries_to_enrichment(redis_mock, mocker):
+    """A set-input (MCQ) query is answered by aragorn.coalesce, which scores
+    its own results, rather than lookup + omnicorp + score."""
+    from shepherd_server.base_routes import check_workflow
+
+    mcq = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "input": {
+                        "ids": ["uuid:1"],
+                        "member_ids": ["NCBIGene:5111", "NCBIGene:8856"],
+                        "set_interpretation": "MANY",
+                        "categories": ["biolink:Gene"],
+                    },
+                    "output": {"categories": ["biolink:ChemicalEntity"]},
+                },
+                "edges": {"e0": {"subject": "input", "object": "output"}},
+            }
+        }
+    }
+    mocker.patch("workers.aragorn.worker.get_message", return_value=mcq)
+    task = [
+        "test",
+        {
+            "query_id": "test",
+            "response_id": "test_response",
+            "workflow": json.dumps(None),
+            "log_level": "20",
+            "otel": json.dumps({}),
+        },
+    ]
+
+    await aragorn(task, logging.getLogger(__name__))
+
+    workflow = json.loads(task[1]["workflow"])
+    assert [op["id"] for op in workflow] == [
+        "aragorn.coalesce",
+        "sort_results_score",
+        "filter_results_top_n",
+        "filter_kgraph_orphans",
+    ]
+    # a client may send the same workflow itself
+    check_workflow(workflow)
