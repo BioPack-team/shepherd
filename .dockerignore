@@ -12,3 +12,5 @@
 **/__pycache__
 **/*.pyc
 workers/*/debug
+# Local Rust builds (the worker image compiles the scorer itself)
+workers/*/rust/target
