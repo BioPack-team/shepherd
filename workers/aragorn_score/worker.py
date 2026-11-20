@@ -437,6 +437,15 @@ class Ranker:
         # The probes depend only on the query graph: computed once per ranker
         # rather than once per answer (#220).
         self._probes = None
+        # Per-edge admittances (-1/log(weight) of each weighted property), so
+        # each k_edge's logs are taken once per message instead of once per
+        # (analysis, direction) it appears in.
+        self._admittances = dict()
+        # Per-edge support closure (nodes and edges reachable through
+        # biolink:support_graphs), shared by every analysis that uses the edge.
+        self._support_closures = dict()
+        # The q_node pairs joined by a q_edge (depends only on the qgraph).
+        self._qedge_qnode_ids = None
 
     def rank(self, answers, jaccard_like=False):
         """Generate a sorted list and scores for a set of subgraphs."""
@@ -448,7 +457,9 @@ class Ranker:
         failed = 0
         for answer in answers:
             try:
-                scored_answer, _ = self.score(answer, jaccard_like=jaccard_like)
+                scored_answer, _ = self.score(
+                    answer, jaccard_like=jaccard_like, details=False
+                )
             except Exception as e:
                 # One answer the ranker can't handle (a probe qnode with no
                 # binding, an edge whose node isn't in the KG, an attribute of
@@ -520,8 +531,13 @@ class Ranker:
 
         return probes
 
-    def score(self, answer, jaccard_like=False):
-        """Compute answer score."""
+    def score(self, answer, jaccard_like=False, details=True):
+        """Compute answer score.
+
+        ``details=False`` skips packaging the per-analysis debugging details
+        (r_graph, edges, laplacian, ...): ``rank`` discards them, and building
+        them cost a dict of full k_edges per analysis.
+        """
 
         # Probes used for scoring are based on the q_graph
         # This will be a list of q_node_id tuples
@@ -565,6 +581,9 @@ class Ranker:
                 answer["analyses"][i_analysis]["score"] = score / (1 - score)
             else:
                 answer["analyses"][i_analysis]["score"] = score
+
+            if not details:
+                continue
 
             # Package up details
             this_analysis_details = {
@@ -617,12 +636,7 @@ class Ranker:
             edge_values_mat[r_object][r_subject][k_edge_id] = edge_vals
 
         # Make a set of all subject object q_node_ids that have q_edges
-        qedge_qnode_ids = set(
-            [
-                frozenset((e["subject"], e["object"]))
-                for e in self.qgraph["edges"].values()
-            ]
-        )
+        qedge_qnode_ids = self._qedge_pairs()
 
         # Turn each value into an edge weight and fill the weight matrix.
         # Only node pairs joined by a q_edge or a k_edge carry a weight, so
@@ -630,6 +644,10 @@ class Ranker:
         # Python, and indexing edge_values_mat for each one created an entry
         # per pair -- n**2 time and memory per analysis (#220). Each pair's
         # weight is summed exactly as before, so scores are unchanged.
+        admittances = self._admittances
+        self._prime_admittances(
+            {edge[2]: None for edge in edges if edge[2] not in admittances}
+        )
         index = {node: i for i, node in enumerate(nodes)}
         weight_mat = np.zeros((num_nodes, num_nodes))  # For debugging
         pairs = set()
@@ -660,28 +678,20 @@ class Ranker:
 
             by_object = edge_values_mat.get(sub_r_node_id)
             edges_here = by_object.get(obj_r_node_id) if by_object else None
-            for edge_id, edge in (edges_here or {}).items():
-                for source, properties in edge.items():
-                    for property, values in properties.items():
-                        w = values["weight"]
-
-                        if w >= 1:  # > as an emergency
-                            w = 0.9999999  # 1 causes numerical issues
-
-                        # -1 / np.log(source_weighted) is our mapping from
-                        # a [0,1] weight to an admittance.
-                        # These admittances just add since they are all in
-                        # parallel which is equivalent to a noisy or.
-                        weight = weight + -1 / (np.log(w))
+            for edge_id in edges_here or ():
+                # These admittances just add since they are all in parallel
+                # which is equivalent to a noisy or. Added one at a time, in
+                # the same order as before, so the sum is bit-for-bit equal.
+                for admittance in admittances[edge_id]:
+                    weight = weight + admittance
 
             weight_mat[i, j] += weight  # For debugging
 
         # Using weight_mat you can calculate the laplacian
         # We could do this in the loop above, but let's be explicit
         weight_row_sums = np.sum(weight_mat, axis=1)
-        laplacian = -1 * weight_mat.copy()
-        for i in range(num_nodes):
-            laplacian[i, i] = weight_row_sums[i]
+        laplacian = -1 * weight_mat
+        laplacian[np.diag_indices(num_nodes)] = weight_row_sums
 
         # Clean up Laplacian (remove extra nodes etc.)
         # Sometimes, mostly because of a bug of some kind,
@@ -704,6 +714,100 @@ class Ranker:
 
         # remove row and col for nodes not kept
         return laplacian[keep, :][:, keep], probe_inds, details
+
+    def _qedge_pairs(self):
+        """The set of {subject, object} q_node pairs joined by a q_edge."""
+        if self._qedge_qnode_ids is None:
+            self._qedge_qnode_ids = set(
+                frozenset((e["subject"], e["object"]))
+                for e in self.qgraph["edges"].values()
+            )
+        return self._qedge_qnode_ids
+
+    def _prime_admittances(self, k_edge_ids):
+        """Cache the admittance of each weighted property of these k_edges, in
+        ``get_edge_values`` order, for every one not cached yet.
+
+        -1 / np.log(weight) is our mapping from a [0,1] weight to an
+        admittance. The logs used to be taken one scalar np.log at a time, for
+        every (analysis, direction) an edge appeared in. Now they are taken
+        once per edge, in one vectorised np.log call per batch -- which gives
+        the same bits as scalar np.log (math.log does not, in the last bit,
+        for ~0.3% of inputs).
+        """
+        cache = self._admittances
+        todo, weights, counts = [], [], []
+        for k_edge_id in k_edge_ids:
+            if k_edge_id in cache:
+                continue
+            n = 0
+            for properties in self.get_edge_values(k_edge_id).values():
+                for values in properties.values():
+                    w = values["weight"]
+                    if w >= 1:  # > as an emergency
+                        w = 0.9999999  # 1 causes numerical issues
+                    weights.append(w)
+                    n += 1
+            todo.append(k_edge_id)
+            counts.append(n)
+            cache[k_edge_id] = ()  # placeholder: an id may repeat in the batch
+        if not todo:
+            return
+        # A weight of 0 (e.g. omnicorp's base weight) is an admittance of 0:
+        # -1 / log(0) = -1 / -inf. Don't warn about it on every edge.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            admittances = (-1 / np.log(np.array(weights, dtype=float))).tolist()
+        # Python floats add exactly as np.float64s do (both IEEE doubles), and
+        # faster.
+        start = 0
+        for k_edge_id, n in zip(todo, counts):
+            cache[k_edge_id] = admittances[start : start + n]
+            start += n
+
+    def _support_closure(self, edge_id):
+        """Every node and edge ``get_edge_support_kg(edge_id, ...)`` adds, as
+        two lists in the order it first adds them (cached per message).
+
+        ``get_edge_support_kg`` re-walks a support graph each time an edge
+        reaches it: once per analysis, and once per path to it within one
+        (exponential in diamond-shaped support, and a RecursionError on a
+        cycle). Adding these lists in order inserts the same elements into
+        the analysis's sets in the same order, so the r_graph -- and the
+        Laplacian's row order -- is unchanged.
+        """
+        cached = self._support_closures.get(edge_id)
+        if cached is not None:
+            return cached
+        # dicts as insertion-ordered sets: assigning a key that is already
+        # there doesn't move it, and dict.update appends only new keys.
+        nodes, edges = {}, {}
+        # Cached before walking: an edge reached again through a support-graph
+        # cycle adds nothing new (its elements are already being collected).
+        self._support_closures[edge_id] = (nodes, edges)
+        kg_edges = self.kgraph["edges"]
+        edge = kg_edges.get(edge_id, None)
+        if not edge:
+            return nodes, edges
+        edges[edge_id] = None
+        sub = edge.get("subject", None)
+        if sub:
+            nodes[sub] = None
+        obj = edge.get("object", None)
+        if obj:
+            nodes[obj] = None
+        for sg_id in edge_support_graphs(edge):
+            sg = self.agraphs.get(sg_id, None)
+            if not sg:
+                continue
+            for sgn in sg.get("nodes", []):
+                nodes[sgn] = None
+            for add_edge_id in sg.get("edges", []):
+                if add_edge_id not in kg_edges:
+                    continue
+                add_nodes, add_edges = self._support_closure(add_edge_id)
+                edges.update(add_edges)
+                nodes.update(add_nodes)
+        return nodes, edges
 
     def get_rgraph(self, result):
         """Get "ranker" subgraph.
@@ -771,9 +875,13 @@ class Ranker:
             # Since results_kg uses sets, things will not get duplicated
             current_edge_ids = _copy_set(anal_kg["edge_ids"])
             for edge_id in current_edge_ids:
-                anal_kg = get_edge_support_kg(
-                    edge_id, self.kgraph, self.agraphs, anal_kg
-                )
+                closure_nodes, closure_edges = self._support_closure(edge_id)
+                # Interleaving within one edge's walk doesn't matter: nodes
+                # and edges go into separate sets. Pass .keys(), not the dicts:
+                # set.update(dict) pre-sizes the table, which changes the
+                # set's iteration order (and so the Laplacian's row order).
+                anal_kg["edge_ids"].update(closure_edges.keys())
+                anal_kg["node_ids"].update(closure_nodes.keys())
 
             # At this point each analysis now has a complete anal_kg
             # This is the complete picture of all nodes and edges used by this
