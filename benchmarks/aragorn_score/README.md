@@ -23,13 +23,14 @@ cd benchmarks/aragorn_score
 REPEAT=10 GEN_ARGS="--results 6000 --genes 1000" ./run.sh
 GEN_ARGS="--results 300 --quirks --nested" ./run.sh   # parity on odd inputs
 VARIANTS="typed:cholesky" ./run.sh           # only the fastest Rust variant
+VARIANTS="typed:cholesky:sonic" ./run.sh     # ... with sonic-rs as the parser
 CHECK_MESSAGES=0 ./run.sh                    # skip the scored-message check
 ```
 
 It needs Python with the repository's dependencies, which the worker
 imports, and a Rust toolchain (`cargo`). Outputs go to `out/`:
-`python.json`, `rust-<parse>-<solver>.json`, the scored messages, and the
-generated message.
+`python.json`, `rust-<parse>-<solver>-<json>.json`, the scored messages, and
+the generated message.
 
 To benchmark a real query, grab its response from Redis where the worker's
 settings are in the environment, then point `run.sh` at it:
@@ -44,7 +45,8 @@ Each runner can also run on its own:
 ```sh
 python python_scorer.py MESSAGE --repeat 5 --out out/python.json
 rust/target/release/aragorn_score_rs MESSAGE --repeat 5 \
-    --parse typed --solver cholesky --out out/rust.json
+    --parse typed --solver cholesky --json serde_json --out out/rust.json
+rust/target/release/aragorn_score_rs MESSAGE --bench-parse --repeat 15  # parsers only
 python compare.py out/python.json out/rust.json [more.json ...] --tol 1e-9
 ```
 
@@ -53,8 +55,9 @@ if the name ends in `.zst`).
 
 ## The Rust variants
 
-Two independent switches choose a variant; `run.sh` runs `value:svd`,
-`typed:svd` and `typed:cholesky` by default.
+Three switches choose a variant. `run.sh` runs `value:svd`, `typed:svd`,
+`typed:cholesky` and `typed:cholesky:sonic` by default
+(`VARIANTS=PARSE:SOLVER[:JSON] ...`).
 
 **`--parse value`** (`src/value_ranker.rs`) is the straight port. It parses
 the whole message into `serde_json::Value`, scores by looking things up in
@@ -79,6 +82,14 @@ changes how the message is read and written:
   The model stores those cases and raises them at the same point. A shape the
   visitors can't represent at all falls back to the value path for the whole
   message, and the result file says so (`note`).
+
+**`--json serde_json|sonic`** picks the JSON parser that drives the typed
+visitors (serde_json by default). See "JSON parsers" below for why they come
+out even.
+
+The build uses mimalloc as its allocator (`--no-default-features` for the
+system one). On the default message it made the whole pipeline about 20%
+faster, scoring included.
 
 **`--solver svd`** (`src/solve.rs`) solves the probes' effective resistance
 the way numpy's `lstsq(L, X, rcond=None)` does: faer's SVD, with the same
@@ -179,52 +190,109 @@ problems were tracked down.
 
 ## Results so far (synthetic messages, this container)
 
-Minimum of 5 runs, in ms. Speedups are against Python.
+Minimum of 5 runs, in ms. Speedups are against Python, measured in the same
+run (Python's own times move by about 10% between runs here).
 
-| message | Python total | value + SVD | typed + SVD | typed + Cholesky |
-|---|---|---|---|---|
-| 2000 results with omnicorp, 24 MB | 1215 | 422 (2.9x) | 199 (6.1x) | 171 (7.1x) |
-| 2000 results, no omnicorp, 7 MB | 502 | 161 (3.1x) | 86 (5.9x) | 62 (8.1x) |
-| 2000 results, nested support, 26 MB | 1736 | 843 (2.1x) | 586 (3.0x) | 240 (7.2x) |
-| 500 results, up to 40 paths, 39 MB | 1969 | 701 (2.8x) | 338 (5.8x) | 254 (7.8x) |
-| 6000 results, 1000 genes, 71 MB | 4895 | 1436 (3.4x) | 643 (7.6x) | 571 (8.6x) |
-| quirks + nested, 312 results | 234 | 123 (1.9x) | 79 (3.0x) | 33 (7.2x) |
+| message | Python | value + SVD | typed + SVD | typed + Cholesky | same, sonic-rs |
+|---|---|---|---|---|---|
+| 2000 results with omnicorp, 24 MB | 1252 | 417 (3.0x) | 172 (7.3x) | 129 (9.7x) | 127 (9.9x) |
+| 2000 results, no omnicorp, 7 MB | 527 | 147 (3.6x) | 72 (7.3x) | 45 (11.7x) | 44 (12.0x) |
+| 2000 results, nested support, 26 MB | 2053 | 808 (2.5x) | 514 (4.0x) | 191 (10.8x) | 179 (11.5x) |
+| 500 results, up to 40 paths, 39 MB | 2219 | 618 (3.6x) | 272 (8.2x) | 210 (10.6x) | 203 (11.0x) |
+| 6000 results, 1000 genes, 71 MB | 5232 | 1304 (4.0x) | 518 (10.1x) | 414 (12.6x) | 381 (13.7x) |
+| quirks + nested, 314 results | 273 | 114 (2.4x) | 74 (3.7x) | 28 (9.7x) | 27 (10.0x) |
 
 The same runs, phase by phase for the default 2000-result message:
 
 | phase | Python | value + SVD | typed + SVD | typed + Cholesky |
 |---|---|---|---|---|
-| decompress | 7 | 10 | 18 | 20 |
-| parse | 130 | 115 | 55 (2.3x) | 56 (2.3x) |
-| score | 1033 | 220 (4.7x) | 95 (10.8x) | 61 (16.8x) |
-| serialize | 24 | 52 | 4 (5.7x) | 3 (6.8x) |
-| compress | 21 | 21 | 22 | 21 |
+| decompress | 7.7 | 8.3 | 8.1 | 7.8 |
+| parse | 141 | 126 | 38 | 36 (3.9x) |
+| score | 1040 | 210 | 96 | 57 (18.2x) |
+| serialize | 27 | 43 | 4.9 | 3.8 (7.0x) |
+| compress | 23 | 24 | 24 | 23 |
+| total | 1252 | 417 | 172 | 129 (9.7x) |
 
 Every variant agrees with Python within 1e-9 on all of these; the largest
 relative difference was about 1e-13. The saved messages match too.
 
 What the tables show:
 
-- **Typed parsing roughly halves parse time** and cuts scoring time about 2x
-  on top of the value port, because scoring works on integers instead of
-  JSON lookups. Splicing makes writing the message 6–8x cheaper than
+- **Typed parsing** is about 3.5x faster than parsing into a `Value`. It also
+  makes scoring about 2x faster, because scoring works on integers instead of
+  JSON lookups. Splicing makes writing the message 7–10x cheaper than
   re-serialising it.
 - **The Cholesky solve matters most for large support graphs.** In the nested
-  case (median 29 r-nodes) it cuts scoring from 399 to 113 ms. It never fell
+  case (median 29 r-nodes) it cuts scoring from 420 to 107 ms. It never fell
   back on these messages; only the self-loop quirks need the SVD.
-- **What's left** is mostly parsing (about a third of the typed + Cholesky
-  total) and zstd. In the typed variants, decompression runs about 2x slower
-  than in the value variant. The code is identical, so I suspect allocator or
-  page-fault effects; I haven't looked into it.
+- **What's left**: in the best variant, scoring is about 45% of the total,
+  parsing about 28%, and zstd (decompress plus compress, the same library as
+  Python's) about 24%.
+
+## JSON parsers
+
+`--bench-parse` times the parsers alone on the same decompressed bytes. Each
+value is dropped after the clock stops: freeing a big tree can cost as much
+as building it, and the pipeline frees outside its timed phases too.
+
+Default message, 23.8 MB, min of 15:
+
+| parser | time | throughput |
+|---|---|---|
+| serde_json `Value` (whole document) | 112 ms | 213 MB/s |
+| simd-json `BorrowedValue` (whole document) | 58 ms | 409 MB/s |
+| sonic-rs `Value` (whole document) | 17 ms | 1.4 GB/s |
+| typed visitors, serde_json | 32 ms | 747 MB/s |
+| typed visitors, sonic-rs | 30 ms | 789 MB/s |
+
+The 71 MB message gives the same ranking (serde_json `Value` 382 ms,
+simd-json 214, sonic-rs `Value` 69, typed visitors 104–106).
+
+**sonic-rs parses a whole document far faster than anything else, but that
+doesn't carry over to scoring.** Through serde, where the typed visitors
+need it, sonic-rs ties with serde_json: the time goes into the visitor calls
+and the structs they build, not into tokenising JSON.
+
+I also tried using sonic-rs's own document parser for the knowledge graph,
+converting the result into the typed structs. It took 63–66 ms, twice as
+slow. Skipping over the 22 MB knowledge graph with sonic-rs's lazy iterator
+costs about 20 ms (as much as parsing it), and the conversion another 16 ms.
+Even parsing the whole file at once and converting (about 17 + 16 ms) can't
+beat the visitors' single pass, so I removed that prototype.
+
+**simd-json** has no borrowed raw-value type, and its serde mode rewrites
+the input buffer in place, so it can't support the splicing. As a whole-
+document parser it's 3x slower than sonic-rs here anyway.
+
+What did make the typed parse faster (55 → about 32 ms):
+
+- **One pass.** The top level and the message are parsed together. Before,
+  the code scanned the whole document once just to find `"message"`.
+- **Parse from `&str`.** UTF-8 is validated once up front (simdutf8), then
+  parsing runs from the string. serde_json's `from_slice` re-validates every
+  string it reads.
+- **Borrowed keys.** Object keys are borrowed from the input. serde's
+  `Cow<str>` allocates a `String` for every key.
+- **mimalloc.** About 10% off the parse, and more off scoring.
+
+Decompression also matches Python now (14 → 7 ms on the default message). It
+allocates the size the zstd frame header declares, as Shepherd's
+`decompress_frame` does, instead of growing a buffer.
 
 ## Headroom and caveats
 
-- **Faster parsing.** A SIMD JSON parser (simd-json, sonic-rs) could cut the
-  parse phase further; it's now the biggest piece.
+- **Parsing is near its limit for this design.** The visitors spend their time
+  building the structs the ranker needs. Going faster would mean building
+  the model directly from a sonic-rs document, skipping the intermediate
+  structs. The prototype above suggests the gain would be small, if any.
+- **zstd is now about a quarter of the total.** Compression at level 3 takes
+  about 23 ms for 24 MB in both languages. Level 1 or a faster codec would
+  matter more than any further parser work, but that's a change to how
+  Shepherd stores messages, not to the scorer.
 - **The Cholesky trick works in Python too.** It's an algorithm change, not a
   language one. But numpy's `lstsq` was only about 10% of the Python worker's
-  time (most of it is the Python-level dict and loop work), so Python would
-  gain much less from it than Rust does.
+  time (most of it is Python-level dict and loop work), so Python would gain
+  much less from it than Rust does.
 - **No reconstruction check.** Dropping it saves about 6% on SVD solves, but
   it's what keeps a silently failed decomposition from becoming a wrong
   score.

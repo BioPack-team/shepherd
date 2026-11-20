@@ -6,7 +6,7 @@
 //! * only the fields the ranker reads are kept; everything else is skipped
 //!   without allocating (`IgnoredAny`);
 //! * strings borrow from the input buffer (`Cow`, owned only when escaped);
-//! * an attribute's `value` is kept as raw JSON (`&RawValue`) and only
+//! * an attribute's `value` is kept as raw JSON (`Raw`) and only
 //!   interpreted for the attributes scoring looks at; a list is reduced to
 //!   its length and first element (`AV::List`), so a publications list of
 //!   thousands of PMIDs is counted, not built;
@@ -24,10 +24,103 @@ use std::borrow::Cow;
 use std::fmt;
 use std::marker::PhantomData;
 
-use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde_json::value::RawValue;
+use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use std::cell::Cell;
+use std::ops::Deref;
 
 pub type R<T> = Result<T, String>;
+
+// --- parser backend --------------------------------------------------------------------
+
+/// Which JSON parser drives the visitors below (`--json`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    SerdeJson,
+    /// sonic-rs through the same serde visitors.
+    Sonic,
+}
+
+impl Backend {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "serde_json" => Some(Backend::SerdeJson),
+            "sonic" | "sonic-rs" => Some(Backend::Sonic),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Backend::SerdeJson => "serde_json",
+            Backend::Sonic => "sonic",
+        }
+    }
+}
+
+thread_local! {
+    static BACKEND: Cell<Backend> = const { Cell::new(Backend::SerdeJson) };
+}
+
+/// Deserialize from a borrowed &str with the current backend.
+fn from_str<'de, T: Deserialize<'de>>(s: &'de str) -> R<T> {
+    match BACKEND.with(Cell::get) {
+        Backend::SerdeJson => serde_json::from_str(s).map_err(|e| e.to_string()),
+        Backend::Sonic => sonic_rs::from_str(s).map_err(|e| e.to_string()),
+    }
+}
+
+/// A value's raw JSON text, borrowed from the input. Each backend has its own
+/// raw-value type (serde_json's `RawValue`, sonic-rs's `LazyValue`), which
+/// only its own deserializer recognises, so this asks for whichever is
+/// running.
+#[derive(Clone, Copy)]
+pub struct Raw<'de>(pub &'de str);
+
+impl<'de> Deserialize<'de> for Raw<'de> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match BACKEND.with(Cell::get) {
+            Backend::SerdeJson => {
+                Ok(Raw(<&'de serde_json::value::RawValue>::deserialize(d)?.get()))
+            }
+            Backend::Sonic => match sonic_rs::LazyValue::<'de>::deserialize(d)?.as_raw_cow() {
+                Cow::Borrowed(s) => Ok(Raw(s)),
+                Cow::Owned(_) => Err(de::Error::custom("sonic-rs returned an owned raw value")),
+            },
+        }
+    }
+}
+
+/// A string (an object key, mostly) borrowed from the input when it has no
+/// escapes. serde's own `Cow<str>` always allocates a `String`.
+pub struct Key<'de>(pub Cow<'de, str>);
+
+impl Deref for Key<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Key<'de> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct KV;
+        impl<'de> Visitor<'de> for KV {
+            type Value = Key<'de>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Key<'de>, E> {
+                Ok(Key(Cow::Borrowed(v)))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Key<'de>, E> {
+                Ok(Key(Cow::Owned(v.to_owned())))
+            }
+            fn visit_string<E>(self, v: String) -> Result<Key<'de>, E> {
+                Ok(Key(Cow::Owned(v)))
+            }
+        }
+        d.deserialize_str(KV)
+    }
+}
 
 // --- AV: a JSON value reduced to what Python's checks need --------------------
 
@@ -175,7 +268,7 @@ impl<'de> Visitor<'de> for AVVisitor {
 #[derive(Clone, Copy)]
 pub enum Lazy<'a> {
     Missing,
-    Raw(&'a RawValue),
+    Raw(Raw<'a>),
 }
 
 impl<'a> Lazy<'a> {
@@ -183,13 +276,13 @@ impl<'a> Lazy<'a> {
     pub fn av(&self) -> Option<AV<'a>> {
         match self {
             Lazy::Missing => None,
-            Lazy::Raw(r) => serde_json::from_str::<AV<'a>>(r.get()).ok(),
+            Lazy::Raw(r) => serde_json::from_str::<AV<'a>>(r.0).ok(),
         }
     }
     pub fn full(&self) -> Option<serde_json::Value> {
         match self {
             Lazy::Missing => None,
-            Lazy::Raw(r) => serde_json::from_str(r.get()).ok(),
+            Lazy::Raw(r) => serde_json::from_str(r.0).ok(),
         }
     }
 }
@@ -287,7 +380,7 @@ impl<'de, T: Fields<'de>> Deserialize<'de> for Thing<T> {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Thing<T>, A::Error> {
                 let mut f = T::default();
                 let mut len = 0;
-                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+                while let Some(key) = map.next_key::<Key<'de>>()? {
                     len += 1;
                     f.field(&key, &mut map)?;
                 }
@@ -398,20 +491,20 @@ fields!(QEdgeFields {
 });
 
 fields!(QGraphFields {
-    "nodes" => nodes: Maybe<Entries<Cow<'de, str>, IgnoredAny>>,
-    "edges" => edges: Maybe<Entries<Cow<'de, str>, Thing<QEdgeFields<'de>>>>,
+    "nodes" => nodes: Maybe<Entries<Key<'de>, IgnoredAny>>,
+    "edges" => edges: Maybe<Entries<Key<'de>, Thing<QEdgeFields<'de>>>>,
 });
 
 fields!(KGraphFields {
-    "nodes" => nodes: Maybe<Entries<Cow<'de, str>, Thing<NodeFields<'de>>>>,
-    "edges" => edges: Maybe<Entries<Cow<'de, str>, Thing<EdgeFields<'de>>>>,
+    "nodes" => nodes: Maybe<Entries<Key<'de>, Thing<NodeFields<'de>>>>,
+    "edges" => edges: Maybe<Entries<Key<'de>, Thing<EdgeFields<'de>>>>,
 });
 
 fields!(MessageFields {
     "query_graph" => query_graph: Has<Thing<QGraphFields<'de>>>,
     "knowledge_graph" => knowledge_graph: Has<Thing<KGraphFields<'de>>>,
-    "auxiliary_graphs" => auxiliary_graphs: Maybe<Entries<Cow<'de, str>, Thing<AuxFields<'de>>>>,
-    "results" => results: Option<&'de RawValue>,
+    "auxiliary_graphs" => auxiliary_graphs: Maybe<Entries<Key<'de>, Thing<AuxFields<'de>>>>,
+    "results" => results: Option<Raw<'de>>,
 });
 
 fields!(BindingFields {
@@ -419,12 +512,12 @@ fields!(BindingFields {
 });
 
 fields!(ResultFields {
-    "node_bindings" => node_bindings: Maybe<Entries<Cow<'de, str>, Thing<BindingFields<'de>>>>,
-    "analyses" => analyses: Maybe<Vec<&'de RawValue>>,
+    "node_bindings" => node_bindings: Maybe<Entries<Key<'de>, Thing<BindingFields<'de>>>>,
+    "analyses" => analyses: Maybe<Vec<Raw<'de>>>,
 });
 
 fields!(AnalysisFields {
-    "edge_bindings" => edge_bindings: Maybe<Entries<Cow<'de, str>, Thing<BindingFields<'de>>>>,
+    "edge_bindings" => edge_bindings: Maybe<Entries<Key<'de>, Thing<BindingFields<'de>>>>,
     "support_graphs" => support_graphs: Maybe<Vec<AV<'de>>>,
     "score" => score: Opt<'de>,
 });
@@ -440,7 +533,7 @@ impl Default for LazyField<'_> {
 
 impl<'de> Deserialize<'de> for LazyField<'de> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(LazyField(Lazy::Raw(<&'de RawValue>::deserialize(d)?)))
+        Ok(LazyField(Lazy::Raw(Raw::deserialize(d)?)))
     }
 }
 
@@ -465,49 +558,67 @@ fn span(base: &[u8], part: &str) -> (usize, usize) {
 }
 
 /// Parse a stored TRAPI Response (`{"message": ...}`) or a bare Message.
-pub fn parse(bytes: &[u8]) -> Result<Parsed<'_>, String> {
-    // Is there a "message" object at the top level?
-    let top: Entries<Cow<str>, &RawValue> =
-        serde_json::from_slice(bytes).map_err(|e| format!("top level: {e}"))?;
-    let message_raw = top
-        .0
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "message")
-        .map(|(_, v)| *v)
-        .filter(|v| v.get().starts_with('{'));
-    let message: Thing<MessageFields> = match message_raw {
-        Some(raw) => serde_json::from_str(raw.get()),
-        None => serde_json::from_slice(bytes),
+/// The top level, read in one pass: a stored Response's `"message"`, or a
+/// bare Message's own fields.
+#[derive(Default)]
+struct TopFields<'de> {
+    message: Has<Thing<MessageFields<'de>>>,
+    bare: MessageFields<'de>,
+}
+
+impl<'de> Fields<'de> for TopFields<'de> {
+    fn field<A: MapAccess<'de>>(&mut self, key: &str, map: &mut A) -> Result<(), A::Error> {
+        match key {
+            "message" => self.message = map.next_value()?,
+            _ => self.bare.field(key, map)?,
+        }
+        Ok(())
     }
-    .map_err(|e| format!("message: {e}"))?;
-    let message = match message {
+}
+
+pub fn parse(bytes: &[u8], backend: Backend) -> Result<Parsed<'_>, String> {
+    BACKEND.with(|b| b.set(backend));
+    // Validate UTF-8 once, up front, with SIMD (several times faster than
+    // std's check), then parse from &str: from_slice would re-validate every
+    // string it reads.
+    let text = simdutf8::basic::from_utf8(bytes).map_err(|_| "not UTF-8".to_string())?;
+    let top: Thing<TopFields> = from_str(text).map_err(|e| format!("message: {e}"))?;
+    let top = match top {
         Thing::Obj { f, .. } => f,
-        other => return Err(format!("the message is {}", other.kind())),
+        other => return Err(format!("the document is {}", other.kind())),
+    };
+    // A Response's "message" when it is an object, else the document itself.
+    let message = match top.message.0 {
+        Some(Thing::Obj { f, .. }) => f,
+        _ => top.bare,
     };
 
+    finish(bytes, message)
+}
+
+/// Parse the results (raw, typed, and each analysis) of a parsed message.
+fn finish<'de>(bytes: &[u8], message: MessageFields<'de>) -> R<Parsed<'de>> {
     let mut results = None;
     let mut results_span = None;
-    if let Some(raw) = message.results.filter(|r| r.get().starts_with('[')) {
-        results_span = Some(span(bytes, raw.get()));
-        let raws: Vec<&RawValue> =
-            serde_json::from_str(raw.get()).map_err(|e| format!("results: {e}"))?;
+    if let Some(raw) = message.results.filter(|r| r.0.starts_with('[')) {
+        results_span = Some(span(bytes, raw.0));
+        let raws: Vec<Raw> = from_str(raw.0).map_err(|e| format!("results: {e}"))?;
         let mut out = Vec::with_capacity(raws.len());
         for r in raws {
             let fields: Thing<ResultFields> =
-                serde_json::from_str(r.get()).map_err(|e| format!("a result: {e}"))?;
+                from_str(r.0).map_err(|e| format!("a result: {e}"))?;
             let mut analyses = vec![];
             if let Thing::Obj { f, .. } = &fields {
                 if let Maybe::Present(list) = &f.analyses {
                     for a in list {
-                        let af: Thing<AnalysisFields> = serde_json::from_str(a.get())
-                            .map_err(|e| format!("an analysis: {e}"))?;
-                        analyses.push((a.get(), af));
+                        let af: Thing<AnalysisFields> =
+                            from_str(a.0).map_err(|e| format!("an analysis: {e}"))?;
+                        analyses.push((a.0, af));
                     }
                 }
             }
             out.push(ParsedResult {
-                raw: r.get(),
+                raw: r.0,
                 fields,
                 analyses,
             });

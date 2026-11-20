@@ -11,8 +11,9 @@
 #
 # Env:
 #   REPEAT    runs per scorer (default 5)
-#   VARIANTS  Rust variants, PARSE:SOLVER, space-separated
-#             (default "value:svd typed:svd typed:cholesky")
+#   VARIANTS  Rust variants, PARSE:SOLVER[:JSON], space-separated
+#             (default "value:svd typed:svd typed:cholesky typed:cholesky:sonic";
+#             JSON is serde_json unless given)
 #   CHECK_MESSAGES  1 (default) saves each scored message and checks they
 #             agree with Python's; 0 skips that (it reloads every message)
 #   OUT, GEN_ARGS, TOL (default 1e-9), PYTHON (default python3)
@@ -22,7 +23,7 @@ OUT="${OUT:-$HERE/out}"
 REPEAT="${REPEAT:-5}"
 TOL="${TOL:-1e-9}"
 PYTHON="${PYTHON:-python3}"
-VARIANTS="${VARIANTS:-value:svd typed:svd typed:cholesky}"
+VARIANTS="${VARIANTS:-value:svd typed:svd typed:cholesky typed:cholesky:sonic}"
 CHECK_MESSAGES="${CHECK_MESSAGES:-1}"
 mkdir -p "$OUT"
 
@@ -43,11 +44,13 @@ echo "== scoring $MESSAGE ($REPEAT runs each)" >&2
 "$PYTHON" "$HERE/python_scorer.py" "$MESSAGE" --repeat "$REPEAT" --out "$OUT/python.json" $(save python)
 results=()
 for v in $VARIANTS; do
-  parse="${v%%:*}"; solver="${v##*:}"
+  IFS=: read -r parse solver json <<<"$v"
+  json="${json:-serde_json}"
+  name="rust-$parse-$solver-$json"
   # shellcheck disable=SC2046
   "$HERE/rust/target/release/aragorn_score_rs" "$MESSAGE" --repeat "$REPEAT" \
-    --parse "$parse" --solver "$solver" --out "$OUT/rust-$parse-$solver.json" $(save "rust-$parse-$solver")
-  results+=("$OUT/rust-$parse-$solver.json")
+    --parse "$parse" --solver "$solver" --json "$json" --out "$OUT/$name.json" $(save "$name")
+  results+=("$OUT/$name.json")
 done
 
 echo >&2

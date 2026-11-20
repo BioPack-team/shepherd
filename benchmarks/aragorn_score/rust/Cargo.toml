@@ -13,6 +13,10 @@ path = "src/main.rs"
 # preserve_order: TRAPI key order matters (query-graph node order picks the probes).
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 serde = "1"
+sonic-rs = "0.5"
+simd-json = "0.19"
+simdutf8 = "0.1"
+mimalloc = { version = "0.1", optional = true }
 indexmap = "2"
 nalgebra = "0.33"
 faer = "0.22"
@@ -23,3 +27,9 @@ rustc-hash = "2"
 lto = "fat"
 codegen-units = 1
 debug = "line-tables-only"
+
+[features]
+# mimalloc as the global allocator (on by default; --no-default-features for the
+# system allocator).
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]

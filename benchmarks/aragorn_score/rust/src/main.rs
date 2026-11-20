@@ -1,16 +1,22 @@
 //! Benchmark runner for the Rust ports of the aragorn.score ranker.
 //!
 //!     aragorn_score_rs <message.json|message.json.zst> [--repeat N]
-//!         [--parse typed|value] [--solver cholesky|svd]
-//!         [--out result.json] [--save-message scored.json.zst]
+//!         [--parse typed|value] [--solver cholesky|svd] [--json serde_json|sonic]
+//!         [--out result.json] [--save-message scored.json.zst] [--bench-parse]
 //!
 //! Each repeat runs the full worker pipeline on the raw bytes, timed per
 //! phase: zstd decompress -> parse -> score -> write the scored message ->
 //! zstd compress. `--parse value` is the straight port on serde_json::Value
 //! (value_ranker.rs); `--parse typed` (the default) parses into borrowed
 //! structs and splices scores into the input (typed.rs). `--solver` picks
-//! the effective-resistance solve (solve.rs). The result file has the same
-//! shape as `python_scorer.py`'s, for `compare.py`.
+//! the effective-resistance solve (solve.rs), `--json` the parser driving
+//! the typed visitors. The result file has the same shape as
+//! `python_scorer.py`'s, for `compare.py`. `--bench-parse` times the JSON
+//! parsers alone (see README).
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod solve;
 mod typed;
@@ -21,8 +27,19 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use solve::{SolveStats, Solver};
+use typed_input::Backend;
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Decompress a zstd frame into one allocation of the size its header
+/// declares (as Shepherd's `decompress_frame` does); stream it when the
+/// header doesn't say.
+fn decompress(raw: &[u8]) -> Vec<u8> {
+    match zstd::zstd_safe::get_frame_content_size(raw) {
+        Ok(Some(size)) => zstd::bulk::decompress(raw, size as usize).expect("zstd decompress"),
+        _ => zstd::decode_all(raw).expect("zstd decompress"),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Parse {
@@ -35,12 +52,15 @@ struct Args {
     repeat: usize,
     parse: Parse,
     solver: Solver,
+    json: Backend,
     out: Option<String>,
     save_message: Option<String>,
+    bench_parse: bool,
 }
 
 const USAGE: &str = "usage: aragorn_score_rs MESSAGE [--repeat N] [--parse typed|value] \
-                     [--solver cholesky|svd] [--out RESULT.json] [--save-message OUT]";
+                     [--solver cholesky|svd] [--json sonic|serde_json] [--out RESULT.json] \
+                     [--save-message OUT] [--bench-parse]";
 
 fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
@@ -49,8 +69,10 @@ fn parse_args() -> Args {
         repeat: 1,
         parse: Parse::Typed,
         solver: Solver::Cholesky,
+        json: Backend::SerdeJson,
         out: None,
         save_message: None,
+        bench_parse: false,
     };
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -63,8 +85,10 @@ fn parse_args() -> Args {
                 }
             }
             "--solver" => args.solver = it.next().as_deref().and_then(Solver::parse).expect(USAGE),
+            "--json" => args.json = it.next().as_deref().and_then(Backend::parse).expect(USAGE),
             "--out" => args.out = it.next(),
             "--save-message" => args.save_message = it.next(),
+            "--bench-parse" => args.bench_parse = true,
             "-h" | "--help" => {
                 eprintln!("{USAGE}");
                 std::process::exit(0);
@@ -154,9 +178,9 @@ fn run_value(bytes: &[u8], solver: Solver) -> Run {
 }
 
 /// Err: the typed parse couldn't represent this message.
-fn run_typed(bytes: &[u8], solver: Solver) -> Result<Run, String> {
+fn run_typed(bytes: &[u8], solver: Solver, json: Backend) -> Result<Run, String> {
     let t = Instant::now();
-    let parsed = typed_input::parse(bytes)?;
+    let parsed = typed_input::parse(bytes, json)?;
     let parse_ms = ms(t);
 
     let t = Instant::now();
@@ -197,6 +221,56 @@ fn run_typed(bytes: &[u8], solver: Solver) -> Result<Run, String> {
     })
 }
 
+/// `--bench-parse`: time each parser on the same decompressed bytes,
+/// `repeat` times each (the parse result is dropped outside the timing).
+fn bench_parse(raw: &[u8], repeat: usize) {
+    let bytes = if raw.starts_with(&ZSTD_MAGIC) {
+        decompress(raw)
+    } else {
+        raw.to_vec()
+    };
+    let report = |name: &str, mut v: Vec<f64>| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mbps = bytes.len() as f64 / 1e6 / (v[0] / 1e3);
+        println!("{name:<28} min {:7.1} ms  median {:7.1} ms  ({mbps:.0} MB/s)", v[0], v[v.len() / 2]);
+    };
+    // Times the parse only: each result is dropped after the clock stops
+    // (freeing a big tree can cost as much as building it, and the pipeline
+    // drops outside its timed phases too).
+    fn time<T>(repeat: usize, mut f: impl FnMut(usize) -> T) -> Vec<f64> {
+        (0..repeat)
+            .map(|i| {
+                let t = Instant::now();
+                let v = f(i);
+                let elapsed = ms(t);
+                drop(v);
+                elapsed
+            })
+            .collect()
+    }
+    println!("{:.1} MB of JSON, {repeat} runs each", bytes.len() as f64 / 1e6);
+    println!("-- full document (reference):");
+    report("serde_json Value", time(repeat, |_| serde_json::from_slice::<Value>(&bytes).unwrap()));
+    report("sonic-rs Value", time(repeat, |_| sonic_rs::from_slice::<sonic_rs::Value>(&bytes).unwrap()));
+    // simd-json parses in place, so each run needs its own copy (not timed).
+    let mut times = vec![];
+    for _ in 0..repeat {
+        let mut copy = bytes.clone(); // not timed
+        let t = Instant::now();
+        let v = simd_json::to_borrowed_value(&mut copy).unwrap();
+        times.push(ms(t));
+        drop(v);
+    }
+    report("simd-json BorrowedValue", times);
+    println!("-- typed visitors (what --parse typed runs):");
+    for backend in [Backend::SerdeJson, Backend::Sonic] {
+        report(
+            &format!("typed, {}", backend.name()),
+            time(repeat, |_| typed_input::parse(&bytes, backend).unwrap()),
+        );
+    }
+}
+
 fn main() {
     let args = parse_args();
     // One thread, like each Python pool worker: the matrices are small, and
@@ -207,13 +281,18 @@ fn main() {
     let raw = std::fs::read(&args.input).expect("read input");
     let read_ms = ms(t);
 
+    if args.bench_parse {
+        bench_parse(&raw, args.repeat);
+        return;
+    }
+
     let phases = ["decompress", "parse", "score", "serialize", "compress"];
     let mut runs: Vec<Vec<f64>> = vec![];
     let mut last = None;
     for _ in 0..args.repeat {
         let t = Instant::now();
         let bytes = if raw.starts_with(&ZSTD_MAGIC) {
-            zstd::decode_all(raw.as_slice()).expect("zstd decompress")
+            decompress(&raw)
         } else {
             raw.clone()
         };
@@ -221,7 +300,7 @@ fn main() {
 
         let run = match args.parse {
             Parse::Value => run_value(&bytes, args.solver),
-            Parse::Typed => run_typed(&bytes, args.solver).unwrap_or_else(|e| {
+            Parse::Typed => run_typed(&bytes, args.solver, args.json).unwrap_or_else(|e| {
                 let mut r = run_value(&bytes, args.solver);
                 r.note = Some(format!("typed parse failed ({e}); used the value path"));
                 r
@@ -258,11 +337,10 @@ fn main() {
     }
     timings.insert("total".into(), stat(runs.iter().map(|r| r.iter().sum()).collect()));
 
-    let label = format!(
-        "rust[{},{}]",
-        if args.parse == Parse::Typed { "typed" } else { "value" },
-        args.solver.name()
-    );
+    let label = match args.parse {
+        Parse::Typed => format!("rust[typed:{},{}]", args.json.name(), args.solver.name()),
+        Parse::Value => format!("rust[value,{}]", args.solver.name()),
+    };
     let n_analyses: usize = run.scores.iter().map(Vec::len).sum();
     let result = json!({
         "impl": label,
