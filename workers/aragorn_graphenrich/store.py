@@ -1,4 +1,4 @@
-"""Read-only access to the AnswerCoalesce DuckDB graph.
+"""Read-only access to the graphenrich DuckDB graph.
 
 Ported from AnswerCoalesce's ``src/graph_coalescence/duckdb_store.py``, keeping
 what set-input (MCQ) enrichment needs: the enrichment query itself, node names,
@@ -114,15 +114,15 @@ def _poisson_survival(support_count, expected_count):
 
 def connection() -> duckdb.DuckDBPyConnection:
     """This process's read-only connection to the configured database."""
-    path = os.path.abspath(settings.answer_coalesce_duckdb_path)
+    path = os.path.abspath(settings.graphenrich_duckdb_path)
     if _state.connection is not None and _state.path == path:
         return _state.connection
     close_connection()
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"AnswerCoalesce DuckDB database not found at {path}. Mount it there "
-            "or set ANSWER_COALESCE_DUCKDB_PATH (build one with "
-            "`python -m workers.aragorn_coalesce.build_duckdb`)."
+            f"graphenrich DuckDB database not found at {path}. Mount it there "
+            "or set GRAPHENRICH_DUCKDB_PATH (build one with "
+            "`python -m workers.aragorn_graphenrich.build_duckdb`)."
         )
     conn = duckdb.connect(path, read_only=True)
     try:
@@ -132,7 +132,7 @@ def connection() -> duckdb.DuckDBPyConnection:
         version = row[0] if row else "missing"
         if version not in SUPPORTED_SCHEMA_VERSIONS:
             raise RuntimeError(
-                f"AnswerCoalesce DuckDB schema version {version} is not "
+                f"graphenrich DuckDB schema version {version} is not "
                 f"supported; expected one of {', '.join(SUPPORTED_SCHEMA_VERSIONS)}. "
                 "Rebuild the database."
             )
@@ -143,17 +143,17 @@ def connection() -> duckdb.DuckDBPyConnection:
             DOUBLE,
             type="arrow",
         )
-        temp_directory = settings.answer_coalesce_duckdb_temp_directory or (
-            f"/tmp/answer-coalesce-duckdb-{os.getpid()}"
+        temp_directory = settings.graphenrich_duckdb_temp_directory or (
+            f"/tmp/graphenrich-duckdb-{os.getpid()}"
         )
         for name, value in (
             ("temp_directory", temp_directory),
-            ("memory_limit", settings.answer_coalesce_duckdb_memory_limit),
+            ("memory_limit", settings.graphenrich_duckdb_memory_limit),
             (
                 "max_temp_directory_size",
-                settings.answer_coalesce_duckdb_max_temp_directory_size,
+                settings.graphenrich_duckdb_max_temp_directory_size,
             ),
-            ("threads", str(settings.answer_coalesce_duckdb_threads)),
+            ("threads", str(settings.graphenrich_duckdb_threads)),
             ("preserve_insertion_order", "false"),
         ):
             conn.execute(f"SET {name} = ?", [value])
@@ -241,12 +241,19 @@ def enrichment_candidates(
     pvalue_threshold=None,
     max_results=None,
 ):
-    """The features over-represented among ``input_ids``, best p-value first.
+    """The neighbors over-represented among ``input_ids``, best p-value first.
 
     A feature is a (neighbor node, relation, direction) pattern. Its p-value is
     the Poisson survival of seeing it on ``support_count`` of the inputs when
     ``background_count`` of the ``total_node_count`` nodes in the input
-    category have it. Returns ``(candidates, total_node_count)``.
+    category have it.
+
+    Each neighbor is returned once, with its best feature: every relation that
+    qualifies is a sub-predicate of the queried one, so the lowest p-value
+    wins, and among equal p-values the most specific relation (one no other
+    tied relation descends from, per ``relation_hierarchy``), then the lowest
+    relation id. ``max_results`` therefore counts neighbors. Returns
+    ``(candidates, total_node_count)``.
     """
     input_ids = list(dict.fromkeys(input_ids))
     if not input_ids:
@@ -319,7 +326,7 @@ def enrichment_candidates(
     params += [n_inputs, total_node_count]
     pvalue_filter = ""
     if pvalue_threshold is not None:
-        pvalue_filter = "WHERE p_value < ?"
+        pvalue_filter = "WHERE surviving.p_value < ?"
         params.append(pvalue_threshold)
     limit = ""
     if max_results is not None:
@@ -367,21 +374,40 @@ def enrichment_candidates(
             -- only features seen more often than chance predicts
             WHERE candidate.support_count >= stats.background_count * ? / ?
         ),
-        selected AS (
+        -- each neighbor's best p-value ...
+        best_scored AS (
             SELECT
-                surviving.feature_id,
-                surviving.support_count,
-                surviving.background_count,
-                surviving.p_value
+                surviving.*,
+                feature.neighbor_node_id,
+                feature.relation_id,
+                feature.member_is_subject
             FROM surviving
             JOIN feature USING (feature_id)
             {pvalue_filter}
-            ORDER BY
-                surviving.p_value,
-                feature.neighbor_node_id,
-                feature.relation_id,
-                feature.member_is_subject,
-                surviving.feature_id
+            QUALIFY surviving.p_value = min(surviving.p_value)
+                OVER (PARTITION BY feature.neighbor_node_id)
+        ),
+        -- ... from its most specific relation, then the lowest relation id
+        best AS (
+            SELECT *
+            FROM best_scored candidate
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM best_scored other
+                JOIN relation_hierarchy hierarchy
+                  ON hierarchy.descendant_relation_id = other.relation_id
+                 AND hierarchy.ancestor_relation_id = candidate.relation_id
+                WHERE other.neighbor_node_id = candidate.neighbor_node_id
+            )
+            QUALIFY row_number() OVER (
+                PARTITION BY neighbor_node_id
+                ORDER BY relation_id, member_is_subject, feature_id
+            ) = 1
+        ),
+        selected AS (
+            SELECT feature_id, support_count, background_count, p_value
+            FROM best
+            ORDER BY p_value, neighbor_node_id
             {limit}
         ),
         linked AS (

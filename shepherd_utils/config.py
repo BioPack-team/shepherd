@@ -305,23 +305,23 @@ class Settings(BaseSettings):
     omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.lmdb"
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
 
-    # aragorn.coalesce (set enrichment): the read-only AnswerCoalesce DuckDB
+    # aragorn.graphenrich (graph enrichment): the read-only DuckDB
     # graph, volume-mounted like the omnicorp LMDBs (build one with
-    # `python -m workers.aragorn_coalesce.build_duckdb`). The limits apply per
+    # `python -m workers.aragorn_graphenrich.build_duckdb`). The limits apply per
     # pool child, so the worker's memory is about pool size x memory_limit.
-    answer_coalesce_duckdb_path: str = "/app/answer_coalesce/answer-coalesce.duckdb"
-    answer_coalesce_duckdb_memory_limit: str = "1GB"
-    answer_coalesce_duckdb_max_temp_directory_size: str = "8GB"
-    answer_coalesce_duckdb_threads: int = 2
-    # Where DuckDB spills; empty uses /tmp/answer-coalesce-duckdb-<pid>.
-    answer_coalesce_duckdb_temp_directory: str = ""
+    graphenrich_duckdb_path: str = "/app/graphenrich/graphenrich.duckdb"
+    graphenrich_duckdb_memory_limit: str = "1GB"
+    graphenrich_duckdb_max_temp_directory_size: str = "8GB"
+    graphenrich_duckdb_threads: int = 2
+    # Where DuckDB spills; empty uses /tmp/graphenrich-duckdb-<pid>.
+    graphenrich_duckdb_temp_directory: str = ""
     # Where the worker fetches the database on startup when it is missing: a
-    # .tar.gz holding answer-coalesce.duckdb (the basename of
-    # answer_coalesce_duckdb_path) at its top level, extracted into that
+    # .tar.gz holding graphenrich.duckdb (the basename of
+    # graphenrich_duckdb_path) at its top level, extracted into that
     # file's directory. Empty skips the download.
     # TODO: a placeholder until the database is published.
-    answer_coalesce_duckdb_url: str = (
-        "https://example.org/answer-coalesce/answer-coalesce.duckdb.tar.gz"
+    graphenrich_duckdb_url: str = (
+        "https://example.org/graphenrich/graphenrich.duckdb.tar.gz"
     )
 
     pathfinder_embeddings_dir: str = "/app/pathfinder_embeddings"

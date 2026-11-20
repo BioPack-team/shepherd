@@ -42,7 +42,7 @@ async def test_aragorn_entrypoint(redis_mock, mocker):
 
 @pytest.mark.asyncio
 async def test_aragorn_routes_set_input_queries_to_enrichment(redis_mock, mocker):
-    """A set-input (MCQ) query is answered by aragorn.coalesce, which scores
+    """A set-input (MCQ) query is answered by aragorn.graphenrich, which scores
     its own results, rather than lookup + omnicorp + score."""
     from shepherd_server.base_routes import check_workflow
 
@@ -78,7 +78,7 @@ async def test_aragorn_routes_set_input_queries_to_enrichment(redis_mock, mocker
 
     workflow = json.loads(task[1]["workflow"])
     assert [op["id"] for op in workflow] == [
-        "aragorn.coalesce",
+        "aragorn.graphenrich",
         "sort_results_score",
         "filter_results_top_n",
         "filter_kgraph_orphans",

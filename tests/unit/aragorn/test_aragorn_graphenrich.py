@@ -1,4 +1,4 @@
-"""The aragorn.coalesce worker: AnswerCoalesce's set enrichment (MCQ) ported
+"""The aragorn.graphenrich worker: AnswerCoalesce's set enrichment (MCQ) ported
 to Shepherd, with its DuckDB builder.
 
 The databases are built here from small KGX fixtures. The builder's Biolink
@@ -17,8 +17,8 @@ from scipy.stats import poisson
 from shepherd_utils.config import settings
 from shepherd_utils.query_errors import QueryError
 from shepherd_utils.shared import is_set_input_query
-from workers.aragorn_coalesce import build_duckdb, mcq, store
-from workers.aragorn_coalesce import worker as coalesce_worker
+from workers.aragorn_graphenrich import build_duckdb, mcq, store
+from workers.aragorn_graphenrich import worker as coalesce_worker
 
 SET_ID = "uuid:00000000-0000-0000-0000-000000000001"
 
@@ -68,7 +68,7 @@ def build(tmp_path, monkeypatch, nodes, edges, name="ac.duckdb"):
     _write_jsonl(edge_file, edges)
     database = tmp_path / name
     build_duckdb.build_database(node_file, edge_file, database, blocklist=set())
-    monkeypatch.setattr(settings, "answer_coalesce_duckdb_path", str(database))
+    monkeypatch.setattr(settings, "graphenrich_duckdb_path", str(database))
     store.close_connection()
     return database
 
@@ -232,7 +232,7 @@ def test_response_is_valid_trapi_2_with_support_graphs(direction_db):
         "output": {"ids": ["DISEASE:FORWARD"]},
     }
     (analysis,) = result["analyses"]
-    assert analysis["resource_id"] == "infores:shepherd-answercoalesce"
+    assert analysis["resource_id"] == "infores:shepherd-graphenrich"
     (inferred_id,) = analysis["edge_bindings"]["e0"]["ids"]
     inferred = kg["edges"][inferred_id]
     assert (inferred["subject"], inferred["predicate"], inferred["object"]) == (
@@ -290,7 +290,7 @@ def test_support_edges_keep_their_provenance_and_klat(direction_db):
     assert support["DRUG:1"]["sources"] == [
         {"resource_id": "infores:test", "resource_role": "primary_knowledge_source"},
         {
-            "resource_id": "infores:shepherd-answercoalesce",
+            "resource_id": "infores:shepherd-graphenrich",
             "resource_role": "aggregator_knowledge_source",
             "upstream_resource_ids": ["infores:test"],
         },
@@ -332,6 +332,109 @@ def test_bad_parameters_are_a_client_error(direction_db, parameters):
     with pytest.raises(QueryError) as e:
         mcq.answer_mcq(mcq_query(["DRUG:1", "DRUG:2"], "biolink:treats"), parameters)
     assert e.value.status_code == 400
+
+
+# --- one result per answer node, for its best sub-predicate ----------------------
+
+SUBPREDICATE_NODES = [
+    {"id": f"DRUG:{i}", "category": ["biolink:Drug"]} for i in (1, 2, 3)
+] + [{"id": "DIS:A", "category": ["biolink:Disease"]}]
+
+
+def affects_a(drug, direction):
+    return {
+        "subject": drug,
+        "predicate": "biolink:affects",
+        "object": "DIS:A",
+        "qualified_predicate": "biolink:causes",
+        "object_direction_qualifier": direction,
+        "sources": source(),
+    }
+
+
+def _single_answer(response):
+    (result,) = response["message"]["results"]
+    assert result["node_bindings"]["output"] == {"ids": ["DIS:A"]}
+    (analysis,) = result["analyses"]
+    (edge_id,) = analysis["edge_bindings"]["e0"]["ids"]
+    return response["message"]["knowledge_graph"]["edges"][edge_id]
+
+
+def _direction(edge):
+    return {
+        q["qualifier_type_id"]: q["qualifier_value"] for q in edge["qualifiers"]
+    }.get("biolink:object_direction_qualifier")
+
+
+AFFECTS_QUERY = dict(set_category="biolink:Drug", answer_category="biolink:Disease")
+
+
+def test_an_answer_node_gets_only_its_best_scoring_subpredicate(tmp_path, monkeypatch):
+    """An affects query matches both the direction-qualified relation and the
+    unqualified one it implies. DRUG:3 makes the unqualified one commoner in
+    the background, so the increased relation has the better p-value and is
+    the only one returned."""
+    edges = [
+        affects_a("DRUG:1", "increased"),
+        affects_a("DRUG:2", "increased"),
+        affects_a("DRUG:3", "decreased"),
+    ]
+    build(tmp_path, monkeypatch, SUBPREDICATE_NODES, edges)
+    candidates, _ = store.enrichment_candidates(
+        ["DRUG:1", "DRUG:2"],
+        "biolink:Drug",
+        predicate_constraints=[{"predicate": "biolink:affects"}],
+    )
+    (candidate,) = candidates
+    assert json.loads(candidate.predicate_json)["object_direction_qualifier"] == (
+        "increased"
+    )
+    assert candidate.p_value == pytest.approx(poisson.sf(1, 2 * 2 / 3))
+
+    response = mcq.answer_mcq(
+        mcq_query(["DRUG:1", "DRUG:2"], "biolink:affects", **AFFECTS_QUERY),
+        {"pvalue_threshold": 1.0},
+    )
+    assert _direction(_single_answer(response)) == "increased"
+
+
+def test_a_pvalue_tie_goes_to_the_more_specific_relation(tmp_path, monkeypatch):
+    """increased implies changed (and the unqualified relation), all with the
+    same support and background, so the same p-value. changed sorts first, so
+    has the lower relation id; the hierarchy still picks increased."""
+    monkeypatch.setattr(
+        build_duckdb,
+        "_qualifier_ancestors",
+        lambda value, enum: (value, "changed") if value == "increased" else (value,),
+    )
+    edges = [affects_a("DRUG:1", "increased"), affects_a("DRUG:2", "increased")]
+    database = build(tmp_path, monkeypatch, SUBPREDICATE_NODES, edges)
+    connection = duckdb.connect(str(database), read_only=True)
+    ids = {
+        json.loads(predicate_json).get("object_direction_qualifier"): relation_id
+        for relation_id, predicate_json in connection.execute(
+            "SELECT relation_id, predicate_json FROM relation"
+        ).fetchall()
+    }
+    connection.close()
+    assert ids["changed"] < ids["increased"]
+
+    response = mcq.answer_mcq(
+        mcq_query(["DRUG:1", "DRUG:2"], "biolink:affects", **AFFECTS_QUERY),
+        {"pvalue_threshold": 1.0},
+    )
+    assert _direction(_single_answer(response)) == "increased"
+
+
+def test_max_results_counts_answer_nodes(direction_db):
+    candidates, _ = store.enrichment_candidates(
+        ["DRUG:1", "DRUG:2"],
+        "biolink:Drug",
+        predicate_constraints=[{"predicate": "biolink:related_to"}],
+        max_results=2,
+    )
+    neighbors = [c.neighbor_curie for c in candidates]
+    assert len(neighbors) == 2 == len(set(neighbors))
 
 
 # --- enrichment statistics and qualifiers -----------------------------------------
@@ -452,7 +555,7 @@ def test_query_qualifiers_constrain_and_are_kept(tmp_path, monkeypatch):
             }
 
 
-def test_pvalue_to_score_matches_answercoalesce():
+def test_pvalue_to_score_matches_answercoalesce_scoring():
     # sigmoid(0.5 * (-log10(p) - 5)), rounded to 5 places
     assert mcq.pvalue_to_score(1e-5) == 0.5
     assert mcq.pvalue_to_score(1e-15) == pytest.approx(0.99331, abs=1e-5)
@@ -575,16 +678,16 @@ def test_unsupported_schema_is_refused(tmp_path, monkeypatch):
         "INSERT INTO metadata VALUES ('schema_version', '6');"
     )
     connection.close()
-    monkeypatch.setattr(settings, "answer_coalesce_duckdb_path", str(database))
+    monkeypatch.setattr(settings, "graphenrich_duckdb_path", str(database))
     with pytest.raises(RuntimeError, match="schema version 6"):
         store.connection()
 
 
 def test_missing_database_names_the_setting(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        settings, "answer_coalesce_duckdb_path", str(tmp_path / "absent.duckdb")
+        settings, "graphenrich_duckdb_path", str(tmp_path / "absent.duckdb")
     )
-    with pytest.raises(FileNotFoundError, match="ANSWER_COALESCE_DUCKDB_PATH"):
+    with pytest.raises(FileNotFoundError, match="GRAPHENRICH_DUCKDB_PATH"):
         store.connection()
 
 
@@ -653,8 +756,8 @@ def test_worker_entrypoint_reads_the_query_and_saves_the_response(direction_db, 
     save = mocker.patch.object(coalesce_worker, "save_response_sync")
 
     # the workflow operation's settings win over the query's parameters
-    operation = {"id": "aragorn.coalesce", "parameters": {"pvalue_threshold": 1.0}}
-    logs = coalesce_worker.aragorn_coalesce("q1", "r1", operation, logging.INFO)
+    operation = {"id": "aragorn.graphenrich", "parameters": {"pvalue_threshold": 1.0}}
+    logs = coalesce_worker.aragorn_graphenrich("q1", "r1", operation, logging.INFO)
 
     get.assert_called_once_with("q1")
     (response_id, response), _ = save.call_args

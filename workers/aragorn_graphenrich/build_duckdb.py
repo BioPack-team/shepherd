@@ -1,4 +1,4 @@
-"""Build the aragorn.coalesce worker's DuckDB database from KGX JSONL.
+"""Build the aragorn.graphenrich worker's DuckDB database from KGX JSONL.
 
 Ported from AnswerCoalesce (``src/graph_coalescence/build_duckdb.py``). The
 database layout is described in AnswerCoalesce's ``docs/duckdb-architecture.md``;
@@ -9,9 +9,9 @@ requires on every knowledge-graph edge.
 Run it from the repository root (or inside the worker's image, where /app is
 the root)::
 
-    python -m workers.aragorn_coalesce.build_duckdb \
+    python -m workers.aragorn_graphenrich.build_duckdb \
         --nodes nodes.jsonl --edges edges.jsonl \
-        --output answer_coalesce/answer-coalesce.duckdb
+        --output graphenrich/graphenrich.duckdb
 
 It needs network access for the Biolink model (``bmt``) and, unless
 ``--skip-blocklist`` is given, the Translator blocklist.
@@ -823,7 +823,7 @@ def build_database(
     max_temp_directory_size=DEFAULT_MAX_TEMP_DIRECTORY_SIZE,
     threads=DEFAULT_THREADS,
 ):
-    """Build an immutable AnswerCoalesce DuckDB database from KGX JSONL."""
+    """Build an immutable graphenrich DuckDB database from KGX JSONL."""
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     building_path = output_path.with_suffix(output_path.suffix + ".building")
@@ -965,7 +965,7 @@ def build_database(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build an AnswerCoalesce DuckDB database from KGX JSONL files."
+        description="Build a graphenrich DuckDB database from KGX JSONL files."
     )
     parser.add_argument("--nodes", required=True, help="KGX node JSONL or JSONL.GZ")
     parser.add_argument("--edges", required=True, help="KGX edge JSONL or JSONL.GZ")

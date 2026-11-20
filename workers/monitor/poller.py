@@ -47,7 +47,7 @@ def _worker_state_key(stream: str) -> str:
 # worker has reported in.
 SEED_STREAMS = [
     "aragorn",
-    "aragorn.coalesce",
+    "aragorn.graphenrich",
     "aragorn.lookup",
     "aragorn.pathfinder",
     "aragorn.omnicorp",

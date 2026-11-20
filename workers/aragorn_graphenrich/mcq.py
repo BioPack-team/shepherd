@@ -8,7 +8,9 @@ Ported from AnswerCoalesce's MCQ path (``multi_curie_query`` in
 An MCQ is a one-hop query whose input qnode is a set: ``set_interpretation:
 MANY``, one ``ids`` entry naming the set, and its ``member_ids``. Enrichment
 finds the nodes linked to more of the members than chance predicts, and each
-becomes a result:
+becomes one result with one analysis, for its best-scoring relation (every
+qualifying relation is a sub-predicate of the queried one; see
+``store.enrichment_candidates``):
 
 * an inferred edge from the set to the enriched node, carrying its p-value and
   pointing (``biolink:support_graphs``) at one auxiliary graph per supporting
@@ -30,7 +32,7 @@ from shepherd_utils.trapi import make_binding, qedge_qualifier_sets
 
 from . import store
 
-INFORES = "infores:shepherd-answercoalesce"
+INFORES = "infores:shepherd-graphenrich"
 SUPPORT_GRAPHS = "biolink:support_graphs"
 #: A node TRAPI 2.0 must categorize but the graph left uncategorized.
 FALLBACK_CATEGORY = "biolink:NamedThing"
@@ -236,7 +238,7 @@ def build_response(
     nodes: dict[str, dict] = {}
     edges: dict[str, dict] = {}
     aux_graphs: dict[str, dict] = {}
-    results: dict[str, dict] = {}
+    results: list[dict] = []
 
     def add_node(curie: str, categories, **extra) -> None:
         if curie in nodes:
@@ -330,30 +332,30 @@ def build_response(
         )
         edges[inferred_edge_id] = inferred_edge
 
-        # One result per enriched node; each enriching relation is an analysis.
-        result = results.setdefault(
-            candidate.neighbor_curie,
+        # The store returns each enriched node once, with its best relation.
+        results.append(
             {
                 "node_bindings": {
                     mcq.set_qnode_id: make_binding([mcq.set_id]),
                     mcq.answer_qnode_id: make_binding([candidate.neighbor_curie]),
                 },
-                "analyses": [],
-            },
-        )
-        result["analyses"].append(
-            {
-                "resource_id": INFORES,
-                "edge_bindings": {mcq.qedge_id: make_binding([inferred_edge_id])},
-                "score": pvalue_to_score(candidate.p_value),
-                "scoring_method": "answercoalesce_enrichment_pvalue",
+                "analyses": [
+                    {
+                        "resource_id": INFORES,
+                        "edge_bindings": {
+                            mcq.qedge_id: make_binding([inferred_edge_id])
+                        },
+                        "score": pvalue_to_score(candidate.p_value),
+                        "scoring_method": "graphenrich_enrichment_pvalue",
+                    }
+                ],
             }
         )
 
     message: dict[str, Any] = {
         "query_graph": query["message"]["query_graph"],
         "knowledge_graph": {"nodes": nodes, "edges": edges},
-        "results": list(results.values()),
+        "results": results,
     }
     if aux_graphs:
         message["auxiliary_graphs"] = aux_graphs

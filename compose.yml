@@ -594,20 +594,20 @@ services:
       # downloads + extracts curies.lmdb / shared_counts.lmdb into this mount on
       # startup (see README "Worker data (LMDB / sqlite) downloads").
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
-  aragorn_coalesce:
-    container_name: aragorn_coalesce
+  aragorn_graphenrich:
+    container_name: aragorn_graphenrich
     init: true
     environment:
       <<: *postgres_budget
     cpus: 2 # -> pool sizes to 2
-    # Each pool child runs DuckDB under ANSWER_COALESCE_DUCKDB_MEMORY_LIMIT
+    # Each pool child runs DuckDB under GRAPHENRICH_DUCKDB_MEMORY_LIMIT
     # (default 1GB) on top of the query and response it holds; 2 children and
     # the parent fit in 4g.
     mem_limit: 4g
     platform: linux/amd64
     build:
       context: .
-      dockerfile: workers/aragorn_coalesce/Dockerfile
+      dockerfile: workers/aragorn_graphenrich/Dockerfile
       additional_contexts:
         shepherd_base: service:shepherd_base
     restart: unless-stopped
@@ -619,12 +619,12 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-      # The AnswerCoalesce DuckDB graph. First run? The worker downloads the
-      # .tar.gz at ANSWER_COALESCE_DUCKDB_URL and extracts answer-coalesce.duckdb
-      # into this mount (writable for that reason; the worker only ever opens
-      # the database read-only, so a deployment can mount its volume
-      # read-only), or put/build it here yourself (see README "Worker data").
-      - ./answer_coalesce:/app/answer_coalesce
+      # The graphenrich DuckDB graph. First run? The worker downloads the
+      # .tar.gz at GRAPHENRICH_DUCKDB_URL and extracts graphenrich.duckdb into
+      # this mount (writable for that reason; the worker only ever opens the
+      # database read-only, so a deployment can mount its volume read-only),
+      # or put/build it here yourself (see README "Worker data").
+      - ./graphenrich:/app/graphenrich
   aragorn_score:
     container_name: aragorn_score
     init: true

@@ -36,7 +36,7 @@ async def aragorn(task, logger: logging.Logger):
         # Set-input (MCQ) queries are answered by enrichment, which scores its
         # own results (from the enrichment p-values).
         workflow = [
-            {"id": "aragorn.coalesce"},
+            {"id": "aragorn.graphenrich"},
             {"id": "sort_results_score"},
             {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
             {"id": "filter_kgraph_orphans"},

@@ -1,4 +1,4 @@
-"""Aragorn set enrichment (AnswerCoalesce) module.
+"""Aragorn graph enrichment (graphenrich) module.
 
 A local port of AnswerCoalesce's multi-curie query (MCQ) mode
 (https://github.com/ranking-agent/AnswerCoalesce): given a set of input
@@ -7,9 +7,9 @@ finds the nodes linked to more of the set than chance predicts and returns
 each as a result. See ``mcq.py`` for the answer's shape and ``store.py`` for
 the statistics.
 
-The graph is a read-only DuckDB database (``ANSWER_COALESCE_DUCKDB_PATH``),
+The graph is a read-only DuckDB database (``GRAPHENRICH_DUCKDB_PATH``),
 volume-mounted like the omnicorp LMDBs and downloaded on startup when missing
-(``ANSWER_COALESCE_DUCKDB_URL``); ``build_duckdb.py`` builds one from KGX
+(``GRAPHENRICH_DUCKDB_URL``); ``build_duckdb.py`` builds one from KGX
 JSONL. The enrichment query is CPU- and memory-heavy, so it runs in a process
 pool, each child holding its own read-only connection.
 
@@ -24,7 +24,7 @@ import uuid
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
-from shepherd_utils.data_download import ensure_answer_coalesce_duckdb
+from shepherd_utils.data_download import ensure_graphenrich_duckdb
 from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import (
     get_worker_logger,
@@ -39,7 +39,7 @@ from shepherd_utils.trapi import operation_parameters, query_parameters
 from .mcq import answer_mcq
 
 # Queue name
-STREAM = "aragorn.coalesce"
+STREAM = "aragorn.graphenrich"
 # Consumer group, most likely you don't need to change this.
 GROUP = "consumer"
 CONSUMER = str(uuid.uuid4())[:8]
@@ -50,10 +50,10 @@ tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
 #: How a query that ran out of time here is told which step it was.
-ENRICHMENT_STEP = "Set enrichment (answer coalesce)"
+ENRICHMENT_STEP = "Graph enrichment (graphenrich)"
 
 
-def aragorn_coalesce(
+def aragorn_graphenrich(
     query_id: str,
     response_id: str,
     operation: dict,
@@ -93,7 +93,7 @@ async def process_task(
             loop,
             task[1],
             ENRICHMENT_STEP,
-            aragorn_coalesce,
+            aragorn_graphenrich,
             task[1]["query_id"],
             task[1]["response_id"],
             operation,
@@ -107,12 +107,12 @@ async def process_task(
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     # Fetch the DuckDB graph into the volume before any pool child opens it
-    # (a first-run `docker compose up` starts with ./answer_coalesce empty).
-    # A no-op once present or with ANSWER_COALESCE_DUCKDB_URL empty.
-    ensure_answer_coalesce_duckdb(LOGGER)
+    # (a first-run `docker compose up` starts with ./graphenrich empty).
+    # A no-op once present or with GRAPHENRICH_DUCKDB_URL empty.
+    ensure_graphenrich_duckdb(LOGGER)
     loop = asyncio.get_running_loop()
     # Each child runs DuckDB with its own memory limit
-    # (ANSWER_COALESCE_DUCKDB_MEMORY_LIMIT), so the pool size times that limit
+    # (GRAPHENRICH_DUCKDB_MEMORY_LIMIT), so the pool size times that limit
     # is what bounds the worker's memory; size it from the cgroup's CPUs (or
     # POOL_MAX_WORKERS), not the host's.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
@@ -120,7 +120,7 @@ async def poll_for_tasks():
     pool = ProcessPoolManager(
         max_workers,
         max_tasks_per_child=settings.pool_max_tasks_per_child,
-        name="aragorn.coalesce process pool",
+        name="aragorn.graphenrich process pool",
         task_timeout=settings.pool_task_timeout_sec,
     )
     await run_poll_loop(

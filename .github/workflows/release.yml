@@ -85,7 +85,7 @@ jobs:
       matrix:
         worker: 
           - aragorn
-          - aragorn_coalesce
+          - aragorn_graphenrich
           - aragorn_lookup
           - aragorn_omnicorp
           - aragorn_pathfinder

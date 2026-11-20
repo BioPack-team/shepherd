@@ -9,7 +9,7 @@ LABEL org.opencontainers.image.source=https://github.com/BioPack-team/shepherd
 # imports, so it runs as a module from /app.
 ENV PYTHONPATH=/app
 
-COPY ./workers/aragorn_coalesce/requirements.txt .
+COPY ./workers/aragorn_graphenrich/requirements.txt .
 RUN pip install -r requirements.txt
 
 # Shepherd's code; its dependencies are in the base already
@@ -18,7 +18,7 @@ COPY ./shepherd_utils ./shepherd_utils
 RUN pip install --no-deps .
 
 COPY ./workers/__init__.py ./workers/__init__.py
-COPY ./workers/aragorn_coalesce ./workers/aragorn_coalesce
+COPY ./workers/aragorn_graphenrich ./workers/aragorn_graphenrich
 
 # Release version (git tag), injected by .github/workflows/release.yml.
 # Reported in the worker heartbeat so the monitor can show which image
@@ -30,4 +30,4 @@ ENV SHEPHERD_VERSION=${SHEPHERD_VERSION}
 # the non-root user, defined in the RENCI base image
 USER nru
 
-CMD ["python", "-m", "workers.aragorn_coalesce.worker"]
+CMD ["python", "-m", "workers.aragorn_graphenrich.worker"]

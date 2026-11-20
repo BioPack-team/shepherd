@@ -13,8 +13,8 @@ Two flavors of HTTP source are supported:
 
 * **Archive** -- a single ``.tar.gz`` fetched via ``urllib`` and extracted in
   place (``OMNICORP_LMDB_URL`` / ``PATHFINDER_EMBEDDINGS_URL`` /
-  ``PATHFINDER_SEARCH_GRAPH_URL`` / ``ANSWER_COALESCE_DUCKDB_URL``, used by
-  ``aragorn_coalesce``, ``aragorn_omnicorp``,
+  ``PATHFINDER_SEARCH_GRAPH_URL`` / ``GRAPHENRICH_DUCKDB_URL``, used by
+  ``aragorn_graphenrich``, ``aragorn_omnicorp``,
   ``score_paths`` and ``aragorn_pathfinder`` below).
 * **Per-file** -- individual files fetched directly, no archive/extract step
   (``arax_pathfinder`` below, whose two sqlite databases are served as plain
@@ -333,16 +333,16 @@ def ensure_pathfinder_search_graph(logger: Optional[logging.Logger] = None) -> N
     )
 
 
-def ensure_answer_coalesce_duckdb(logger: Optional[logging.Logger] = None) -> None:
-    """Ensure aragorn.coalesce's DuckDB graph is present, fetching and
-    extracting the ``.tar.gz`` at ``answer_coalesce_duckdb_url`` when missing.
+def ensure_graphenrich_duckdb(logger: Optional[logging.Logger] = None) -> None:
+    """Ensure aragorn.graphenrich's DuckDB graph is present, fetching and
+    extracting the ``.tar.gz`` at ``graphenrich_duckdb_url`` when missing.
     The archive holds the database file at its top level."""
-    path = settings.answer_coalesce_duckdb_path
+    path = settings.graphenrich_duckdb_path
     ensure_lmdb_dataset(
-        name="aragorn_coalesce",
+        name="aragorn_graphenrich",
         target_dir=os.path.dirname(path),
         required_files=[os.path.basename(path)],
-        url=settings.answer_coalesce_duckdb_url,
+        url=settings.graphenrich_duckdb_url,
         logger=logger,
     )
 

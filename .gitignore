@@ -4,7 +4,7 @@ debug/
 
 gandalf_mmap/
 omnicorp_lmdb/
-answer_coalesce/
+graphenrich/
 pathfinder_embeddings/
 pathfinder_search_graph/
 arax_pathfinder_dbs/
