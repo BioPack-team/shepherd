@@ -11,6 +11,7 @@ from shepherd_utils.otel import setup_tracer
 from shepherd_utils.shared import (
     run_poll_loop,
     examine_query,
+    is_set_input_query,
     run_task_lifecycle,
 )
 
@@ -30,9 +31,18 @@ async def aragorn(task, logger: logging.Logger):
     query_id = task[1]["query_id"]
     workflow = json.loads(task[1]["workflow"])
     message = await get_message(query_id, logger)
-    infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
 
+    if workflow is None and is_set_input_query(message["message"].get("query_graph")):
+        # Set-input (MCQ) queries are answered by enrichment, which scores its
+        # own results (from the enrichment p-values).
+        workflow = [
+            {"id": "aragorn.graphenrich"},
+            {"id": "sort_results_score"},
+            {"id": "filter_results_top_n", "parameters": {"max_results": 500}},
+            {"id": "filter_kgraph_orphans"},
+        ]
     if workflow is None:
+        infer, question_qnode, answer_qnode, pathfinder = examine_query(message)
         if infer:
             workflow = [
                 {"id": "aragorn.lookup"},

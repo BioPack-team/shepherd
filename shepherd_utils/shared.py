@@ -1513,6 +1513,21 @@ def filter_kgraph_orphans(message, logger: logging.Logger):
         # return message, 400
 
 
+def is_set_input_query(query_graph) -> bool:
+    """Whether ``query_graph`` is a set-input query (an MCQ): one hop from a
+    query node with ``set_interpretation: MANY`` and ``member_ids``."""
+    query_graph = query_graph or {}
+    nodes = query_graph.get("nodes") or {}
+    edges = query_graph.get("edges") or {}
+    if len(nodes) != 2 or len(edges) != 1:
+        return False
+    return any(
+        (qnode or {}).get("set_interpretation") == "MANY"
+        and bool((qnode or {}).get("member_ids"))
+        for qnode in nodes.values()
+    )
+
+
 def examine_query(message):
     """Decides whether the input is an infer. Returns the grouping node"""
     # Currently, we support:
