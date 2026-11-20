@@ -315,6 +315,12 @@ class Settings(BaseSettings):
     answer_coalesce_duckdb_threads: int = 2
     # Where DuckDB spills; empty uses /tmp/answer-coalesce-duckdb-<pid>.
     answer_coalesce_duckdb_temp_directory: str = ""
+    # Where the worker fetches the database on startup when it is missing
+    # (a plain file, saved as answer_coalesce_duckdb_path). Empty skips the
+    # download. TODO: a placeholder until the database is published.
+    answer_coalesce_duckdb_url: str = (
+        "https://example.org/answer-coalesce/answer-coalesce.duckdb"
+    )
 
     pathfinder_embeddings_dir: str = "/app/pathfinder_embeddings"
     pathfinder_search_graph_dir: str = "/app/pathfinder_search_graph"

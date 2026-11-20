@@ -380,3 +380,68 @@ def test_ensure_arax_dbs_with_no_names_does_nothing(tmp_path, mocker):
 
     spy.assert_not_called()
     assert not (tmp_path / "d").exists()
+
+
+# --- aragorn_coalesce's DuckDB graph ------------------------------------------------
+
+
+def _point_answer_coalesce_at(mocker, target, url):
+    mocker.patch.object(
+        data_download.settings,
+        "answer_coalesce_duckdb_path",
+        str(target / "answer-coalesce.duckdb"),
+    )
+    mocker.patch.object(data_download.settings, "answer_coalesce_duckdb_url", url)
+
+
+def test_ensure_answer_coalesce_duckdb_downloads_the_plain_file(tmp_path, mocker):
+    source = tmp_path / "published.duckdb"
+    source.write_bytes(b"duckdb-bytes")
+    target = tmp_path / "answer_coalesce"
+    _point_answer_coalesce_at(mocker, target, source.as_uri())
+
+    data_download.ensure_answer_coalesce_duckdb(logger)
+
+    # saved under the configured name, with no temp files left behind
+    assert (target / "answer-coalesce.duckdb").read_bytes() == b"duckdb-bytes"
+    assert os.listdir(target) == ["answer-coalesce.duckdb"]
+
+
+def test_ensure_answer_coalesce_duckdb_is_a_noop_once_present(tmp_path, mocker):
+    target = tmp_path / "answer_coalesce"
+    target.mkdir()
+    (target / "answer-coalesce.duckdb").write_bytes(b"mounted")
+    _point_answer_coalesce_at(mocker, target, "https://example.org/never-fetched")
+    download = mocker.patch.object(data_download, "_download")
+
+    data_download.ensure_answer_coalesce_duckdb(logger)
+
+    download.assert_not_called()
+    assert (target / "answer-coalesce.duckdb").read_bytes() == b"mounted"
+
+
+def test_ensure_answer_coalesce_duckdb_without_a_url_only_warns(
+    tmp_path, mocker, caplog
+):
+    target = tmp_path / "answer_coalesce"
+    _point_answer_coalesce_at(mocker, target, "")
+    download = mocker.patch.object(data_download, "_download")
+
+    with caplog.at_level(logging.WARNING):
+        data_download.ensure_answer_coalesce_duckdb(logger)
+
+    download.assert_not_called()
+    assert "no URL configured" in caplog.text
+    assert not (target / "answer-coalesce.duckdb").exists()
+
+
+def test_a_failed_answer_coalesce_download_leaves_no_partial_file(tmp_path, mocker):
+    target = tmp_path / "answer_coalesce"
+    _point_answer_coalesce_at(
+        mocker, target, (tmp_path / "not-published.duckdb").as_uri()
+    )
+
+    with pytest.raises(RuntimeError, match="download failed"):
+        data_download.ensure_answer_coalesce_duckdb(logger)
+
+    assert os.listdir(target) == []

@@ -16,7 +16,7 @@ Two flavors of HTTP source are supported:
   ``PATHFINDER_SEARCH_GRAPH_URL``, used by ``aragorn_omnicorp``,
   ``score_paths`` and ``aragorn_pathfinder`` below).
 * **Per-file** -- individual files fetched directly, no archive/extract step
-  (``arax_pathfinder`` below, whose two sqlite databases are served as plain
+  (``aragorn_coalesce``'s DuckDB graph, ``arax_pathfinder`` below, whose two sqlite databases are served as plain
   files rather than bundled into one archive, plus the ARAX blocked-concept
   list that shares their directory; and the ARAX port's other data files via
   ``ensure_arax_dbs``).
@@ -328,6 +328,18 @@ def ensure_pathfinder_search_graph(logger: Optional[logging.Logger] = None) -> N
         target_dir=settings.pathfinder_search_graph_dir,
         required_files=["offsets.npy", "neighbors.npy", "weights.npy", "nodes.txt"],
         url=settings.pathfinder_search_graph_url,
+        logger=logger,
+    )
+
+
+def ensure_answer_coalesce_duckdb(logger: Optional[logging.Logger] = None) -> None:
+    """Ensure aragorn.coalesce's DuckDB graph is present, fetching it as a
+    single plain file from ``answer_coalesce_duckdb_url`` when missing."""
+    path = settings.answer_coalesce_duckdb_path
+    ensure_http_files_dataset(
+        name="aragorn_coalesce",
+        target_dir=os.path.dirname(path),
+        file_sources={os.path.basename(path): settings.answer_coalesce_duckdb_url},
         logger=logger,
     )
 

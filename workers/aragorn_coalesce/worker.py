@@ -8,7 +8,8 @@ each as a result. See ``mcq.py`` for the answer's shape and ``store.py`` for
 the statistics.
 
 The graph is a read-only DuckDB database (``ANSWER_COALESCE_DUCKDB_PATH``),
-volume-mounted like the omnicorp LMDBs; ``build_duckdb.py`` builds one from KGX
+volume-mounted like the omnicorp LMDBs and downloaded on startup when missing
+(``ANSWER_COALESCE_DUCKDB_URL``); ``build_duckdb.py`` builds one from KGX
 JSONL. The enrichment query is CPU- and memory-heavy, so it runs in a process
 pool, each child holding its own read-only connection.
 
@@ -23,6 +24,7 @@ import uuid
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
+from shepherd_utils.data_download import ensure_answer_coalesce_duckdb
 from shepherd_utils.db import get_message_sync, save_response_sync
 from shepherd_utils.logger import (
     get_worker_logger,
@@ -104,6 +106,10 @@ async def process_task(
 
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
+    # Fetch the DuckDB graph into the volume before any pool child opens it
+    # (a first-run `docker compose up` starts with ./answer_coalesce empty).
+    # A no-op once present or with ANSWER_COALESCE_DUCKDB_URL empty.
+    ensure_answer_coalesce_duckdb(LOGGER)
     loop = asyncio.get_running_loop()
     # Each child runs DuckDB with its own memory limit
     # (ANSWER_COALESCE_DUCKDB_MEMORY_LIMIT), so the pool size times that limit
