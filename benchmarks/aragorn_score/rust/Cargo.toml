@@ -1,0 +1,24 @@
+[package]
+name = "aragorn_score_rs"
+version = "0.1.0"
+edition = "2021"
+description = "Benchmark-only Rust port of the aragorn.score ranker (workers/aragorn_score/worker.py)."
+publish = false
+
+[[bin]]
+name = "aragorn_score_rs"
+path = "src/main.rs"
+
+[dependencies]
+# preserve_order: TRAPI key order matters (query-graph node order picks the probes).
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = "2"
+nalgebra = "0.33"
+faer = "0.22"
+zstd = "0.13"
+rustc-hash = "2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"

@@ -804,6 +804,9 @@ class Ranker:
             for add_edge_id in sg.get("edges", []):
                 if add_edge_id not in kg_edges:
                     continue
+                # Added even when the k_edge is empty, as the recursive walk
+                # does (the closure of an empty edge is itself empty).
+                edges[add_edge_id] = None
                 add_nodes, add_edges = self._support_closure(add_edge_id)
                 edges.update(add_edges)
                 nodes.update(add_nodes)
