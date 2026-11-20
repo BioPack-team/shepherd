@@ -40,6 +40,23 @@ def _gen_message(**kwargs):
     return {"message": message}
 
 
+def _high_evidence_message(n_results=80, seed=4):
+    """Edges with 30-64 publications from a source with no transformation of
+    its own: weights within ~1e-9 of 1, whose admittances (uncapped) were
+    large enough to make the scores numerical noise."""
+    import random
+
+    response = _gen_message(n_results=n_results, seed=seed)
+    rnd = random.Random(seed)
+    for eid, e in response["message"]["knowledge_graph"]["edges"].items():
+        if eid.startswith("cg_") and rnd.random() < 0.3:
+            e["sources"][0]["resource_id"] = "infores:some-unknown-source"
+            e["attributes"][0]["value"] = [
+                f"PMID:{k}" for k in range(rnd.randint(30, 64))
+            ]
+    return response
+
+
 class Store:
     """Stands in for the data db: one stored response, as a blob."""
 
@@ -152,6 +169,7 @@ def test_rust_failure_falls_back_to_python(mocker, monkeypatch):
             lambda: _gen_message(n_results=60, seed=7, cycles=True),
             id="support-cycles",
         ),
+        pytest.param(lambda: _high_evidence_message(), id="high-evidence"),
     ],
 )
 def test_rust_scores_like_python(mocker, monkeypatch, response):
@@ -179,7 +197,7 @@ def test_rust_scores_like_python(mocker, monkeypatch, response):
     assert python_by_result.keys() == rust_by_result.keys()
     for key, py in python_by_result.items():
         for a, b in zip(py, rust_by_result[key]):
-            assert b == pytest.approx(a, rel=1e-9, abs=1e-12)
+            assert b == pytest.approx(a, rel=worker.SHADOW_TOL, abs=1e-12)
     # Ranked ascending by best score.
     best = [
         max(s for s in row)

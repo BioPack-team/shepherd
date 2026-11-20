@@ -868,3 +868,50 @@ def test_cyclic_scores_do_not_depend_on_walk_order():
     assert a.keys() == b.keys()
     for k in a:
         assert b[k] == pytest.approx(a[k], rel=1e-12), k
+
+
+# --- edge weights near 1 --------------------------------------------------
+
+
+def test_edge_weights_are_capped_below_one_so_more_evidence_never_weighs_less():
+    """A weight just below 1 (a publications sigmoid at ~40-64 papers) used
+    to escape the cap, which applied only at 1: 38 papers made an admittance
+    of ~1e9, 389 papers (weight exactly 1, capped) only ~1e7. Both are capped
+    now, and the admittances that large made the scores numerical noise."""
+    from workers.aragorn_score.worker import MAX_EDGE_WEIGHT
+
+    def edge(n_pubs):
+        return {
+            "subject": "A",
+            "object": "B",
+            "predicate": "biolink:treats",
+            "sources": [
+                {
+                    "resource_id": "infores:unknown",
+                    "resource_role": "primary_knowledge_source",
+                }
+            ],
+            "attributes": [
+                {
+                    "attribute_type_id": "biolink:publications",
+                    "value": [f"PMID:{i}" for i in range(n_pubs)],
+                }
+            ],
+        }
+
+    msg = {
+        "query_graph": {
+            "nodes": {"n0": {}, "n1": {}},
+            "edges": {"e": {"subject": "n0", "object": "n1"}},
+        },
+        "knowledge_graph": {
+            "nodes": {},
+            "edges": {f"e{n}": edge(n) for n in (20, 38, 389)},
+        },
+    }
+    r = Ranker(msg, logger)
+    r._prime_admittances(["e20", "e38", "e389"])
+    pubs = {n: r._admittances[f"e{n}"][-1] for n in (20, 38, 389)}
+    cap = -1 / np.log(MAX_EDGE_WEIGHT)
+    assert pubs[20] < pubs[38] <= pubs[389] == pytest.approx(cap)
+    assert max(pubs.values()) <= cap * (1 + 1e-12)

@@ -26,7 +26,7 @@ use crate::typed_input::{
     ParsedResult, Thing, AV, R,
 };
 use crate::value_ranker::{
-    base_weight, source_sigmoid, source_weight, split_count, LITERATURE_PREDICATE,
+    base_weight, source_sigmoid, source_weight, split_count, LITERATURE_PREDICATE, MAX_EDGE_WEIGHT,
     SUPPORT_GRAPHS_ATTRIBUTE, TOTAL_PUBS,
 };
 
@@ -303,7 +303,8 @@ fn edge_admittances(f: &EdgeFields, pubs: &dyn Fn(&AV) -> R<f64>) -> R<Rc<[f64]>
     Ok(weights
         .into_iter()
         .map(|w| {
-            let w = if w >= 1.0 { 0.9999999 } else { w };
+            // Capped below 1, not only at it: see MAX_EDGE_WEIGHT in worker.py.
+            let w = if w > MAX_EDGE_WEIGHT { MAX_EDGE_WEIGHT } else { w };
             -1.0 / w.ln()
         })
         .collect())

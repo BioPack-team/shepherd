@@ -11,7 +11,8 @@ There are two implementations of the scorer:
   default.
 - **Rust**: `rust/`, built into the worker image as the `aragorn_score_rs`
   Python module. It's about 10x faster at scoring and agrees with the Python
-  scorer to about 1e-13. It never decodes the message in Python: the stored
+  scorer to about 1e-9 (1e-13 on well-conditioned graphs). It never decodes
+  the message in Python: the stored
   blob goes in, and the scored blob comes out.
 
 ## Choosing the scorer
@@ -53,6 +54,24 @@ the stored input of each query the two disagree on there, as
 Reproduce it with:
 
     benchmarks/aragorn_score/run.sh logs/aragorn_shadow/<response_id>.json.zst
+
+## Edge weights near 1
+
+Each edge property's weight `w` (a sigmoid of its evidence, times a source
+weight) becomes an admittance `-1/ln(w)`, which grows without bound as `w`
+approaches 1. Weights are capped at `MAX_EDGE_WEIGHT = 0.9999999` (an
+admittance of about 1e7).
+
+The cap used to apply only to weights of 1 or more. A weight just below 1
+escaped it: a publications sigmoid at 40–64 papers gives `w ≈ 1 - 1e-15`,
+an admittance of about 5e14. Two consequences:
+- **Evidence inverted.** An edge with 38 publications outweighed one with
+  389, which the cap held at 1e7.
+- **Noise.** Entries that large carry rounding errors the size of a graph's
+  real conductances, and numpy's `lstsq` cutoff then discards real singular
+  values, so those scores were numerical noise. The Python scorer alone gave
+  0.958, 0.956 and 0.956 on different runs of the same answer, and the Rust
+  scorer could not agree with it.
 
 ## Support-graph cycles
 

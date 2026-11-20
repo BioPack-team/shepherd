@@ -16,12 +16,12 @@
 #             JSON is serde_json unless given)
 #   CHECK_MESSAGES  1 (default) saves each scored message and checks they
 #             agree with Python's; 0 skips that (it reloads every message)
-#   OUT, GEN_ARGS, TOL (default 1e-9), PYTHON (default python3)
+#   OUT, GEN_ARGS, TOL (default 1e-6), PYTHON (default python3)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${OUT:-$HERE/out}"
 REPEAT="${REPEAT:-5}"
-TOL="${TOL:-1e-9}"
+TOL="${TOL:-1e-6}"
 PYTHON="${PYTHON:-python3}"
 VARIANTS="${VARIANTS:-value:svd typed:svd typed:cholesky typed:cholesky:sonic}"
 CHECK_MESSAGES="${CHECK_MESSAGES:-1}"

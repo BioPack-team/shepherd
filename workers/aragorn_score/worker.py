@@ -48,10 +48,13 @@ except ImportError:  # not built here (a plain local checkout, say)
 
 SCORERS = ("python", "rust", "shadow")
 SOLVERS = ("cholesky", "svd")
-# Relative tolerance for the shadow comparison. The two scorers agree to
-# about 1e-13 (they sum and factorise in different orders); a difference past
-# this is a real disagreement.
-SHADOW_TOL = 1e-9
+# Relative tolerance for the shadow comparison. The scorers sum and factorise
+# in different orders, so they agree only as far as the Laplacians' condition
+# allows: about 1e-13 on well-conditioned ones, and about 1e-9 when capped
+# high-evidence edges (admittance ~1e7) sit beside ordinary ones (~0.1). A
+# real disagreement -- a missing edge, a different closure -- is orders of
+# magnitude past this.
+SHADOW_TOL = 1e-6
 _warned = set()
 
 
@@ -93,6 +96,8 @@ def scorer_solver() -> str:
 
 
 DEFAULT_WEIGHT = 1e-2
+# The largest edge weight scored: an admittance of -1/ln(0.9999999) ~ 1e7.
+MAX_EDGE_WEIGHT = 0.9999999
 
 BLENDED_PROFILE = {
     "source_weights": {
@@ -805,8 +810,15 @@ class Ranker:
             for properties in self.get_edge_values(k_edge_id).values():
                 for values in properties.values():
                     w = values["weight"]
-                    if w >= 1:  # > as an emergency
-                        w = 0.9999999  # 1 causes numerical issues
+                    # Cap the weight at MAX_EDGE_WEIGHT. It used to be capped
+                    # only at 1 (whose log is 0), but a weight just below 1
+                    # is as bad: 1 - 2e-15 (a publications sigmoid at ~60
+                    # papers) is an admittance of ~5e14. Entries that large
+                    # carry rounding errors the size of the graph's real
+                    # conductances, and lstsq's cutoff then discards real
+                    # singular values, so the score is numerical noise.
+                    if w > MAX_EDGE_WEIGHT:
+                        w = MAX_EDGE_WEIGHT
                     weights.append(w)
                     n += 1
             todo.append(k_edge_id)

@@ -5,7 +5,7 @@ rankings and (when both runs saved it) scored message are from the
 baseline's.
 
     python compare.py out/python.json out/rust-typed-cholesky.json [more.json ...]
-                      [--tol 1e-9] [--top 10]
+                      [--tol 1e-6] [--top 10]
 
 Exits 1 if any analysis score differs by more than ``--tol`` (relative, with
 the same value as an absolute floor near zero), if two runs failed different
@@ -306,7 +306,7 @@ def main(argv=None):
     p.add_argument("base", help="baseline result (e.g. out/python.json)")
     p.add_argument("others", nargs="+", help="results to compare with it")
     p.add_argument(
-        "--tol", type=float, default=1e-9, help="relative tolerance on scores"
+        "--tol", type=float, default=1e-6, help="relative tolerance on scores"
     )
     p.add_argument("--top", type=int, default=10, help="how many examples to print")
     args = p.parse_args(argv)

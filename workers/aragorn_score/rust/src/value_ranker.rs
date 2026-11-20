@@ -33,6 +33,8 @@ use crate::solve::{kirchhoff, SolveStats, Solver};
 pub type R<T> = Result<T, String>;
 
 pub(crate) const TOTAL_PUBS: f64 = 27_840_000.0;
+/// The largest edge weight scored (`MAX_EDGE_WEIGHT` in worker.py).
+pub(crate) const MAX_EDGE_WEIGHT: f64 = 0.9999999;
 pub(crate) const LITERATURE_PREDICATE: &str = "biolink:occurs_together_in_literature_with";
 pub(crate) const SUPPORT_GRAPHS_ATTRIBUTE: &str = "biolink:support_graphs";
 
@@ -868,7 +870,8 @@ impl<'a> Ranker<'a> {
         Ok(weights
             .into_iter()
             .map(|w| {
-                let w = if w >= 1.0 { 0.9999999 } else { w };
+                // Capped below 1, not only at it: see MAX_EDGE_WEIGHT in worker.py.
+                let w = if w > MAX_EDGE_WEIGHT { MAX_EDGE_WEIGHT } else { w };
                 -1.0 / w.ln()
             })
             .collect())

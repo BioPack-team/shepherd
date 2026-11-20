@@ -54,7 +54,7 @@ R=../../workers/aragorn_score/rust/target/release/aragorn_score_rs
 $R MESSAGE --repeat 5 \
     --parse typed --solver cholesky --json serde_json --out out/rust.json
 $R MESSAGE --bench-parse --repeat 15  # parsers only
-python compare.py out/python.json out/rust.json [more.json ...] --tol 1e-9
+python compare.py out/python.json out/rust.json [more.json ...] --tol 1e-6
 ```
 
 `--save-message FILE` on either one writes the scored, ranked message (zstd
@@ -164,8 +164,17 @@ different routes to the same numbers:
 - The maths runs on different libraries: `ln`, `exp` and row sums come from
   Rust's std, and the solve is faer's SVD or the Cholesky above.
 
-Expect differences around 1e-13 and the odd swap between two answers whose
-scores tie to within that. Anything bigger is a bug.
+Expect differences around 1e-13, and up to about 1e-9 when an analysis mixes
+edges at the weight cap (admittance ~1e7) with ordinary ones (~0.1): the
+matrices are then ill-conditioned, so the low digits depend on summation
+order. The default tolerance (`--tol`, `TOL`) is 1e-6. Two answers whose
+scores tie to within that can swap places. Anything bigger is a bug.
+
+Before the weight cap applied below 1 (see `MAX_EDGE_WEIGHT` in
+`worker.py`), edges with 40–64 publications from some sources had
+admittances up to ~1e15. Those scores were numerical noise, and the two
+scorers disagreed on real messages by up to 12%. `gen_message.py`'s
+messages don't contain such edges; the scorer tests add some.
 
 ## How faithful the ports are
 
