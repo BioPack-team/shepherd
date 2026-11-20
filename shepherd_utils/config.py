@@ -510,6 +510,21 @@ class Settings(BaseSettings):
     # SCORE_PATHS_TASK_TIMEOUT_SEC; 0 disables the timeout.
     score_paths_task_timeout_sec: float = 210.0
 
+    # Which scorer the aragorn.score worker runs (ARAGORN_SCORER):
+    #   python  the Ranker in workers/aragorn_score/worker.py (the default);
+    #   rust    the Rust port (the aragorn_score_rs module built into the
+    #           worker image), falling back to python for a task it can't
+    #           score, or if the module isn't installed;
+    #   shadow  python scores and saves as usual; then rust scores the same
+    #           input, and the worker log says how far apart the two are and
+    #           how long each took. The response is python's.
+    # An unknown value logs a warning and runs python.
+    aragorn_scorer: str = "python"
+    # The Rust scorer's effective-resistance solve (ARAGORN_SCORER_SOLVER):
+    # "cholesky" (fast; falls back to svd where it wouldn't match numpy's
+    # lstsq) or "svd" (lstsq's method throughout).
+    aragorn_scorer_solver: str = "cholesky"
+
     # Recycle each process-pool child after this many tasks. A child that once
     # processed a very large message keeps that peak RSS for its whole life
     # (freed memory isn't fully returned to the OS), so long-lived children

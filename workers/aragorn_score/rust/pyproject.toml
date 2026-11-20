@@ -1,0 +1,16 @@
+# The aragorn_score_rs Python module, built with maturin:
+#   pip install maturin && maturin build --release   (or `maturin develop`)
+# The worker's Dockerfile builds and installs it.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "aragorn-score-rs"
+description = "The aragorn.score ranker in Rust, for the aragorn.score worker."
+requires-python = ">=3.9"
+dynamic = ["version"]
+
+[tool.maturin]
+features = ["python"]
+module-name = "aragorn_score_rs"

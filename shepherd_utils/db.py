@@ -1318,10 +1318,25 @@ async def clear_merge_crashes(response_id: str) -> None:
 
 def get_message_sync(message_id: str) -> Dict:
     """Synchronously fetch and decode a message from the data db."""
+    return decode_message(get_blob_sync(message_id))
+
+
+def get_blob_sync(message_id: str) -> bytes:
+    """Synchronously fetch a message from the data db as stored (a zstd
+    frame of JSON), without decoding it. For code that decodes it itself, such
+    as the Rust scorer."""
     blob = _get_sync_data_db().get(message_id)
     if blob is None:
         raise KeyError(f"Failed to get {message_id} from db")
-    return decode_message(blob)
+    return blob
+
+
+def save_blob_sync(message_id: str, blob: bytes) -> None:
+    """Store an already-encoded message (``encode_message``'s format: a zstd
+    frame of JSON) in the data db. Raises ``ResponseSealedError`` for a sealed
+    response, as ``save_message_sync`` does. The caller is responsible for the
+    content being in stored form (``prepare_stored_response``)."""
+    _set_unless_sealed_sync(message_id, blob)
 
 
 def save_message_sync(message_id: str, message: dict[str, Any]) -> None:

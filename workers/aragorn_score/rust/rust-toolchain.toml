@@ -1,0 +1,5 @@
+# The Rust version the scorer is built and tested with. rustup (in the
+# worker's Docker build stage, and in CI) installs it on first use.
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"

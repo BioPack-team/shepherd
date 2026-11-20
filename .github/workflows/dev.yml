@@ -35,6 +35,36 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  rust-scorer:
+    # The aragorn.score worker's Rust scorer: build the Python module and run
+    # the scorer tests with it, so Python/Rust parity is checked on every PR
+    # (in the tox job those tests skip: the module isn't built there).
+    name: Rust scorer parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Shepherd and the test requirements
+        run: |
+          python -m pip install --upgrade pip maturin
+          pip install -r test-requirements.txt
+          pip install .
+
+      - name: Build and install the Rust scorer
+        run: |
+          (cd workers/aragorn_score/rust && rustup toolchain install)  # rust-toolchain.toml's
+          maturin build --release -m workers/aragorn_score/rust/Cargo.toml --out dist
+          pip install dist/*.whl
+
+      - name: Run the scorer tests
+        run: python -m pytest -q tests/unit/aragorn tests/unit/test_ranker_omnicorp.py
+
   check-format:
     name: Check that code matches Black formatter
     runs-on: ubuntu-latest

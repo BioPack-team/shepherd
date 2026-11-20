@@ -1,4 +1,4 @@
-//! Benchmark runner for the Rust ports of the aragorn.score ranker.
+//! Benchmark runner for the Rust aragorn.score scorer (the library in lib.rs).
 //!
 //!     aragorn_score_rs <message.json|message.json.zst> [--repeat N]
 //!         [--parse typed|value] [--solver cholesky|svd] [--json serde_json|sonic]
@@ -14,32 +14,12 @@
 //! `python_scorer.py`'s, for `compare.py`. `--bench-parse` times the JSON
 //! parsers alone (see README).
 
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-mod solve;
-mod typed;
-mod typed_input;
-mod value_ranker;
-
 use std::time::Instant;
 
+use aragorn_score_rs::pipeline::{decompress, ms, run, run_value, ZSTD_MAGIC};
+use aragorn_score_rs::solve::Solver;
+use aragorn_score_rs::typed_input::{self, Backend};
 use serde_json::{json, Value};
-use solve::{SolveStats, Solver};
-use typed_input::Backend;
-
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
-
-/// Decompress a zstd frame into one allocation of the size its header
-/// declares (as Shepherd's `decompress_frame` does); stream it when the
-/// header doesn't say.
-fn decompress(raw: &[u8]) -> Vec<u8> {
-    match zstd::zstd_safe::get_frame_content_size(raw) {
-        Ok(Some(size)) => zstd::bulk::decompress(raw, size as usize).expect("zstd decompress"),
-        _ => zstd::decode_all(raw).expect("zstd decompress"),
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Parse {
@@ -102,130 +82,11 @@ fn parse_args() -> Args {
     args
 }
 
-fn ms(t: Instant) -> f64 {
-    t.elapsed().as_secs_f64() * 1e3
-}
-
-/// One pipeline run's products (decompress and compress are timed outside).
-struct Run {
-    parse_ms: f64,
-    score_ms: f64,
-    serialize_ms: f64,
-    out_bytes: Vec<u8>,
-    scores: Vec<Vec<Value>>,
-    order: Vec<usize>,
-    failures: Vec<(usize, String)>,
-    stats: SolveStats,
-    note: Option<String>,
-}
-
-fn run_value(bytes: &[u8], solver: Solver) -> Run {
-    let t = Instant::now();
-    let mut doc: Value = serde_json::from_slice(bytes).expect("parse JSON");
-    let parse_ms = ms(t);
-
-    let t = Instant::now();
-    // Accept a stored TRAPI Response ({"message": ...}) or a bare Message.
-    let message = if doc.get("message").map_or(false, Value::is_object) {
-        doc.get_mut("message").unwrap()
-    } else {
-        &mut doc
-    };
-    let message = message.as_object_mut().expect("message is an object");
-    let has_results = matches!(message.get("results"), Some(Value::Array(_)));
-    let mut results = match message.get_mut("results") {
-        Some(Value::Array(r)) => std::mem::take(r),
-        _ => vec![],
-    };
-    let (order, failures, stats) = if has_results {
-        let mut ranker = value_ranker::Ranker::new(message, solver);
-        let (order, failures) = ranker.rank(&mut results);
-        (order, failures, ranker.stats)
-    } else {
-        (vec![], vec![], SolveStats::default())
-    };
-    let scores: Vec<Vec<Value>> = results
-        .iter()
-        .map(|r| {
-            r.get("analyses")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().map(|x| x.get("score").cloned().unwrap_or(Value::Null)).collect())
-                .unwrap_or_default()
-        })
-        .collect();
-    // Put the results back in ranked order, as the worker saves them.
-    let mut slots: Vec<Option<Value>> = results.into_iter().map(Some).collect();
-    let ranked: Vec<Value> = order.iter().map(|&i| slots[i].take().unwrap()).collect();
-    if has_results {
-        message.insert("results".into(), Value::Array(ranked));
-    }
-    let score_ms = ms(t);
-
-    let t = Instant::now();
-    let out_bytes = serde_json::to_vec(&doc).expect("serialise");
-    let serialize_ms = ms(t);
-    Run {
-        parse_ms,
-        score_ms,
-        serialize_ms,
-        out_bytes,
-        scores,
-        order,
-        failures,
-        stats,
-        note: None,
-    }
-}
-
-/// Err: the typed parse couldn't represent this message.
-fn run_typed(bytes: &[u8], solver: Solver, json: Backend) -> Result<Run, String> {
-    let t = Instant::now();
-    let parsed = typed_input::parse(bytes, json)?;
-    let parse_ms = ms(t);
-
-    let t = Instant::now();
-    let model = typed::Model::build(&parsed);
-    let n = model.n_answers();
-    let ranked = if parsed.results.is_some() {
-        typed::Scorer::new(&model, solver).rank()
-    } else {
-        typed::Ranked {
-            finals: vec![],
-            order: vec![],
-            failures: vec![],
-            stats: SolveStats::default(),
-        }
-    };
-    let score_ms = ms(t);
-    debug_assert_eq!(n, ranked.finals.len());
-
-    let t = Instant::now();
-    let out_bytes = typed::splice(bytes, &parsed, &ranked);
-    let serialize_ms = ms(t);
-
-    let scores = ranked
-        .finals
-        .iter()
-        .map(|f| f.iter().map(|x| x.to_value()).collect())
-        .collect();
-    Ok(Run {
-        parse_ms,
-        score_ms,
-        serialize_ms,
-        out_bytes,
-        scores,
-        order: ranked.order,
-        failures: ranked.failures,
-        stats: ranked.stats,
-        note: None,
-    })
-}
-
 /// `--bench-parse`: time each parser on the same decompressed bytes,
 /// `repeat` times each (the parse result is dropped outside the timing).
 fn bench_parse(raw: &[u8], repeat: usize) {
     let bytes = if raw.starts_with(&ZSTD_MAGIC) {
-        decompress(raw)
+        decompress(raw).expect("zstd decompress")
     } else {
         raw.to_vec()
     };
@@ -253,15 +114,18 @@ fn bench_parse(raw: &[u8], repeat: usize) {
     report("serde_json Value", time(repeat, |_| serde_json::from_slice::<Value>(&bytes).unwrap()));
     report("sonic-rs Value", time(repeat, |_| sonic_rs::from_slice::<sonic_rs::Value>(&bytes).unwrap()));
     // simd-json parses in place, so each run needs its own copy (not timed).
-    let mut times = vec![];
-    for _ in 0..repeat {
-        let mut copy = bytes.clone(); // not timed
-        let t = Instant::now();
-        let v = simd_json::to_borrowed_value(&mut copy).unwrap();
-        times.push(ms(t));
-        drop(v);
+    #[cfg(feature = "bench-parsers")]
+    {
+        let mut times = vec![];
+        for _ in 0..repeat {
+            let mut copy = bytes.clone(); // not timed
+            let t = Instant::now();
+            let v = simd_json::to_borrowed_value(&mut copy).unwrap();
+            times.push(ms(t));
+            drop(v);
+        }
+        report("simd-json BorrowedValue", times);
     }
-    report("simd-json BorrowedValue", times);
     println!("-- typed visitors (what --parse typed runs):");
     for backend in [Backend::SerdeJson, Backend::Sonic] {
         report(
@@ -292,7 +156,7 @@ fn main() {
     for _ in 0..args.repeat {
         let t = Instant::now();
         let bytes = if raw.starts_with(&ZSTD_MAGIC) {
-            decompress(&raw)
+            decompress(&raw).expect("zstd decompress")
         } else {
             raw.clone()
         };
@@ -300,12 +164,9 @@ fn main() {
 
         let run = match args.parse {
             Parse::Value => run_value(&bytes, args.solver),
-            Parse::Typed => run_typed(&bytes, args.solver, args.json).unwrap_or_else(|e| {
-                let mut r = run_value(&bytes, args.solver);
-                r.note = Some(format!("typed parse failed ({e}); used the value path"));
-                r
-            }),
-        };
+            Parse::Typed => run(&bytes, args.solver, args.json),
+        }
+        .expect("scoring failed");
 
         let t = Instant::now();
         let compressed = zstd::bulk::compress(&run.out_bytes, 3).expect("zstd compress");

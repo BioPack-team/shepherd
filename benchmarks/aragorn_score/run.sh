@@ -37,7 +37,8 @@ fi
 save() { [[ "$CHECK_MESSAGES" == 1 ]] && echo "--save-message $OUT/$1.scored.json.zst" || true; }
 
 echo "== building the Rust scorer (release)" >&2
-cargo build --release --quiet --manifest-path "$HERE/rust/Cargo.toml"
+RUST="$HERE/../../workers/aragorn_score/rust"
+cargo build --release --quiet --features bench-parsers --manifest-path "$RUST/Cargo.toml"
 
 echo "== scoring $MESSAGE ($REPEAT runs each)" >&2
 # shellcheck disable=SC2046
@@ -48,7 +49,7 @@ for v in $VARIANTS; do
   json="${json:-serde_json}"
   name="rust-$parse-$solver-$json"
   # shellcheck disable=SC2046
-  "$HERE/rust/target/release/aragorn_score_rs" "$MESSAGE" --repeat "$REPEAT" \
+  "$RUST/target/release/aragorn_score_rs" "$MESSAGE" --repeat "$REPEAT" \
     --parse "$parse" --solver "$solver" --json "$json" --out "$OUT/$name.json" $(save "$name")
   results+=("$OUT/$name.json")
 done

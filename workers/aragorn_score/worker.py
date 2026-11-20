@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 import uuid
 from collections import defaultdict
 from itertools import combinations
@@ -12,7 +13,12 @@ import numpy as np
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
-from shepherd_utils.db import get_message_sync, save_response_sync
+from shepherd_utils.db import (
+    get_blob_sync,
+    get_message_sync,
+    save_blob_sync,
+    save_response_sync,
+)
 from shepherd_utils.logger import (
     get_worker_logger,
     ingest_query_logs,
@@ -31,6 +37,58 @@ CONSUMER = str(uuid.uuid4())[:8]
 TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
+
+try:
+    # The Rust port of the Ranker below (workers/aragorn_score/rust), built
+    # into the worker image. See ARAGORN_SCORER in shepherd_utils/config.py.
+    import aragorn_score_rs
+except ImportError:  # not built here (a plain local checkout, say)
+    aragorn_score_rs = None
+
+SCORERS = ("python", "rust", "shadow")
+SOLVERS = ("cholesky", "svd")
+# Relative tolerance for the shadow comparison. The two scorers agree to
+# about 1e-13 (they sum and factorise in different orders); a difference past
+# this is a real disagreement.
+SHADOW_TOL = 1e-9
+_warned = set()
+
+
+def _warn_once(message: str) -> None:
+    if message not in _warned:
+        _warned.add(message)
+        LOGGER.warning(message)
+
+
+def scorer_mode() -> str:
+    """The scorer to run (``settings.aragorn_scorer``): "python", "rust" or
+    "shadow". Falls back to "python" for a value it doesn't know, or when the
+    Rust module isn't installed."""
+    mode = str(settings.aragorn_scorer or "python").strip().lower()
+    if mode not in SCORERS:
+        _warn_once(
+            f"Unknown ARAGORN_SCORER {settings.aragorn_scorer!r} (expected one of "
+            f"{', '.join(SCORERS)}); using the Python scorer."
+        )
+        return "python"
+    if mode != "python" and aragorn_score_rs is None:
+        _warn_once(
+            f"ARAGORN_SCORER={mode}, but the Rust scorer (the aragorn_score_rs "
+            "module) isn't installed; using the Python scorer."
+        )
+        return "python"
+    return mode
+
+
+def scorer_solver() -> str:
+    solver = str(settings.aragorn_scorer_solver or "cholesky").strip().lower()
+    if solver not in SOLVERS:
+        _warn_once(
+            f"Unknown ARAGORN_SCORER_SOLVER {settings.aragorn_scorer_solver!r}; "
+            "using cholesky."
+        )
+        return "cholesky"
+    return solver
 
 
 DEFAULT_WEIGHT = 1e-2
@@ -1363,46 +1421,225 @@ def aragorn_score(response_id: str, log_level: int = logging.INFO) -> list[dict]
     the child logs at the task's ``log_level`` through its own logger and
     returns the formatted records, oldest-first, for the parent to fold into
     the query's logs.
+
+    Which scorer runs is ``ARAGORN_SCORER`` (see ``scorer_mode``): the Python
+    Ranker, the Rust port (falling back to the Ranker for a message it can't
+    score), or both, with the Rust one in the shadow of the Python one.
     """
     with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
-        in_message = get_message_sync(response_id)
-
-        # these timestamps are causing json serialization issues so here we
-        # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
-        # empty list is never created.
-        for log in in_message.get("logs") or []:
-            log["timestamp"] = str(log["timestamp"])
-
-        message = in_message["message"]
-        if ("results" not in message) or (message["results"] is None):
-            # No results to weight; save unchanged and abort.
-            logger.info("No results to score. Saving unscored.")
-            save_response_sync(response_id, in_message)
-            return query_log_handler.drain()
-
-        # get a reference to the results
-        answers = message["results"]
-
-        try:
-            # resistance distance ranking
-            pr = Ranker(message, logger)
-
-            # rank the answers. there should be a score for each bound result after this
-            # TODO: is this right?
-            jaccard_like = False
-            answers = pr.rank(answers, jaccard_like=jaccard_like)
-
-            # save the results
-            message["results"] = answers
-        except Exception as e:
-            # put the error in the response
-            logger.exception(f"Aragorn-ranker/score exception {e}")
-            # save any log entries
-            # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
-
-        logger.info("Score complete. Saving.")
-        save_response_sync(response_id, in_message)
+        mode = scorer_mode()
+        if mode == "rust":
+            if score_with_rust(response_id, get_blob_sync(response_id), logger):
+                return query_log_handler.drain()
+        # The stored input, for the shadow run: read before the Python scorer
+        # overwrites it with its scored copy.
+        blob = get_blob_sync(response_id) if mode == "shadow" else None
+        python_run = score_with_python(response_id, logger)
+        if blob is not None and python_run is not None:
+            shadow_compare(response_id, blob, python_run)
         return query_log_handler.drain()
+
+
+def score_with_python(response_id: str, logger: logging.Logger):
+    """Score and save a response with the Python Ranker.
+
+    Returns what the shadow comparison needs -- each result's analysis scores
+    in input order, the ranked order (input indices) and timings -- or None
+    when there were no results to score.
+    """
+    t0 = time.perf_counter()
+    in_message = get_message_sync(response_id)
+
+    # these timestamps are causing json serialization issues so here we
+    # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
+    # empty list is never created.
+    for log in in_message.get("logs") or []:
+        log["timestamp"] = str(log["timestamp"])
+
+    message = in_message["message"]
+    if ("results" not in message) or (message["results"] is None):
+        # No results to weight; save unchanged and abort.
+        logger.info("No results to score. Saving unscored.")
+        save_response_sync(response_id, in_message)
+        return None
+
+    # get a reference to the results
+    answers = message["results"]
+    originals = list(answers) if isinstance(answers, list) else []
+
+    t1 = time.perf_counter()
+    try:
+        # resistance distance ranking
+        pr = Ranker(message, logger)
+
+        # rank the answers. there should be a score for each bound result after this
+        # TODO: is this right?
+        jaccard_like = False
+        answers = pr.rank(answers, jaccard_like=jaccard_like)
+
+        # save the results
+        message["results"] = answers
+    except Exception as e:
+        # put the error in the response
+        logger.exception(f"Aragorn-ranker/score exception {e}")
+        # save any log entries
+        # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
+    rank_ms = (time.perf_counter() - t1) * 1e3
+
+    logger.info("Score complete. Saving.")
+    save_response_sync(response_id, in_message)
+    total_ms = (time.perf_counter() - t0) * 1e3
+
+    position = {id(a): i for i, a in enumerate(originals)}
+    return {
+        "scores": [
+            (
+                [
+                    a.get("score") if isinstance(a, dict) else None
+                    for a in (r.get("analyses") or [])
+                ]
+                if isinstance(r, dict)
+                else []
+            )
+            for r in originals
+        ],
+        "order": [position.get(id(a)) for a in message.get("results") or []],
+        "rank_ms": rank_ms,
+        "total_ms": total_ms,
+    }
+
+
+def score_with_rust(response_id: str, blob: bytes, logger: logging.Logger) -> bool:
+    """Score and save a response with the Rust scorer.
+
+    The stored blob goes in and the scored blob comes out: the message is
+    never decoded in Python. Returns False, having saved nothing, when the
+    Rust scorer can't score the message, so the caller can fall back to the
+    Python one.
+    """
+    try:
+        scored, info = aragorn_score_rs.score_blob(blob, solver=scorer_solver())
+    except Exception as e:
+        logger.warning(
+            f"The Rust scorer could not score this response ({e}); scoring it "
+            "with the Python scorer instead."
+        )
+        LOGGER.warning(f"Rust scorer failed on {response_id}: {e}")
+        return False
+    if info.get("note"):
+        LOGGER.info(f"Rust scorer, {response_id}: {info['note']}")
+
+    # The same log lines the Python Ranker writes.
+    if info["n_results"] == 0:
+        logger.info("No results to score.")
+    failures = info["failures"]
+    for _, reason in failures:
+        logger.warning(f"Could not score an answer, scoring it 0: {reason}")
+    if failures:
+        logger.warning(
+            f"{len(failures)} of {info['n_results']} answer(s) could not be scored "
+            "and were given a score of 0."
+        )
+    logger.info(
+        f"Score complete (Rust scorer, {info['timings_ms']['total']:.0f} ms). Saving."
+    )
+    # The input was in stored form (prepare_stored_response), and scoring only
+    # adds scores and reorders results, so the output is too.
+    save_blob_sync(response_id, scored)
+    return True
+
+
+def compare_scores(py_scores, py_order, rs_scores, rs_order, tol=SHADOW_TOL) -> dict:
+    """How far apart two scorers' results are: per-analysis scores (relative
+    difference, with ``tol`` as the floor near zero) and the ranked order."""
+    out = {
+        "agree": True,
+        "results": len(py_scores),
+        "analyses": 0,
+        "beyond_tol": 0,
+        "max_abs_diff": 0.0,
+        "max_rel_diff": 0.0,
+        "worst": None,
+        "shape_mismatch": 0,
+    }
+    if len(py_scores) != len(rs_scores):
+        out["shape_mismatch"] = abs(len(py_scores) - len(rs_scores))
+    worst_rel = -1.0
+    for i, (a, b) in enumerate(zip(py_scores, rs_scores)):
+        if len(a) != len(b):
+            out["shape_mismatch"] += 1
+            continue
+        for j, (x, y) in enumerate(zip(a, b)):
+            out["analyses"] += 1
+            numeric = all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y)
+            )
+            if not numeric:
+                if x != y:
+                    out["beyond_tol"] += 1
+                    out["worst"] = {"result": i, "analysis": j, "python": x, "rust": y}
+                    worst_rel = math.inf
+                continue
+            diff = abs(float(x) - float(y))
+            rel = diff / max(abs(float(x)), abs(float(y)), tol)
+            out["max_abs_diff"] = max(out["max_abs_diff"], diff)
+            out["max_rel_diff"] = max(out["max_rel_diff"], rel)
+            if rel > tol:
+                out["beyond_tol"] += 1
+            if rel > worst_rel and rel > tol:
+                worst_rel = rel
+                out["worst"] = {"result": i, "analysis": j, "python": x, "rust": y}
+    out["results_moved"] = sum(1 for p, q in zip(py_order, rs_order) if p != q)
+    # Ranked ascending: the best answers are last.
+    k = min(10, len(py_order), len(rs_order))
+    out["top10_overlap"] = len(set(py_order[-k:]) & set(rs_order[-k:])) if k else 0
+    out["top10_of"] = k
+    out["agree"] = (
+        out["beyond_tol"] == 0
+        and out["shape_mismatch"] == 0
+        and len(py_order) == len(rs_order)
+    )
+    return out
+
+
+def shadow_compare(response_id: str, blob: bytes, python_run: dict) -> None:
+    """Score the stored input with the Rust scorer too, and log how its
+    scores, ranking and time compare with the Python scorer's. Nothing is
+    saved; a failure is logged, never raised."""
+    try:
+        _, info = aragorn_score_rs.score_blob(blob, solver=scorer_solver())
+    except Exception as e:
+        LOGGER.warning(
+            f"aragorn.score shadow {response_id}: the Rust scorer failed: {e}"
+        )
+        return
+    summary = {"response_id": response_id}
+    summary.update(
+        compare_scores(
+            python_run["scores"], python_run["order"], info["scores"], info["order"]
+        )
+    )
+    rust_ms = info["timings_ms"]
+    summary.update(
+        {
+            "rust_failures": len(info["failures"]),
+            # Python: Redis read + decode + Ranker + encode + Redis write.
+            "python_total_ms": round(python_run["total_ms"], 1),
+            # Python's Ranker.rank alone.
+            "python_rank_ms": round(python_run["rank_ms"], 1),
+            # Rust: decompress + parse + score + write + compress (no Redis).
+            "rust_total_ms": round(rust_ms["total"], 1),
+            "rust_score_ms": round(rust_ms["score"], 1),
+            "rank_speedup": round(
+                python_run["rank_ms"] / max(rust_ms["score"], 1e-3), 1
+            ),
+            "note": info.get("note"),
+        }
+    )
+    LOGGER.log(
+        logging.INFO if summary["agree"] else logging.WARNING,
+        "aragorn.score shadow " + json.dumps(summary, default=str),
+    )
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):
@@ -1441,6 +1678,12 @@ async def poll_for_tasks():
     # full message, so this also bounds peak memory. POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
     LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    mode = scorer_mode()
+    LOGGER.info(
+        f"{STREAM}: scoring with the {mode} scorer"
+        + (f" (solver {scorer_solver()})" if mode != "python" else "")
+        + "; set by ARAGORN_SCORER."
+    )
     pool = ProcessPoolManager(
         max_workers,
         max_tasks_per_child=settings.pool_max_tasks_per_child,

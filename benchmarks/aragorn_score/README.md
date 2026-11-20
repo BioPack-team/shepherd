@@ -1,18 +1,21 @@
 # aragorn.score: Python vs Rust benchmark
 
-A debugging aid for deciding whether to move the ARAGORN scorer
-(`workers/aragorn_score/worker.py`) to Rust. Nothing here is used by the
-workers.
+Tools for comparing the ARAGORN scorer's Python and Rust implementations on
+the same message. The worker itself can run either one, or both side by side
+on real queries (`ARAGORN_SCORER`, see `workers/aragorn_score/README.md`).
 
 - **`python_scorer.py`** runs the real worker `Ranker`, unchanged.
-- **`rust/`** holds Rust ports of that ranker and a runner, in two variants
-  (see "The Rust variants" below).
+- **`workers/aragorn_score/rust/`** holds the Rust scorer: the library the
+  worker runs (as the `aragorn_score_rs` Python module) and this benchmark's
+  runner, in two variants (see "The Rust variants" below).
 - **`compare.py`** compares a baseline run with one or more others: timings,
   scores, rankings, and the scored messages themselves.
 - **`gen_message.py`** generates synthetic creative-mode messages.
 - **`dump_message.py`** pulls a real message out of Shepherd's Redis.
 - **`run.sh`** builds the Rust runner, runs Python and each Rust variant on
   the same message, and compares them all.
+- **`shadow_report.py`** summarises the comparisons the worker logs in shadow
+  mode, on real queries (see `workers/aragorn_score/README.md`).
 
 ## Running it
 
@@ -44,9 +47,10 @@ Each runner can also run on its own:
 
 ```sh
 python python_scorer.py MESSAGE --repeat 5 --out out/python.json
-rust/target/release/aragorn_score_rs MESSAGE --repeat 5 \
+R=../../workers/aragorn_score/rust/target/release/aragorn_score_rs
+$R MESSAGE --repeat 5 \
     --parse typed --solver cholesky --json serde_json --out out/rust.json
-rust/target/release/aragorn_score_rs MESSAGE --bench-parse --repeat 15  # parsers only
+$R MESSAGE --bench-parse --repeat 15  # parsers only
 python compare.py out/python.json out/rust.json [more.json ...] --tol 1e-9
 ```
 
@@ -58,6 +62,8 @@ if the name ends in `.zst`).
 Three switches choose a variant. `run.sh` runs `value:svd`, `typed:svd`,
 `typed:cholesky` and `typed:cholesky:sonic` by default
 (`VARIANTS=PARSE:SOLVER[:JSON] ...`).
+
+Source paths below are under `workers/aragorn_score/rust/`.
 
 **`--parse value`** (`src/value_ranker.rs`) is the straight port. It parses
 the whole message into `serde_json::Value`, scores by looking things up in
@@ -88,7 +94,8 @@ visitors (serde_json by default). See "JSON parsers" below for why they come
 out even.
 
 The build uses mimalloc as its allocator (`--no-default-features` for the
-system one). On the default message it made the whole pipeline about 20%
+system one); `run.sh` also enables `bench-parsers` (simd-json, for
+`--bench-parse`). On the default message it made the whole pipeline about 20%
 faster, scoring included.
 
 **`--solver svd`** (`src/solve.rs`) solves the probes' effective resistance

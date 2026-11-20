@@ -1,0 +1,48 @@
+[package]
+name = "aragorn_score_rs"
+version = "0.1.0"
+edition = "2021"
+description = "The aragorn.score ranker in Rust: a Python module for the worker, and a benchmark runner."
+publish = false
+
+[lib]
+name = "aragorn_score_rs"
+# cdylib: the Python extension module (built by maturin, feature "python");
+# rlib: for the benchmark runner below.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+# The benchmark runner (benchmarks/aragorn_score/run.sh).
+name = "aragorn_score_rs"
+path = "src/main.rs"
+
+[dependencies]
+# preserve_order: TRAPI key order matters (query-graph node order picks the probes).
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+serde = "1"
+sonic-rs = "0.5"
+# Only for the benchmark runner's --bench-parse reference numbers.
+simd-json = { version = "0.19", optional = true }
+simdutf8 = "0.1"
+mimalloc = { version = "0.1", optional = true }
+indexmap = "2"
+nalgebra = "0.33"
+faer = "0.22"
+zstd = "0.13"
+rustc-hash = "2"
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"], optional = true }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+[features]
+# mimalloc as the global allocator (on by default; --no-default-features for the
+# system allocator).
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
+# The Python module (maturin builds with it; see pyproject.toml).
+python = ["dep:pyo3"]
+# simd-json in the benchmark runner's --bench-parse table.
+bench-parsers = ["dep:simd-json"]
