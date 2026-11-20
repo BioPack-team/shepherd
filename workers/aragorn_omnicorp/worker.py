@@ -14,18 +14,18 @@ cache. Here both lookups are served from local read-only LMDB environments:
 """
 
 import asyncio
+import gc
 import json
 import logging
 import os
-import time
 import uuid
-from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import combinations
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 import lmdb
+import numpy as np
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
@@ -133,38 +133,52 @@ def curie_query(keys: List[str]) -> Dict[str, dict]:
     return out
 
 
-def shared_count_query(keys: List[str]) -> Dict[str, int]:
-    """LMDB replacement for ``Cache.shared_count_query``.
+def read_shared_counts(keys: Sequence[bytes]) -> List[Optional[int]]:
+    """Look up shared counts for ``keys`` (utf-8 ``b"<i1>_<i2>"``), in order.
 
-    Values are ASCII decimal text; decode here so the caller receives ints
-    (or ``None`` for misses), matching upstream's ``int(output)`` expectation.
-    Anything that isn't a plain run of digits raises rather than being guessed
-    at, so a store in an unexpected format fails loudly instead of emitting
-    wrong counts.
+    Returns the count as an int, or ``None`` for a miss. All reads share one
+    read transaction, and callers should pass the keys in sorted (byte)
+    order: that is LMDB's key order, so neighbouring lookups land on
+    neighbouring pages of a store that is bigger than RAM.
+
+    Values are ASCII decimal text. Anything that isn't a plain run of digits
+    raises rather than being guessed at, so a store in an unexpected format
+    fails loudly instead of emitting wrong counts.
     """
-    out: Dict[str, int] = {}
     with _get_shared_counts_env().begin(buffers=False) as txn:
-        for key in keys:
-            raw = txn.get(key.encode("utf-8"))
-            if raw is None:
-                out[key] = None
-            elif raw.isdigit():
-                out[key] = int(raw)
-            else:
-                raise ValueError(
-                    f"shared-counts LMDB value for {key!r} is not ASCII decimal: "
-                    f"{raw[:32]!r}"
-                )
+        get = txn.get
+        raws = [get(key) for key in keys]
+    out: List[Optional[int]] = []
+    append = out.append
+    for key, raw in zip(keys, raws):
+        if raw is None:
+            append(None)
+        elif raw.isdigit():
+            append(int(raw))
+        else:
+            raise ValueError(
+                f"shared-counts LMDB value for {key.decode('utf-8', 'replace')!r} "
+                f"is not ASCII decimal: {raw[:32]!r}"
+            )
     return out
 
 
-def make_key(x, node_indices):
-    """Sorted "index1_index2" key for the shared-counts LMDB."""
-    i1 = node_indices[x[0]]
-    i2 = node_indices[x[1]]
-    if i1 < i2:
-        return f"{i1}_{i2}"
-    return f"{i2}_{i1}"
+def shared_count_query(keys: List[str]) -> Dict[str, Optional[int]]:
+    """LMDB replacement for ``Cache.shared_count_query``.
+
+    Returns ``{key: count}``, with ``None`` for misses, matching upstream's
+    ``int(output)`` expectation. See ``read_shared_counts``.
+    """
+    counts = read_shared_counts([key.encode("utf-8") for key in keys])
+    return dict(zip(keys, counts))
+
+
+def shared_count_keys(index_a: np.ndarray, index_b: np.ndarray) -> List[bytes]:
+    """Shared-counts LMDB keys ``b"<i1>_<i2>"`` (``i1 < i2``) for each pair of
+    omnicorp indices."""
+    low = np.minimum(index_a, index_b).tolist()
+    high = np.maximum(index_a, index_b).tolist()
+    return [f"{i1}_{i2}".encode() for i1, i2 in zip(low, high)]
 
 
 def create_log_entry(msg: str, err_level, code=None) -> dict:
@@ -203,94 +217,153 @@ def add_node_pmid_counts(kgraph, counts):
         kgraph["nodes"][node_id]["attributes"].append(attribute)
 
 
-def add_shared_pmid_counts(message, values, pair_to_answer):
-    """Count PMIDS shared by a pair of nodes and create a new support edge."""
-    kgraph = message["knowledge_graph"]
+def add_shared_pmid_counts(
+    message: dict,
+    cooccurrences: Iterable[Tuple[str, str, int, Iterable[Tuple[int, int]]]],
+) -> None:
+    """Create a co-occurrence support edge for each pair of nodes that share
+    publications, and attach it to the analyses the pair came from.
+
+    ``cooccurrences`` yields ``(subject, object, publication_count, refs)``,
+    where ``refs`` are the ``(result_idx, analysis_idx)`` of the analyses the
+    pair supports. Each analysis gets one OMNICORP support graph (reusing one
+    it already has), which collects every co-occurrence edge for it.
+    """
+    kgraph_edges = message["knowledge_graph"]["edges"]
     answers = message["results"]
     support_idx = 0
+    # (result_idx, analysis_idx) -> its OMNICORP aux graph's edge list. A
+    # single analysis is referenced by many curie pairs (every combination of
+    # its nodes), so resolve its support graph once rather than per pair.
+    analysis_edges: Dict[Tuple[int, int], list] = {}
 
-    for pair, publication_count in values.items():
+    for subject, obj, publication_count, refs in cooccurrences:
         if publication_count == 0:
             continue
 
         uid = str(uuid4())
-        kgraph["edges"].update(
-            {
-                uid: {
-                    "predicate": "biolink:occurs_together_in_literature_with",
-                    # TRAPI 2.0: required top-level Edge properties, no longer
-                    # biolink:knowledge_level / biolink:agent_type attributes.
-                    "knowledge_level": "statistical_association",
-                    "agent_type": "statistical_association_pipeline",
-                    "attributes": [
-                        {
-                            "original_attribute_name": "num_publications",
-                            "attribute_type_id": "biolink:has_count",
-                            "value_type_id": "EDAM:data_0006",
-                            "value": publication_count,
-                        },
-                    ],
-                    "sources": [
-                        {
-                            "resource_id": "infores:omnicorp",
-                            "resource_role": "primary_knowledge_source",
-                        }
-                    ],
-                    "subject": pair[0],
-                    "object": pair[1],
+        kgraph_edges[uid] = {
+            "predicate": "biolink:occurs_together_in_literature_with",
+            # TRAPI 2.0: required top-level Edge properties, no longer
+            # biolink:knowledge_level / biolink:agent_type attributes.
+            "knowledge_level": "statistical_association",
+            "agent_type": "statistical_association_pipeline",
+            "attributes": [
+                {
+                    "original_attribute_name": "num_publications",
+                    "attribute_type_id": "biolink:has_count",
+                    "value_type_id": "EDAM:data_0006",
+                    "value": publication_count,
+                },
+            ],
+            "sources": [
+                {
+                    "resource_id": "infores:omnicorp",
+                    "resource_role": "primary_knowledge_source",
                 }
-            }
-        )
+            ],
+            "subject": subject,
+            "object": obj,
+        }
 
-        for answer_idx, analysis_idx in pair_to_answer[pair]:
-            analysis = answers[answer_idx]["analyses"][analysis_idx]
+        for ref in refs:
+            edges = analysis_edges.get(ref)
+            if edges is None:
+                answer_idx, analysis_idx = ref
+                analysis = answers[answer_idx]["analyses"][analysis_idx]
 
-            omnisupport = None
-            for sg in analysis.get("support_graphs") or []:
-                if sg.startswith("OMNICORP_support_graph"):
-                    omnisupport = sg
-                    break
+                omnisupport = None
+                for sg in analysis.get("support_graphs") or []:
+                    if sg.startswith("OMNICORP_support_graph"):
+                        omnisupport = sg
+                        break
 
-            # Only attach the support graph id to the analysis the first time
-            # we create it. A single analysis is referenced by many curie pairs
-            # (every combination of its nodes maps back to the same analysis),
-            # so appending unconditionally added the same OMNICORP_support_graph
-            # id to support_graphs once per pair.
-            if omnisupport is None:
-                omnisupport = f"OMNICORP_support_graph_{support_idx}"
-                support_idx += 1
-                # TRAPI 2.0: support_graphs has minItems 1, so it is only
-                # created here, with its first id.
-                if not analysis.get("support_graphs"):
-                    analysis["support_graphs"] = []
-                analysis["support_graphs"].append(omnisupport)
+                if omnisupport is None:
+                    omnisupport = f"OMNICORP_support_graph_{support_idx}"
+                    support_idx += 1
+                    # TRAPI 2.0: support_graphs has minItems 1, so it is only
+                    # created here, with its first id.
+                    if not analysis.get("support_graphs"):
+                        analysis["support_graphs"] = []
+                    analysis["support_graphs"].append(omnisupport)
 
-            # Message.auxiliary_graphs has minProperties 1: create it lazily,
-            # with its first graph. AuxiliaryGraph is {"edges": [...]} in 2.0.
-            aux_graphs = message.get("auxiliary_graphs")
-            if not aux_graphs:
-                aux_graphs = message["auxiliary_graphs"] = {}
-            if omnisupport not in aux_graphs:
-                aux_graphs[omnisupport] = {"edges": []}
+                # Message.auxiliary_graphs has minProperties 1: create it
+                # lazily, with its first graph. AuxiliaryGraph is
+                # {"edges": [...]} in 2.0.
+                aux_graphs = message.get("auxiliary_graphs")
+                if not aux_graphs:
+                    aux_graphs = message["auxiliary_graphs"] = {}
+                if omnisupport not in aux_graphs:
+                    aux_graphs[omnisupport] = {"edges": []}
+                edges = analysis_edges[ref] = aux_graphs[omnisupport]["edges"]
 
-            aux_graphs[omnisupport]["edges"].append(uid)
+            edges.append(uid)
+
+
+class CuriePairs:
+    """The distinct curie pairs to look up, and the analyses each supports.
+
+    Pairs are held as numpy arrays over local node ids rather than as a dict
+    of curie-tuple keys to sets of ``(result_idx, analysis_idx)`` tuples: a
+    big creative query yields millions of pairs and many more (pair, analysis)
+    links, and as Python objects those dominated both the overlay's time
+    (allocation plus the cyclic GC repeatedly scanning them) and its memory.
+
+    * ``first`` / ``second``: the local ids of each distinct pair, with
+      ``first < second`` (so the curies are in sorted order).
+    * ``refs[starts[i]:ends[i]]``: indexes into ``analyses`` (a list of
+      ``(result_idx, analysis_idx)``) of the analyses pair ``i`` supports.
+    """
+
+    def __init__(self, codes: np.ndarray, refs: np.ndarray, num_nodes: int, analyses):
+        # Distinct (pair, analysis) links, grouped by pair.
+        order = np.lexsort((refs, codes))
+        codes, refs = codes[order], refs[order]
+        if len(codes):
+            keep = np.empty(len(codes), dtype=bool)
+            keep[0] = True
+            keep[1:] = (codes[1:] != codes[:-1]) | (refs[1:] != refs[:-1])
+            codes, refs = codes[keep], refs[keep]
+        pairs, starts = np.unique(codes, return_index=True)
+        self.first = pairs // max(num_nodes, 1)
+        self.second = pairs % max(num_nodes, 1)
+        self.starts = starts
+        self.ends = np.append(starts[1:], len(codes)) if len(starts) else starts
+        self.refs = refs
+        self.analyses = analyses
+
+    def __len__(self) -> int:
+        return len(self.first)
+
+    def pair_refs(self, i: int) -> List[Tuple[int, int]]:
+        """The ``(result_idx, analysis_idx)`` of every analysis pair ``i`` supports."""
+        analyses = self.analyses
+        return [analyses[k] for k in self.refs[self.starts[i] : self.ends[i]].tolist()]
 
 
 def generate_curie_pairs(
-    answers, qgraph_setnodes, node_pub_counts, message, logger, max_pairs=None
-):
-    """Build the ``{curie_pair: {(answer_idx, analysis_idx)}}`` mapping.
+    answers, qgraph_setnodes, node_ids: Dict[str, int], message
+) -> CuriePairs:
+    """Collect every curie pair the overlay looks up, and the analyses each
+    pair supports.
 
-    When ``max_pairs`` is set, generation stops as soon as that many distinct
-    pairs have been collected and the (capped) mapping is returned early. The
-    overlay itself passes no cap (#220): a query too big to overlay in time
-    times out instead.
+    ``node_ids`` maps each curie with omnicorp data to a local id, assigned in
+    sorted curie order; curies without data have no co-occurrence counts, so
+    pairs involving them are never generated. That holds for nodes bound to a
+    set-interpretation qnode too: those were once paired unfiltered, and a
+    curie missing from the curies LMDB then failed the whole query with a
+    ``KeyError`` when its pair key was built.
 
     A binding or support graph that points at something the message doesn't
     have raises ``ValueError``: the message is malformed, and scoring its
     answers without that evidence would quietly return a different answer.
     """
-    pair_to_answer = defaultdict(set)
+    num_nodes = len(node_ids)
+    kgraph_edges = message["knowledge_graph"]["edges"]
+    aux_graphs = message.get("auxiliary_graphs") or {}
+    analyses: List[Tuple[int, int]] = []
+    code_chunks = []
+    ref_chunks = []
 
     for ans_idx, answer_map in enumerate(answers):
         nonset_nodes = []
@@ -299,75 +372,69 @@ def generate_curie_pairs(
         # TRAPI 2.0: one NodeBinding {"ids": [...]} per qnode.
         for nb, node_binding in (answer_map.get("node_bindings") or {}).items():
             if nb in qgraph_setnodes:
-                setnodes[nb] = binding_ids(node_binding)
+                setnodes[nb] = [
+                    node_ids[n] for n in binding_ids(node_binding) if n in node_ids
+                ]
             else:
                 nonset_nodes.extend(binding_ids(node_binding))
 
         # Result.analyses is optional in 2.0.
         for analysis_idx, analysis in enumerate(answer_map.get("analyses") or []):
-            new_nonset_nodes = set()
+            analysis_nodes = set(nonset_nodes)
 
-            relevant_kedge_ids = edge_binding_ids(analysis)
-
-            auxgraph_ids = []
-            for kedge_id in relevant_kedge_ids:
-                kedge = message["knowledge_graph"]["edges"].get(kedge_id)
+            for kedge_id in edge_binding_ids(analysis):
+                kedge = kgraph_edges.get(kedge_id)
                 if kedge is None:
                     raise ValueError(
                         f"Result {ans_idx} binds edge {kedge_id}, which is not "
                         "in the knowledge graph"
                     )
-                auxgraph_ids.extend(edge_support_graphs(kedge))
+                for auxgraph_id in edge_support_graphs(kedge):
+                    if auxgraph_id not in aux_graphs:
+                        raise ValueError(
+                            f"Support graph {auxgraph_id} of result {ans_idx} is "
+                            "not in the auxiliary graphs"
+                        )
+                    for edge_id in aux_graphs[auxgraph_id]["edges"]:
+                        edge = kgraph_edges.get(edge_id)
+                        if edge is None:
+                            raise ValueError(
+                                f"A support graph of result {ans_idx} uses edge "
+                                f"{edge_id}, which is not in the knowledge graph"
+                            )
+                        analysis_nodes.add(edge["subject"])
+                        analysis_nodes.add(edge["object"])
 
-            all_relevant_edge_ids = set()
-            aux_graphs = message.get("auxiliary_graphs") or {}
-            for auxgraph_id in auxgraph_ids:
-                if auxgraph_id not in aux_graphs:
-                    raise ValueError(
-                        f"Support graph {auxgraph_id} of result {ans_idx} is not "
-                        "in the auxiliary graphs"
+            lookup = sorted(node_ids[n] for n in analysis_nodes if n in node_ids)
+
+            # Pair (a, b), a < b, is encoded as the int a * num_nodes + b.
+            codes = [a * num_nodes + b for a, b in combinations(lookup, 2)]
+            for snodes in setnodes.values():
+                for s in snodes:
+                    codes.extend(
+                        (n * num_nodes + s) if n < s else (s * num_nodes + n)
+                        for n in lookup
+                        if n != s
                     )
-                all_relevant_edge_ids.update(aux_graphs[auxgraph_id]["edges"])
-
-            for edge_id in all_relevant_edge_ids:
-                edge = message["knowledge_graph"]["edges"].get(edge_id)
-                if edge is None:
-                    raise ValueError(
-                        f"A support graph of result {ans_idx} uses edge "
-                        f"{edge_id}, which is not in the knowledge graph"
+            for qga, qgb in combinations(setnodes, 2):
+                for a in setnodes[qga]:
+                    codes.extend(
+                        (a * num_nodes + b) if a < b else (b * num_nodes + a)
+                        for b in setnodes[qgb]
+                        if a != b
                     )
 
-                new_nonset_nodes.add(edge["subject"])
-                new_nonset_nodes.add(edge["object"])
+            if codes:
+                code_chunks.append(np.array(codes, dtype=np.int64))
+                ref_chunks.append(np.full(len(codes), len(analyses), dtype=np.int64))
+            analyses.append((ans_idx, analysis_idx))
 
-            new_nonset_nodes.update(nonset_nodes)
-            lookup_nodes = list(new_nonset_nodes)
-
-            lookup_nodes = [n for n in lookup_nodes if n in node_pub_counts]
-            lookup_nodes = sorted(lookup_nodes)
-
-            for node_pair in combinations(lookup_nodes, 2):
-                pair_to_answer[node_pair].add((ans_idx, analysis_idx))
-                if max_pairs is not None and len(pair_to_answer) >= max_pairs:
-                    return pair_to_answer
-
-            for qg_id, snodes in setnodes.items():
-                for snode in snodes:
-                    for node in lookup_nodes:
-                        node_pair = tuple(sorted((node, snode)))
-                        pair_to_answer[node_pair].add((ans_idx, analysis_idx))
-                        if max_pairs is not None and len(pair_to_answer) >= max_pairs:
-                            return pair_to_answer
-
-            for qga, qgb in combinations(setnodes.keys(), 2):
-                for anode in setnodes[qga]:
-                    for bnode in setnodes[qgb]:
-                        node_pair = tuple(sorted((anode, bnode)))
-                        pair_to_answer[node_pair].add((ans_idx, analysis_idx))
-                        if max_pairs is not None and len(pair_to_answer) >= max_pairs:
-                            return pair_to_answer
-
-    return pair_to_answer
+    if code_chunks:
+        codes = np.concatenate(code_chunks)
+        refs = np.concatenate(ref_chunks)
+    else:
+        codes = refs = np.empty(0, dtype=np.int64)
+    return CuriePairs(codes, refs, num_nodes, analyses)
 
 
 def _already_overlaid(kgraph: dict) -> bool:
@@ -401,13 +468,6 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
     logger.info("Start omnicorp")
 
     debug = os.environ.get("DEBUG_TIMING", "False")
-    if debug == "True":
-        dt_start = datetime.now()
-        dt_1 = datetime.now()
-
-    dt_2 = datetime.now()
-    if debug == "True":
-        logger.info(f"convert in message to dict: {dt_2 - dt_1}")
 
     # Response.logs has minItems 1 in TRAPI 2.0: never create an empty list.
     for log in in_message.get("logs") or []:
@@ -466,35 +526,42 @@ def omnicorp_overlay(in_message: dict, logger: logging.Logger) -> dict:
         if (qgraph["nodes"][n].get("set_interpretation", None) or "BATCH") != "BATCH"
     )
 
+    # Local ids in sorted curie order (``keys`` is sorted), so a pair's lower
+    # id is its lexically smaller curie: the edge's subject, as before.
+    curies = [curie for curie in keys if curie in node_indices]
+    local_ids = {curie: i for i, curie in enumerate(curies)}
+    omnicorp_index = np.array([node_indices[c] for c in curies], dtype=np.int64)
+
     t1 = datetime.now()
-    pair_to_answer = generate_curie_pairs(
-        answers,
-        qgraph_setnodes,
-        node_pub_counts,
-        message,
-        logger,
-    )
+    pairs = generate_curie_pairs(answers, qgraph_setnodes, local_ids, message)
     t2 = datetime.now()
+    logger.info(f"generate_curie_pairs time: {t2 - t1}. Number of pairs: {len(pairs)}")
+
+    lmdb_keys = shared_count_keys(
+        omnicorp_index[pairs.first], omnicorp_index[pairs.second]
+    )
+    # Look up in LMDB key order (see read_shared_counts); the co-occurrence
+    # edges are created in that order too, as they always have been.
+    key_order = sorted(range(len(lmdb_keys)), key=lmdb_keys.__getitem__)
+    q_start = datetime.now()
+    counts = read_shared_counts([lmdb_keys[i] for i in key_order])
+    del lmdb_keys
     logger.info(
-        f"generate_curie_pairs time: {t2 - t1}. Number of pairs: {len(pair_to_answer)}"
+        f"shared count lookups ({len(counts)}) time: {datetime.now() - q_start}"
     )
 
-    keypairs = {make_key(x, node_indices): x for x in pair_to_answer.keys()}
-    inputkeys = sorted(keypairs.keys())
-    values = {}
-
-    for batch in batches(inputkeys, LMDB_BATCH_SIZE):
-        q_start = datetime.now()
-        results = shared_count_query(batch)
-        q_end = datetime.now()
-        logger.debug(f"shared_count_query batch ({len(batch)}) time: {q_end - q_start}")
-
-        for input, output in results.items():
-            if output is not None:
-                values[keypairs[input]] = int(output)
+    first = pairs.first.tolist()
+    second = pairs.second.tolist()
 
     add_node_pmid_counts(kgraph, node_pub_counts)
-    add_shared_pmid_counts(message, values, pair_to_answer)
+    add_shared_pmid_counts(
+        message,
+        (
+            (curies[first[i]], curies[second[i]], count, pairs.pair_refs(i))
+            for i, count in zip(key_order, counts)
+            if count
+        ),
+    )
 
     end_pair_time = datetime.now()
     logger.info(f"Pair time: {end_pair_time - start_pair_time}")
@@ -532,19 +599,30 @@ def aragorn_omnicorp(response_id: str, log_level: int = logging.INFO) -> list[di
     the query's logs.
     """
     with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
-        message = get_message_sync(response_id)
+        # The cyclic GC is off for the task: a big message is millions of
+        # dicts and lists, and every collection pass rescans them -- that was
+        # about 40% of a large overlay's time. The decoded message and
+        # everything the overlay builds are acyclic, so reference counting
+        # frees them all without it.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            message = get_message_sync(response_id)
 
-        workflow = None
-        if "workflow" in message:
-            workflow = message["workflow"]
-            del message["workflow"]
+            workflow = None
+            if "workflow" in message:
+                workflow = message["workflow"]
+                del message["workflow"]
 
-        response = omnicorp_overlay(message, logger)
+            response = omnicorp_overlay(message, logger)
 
-        if workflow is not None:
-            response["workflow"] = workflow
+            if workflow is not None:
+                response["workflow"] = workflow
 
-        save_response_sync(response_id, response)
+            save_response_sync(response_id, response)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
         return query_log_handler.drain()
 
 
