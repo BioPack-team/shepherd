@@ -239,8 +239,7 @@ def test_add_shared_pmid_counts_reuses_existing_omnicorp_support_graph():
             }
         ],
     }
-    pair_to_answer = {("A", "B"): {(0, 0)}}
-    add_shared_pmid_counts(message, {("A", "B"): 7}, pair_to_answer)
+    add_shared_pmid_counts(message, [("A", "B", 7, [(0, 0)])])
     sgs = message["results"][0]["analyses"][0]["support_graphs"]
     # No new OMNICORP support graph created; the existing one was reused.
     assert "OMNICORP_support_graph_existing" in sgs
@@ -269,7 +268,7 @@ def test_add_shared_pmid_counts_skips_zero_publication_counts():
             }
         ],
     }
-    add_shared_pmid_counts(message, {("A", "B"): 0}, {("A", "B"): {(0, 0)}})
+    add_shared_pmid_counts(message, [("A", "B", 0, [(0, 0)])])
     assert message["knowledge_graph"]["edges"] == {}
 
 
@@ -292,17 +291,19 @@ def test_generate_curie_pairs_includes_setnode_pairings():
         }
     ]
     qgraph_setnodes = {"qset"}
-    node_pub_counts = {"S1": 1, "S2": 1, "O1": 1}
+    curies = ["O1", "S1", "S2"]
+    local_ids = {c: i for i, c in enumerate(curies)}
     message = {
         "knowledge_graph": {"edges": {}},
         "auxiliary_graphs": {},
     }
-    pair_to_answer = generate_curie_pairs(
-        answers, qgraph_setnodes, node_pub_counts, message, logger
-    )
+    pairs = generate_curie_pairs(answers, qgraph_setnodes, local_ids, message)
+    found = {
+        (curies[a], curies[b])
+        for a, b in zip(pairs.first.tolist(), pairs.second.tolist())
+    }
     # S1<->O1 and S2<->O1 are the setnode-vs-nonset pairs.
-    assert (("O1", "S1") in pair_to_answer) or (("S1", "O1") in pair_to_answer)
-    assert (("O1", "S2") in pair_to_answer) or (("S2", "O1") in pair_to_answer)
+    assert found == {("O1", "S1"), ("O1", "S2")}
 
 
 # --- finish_query.process_task -------------------------------------------
