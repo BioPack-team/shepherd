@@ -619,11 +619,11 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env
-      # The AnswerCoalesce DuckDB graph. First run? The worker downloads
-      # answer-coalesce.duckdb into this mount from ANSWER_COALESCE_DUCKDB_URL
-      # (writable for that reason; the worker only ever opens the database
-      # read-only, so a deployment can mount its volume read-only), or
-      # put/build it here yourself (see README "Worker data").
+      # The AnswerCoalesce DuckDB graph. First run? The worker downloads the
+      # .tar.gz at ANSWER_COALESCE_DUCKDB_URL and extracts answer-coalesce.duckdb
+      # into this mount (writable for that reason; the worker only ever opens
+      # the database read-only, so a deployment can mount its volume
+      # read-only), or put/build it here yourself (see README "Worker data").
       - ./answer_coalesce:/app/answer_coalesce
   aragorn_score:
     container_name: aragorn_score

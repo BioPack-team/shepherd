@@ -394,17 +394,29 @@ def _point_answer_coalesce_at(mocker, target, url):
     mocker.patch.object(data_download.settings, "answer_coalesce_duckdb_url", url)
 
 
-def test_ensure_answer_coalesce_duckdb_downloads_the_plain_file(tmp_path, mocker):
-    source = tmp_path / "published.duckdb"
-    source.write_bytes(b"duckdb-bytes")
+def test_ensure_answer_coalesce_duckdb_downloads_and_extracts_the_archive(
+    tmp_path, mocker
+):
+    url = _make_archive(tmp_path, ["answer-coalesce.duckdb"])
     target = tmp_path / "answer_coalesce"
-    _point_answer_coalesce_at(mocker, target, source.as_uri())
+    _point_answer_coalesce_at(mocker, target, url)
 
     data_download.ensure_answer_coalesce_duckdb(logger)
 
-    # saved under the configured name, with no temp files left behind
-    assert (target / "answer-coalesce.duckdb").read_bytes() == b"duckdb-bytes"
+    # extracted under the configured name, with the archive cleaned up
+    assert (target / "answer-coalesce.duckdb").read_bytes() == (
+        b"lmdb-bytes-for-answer-coalesce.duckdb"
+    )
     assert os.listdir(target) == ["answer-coalesce.duckdb"]
+
+
+def test_an_answer_coalesce_archive_without_the_database_is_an_error(tmp_path, mocker):
+    url = _make_archive(tmp_path, ["something-else.duckdb"])
+    target = tmp_path / "answer_coalesce"
+    _point_answer_coalesce_at(mocker, target, url)
+
+    with pytest.raises(RuntimeError, match="answer-coalesce.duckdb"):
+        data_download.ensure_answer_coalesce_duckdb(logger)
 
 
 def test_ensure_answer_coalesce_duckdb_is_a_noop_once_present(tmp_path, mocker):
@@ -431,14 +443,14 @@ def test_ensure_answer_coalesce_duckdb_without_a_url_only_warns(
         data_download.ensure_answer_coalesce_duckdb(logger)
 
     download.assert_not_called()
-    assert "no URL configured" in caplog.text
+    assert "no download URL configured" in caplog.text
     assert not (target / "answer-coalesce.duckdb").exists()
 
 
 def test_a_failed_answer_coalesce_download_leaves_no_partial_file(tmp_path, mocker):
     target = tmp_path / "answer_coalesce"
     _point_answer_coalesce_at(
-        mocker, target, (tmp_path / "not-published.duckdb").as_uri()
+        mocker, target, (tmp_path / "not-published.duckdb.tar.gz").as_uri()
     )
 
     with pytest.raises(RuntimeError, match="download failed"):

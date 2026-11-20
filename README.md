@@ -175,8 +175,10 @@ connection that opens and then stalls fails loudly instead of hanging worker sta
 
 **`aragorn_coalesce`'s DuckDB graph** is one plain file, `./answer_coalesce/answer-coalesce.duckdb`
 (mounted at `/app/answer_coalesce`; `ANSWER_COALESCE_DUCKDB_PATH` moves it). When it is missing the
-worker downloads it on startup from `ANSWER_COALESCE_DUCKDB_URL`, the same way as the per-file
-datasets above; set the variable empty to skip the download. **The default URL is a placeholder until
+worker downloads it on startup from `ANSWER_COALESCE_DUCKDB_URL`, a `.tar.gz` with
+`answer-coalesce.duckdb` at its top level, and extracts it in place, the same way as the LMDB datasets
+above (`tar -czf answer-coalesce.duckdb.tar.gz answer-coalesce.duckdb` makes one); set the variable
+empty to skip the download. **The default URL is a placeholder until
 the database is published**, so for now either point the variable at a copy or put the file there
 yourself. A database built by AnswerCoalesce (schema 7) works as is. To build one from a KGX node/edge
 JSONL pair (needs network access for the Biolink model and the Translator blocklist):
