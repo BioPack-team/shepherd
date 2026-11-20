@@ -37,11 +37,29 @@ def _index(instructions, pattern):
     raise AssertionError(f"no instruction matches {pattern!r}")
 
 
+def _final_stage(instructions):
+    """The instructions of the image's last stage, and its earlier (build)
+    stages' ``FROM`` lines. A multi-stage image -- aragorn_score compiles its
+    Rust scorer in a stage of its own -- ships only its last stage."""
+    froms = [i for i, line in enumerate(instructions) if line.startswith("FROM ")]
+    assert froms, "no FROM"
+    return instructions[froms[-1] :], [instructions[i] for i in froms[:-1]]
+
+
 @pytest.mark.parametrize("dockerfile", IMAGES, ids=lambda p: p.parent.name)
 def test_images_build_on_the_base_in_cache_friendly_order(dockerfile):
-    steps = _instructions(dockerfile)
+    steps, build_stages = _final_stage(_instructions(dockerfile))
 
+    # The shipped image is the last stage, and it builds on the base.
     assert steps[0] == "FROM shepherd_base"
+    # Any earlier stage is a named build stage the image copies from (a
+    # builder, not a second image built on something else).
+    for stage in build_stages:
+        name = re.fullmatch(r"FROM \S+ AS (\w+)", stage, re.IGNORECASE)
+        assert name, f"an earlier stage must be named: {stage!r}"
+        assert any(
+            step.startswith(f"COPY --from={name.group(1)} ") for step in steps
+        ), f"stage {name.group(1)} is never copied from"
     code = _index(steps, r"^COPY \./shepherd_utils ")
     # Shepherd itself is installed without its dependencies (the base has them)
     install = _index(steps, r"^RUN pip install (--no-deps -e|--no-deps) \.$")
