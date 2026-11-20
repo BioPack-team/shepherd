@@ -1,14 +1,17 @@
-"""Compare two aragorn.score benchmark results (python_scorer.py and the Rust
-runner): timings side by side, then how far apart their scores and rankings
-are.
+"""Compare aragorn.score benchmark results: a baseline (normally
+python_scorer.py's) against one or more others (the Rust runner's variants):
+timings side by side, then, for each other result, how far its scores,
+rankings and (when both runs saved it) scored message are from the
+baseline's.
 
-    python compare.py out/python.json out/rust.json [--tol 1e-9] [--top 10]
+    python compare.py out/python.json out/rust-typed-cholesky.json [more.json ...]
+                      [--tol 1e-9] [--top 10]
 
 Exits 1 if any analysis score differs by more than ``--tol`` (relative, with
-the same value as an absolute floor near zero), if the two failed different
-answers, or if the messages had a different number of results; 0 otherwise.
-Ranking differences alone don't fail it: answers whose scores tie to within
-rounding can legitimately swap places.
+the same value as an absolute floor near zero), if two runs failed different
+answers, if the result counts differ, or if a saved message differs beyond
+its scores; 0 otherwise. Ranking differences alone don't fail it: answers
+whose scores tie to within rounding can legitimately swap places.
 """
 
 import argparse
@@ -29,25 +32,40 @@ def fmt_ms(v):
     return f"{v:10.1f}" if v >= 10 else f"{v:10.3f}"
 
 
-def timing_table(a, b):
-    na, nb = a["impl"], b["impl"]
-    print(f"Timings (ms; min / median of {a['repeat']} vs {b['repeat']} runs)")
-    print(
-        f"  {'phase':<11}{na + ' min':>11}{na + ' med':>11}{nb + ' min':>11}{nb + ' med':>11}{'speedup':>10}"
-    )
+def timing_table(runs):
+    base = runs[0]
+    width = max(14, *(len(r["impl"]) + 2 for r in runs))
+    print(f"Timings (ms, min of {base['repeat']} runs; speedup vs {base['impl']})")
+    print(f"  {'phase':<11}" + "".join(f"{r['impl']:>{width}}" for r in runs))
     for phase in PHASES:
-        ta, tb = a["timings_ms"].get(phase), b["timings_ms"].get(phase)
-        if not ta or not tb:
-            continue
-        speed = ta["min"] / tb["min"] if tb["min"] > 0 else math.inf
-        print(
-            f"  {phase:<11}{fmt_ms(ta['min'])} {fmt_ms(ta['median'])} "
-            f"{fmt_ms(tb['min'])} {fmt_ms(tb['median'])} {speed:8.1f}x"
-        )
+        cells = []
+        for r in runs:
+            t = r["timings_ms"].get(phase)
+            if not t:
+                cells.append(f"{'-':>{width}}")
+                continue
+            cell = fmt_ms(t["min"]).strip()
+            tb = base["timings_ms"].get(phase)
+            if r is not base and tb and t["min"] > 0:
+                cell += f" ({tb['min'] / t['min']:.1f}x)"
+            cells.append(f"{cell:>{width}}")
+        print(f"  {phase:<11}" + "".join(cells))
     print(
-        f"  message: {a['message_bytes'] / 1e6:.1f} MB JSON in, "
-        f"{a['n_results']} results, {a['n_analyses']} analyses"
+        f"  message: {base['message_bytes'] / 1e6:.1f} MB JSON in, "
+        f"{base['n_results']} results, {base['n_analyses']} analyses"
     )
+    for r in runs:
+        notes = []
+        if r.get("solves"):
+            sv = r["solves"]
+            notes.append(
+                f"solves: {sv['cholesky']} cholesky, {sv['svd']} svd "
+                f"({sv['cholesky_fallbacks']} cholesky fallbacks)"
+            )
+        if r.get("note"):
+            notes.append(f"NOTE: {r['note']}")
+        if notes:
+            print(f"  {r['impl']}: " + "; ".join(notes))
     print()
 
 
@@ -196,34 +214,119 @@ def ranking_agreement(a, b, tol, top):
     print()
 
 
+def load_message(path):
+    data = Path(path).read_bytes()
+    if data[:4] == b"\x28\xb5\x2f\xfd":
+        import zstandard
+
+        data = zstandard.ZstdDecompressor().decompressobj().decompress(data)
+    doc = orjson.loads(data)
+    return doc["message"] if isinstance(doc.get("message"), dict) else doc
+
+
+def _strip_scores(result):
+    r = dict(result)
+    r["analyses"] = [
+        {k: v for k, v in a.items() if k != "score"} if isinstance(a, dict) else a
+        for a in (result.get("analyses") or [])
+    ]
+    return orjson.dumps(r, option=orjson.OPT_SORT_KEYS)
+
+
+def _diff(a, b, path, tol, out, limit):
+    if len(out) >= limit:
+        return
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b)):
+            if k not in a or k not in b:
+                out.append(f"{path}.{k}: only in {'first' if k in a else 'second'}")
+            else:
+                _diff(a[k], b[k], f"{path}.{k}", tol, out, limit)
+    elif isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            out.append(f"{path}: list length {len(a)} vs {len(b)}")
+            return
+        for i, (x, y) in enumerate(zip(a, b)):
+            _diff(x, y, f"{path}[{i}]", tol, out, limit)
+    elif as_float(a) is not None and as_float(b) is not None:
+        fa, fb = float(a), float(b)
+        if fa != fb and abs(fa - fb) > tol * max(abs(fa), abs(fb), tol):
+            out.append(f"{path}: {a!r} vs {b!r}")
+    elif a != b:
+        out.append(f"{path}: {str(a)[:60]!r} vs {str(b)[:60]!r}")
+
+
+def message_agreement(a, b, tol, top):
+    """Do the two saved scored messages say the same thing? Results are
+    matched by their content without scores, since near-ties may be ordered
+    differently."""
+    pa, pb = a.get("saved_message"), b.get("saved_message")
+    if not pa or not pb:
+        return True
+    print(f"Saved messages ({pa} vs {pb})")
+    ma, mb = load_message(pa), load_message(pb)
+    diffs = []
+    ra, rb = ma.pop("results", None), mb.pop("results", None)
+    _diff(ma, mb, "message", tol, diffs, top)
+    if isinstance(ra, list) and isinstance(rb, list):
+        if len(ra) != len(rb):
+            diffs.append(f"message.results: {len(ra)} vs {len(rb)} results")
+        else:
+            by_key = {}
+            for r in rb:
+                by_key.setdefault(_strip_scores(r), []).append(r)
+            for i, r in enumerate(ra):
+                match = by_key.get(_strip_scores(r))
+                if not match:
+                    diffs.append(
+                        f"message.results[{i}]: no result with the same content"
+                    )
+                    if len(diffs) >= top:
+                        break
+                    continue
+                _diff(r, match.pop(), f"message.results[{i}]", tol, diffs, top)
+    elif ra != rb:
+        diffs.append("message.results: differ")
+    if diffs:
+        print(
+            f"!! {len(diffs)}{'+' if len(diffs) >= top else ''} difference(s), first {min(top, len(diffs))}:"
+        )
+        for d in diffs[:top]:
+            print(f"     {d}")
+    else:
+        print("  same content (scores within tol; results matched regardless of order)")
+    print()
+    return not diffs
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("a", help="first result (e.g. out/python.json)")
-    p.add_argument("b", help="second result (e.g. out/rust.json)")
+    p.add_argument("base", help="baseline result (e.g. out/python.json)")
+    p.add_argument("others", nargs="+", help="results to compare with it")
     p.add_argument(
         "--tol", type=float, default=1e-9, help="relative tolerance on scores"
     )
     p.add_argument("--top", type=int, default=10, help="how many examples to print")
     args = p.parse_args(argv)
 
-    a, b = load(args.a), load(args.b)
-    print(
-        f"Comparing {a['impl']} ({args.a}) with {b['impl']} ({args.b}); input {a['input']}\n"
-    )
-    timing_table(a, b)
-    ok = score_agreement(a, b, args.tol, args.top)
-    ranking_agreement(a, b, args.tol, args.top)
-    print(
-        "RESULT: "
-        + (
-            "scores agree within tolerance"
-            if ok
-            else "DIFFERENCES FOUND (see !! above)"
+    runs = [load(args.base)] + [load(o) for o in args.others]
+    print(f"Input: {runs[0]['input']}\n")
+    timing_table(runs)
+    verdicts = []
+    for other in runs[1:]:
+        print(f"===== {runs[0]['impl']} vs {other['impl']} =====\n")
+        ok = score_agreement(runs[0], other, args.tol, args.top)
+        ranking_agreement(runs[0], other, args.tol, args.top)
+        ok = message_agreement(runs[0], other, args.tol, args.top) and ok
+        verdicts.append((other["impl"], ok))
+    for name, ok in verdicts:
+        print(
+            f"RESULT {name}: "
+            + ("agrees within tolerance" if ok else "DIFFERENCES FOUND (see !! above)")
         )
-    )
-    return 0 if ok else 1
+    return 0 if all(ok for _, ok in verdicts) else 1
 
 
 if __name__ == "__main__":

@@ -153,6 +153,7 @@ def main(argv=None):
         "n_analyses": sum(len(s) for s in scores),
         "failed_answers": len(failures),
         "failures": failures[:50],
+        "saved_message": str(a.save_message) if a.save_message else None,
         "timings_ms": timings,
         "scores": scores,
         "order": order,

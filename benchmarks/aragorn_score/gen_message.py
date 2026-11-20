@@ -309,6 +309,38 @@ def add_quirks(message):
 
     # an edge binding to an edge that isn't in the KG
     answer("QUIRK:dangling", ["not_in_kg"])
+
+    # self-loops (an r_node wired to itself), which make the Laplacian's row
+    # sums non-zero: an edge from a node to itself in a support graph, and a
+    # k_node bound to both q_nodes
+    kg["edges"]["self_loop"] = {
+        "subject": "QUIRK:self",
+        "object": "QUIRK:self",
+        "predicate": "biolink:related_to",
+        "sources": src("infores:x"),
+    }
+    kg["edges"]["self_top"] = {
+        "subject": "QUIRK:self",
+        "object": disease,
+        "predicate": "biolink:treats",
+        "sources": src("infores:x"),
+        "attributes": [
+            {"attribute_type_id": "biolink:support_graphs", "value": ["g_self"]}
+        ],
+    }
+    aux["g_self"] = {"edges": ["self_loop"]}
+    answer("QUIRK:self", ["self_top"])
+    kg["edges"]["both_bound"] = {
+        "subject": disease,
+        "object": disease,
+        "predicate": "biolink:treats",
+        "sources": src("infores:x"),
+    }
+    answer(
+        disease,
+        ["both_bound"],
+        bindings={"on": {"ids": [disease]}, "sn": {"ids": [disease]}},
+    )
     return message
 
 

@@ -1,4 +1,6 @@
-//! Rust port of the ARAGORN ranker in `workers/aragorn_score/worker.py`.
+//! Rust port of the ARAGORN ranker in `workers/aragorn_score/worker.py`,
+//! working on a parsed `serde_json::Value` (`--parse value`). The baseline
+//! port; `typed.rs` is the faster front end. The solver is `solve.rs`.
 //!
 //! Benchmark only: this exists to measure what a Rust scorer would buy us.
 //! It follows the Python `Ranker` (BLENDED profile, which is the only one the
@@ -19,7 +21,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::IndexSet as StdIndexSet;
-// nalgebra is only the matrix container here; the SVD is faer's (see kirchhoff).
 use nalgebra::DMatrix;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
@@ -27,11 +28,13 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 type IndexSet<T> = StdIndexSet<T, FxBuildHasher>;
 use serde_json::{Map, Value};
 
+use crate::solve::{kirchhoff, SolveStats, Solver};
+
 pub type R<T> = Result<T, String>;
 
-const TOTAL_PUBS: f64 = 27_840_000.0;
-const LITERATURE_PREDICATE: &str = "biolink:occurs_together_in_literature_with";
-const SUPPORT_GRAPHS_ATTRIBUTE: &str = "biolink:support_graphs";
+pub(crate) const TOTAL_PUBS: f64 = 27_840_000.0;
+pub(crate) const LITERATURE_PREDICATE: &str = "biolink:occurs_together_in_literature_with";
+pub(crate) const SUPPORT_GRAPHS_ATTRIBUTE: &str = "biolink:support_graphs";
 
 // --- BLENDED profile ------------------------------------------------------
 
@@ -85,7 +88,7 @@ fn source_transformation(source: &str) -> SigTable {
     }
 }
 
-fn source_weight(source: &str, property: &str) -> f64 {
+pub(crate) fn source_weight(source: &str, property: &str) -> f64 {
     static OMNICORP: WeightTable = &[("literature_co-occurrence", 1.0)];
     static TMKP: WeightTable = &[("publications", 0.5), ("confidence_score", 1.0)];
     static P_VALUE: WeightTable = &[("p_value", 1.0)];
@@ -109,7 +112,7 @@ fn source_weight(source: &str, property: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn base_weight(source: &str) -> f64 {
+pub(crate) fn base_weight(source: &str) -> f64 {
     match source {
         "infores:omnicorp" => 0.0,
         "infores:drugcentral" => 5e-2,
@@ -122,7 +125,7 @@ fn base_weight(source: &str) -> f64 {
 }
 
 /// `get_source_sigmoid`, including Python's `math.exp` OverflowError.
-fn source_sigmoid(value: f64, source: &str, property: &str) -> R<f64> {
+pub(crate) fn source_sigmoid(value: f64, source: &str, property: &str) -> R<f64> {
     let p = source_transformation(source)
         .iter()
         .find(|(name, _)| *name == property)
@@ -310,6 +313,8 @@ impl<'a> Index<'a> {
 }
 
 pub struct Ranker<'a> {
+    solver: Solver,
+    pub stats: SolveStats,
     /// Result index to dump r_graph / admittances / Laplacian for
     /// (ARAGORN_SCORE_DEBUG_RESULT), and the index being scored.
     debug_result: Option<usize>,
@@ -331,9 +336,11 @@ fn sub_map<'a>(v: Option<&'a Value>) -> &'a Map<String, Value> {
 }
 
 impl<'a> Ranker<'a> {
-    pub fn new(message: &'a Map<String, Value>) -> Self {
+    pub fn new(message: &'a Map<String, Value>, solver: Solver) -> Self {
         let kgraph = sub_map(message.get("knowledge_graph"));
         Ranker {
+            solver,
+            stats: SolveStats::default(),
             debug_result: std::env::var("ARAGORN_SCORE_DEBUG_RESULT")
                 .ok()
                 .and_then(|v| v.parse().ok()),
@@ -414,7 +421,7 @@ impl<'a> Ranker<'a> {
                 return Ok(Value::from(0));
             }
         }
-        let k = kirchhoff(&laplacian, &probe_inds)?;
+        let k = kirchhoff(&laplacian, &probe_inds, self.solver, &mut self.stats)?;
         let score = (-k).exp();
         let score = if score.is_finite() && score >= 0.0 {
             score
@@ -880,7 +887,7 @@ impl<'a> Ranker<'a> {
     }
 }
 
-fn split_count(s: &str) -> usize {
+pub(crate) fn split_count(s: &str) -> usize {
     if s.contains('|') {
         s.split('|').count()
     } else if s.contains(',') {
@@ -888,71 +895,6 @@ fn split_count(s: &str) -> usize {
     } else {
         1
     }
-}
-
-/// Kirchhoff index restricted to the probes: trace(X^T L^+ X), with L^+ X
-/// the least-squares solution numpy's `lstsq(L, X, rcond=None)` returns:
-/// singular values at or below eps * max(n, n) * s_max count as zero.
-///
-/// The SVD is faer's. nalgebra's SVD and symmetric eigendecomposition were
-/// both tried first and both, on some of these Laplacians, silently returned
-/// unconverged decompositions (reconstruction error up to ~1, scores off by
-/// up to 30%). As a guard, a decomposition that doesn't reconstruct L is an
-/// error for that answer -- visible in compare.py -- rather than a wrong score.
-fn kirchhoff(l: &DMatrix<f64>, probes: &[(usize, usize)]) -> R<f64> {
-    if probes.is_empty() {
-        return Ok(f64::NEG_INFINITY); // np.stack([]) raises -> -inf
-    }
-    let n = l.nrows();
-    if l.iter().any(|v| !v.is_finite()) {
-        return Err("SVD did not converge in Linear Least Squares".into());
-    }
-    let a = faer::Mat::<f64>::from_fn(n, n, |i, j| l[(i, j)]);
-    let svd = a
-        .svd()
-        .map_err(|e| format!("SVD did not converge in Linear Least Squares ({e:?})"))?;
-    let (u, s, v) = (svd.U(), svd.S().column_vector(), svd.V());
-
-    let scale = l.iter().fold(0.0f64, |m, x| m.max(x.abs())).max(1.0);
-    let mut err = 0.0f64;
-    for i in 0..n {
-        for j in 0..n {
-            let mut r = 0.0;
-            for k in 0..n {
-                r += u[(i, k)] * s[k] * v[(j, k)];
-            }
-            err = err.max((r - l[(i, j)]).abs());
-        }
-    }
-    if err > 1e-8 * scale {
-        return Err(format!("SVD reconstruction error {err:e}"));
-    }
-
-    let smax = (0..n).fold(0.0f64, |m, k| m.max(s[k]));
-    let cutoff = f64::EPSILON * n as f64 * smax; // rcond=None
-    // For each probe column x = e_b - e_a: x^T V S+ U^T x.
-    let mut total = 0.0;
-    for &(pa, pb) in probes {
-        let xc = |row: usize| -> f64 {
-            if row == pb {
-                1.0
-            } else if row == pa {
-                -1.0
-            } else {
-                0.0
-            }
-        };
-        let mut k_c = 0.0;
-        for k in 0..n {
-            if s[k] > cutoff {
-                let ut_x = xc(pa) * u[(pa, k)] + if pb != pa { xc(pb) * u[(pb, k)] } else { 0.0 };
-                let vt_x = xc(pa) * v[(pa, k)] + if pb != pa { xc(pb) * v[(pb, k)] } else { 0.0 };
-                k_c += vt_x * ut_x / s[k];
-            }
-        }
-        total += k_c;
-    }
-    Ok(total)
 }
 
 fn write_scores(answer: &mut Value, outcome: Outcome) {

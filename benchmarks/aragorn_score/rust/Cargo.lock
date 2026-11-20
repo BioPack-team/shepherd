@@ -37,6 +37,7 @@ dependencies = [
  "indexmap",
  "nalgebra",
  "rustc-hash",
+ "serde",
  "serde_json",
  "zstd",
 ]

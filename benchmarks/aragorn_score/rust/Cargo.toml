@@ -11,7 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 # preserve_order: TRAPI key order matters (query-graph node order picks the probes).
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+serde = "1"
 indexmap = "2"
 nalgebra = "0.33"
 faer = "0.22"

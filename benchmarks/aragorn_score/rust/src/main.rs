@@ -1,56 +1,200 @@
-//! Benchmark runner for the Rust port of the aragorn.score ranker.
+//! Benchmark runner for the Rust ports of the aragorn.score ranker.
 //!
 //!     aragorn_score_rs <message.json|message.json.zst> [--repeat N]
-//!                      [--out result.json] [--save-message scored.json.zst]
+//!         [--parse typed|value] [--solver cholesky|svd]
+//!         [--out result.json] [--save-message scored.json.zst]
 //!
 //! Each repeat runs the full worker pipeline on the raw bytes, timed per
-//! phase: zstd decompress -> JSON parse -> score -> JSON serialise -> zstd
-//! compress. The result file has the same shape as `python_scorer.py`'s, for
-//! `compare.py`.
+//! phase: zstd decompress -> parse -> score -> write the scored message ->
+//! zstd compress. `--parse value` is the straight port on serde_json::Value
+//! (value_ranker.rs); `--parse typed` (the default) parses into borrowed
+//! structs and splices scores into the input (typed.rs). `--solver` picks
+//! the effective-resistance solve (solve.rs). The result file has the same
+//! shape as `python_scorer.py`'s, for `compare.py`.
 
-mod ranker;
+mod solve;
+mod typed;
+mod typed_input;
+mod value_ranker;
 
 use std::time::Instant;
 
 use serde_json::{json, Value};
+use solve::{SolveStats, Solver};
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+#[derive(Clone, Copy, PartialEq)]
+enum Parse {
+    Value,
+    Typed,
+}
 
 struct Args {
     input: String,
     repeat: usize,
+    parse: Parse,
+    solver: Solver,
     out: Option<String>,
     save_message: Option<String>,
 }
+
+const USAGE: &str = "usage: aragorn_score_rs MESSAGE [--repeat N] [--parse typed|value] \
+                     [--solver cholesky|svd] [--out RESULT.json] [--save-message OUT]";
 
 fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     let mut args = Args {
         input: String::new(),
         repeat: 1,
+        parse: Parse::Typed,
+        solver: Solver::Cholesky,
         out: None,
         save_message: None,
     };
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--repeat" => args.repeat = it.next().and_then(|v| v.parse().ok()).expect("--repeat N"),
+            "--repeat" => args.repeat = it.next().and_then(|v| v.parse().ok()).expect(USAGE),
+            "--parse" => {
+                args.parse = match it.next().as_deref() {
+                    Some("typed") => Parse::Typed,
+                    Some("value") => Parse::Value,
+                    _ => panic!("{USAGE}"),
+                }
+            }
+            "--solver" => args.solver = it.next().as_deref().and_then(Solver::parse).expect(USAGE),
             "--out" => args.out = it.next(),
             "--save-message" => args.save_message = it.next(),
             "-h" | "--help" => {
-                eprintln!("usage: aragorn_score_rs MESSAGE [--repeat N] [--out RESULT.json] [--save-message OUT]");
+                eprintln!("{USAGE}");
                 std::process::exit(0);
             }
             _ if args.input.is_empty() => args.input = a,
-            _ => panic!("unexpected argument {a}"),
+            _ => panic!("unexpected argument {a}\n{USAGE}"),
         }
     }
-    assert!(!args.input.is_empty(), "usage: aragorn_score_rs MESSAGE [--repeat N] [--out RESULT.json]");
+    assert!(!args.input.is_empty(), "{USAGE}");
     args.repeat = args.repeat.max(1);
     args
 }
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
+}
+
+/// One pipeline run's products (decompress and compress are timed outside).
+struct Run {
+    parse_ms: f64,
+    score_ms: f64,
+    serialize_ms: f64,
+    out_bytes: Vec<u8>,
+    scores: Vec<Vec<Value>>,
+    order: Vec<usize>,
+    failures: Vec<(usize, String)>,
+    stats: SolveStats,
+    note: Option<String>,
+}
+
+fn run_value(bytes: &[u8], solver: Solver) -> Run {
+    let t = Instant::now();
+    let mut doc: Value = serde_json::from_slice(bytes).expect("parse JSON");
+    let parse_ms = ms(t);
+
+    let t = Instant::now();
+    // Accept a stored TRAPI Response ({"message": ...}) or a bare Message.
+    let message = if doc.get("message").map_or(false, Value::is_object) {
+        doc.get_mut("message").unwrap()
+    } else {
+        &mut doc
+    };
+    let message = message.as_object_mut().expect("message is an object");
+    let has_results = matches!(message.get("results"), Some(Value::Array(_)));
+    let mut results = match message.get_mut("results") {
+        Some(Value::Array(r)) => std::mem::take(r),
+        _ => vec![],
+    };
+    let (order, failures, stats) = if has_results {
+        let mut ranker = value_ranker::Ranker::new(message, solver);
+        let (order, failures) = ranker.rank(&mut results);
+        (order, failures, ranker.stats)
+    } else {
+        (vec![], vec![], SolveStats::default())
+    };
+    let scores: Vec<Vec<Value>> = results
+        .iter()
+        .map(|r| {
+            r.get("analyses")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(|x| x.get("score").cloned().unwrap_or(Value::Null)).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    // Put the results back in ranked order, as the worker saves them.
+    let mut slots: Vec<Option<Value>> = results.into_iter().map(Some).collect();
+    let ranked: Vec<Value> = order.iter().map(|&i| slots[i].take().unwrap()).collect();
+    if has_results {
+        message.insert("results".into(), Value::Array(ranked));
+    }
+    let score_ms = ms(t);
+
+    let t = Instant::now();
+    let out_bytes = serde_json::to_vec(&doc).expect("serialise");
+    let serialize_ms = ms(t);
+    Run {
+        parse_ms,
+        score_ms,
+        serialize_ms,
+        out_bytes,
+        scores,
+        order,
+        failures,
+        stats,
+        note: None,
+    }
+}
+
+/// Err: the typed parse couldn't represent this message.
+fn run_typed(bytes: &[u8], solver: Solver) -> Result<Run, String> {
+    let t = Instant::now();
+    let parsed = typed_input::parse(bytes)?;
+    let parse_ms = ms(t);
+
+    let t = Instant::now();
+    let model = typed::Model::build(&parsed);
+    let n = model.n_answers();
+    let ranked = if parsed.results.is_some() {
+        typed::Scorer::new(&model, solver).rank()
+    } else {
+        typed::Ranked {
+            finals: vec![],
+            order: vec![],
+            failures: vec![],
+            stats: SolveStats::default(),
+        }
+    };
+    let score_ms = ms(t);
+    debug_assert_eq!(n, ranked.finals.len());
+
+    let t = Instant::now();
+    let out_bytes = typed::splice(bytes, &parsed, &ranked);
+    let serialize_ms = ms(t);
+
+    let scores = ranked
+        .finals
+        .iter()
+        .map(|f| f.iter().map(|x| x.to_value()).collect())
+        .collect();
+    Ok(Run {
+        parse_ms,
+        score_ms,
+        serialize_ms,
+        out_bytes,
+        scores,
+        order: ranked.order,
+        failures: ranked.failures,
+        stats: ranked.stats,
+        note: None,
+    })
 }
 
 fn main() {
@@ -67,121 +211,89 @@ fn main() {
     let mut runs: Vec<Vec<f64>> = vec![];
     let mut last = None;
     for _ in 0..args.repeat {
-        let mut times = vec![];
-
         let t = Instant::now();
-        let compressed = raw.starts_with(&ZSTD_MAGIC);
-        let bytes = if compressed {
+        let bytes = if raw.starts_with(&ZSTD_MAGIC) {
             zstd::decode_all(raw.as_slice()).expect("zstd decompress")
         } else {
             raw.clone()
         };
-        times.push(ms(t));
+        let decompress_ms = ms(t);
 
-        let t = Instant::now();
-        let mut doc: Value = serde_json::from_slice(&bytes).expect("parse JSON");
-        times.push(ms(t));
-
-        let t = Instant::now();
-        // Accept a stored TRAPI Response ({"message": ...}) or a bare Message.
-        let message = if doc.get("message").map_or(false, Value::is_object) {
-            doc.get_mut("message").unwrap()
-        } else {
-            &mut doc
+        let run = match args.parse {
+            Parse::Value => run_value(&bytes, args.solver),
+            Parse::Typed => run_typed(&bytes, args.solver).unwrap_or_else(|e| {
+                let mut r = run_value(&bytes, args.solver);
+                r.note = Some(format!("typed parse failed ({e}); used the value path"));
+                r
+            }),
         };
-        let message = message.as_object_mut().expect("message is an object");
-        let mut results = match message.get_mut("results") {
-            Some(Value::Array(r)) => std::mem::take(r),
-            _ => vec![],
-        };
-        let has_results = matches!(message.get("results"), Some(Value::Array(_)));
-        let (order, failures) = if has_results {
-            let mut ranker = ranker::Ranker::new(message);
-            ranker.rank(&mut results)
-        } else {
-            (vec![], vec![])
-        };
-        let scores: Vec<Vec<Value>> = results
-            .iter()
-            .map(|r| {
-                r.get("analyses")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().map(|x| x.get("score").cloned().unwrap_or(Value::Null)).collect())
-                    .unwrap_or_default()
-            })
-            .collect();
-        // Put the results back in ranked order, as the worker saves them.
-        let mut slots: Vec<Option<Value>> = results.into_iter().map(Some).collect();
-        let ranked: Vec<Value> = order.iter().map(|&i| slots[i].take().unwrap()).collect();
-        if has_results {
-            message.insert("results".into(), Value::Array(ranked));
-        }
-        times.push(ms(t));
 
         let t = Instant::now();
-        let out_bytes = serde_json::to_vec(&doc).expect("serialise");
-        times.push(ms(t));
+        let compressed = zstd::bulk::compress(&run.out_bytes, 3).expect("zstd compress");
+        let compress_ms = ms(t);
 
-        let t = Instant::now();
-        let out_compressed = zstd::bulk::compress(&out_bytes, 3).expect("zstd compress");
-        times.push(ms(t));
-
-        runs.push(times);
-        last = Some((scores, order, failures, out_compressed, out_bytes.len(), bytes.len()));
+        runs.push(vec![decompress_ms, run.parse_ms, run.score_ms, run.serialize_ms, compress_ms]);
+        last = Some((run, compressed, bytes.len()));
     }
 
-    let (scores, order, failures, out_compressed, out_len, in_len) = last.unwrap();
+    let (run, compressed, in_len) = last.unwrap();
     if let Some(path) = &args.save_message {
         let data = if path.ends_with(".zst") {
-            out_compressed.clone()
+            compressed.clone()
         } else {
-            serde_json::to_vec_pretty(&serde_json::from_slice::<Value>(
-                &zstd::decode_all(out_compressed.as_slice()).unwrap(),
-            ).unwrap())
-            .unwrap()
+            run.out_bytes.clone()
         };
         std::fs::write(path, data).expect("write message");
     }
 
-    let stat = |i: usize| {
-        let mut v: Vec<f64> = runs.iter().map(|r| r[i]).collect();
+    let stat = |v: Vec<f64>| {
+        let mut v = v;
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         json!({"min": v[0], "median": v[v.len() / 2], "runs": v})
     };
     let mut timings = serde_json::Map::new();
-    timings.insert("read".into(), json!({"min": read_ms, "median": read_ms, "runs": [read_ms]}));
+    timings.insert("read".into(), stat(vec![read_ms]));
     for (i, p) in phases.iter().enumerate() {
-        timings.insert((*p).into(), stat(i));
+        timings.insert((*p).into(), stat(runs.iter().map(|r| r[i]).collect()));
     }
-    let totals: Vec<f64> = runs.iter().map(|r| r.iter().sum()).collect();
-    let mut sorted = totals.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    timings.insert(
-        "total".into(),
-        json!({"min": sorted[0], "median": sorted[sorted.len() / 2], "runs": totals}),
-    );
+    timings.insert("total".into(), stat(runs.iter().map(|r| r.iter().sum()).collect()));
 
-    let n_analyses: usize = scores.iter().map(Vec::len).sum();
+    let label = format!(
+        "rust[{},{}]",
+        if args.parse == Parse::Typed { "typed" } else { "value" },
+        args.solver.name()
+    );
+    let n_analyses: usize = run.scores.iter().map(Vec::len).sum();
     let result = json!({
-        "impl": "rust",
+        "impl": label,
         "input": args.input,
         "repeat": args.repeat,
         "message_bytes": in_len,
-        "output_bytes": out_len,
-        "n_results": scores.len(),
+        "output_bytes": run.out_bytes.len(),
+        "n_results": run.scores.len(),
         "n_analyses": n_analyses,
-        "failed_answers": failures.len(),
-        "failures": failures.iter().take(50).map(|(i, e)| json!([i, e])).collect::<Vec<_>>(),
+        "failed_answers": run.failures.len(),
+        "failures": run.failures.iter().take(50).map(|(i, e)| json!([i, e])).collect::<Vec<_>>(),
+        "solves": {"cholesky": run.stats.cholesky, "svd": run.stats.svd, "cholesky_fallbacks": run.stats.fallbacks},
+        "note": run.note,
+        "saved_message": args.save_message,
         "timings_ms": timings,
-        "scores": scores,
-        "order": order,
+        "scores": run.scores,
+        "order": run.order,
     });
 
     eprintln!(
-        "rust:   {} results, {} analyses, {} failed | score {:.1} ms (min of {}) | total {:.1} ms",
-        scores.len(), n_analyses, failures.len(),
-        result["timings_ms"]["score"]["min"].as_f64().unwrap(), args.repeat,
+        "{label}: {} results, {} analyses, {} failed | score {:.1} ms | total {:.1} ms (min of {}) | solves: {} cholesky, {} svd ({} fallbacks){}",
+        run.scores.len(),
+        n_analyses,
+        run.failures.len(),
+        result["timings_ms"]["score"]["min"].as_f64().unwrap(),
         result["timings_ms"]["total"]["min"].as_f64().unwrap(),
+        args.repeat,
+        run.stats.cholesky,
+        run.stats.svd,
+        run.stats.fallbacks,
+        run.note.as_deref().map(|n| format!(" | NOTE: {n}")).unwrap_or_default(),
     );
     if let Some(path) = &args.out {
         std::fs::write(path, serde_json::to_vec(&result).unwrap()).expect("write result");
