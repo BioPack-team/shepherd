@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 import uuid
 from collections import defaultdict
@@ -502,6 +503,8 @@ class Ranker:
         # Per-edge support closure (nodes and edges reachable through
         # biolink:support_graphs), shared by every analysis that uses the edge.
         self._support_closures = dict()
+        # The size (in edges) of each support-graph cycle found.
+        self.support_cycles = []
         # The q_node pairs joined by a q_edge (depends only on the qgraph).
         self._qedge_qnode_ids = None
 
@@ -823,51 +826,98 @@ class Ranker:
             start += n
 
     def _support_closure(self, edge_id):
-        """Every node and edge ``get_edge_support_kg(edge_id, ...)`` adds, as
-        two lists in the order it first adds them (cached per message).
+        """Every node and edge reachable from ``edge_id`` through support
+        graphs (the edge and its endpoints included), as two insertion-
+        ordered dicts (cached per message).
 
-        ``get_edge_support_kg`` re-walks a support graph each time an edge
-        reaches it: once per analysis, and once per path to it within one
+        ``get_edge_support_kg`` re-walked a support graph each time an edge
+        reached it: once per analysis, and once per path to it within one
         (exponential in diamond-shaped support, and a RecursionError on a
-        cycle). Adding these lists in order inserts the same elements into
-        the analysis's sets in the same order, so the r_graph -- and the
-        Laplacian's row order -- is unchanged.
+        cycle). Here each edge's closure is computed once.
+
+        Support graphs can form cycles (A's support holds B, B's holds A).
+        Every edge in a cycle reaches everything the others reach, so they
+        all have the same closure. Tarjan's strongly-connected-components
+        walk finds the cycles: an edge whose walk only finished because a
+        cycle led back to an edge still being walked is not complete yet,
+        and gets the closure of that cycle's first edge once that one
+        finishes. Caching each edge as soon as its own walk ended, as this
+        used to, left the edges inside a cycle with partial closures that
+        depended on the order they were reached in.
         """
         cached = self._support_closures.get(edge_id)
         if cached is not None:
             return cached
+        state = {"index": {}, "low": {}, "stack": [], "on_stack": set(), "found": {}}
+        return self._closure_walk(edge_id, state)
+
+    def _closure_walk(self, edge_id, state):
+        """One step of the walk in ``_support_closure``: the closure found
+        for ``edge_id`` (final when cached; partial for a cycle member until
+        its cycle completes)."""
+        cached = self._support_closures.get(edge_id)
+        if cached is not None:
+            return cached
+        index, low = state["index"], state["low"]
+        my_index = len(index)
+        index[edge_id] = low[edge_id] = my_index
+        state["stack"].append(edge_id)
+        state["on_stack"].add(edge_id)
         # dicts as insertion-ordered sets: assigning a key that is already
         # there doesn't move it, and dict.update appends only new keys.
         nodes, edges = {}, {}
-        # Cached before walking: an edge reached again through a support-graph
-        # cycle adds nothing new (its elements are already being collected).
-        self._support_closures[edge_id] = (nodes, edges)
+        state["found"][edge_id] = (nodes, edges)
+
         kg_edges = self.kgraph["edges"]
         edge = kg_edges.get(edge_id, None)
-        if not edge:
-            return nodes, edges
-        edges[edge_id] = None
-        sub = edge.get("subject", None)
-        if sub:
-            nodes[sub] = None
-        obj = edge.get("object", None)
-        if obj:
-            nodes[obj] = None
-        for sg_id in edge_support_graphs(edge):
-            sg = self.agraphs.get(sg_id, None)
-            if not sg:
-                continue
-            for sgn in sg.get("nodes", []):
-                nodes[sgn] = None
-            for add_edge_id in sg.get("edges", []):
-                if add_edge_id not in kg_edges:
+        if edge:
+            edges[edge_id] = None
+            sub = edge.get("subject", None)
+            if sub:
+                nodes[sub] = None
+            obj = edge.get("object", None)
+            if obj:
+                nodes[obj] = None
+            for sg_id in edge_support_graphs(edge):
+                sg = self.agraphs.get(sg_id, None)
+                if not sg:
                     continue
-                # Added even when the k_edge is empty, as the recursive walk
-                # does (the closure of an empty edge is itself empty).
-                edges[add_edge_id] = None
-                add_nodes, add_edges = self._support_closure(add_edge_id)
-                edges.update(add_edges)
-                nodes.update(add_nodes)
+                for sgn in sg.get("nodes", []):
+                    nodes[sgn] = None
+                for add_edge_id in sg.get("edges", []):
+                    if add_edge_id not in kg_edges:
+                        continue
+                    # Added even when the k_edge is empty, as the recursive
+                    # walk does (the closure of an empty edge is itself empty).
+                    edges[add_edge_id] = None
+                    if add_edge_id in state["on_stack"]:
+                        # Back to an edge of a cycle still being walked: what
+                        # it has found so far (the rest reaches this edge's
+                        # cycle through that edge).
+                        low[edge_id] = min(low[edge_id], index[add_edge_id])
+                        add_nodes, add_edges = state["found"][add_edge_id]
+                    else:
+                        # Not reached yet (or cached, from an earlier walk:
+                        # _closure_walk returns that).
+                        add_nodes, add_edges = self._closure_walk(add_edge_id, state)
+                        if add_edge_id in state["on_stack"]:
+                            low[edge_id] = min(low[edge_id], low[add_edge_id])
+                    edges.update(add_edges)
+                    nodes.update(add_nodes)
+
+        if low[edge_id] == my_index:
+            # This edge closes its cycle (or is in none): its closure is
+            # complete, and is every member's.
+            members = 0
+            while True:
+                member = state["stack"].pop()
+                state["on_stack"].discard(member)
+                self._support_closures[member] = (nodes, edges)
+                members += 1
+                if member == edge_id:
+                    break
+            if members > 1:
+                self.support_cycles.append(members)
         return nodes, edges
 
     def get_rgraph(self, result):
@@ -1468,6 +1518,7 @@ def score_with_python(response_id: str, logger: logging.Logger):
     originals = list(answers) if isinstance(answers, list) else []
 
     t1 = time.perf_counter()
+    pr = None
     try:
         # resistance distance ranking
         pr = Ranker(message, logger)
@@ -1506,6 +1557,7 @@ def score_with_python(response_id: str, logger: logging.Logger):
         "order": [position.get(id(a)) for a in message.get("results") or []],
         "rank_ms": rank_ms,
         "total_ms": total_ms,
+        "support_cycles": list(pr.support_cycles) if pr is not None else [],
     }
 
 
@@ -1623,6 +1675,10 @@ def shadow_compare(response_id: str, blob: bytes, python_run: dict) -> None:
     summary.update(
         {
             "rust_failures": len(info["failures"]),
+            # Support-graph cycles (edges whose support graphs reach each
+            # other): how many, and the largest, in edges.
+            "support_cycles": len(python_run.get("support_cycles", [])),
+            "largest_support_cycle": max(python_run.get("support_cycles") or [0]),
             # Python: Redis read + decode + Ranker + encode + Redis write.
             "python_total_ms": round(python_run["total_ms"], 1),
             # Python's Ranker.rank alone.
@@ -1636,10 +1692,36 @@ def shadow_compare(response_id: str, blob: bytes, python_run: dict) -> None:
             "note": info.get("note"),
         }
     )
+    if not summary["agree"]:
+        summary["saved_input"] = save_shadow_input(response_id, blob)
     LOGGER.log(
         logging.INFO if summary["agree"] else logging.WARNING,
         "aragorn.score shadow " + json.dumps(summary, default=str),
     )
+
+
+_shadow_dumps = 0
+
+
+def save_shadow_input(response_id: str, blob: bytes):
+    """Save the stored input of a query the scorers disagreed on, when
+    ``ARAGORN_SHADOW_DUMP_DIR`` is set, so it can be reproduced offline.
+    Returns the file's path, or None."""
+    global _shadow_dumps
+    directory = settings.aragorn_shadow_dump_dir
+    if not directory or _shadow_dumps >= settings.aragorn_shadow_dump_max:
+        return None
+    try:
+        os.makedirs(directory, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in response_id)
+        path = os.path.join(directory, f"{safe}.json.zst")
+        with open(path, "wb") as f:
+            f.write(blob)
+        _shadow_dumps += 1
+        return path
+    except OSError as e:
+        LOGGER.warning(f"Could not save the shadow input for {response_id}: {e}")
+        return None
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):

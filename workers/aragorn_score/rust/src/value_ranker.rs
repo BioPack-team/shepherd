@@ -273,6 +273,16 @@ struct Closure<'a> {
 
 type ClosureRef<'a> = Rc<RefCell<Closure<'a>>>;
 
+/// The state of one support-closure walk (Tarjan's SCC algorithm).
+#[derive(Default)]
+struct Walk<'a> {
+    index: FxHashMap<&'a str, u32>,
+    low: FxHashMap<&'a str, u32>,
+    stack: Vec<&'a str>,
+    on_stack: FxHashSet<&'a str>,
+    found: FxHashMap<&'a str, ClosureRef<'a>>,
+}
+
 /// One analysis's r_graph: node 0..n_q are the answer's q_node bindings, the
 /// rest are its support nodes. Edges are (r_subject, r_object, k_edge_id).
 struct RGraph<'a, 'b> {
@@ -499,47 +509,90 @@ impl<'a> Ranker<'a> {
 
     // --- r_graph ----------------------------------------------------------
 
+    /// Every node and edge reachable from `edge_id` through support graphs
+    /// (cached per message), with support-graph cycles resolved by Tarjan's
+    /// strongly-connected-components walk: see `typed.rs` and
+    /// `Ranker._support_closure` in worker.py.
     fn closure(&mut self, edge_id: &'a str) -> R<ClosureRef<'a>> {
         if let Some(c) = self.closures.get(edge_id) {
             return Ok(c.clone());
         }
+        self.closure_walk(edge_id, &mut Walk::default())
+    }
+
+    fn closure_walk(&mut self, edge_id: &'a str, w: &mut Walk<'a>) -> R<ClosureRef<'a>> {
+        if let Some(c) = self.closures.get(edge_id) {
+            return Ok(c.clone());
+        }
+        let my_index = w.index.len() as u32;
+        w.index.insert(edge_id, my_index);
+        w.low.insert(edge_id, my_index);
+        w.stack.push(edge_id);
+        w.on_stack.insert(edge_id);
         let c: ClosureRef<'a> = Rc::default();
-        // Cached before walking: an edge reached again through a cycle adds
-        // nothing new (as in the Python memo).
-        self.closures.insert(edge_id, c.clone());
+        w.found.insert(edge_id, c.clone());
+
         let edge = match self.kg_edges.get(edge_id) {
-            Some(e) if truthy(e) => e.as_object().ok_or("a k_edge is not an object")?,
-            _ => return Ok(c),
+            Some(e) if truthy(e) => Some(e.as_object().ok_or("a k_edge is not an object")?),
+            _ => None,
         };
-        {
-            let mut cm = c.borrow_mut();
-            cm.edges.insert(edge_id);
-            for key in ["subject", "object"] {
-                if let Some(v) = edge.get(key).filter(|v| truthy(v)) {
-                    cm.nodes.insert(as_id(v)?);
+        if let Some(edge) = edge {
+            {
+                let mut cm = c.borrow_mut();
+                cm.edges.insert(edge_id);
+                for key in ["subject", "object"] {
+                    if let Some(v) = edge.get(key).filter(|v| truthy(v)) {
+                        cm.nodes.insert(as_id(v)?);
+                    }
+                }
+            }
+            for sg_id in edge_support_graphs(edge)? {
+                let sg = match self.agraphs.get(sg_id) {
+                    Some(sg) if truthy(sg) => {
+                        sg.as_object().ok_or("an aux graph is not an object")?
+                    }
+                    _ => continue,
+                };
+                for n in list_or_empty(sg, "nodes")? {
+                    c.borrow_mut().nodes.insert(as_id(n)?);
+                }
+                for add_edge in list_or_empty(sg, "edges")? {
+                    let add_edge_id = match self.kg_edges.get_key_value(as_id(add_edge)?) {
+                        Some((k, _)) => k,
+                        None => continue,
+                    };
+                    c.borrow_mut().edges.insert(add_edge_id);
+                    let child = if w.on_stack.contains(add_edge_id) {
+                        let i = w.index[add_edge_id];
+                        let low = w.low.get_mut(edge_id).unwrap();
+                        *low = (*low).min(i);
+                        w.found[add_edge_id].clone()
+                    } else {
+                        let child = self.closure_walk(add_edge_id, w)?;
+                        if w.on_stack.contains(add_edge_id) {
+                            let child_low = w.low[add_edge_id];
+                            let low = w.low.get_mut(edge_id).unwrap();
+                            *low = (*low).min(child_low);
+                        }
+                        child
+                    };
+                    if !Rc::ptr_eq(&child, &c) {
+                        let ch = child.borrow();
+                        let mut cm = c.borrow_mut();
+                        cm.edges.extend(ch.edges.iter().copied());
+                        cm.nodes.extend(ch.nodes.iter().copied());
+                    }
                 }
             }
         }
-        for sg_id in edge_support_graphs(edge)? {
-            let sg = match self.agraphs.get(sg_id) {
-                Some(sg) if truthy(sg) => sg.as_object().ok_or("an aux graph is not an object")?,
-                _ => continue,
-            };
-            for n in list_or_empty(sg, "nodes")? {
-                c.borrow_mut().nodes.insert(as_id(n)?);
-            }
-            for add_edge in list_or_empty(sg, "edges")? {
-                let add_edge_id = match self.kg_edges.get_key_value(as_id(add_edge)?) {
-                    Some((k, _)) => k,
-                    None => continue,
-                };
-                c.borrow_mut().edges.insert(add_edge_id);
-                let child = self.closure(add_edge_id)?;
-                if !Rc::ptr_eq(&child, &c) {
-                    let ch = child.borrow();
-                    let mut cm = c.borrow_mut();
-                    cm.edges.extend(ch.edges.iter().copied());
-                    cm.nodes.extend(ch.nodes.iter().copied());
+
+        if w.low[edge_id] == my_index {
+            loop {
+                let member = w.stack.pop().expect("Tarjan stack");
+                w.on_stack.remove(member);
+                self.closures.insert(member, c.clone());
+                if member == edge_id {
+                    break;
                 }
             }
         }

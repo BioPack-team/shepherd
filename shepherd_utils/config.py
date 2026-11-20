@@ -524,6 +524,12 @@ class Settings(BaseSettings):
     # "cholesky" (fast; falls back to svd where it wouldn't match numpy's
     # lstsq) or "svd" (lstsq's method throughout).
     aragorn_scorer_solver: str = "cholesky"
+    # In shadow mode, save the input of every query the two scorers disagree
+    # on to this directory, as <response_id>.json.zst, for reproducing it
+    # (benchmarks/aragorn_score/run.sh takes the file). Empty: don't save.
+    # At most aragorn_shadow_dump_max files are written per worker process.
+    aragorn_shadow_dump_dir: str = ""
+    aragorn_shadow_dump_max: int = 20
 
     # Recycle each process-pool child after this many tasks. A child that once
     # processed a very large message keeps that peak RSS for its whole life

@@ -606,6 +606,16 @@ struct Closure {
 
 type ClosureRef = Rc<RefCell<Closure>>;
 
+/// The state of one support-closure walk (Tarjan's SCC algorithm).
+#[derive(Default)]
+struct Walk {
+    index: FxHashMap<EdgeId, u32>,
+    low: FxHashMap<EdgeId, u32>,
+    stack: Vec<EdgeId>,
+    on_stack: FxHashSet<EdgeId>,
+    found: FxHashMap<EdgeId, ClosureRef>,
+}
+
 struct RGraph<'x> {
     qnodes: &'x [&'x str],
     n_nodes: usize,
@@ -754,50 +764,101 @@ impl<'x, 'm> Scorer<'x, 'm> {
         Ok(Some(if score.is_finite() && score >= 0.0 { score } else { -1.0 }))
     }
 
+    /// Every node and edge reachable from `e` through support graphs
+    /// (cached per message). Support graphs can form cycles, and every edge
+    /// in a cycle has the same closure: Tarjan's strongly-connected-components
+    /// walk finds them, and a cycle's members get the closure of its first
+    /// edge once that one's walk completes. (Caching each edge when its own
+    /// walk ended left cycle members with partial, order-dependent closures.)
+    /// The same algorithm as `Ranker._support_closure` in worker.py.
     fn closure(&mut self, e: EdgeId) -> R<ClosureRef> {
         if let Some(c) = &self.closures[e as usize] {
             return Ok(c.clone());
         }
+        self.closure_walk(e, &mut Walk::default())
+    }
+
+    fn closure_walk(&mut self, e: EdgeId, w: &mut Walk) -> R<ClosureRef> {
+        if let Some(c) = &self.closures[e as usize] {
+            return Ok(c.clone());
+        }
+        let my_index = w.index.len() as u32;
+        w.index.insert(e, my_index);
+        w.low.insert(e, my_index);
+        w.stack.push(e);
+        w.on_stack.insert(e);
         let c: ClosureRef = Rc::default();
-        // Cached before walking: a support-graph cycle adds nothing new.
-        self.closures[e as usize] = Some(c.clone());
-        let d = match &self.m.edges[e as usize] {
-            EdgeEntry::Falsy => return Ok(c),
+        w.found.insert(e, c.clone());
+
+        match &self.m.edges[e as usize] {
+            EdgeEntry::Falsy => {}
             EdgeEntry::Bad(t) => return Err(format!("'{t}' object has no attribute 'get'")),
-            EdgeEntry::Data(d) => d,
-        };
-        {
-            let mut cm = c.borrow_mut();
-            cm.edges.insert(e);
-            for ep in [&d.subject, &d.object] {
-                match ep {
-                    Endpoint::Node(n) => {
-                        cm.nodes.insert(*n);
+            EdgeEntry::Data(d) => {
+                {
+                    let mut cm = c.borrow_mut();
+                    cm.edges.insert(e);
+                    for ep in [&d.subject, &d.object] {
+                        match ep {
+                            Endpoint::Node(n) => {
+                                cm.nodes.insert(*n);
+                            }
+                            Endpoint::Bad(t) => return Err(format!("edge endpoint is a {t}")),
+                            _ => {}
+                        }
                     }
-                    Endpoint::Bad(t) => return Err(format!("edge endpoint is a {t}")),
-                    _ => {}
+                }
+                for aux in d.support.as_ref().map_err(Clone::clone)? {
+                    let Some(a) = aux else { continue };
+                    let (nodes, edges) = match &self.m.aux[*a as usize] {
+                        AuxEntry::Falsy => continue,
+                        AuxEntry::Bad(t) => {
+                            return Err(format!("'{t}' object has no attribute 'get'"))
+                        }
+                        AuxEntry::Data { nodes, edges } => (nodes, edges),
+                    };
+                    c.borrow_mut()
+                        .nodes
+                        .extend(nodes.as_ref().map_err(Clone::clone)?.iter().copied());
+                    for ae in edges.as_ref().map_err(Clone::clone)? {
+                        let Some(ae) = *ae else { continue };
+                        c.borrow_mut().edges.insert(ae);
+                        let child = if w.on_stack.contains(&ae) {
+                            // Back to an edge of a cycle still being walked:
+                            // what it has found so far.
+                            let i = w.index[&ae];
+                            let low = w.low.get_mut(&e).unwrap();
+                            *low = (*low).min(i);
+                            w.found[&ae].clone()
+                        } else {
+                            // Not reached yet, or cached from an earlier walk.
+                            let child = self.closure_walk(ae, w)?;
+                            if w.on_stack.contains(&ae) {
+                                let child_low = w.low[&ae];
+                                let low = w.low.get_mut(&e).unwrap();
+                                *low = (*low).min(child_low);
+                            }
+                            child
+                        };
+                        if !Rc::ptr_eq(&child, &c) {
+                            let ch = child.borrow();
+                            let mut cm = c.borrow_mut();
+                            cm.edges.extend(ch.edges.iter().copied());
+                            cm.nodes.extend(ch.nodes.iter().copied());
+                        }
+                    }
                 }
             }
         }
-        for aux in d.support.as_ref().map_err(Clone::clone)? {
-            let Some(a) = aux else { continue };
-            let (nodes, edges) = match &self.m.aux[*a as usize] {
-                AuxEntry::Falsy => continue,
-                AuxEntry::Bad(t) => return Err(format!("'{t}' object has no attribute 'get'")),
-                AuxEntry::Data { nodes, edges } => (nodes, edges),
-            };
-            c.borrow_mut()
-                .nodes
-                .extend(nodes.as_ref().map_err(Clone::clone)?.iter().copied());
-            for ae in edges.as_ref().map_err(Clone::clone)? {
-                let Some(ae) = *ae else { continue };
-                c.borrow_mut().edges.insert(ae);
-                let child = self.closure(ae)?;
-                if !Rc::ptr_eq(&child, &c) {
-                    let ch = child.borrow();
-                    let mut cm = c.borrow_mut();
-                    cm.edges.extend(ch.edges.iter().copied());
-                    cm.nodes.extend(ch.nodes.iter().copied());
+
+        if w.low[&e] == my_index {
+            // This edge closes its cycle (or is in none): its closure is
+            // complete, and is every member's.
+            loop {
+                let member = w.stack.pop().expect("Tarjan stack");
+                w.on_stack.remove(&member);
+                self.closures[member as usize] = Some(c.clone());
+                if member == e {
+                    break;
                 }
             }
         }

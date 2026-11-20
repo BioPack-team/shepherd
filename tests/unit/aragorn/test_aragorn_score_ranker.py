@@ -781,3 +781,90 @@ def test_cyclic_support_graphs_are_scored():
     msg = _nested_support_message(3, cycle=True)
     Ranker(msg, logger).rank(msg["results"])
     assert 0 < msg["results"][0]["analyses"][0]["score"] <= 1
+
+
+# --- support-graph cycles -------------------------------------------------
+
+
+def _cyclic_message(n=40, seed=0):
+    """Inferred edges whose support graphs reach each other, analyses that
+    bind several of them: support-graph cycles, as real responses can have."""
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "benchmarks"
+        / "aragorn_score"
+        / "gen_message.py"
+    )
+    spec = importlib.util.spec_from_file_location("gen_message", path)
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    # Random links: on 40 answers, cycles that tangle several answers together.
+    return gen.add_cycles(
+        gen.make_message(n_results=n, seed=seed), seed=seed, random_links=2, bound=3
+    )
+
+
+def _reachable(msg, edge_id):
+    """Every node and edge reachable from edge_id through support graphs: the
+    closure by plain search, no memo."""
+    from shepherd_utils.trapi import edge_support_graphs
+
+    kg, aux = msg["knowledge_graph"]["edges"], msg.get("auxiliary_graphs") or {}
+    nodes, edges, stack, seen = set(), set(), [edge_id], set()
+    while stack:
+        e = stack.pop()
+        if e in seen:
+            continue
+        seen.add(e)
+        edge = kg.get(e)
+        if not edge:
+            continue
+        edges.add(e)
+        nodes.update(n for n in (edge.get("subject"), edge.get("object")) if n)
+        for sg_id in edge_support_graphs(edge):
+            sg = aux.get(sg_id)
+            if not sg:
+                continue
+            nodes.update(sg.get("nodes", []))
+            for ae in sg.get("edges", []):
+                if ae in kg:
+                    edges.add(ae)
+                    stack.append(ae)
+    return nodes, edges
+
+
+def test_support_closures_in_cycles_are_complete():
+    """Every edge's closure is everything it can reach, cycles or not. (The
+    memo used to cache an edge in a cycle with whatever it had found when
+    the walk came back round, so its closure depended on walk order.)"""
+    msg = _cyclic_message()
+    r = Ranker(msg, logger)
+    for edge_id in msg["knowledge_graph"]["edges"]:
+        nodes, edges = r._support_closure(edge_id)
+        want_nodes, want_edges = _reachable(msg, edge_id)
+        assert set(edges) == want_edges, edge_id
+        assert set(nodes) == want_nodes, edge_id
+
+
+def test_cyclic_scores_do_not_depend_on_walk_order():
+    """Ranking the answers in a different order gives each the same score."""
+    msg = _cyclic_message(seed=1)
+    forward = copy.deepcopy(msg)
+    Ranker(forward, logger).rank(forward["results"])
+    backward = copy.deepcopy(msg)
+    backward["results"].reverse()
+    Ranker(backward, logger).rank(backward["results"])
+
+    def by_answer(m):
+        return {
+            r["node_bindings"]["sn"]["ids"][0]: r["analyses"][0]["score"]
+            for r in m["results"]
+        }
+
+    a, b = by_answer(forward), by_answer(backward)
+    assert a.keys() == b.keys()
+    for k in a:
+        assert b[k] == pytest.approx(a[k], rel=1e-12), k

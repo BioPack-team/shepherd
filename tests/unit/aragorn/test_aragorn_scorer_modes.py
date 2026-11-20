@@ -31,7 +31,10 @@ def _gen_message(**kwargs):
     gen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gen)
     quirks = kwargs.pop("quirks", False)
+    cycles = kwargs.pop("cycles", False)
     message = gen.make_message(**kwargs)
+    if cycles:
+        gen.add_cycles(message, seed=kwargs.get("seed", 0))
     if quirks:
         gen.add_quirks(message)
     return {"message": message}
@@ -145,6 +148,10 @@ def test_rust_failure_falls_back_to_python(mocker, monkeypatch):
             lambda: _gen_message(n_results=40, seed=5, nested=True, quirks=True),
             id="quirks",
         ),
+        pytest.param(
+            lambda: _gen_message(n_results=60, seed=7, cycles=True),
+            id="support-cycles",
+        ),
     ],
 )
 def test_rust_scores_like_python(mocker, monkeypatch, response):
@@ -218,6 +225,7 @@ def test_shadow_saves_python_and_logs_the_comparison(mocker, monkeypatch, caplog
     assert summary["beyond_tol"] == 0
     assert summary["max_rel_diff"] < 1e-9
     assert summary["python_rank_ms"] > 0 and summary["rust_total_ms"] > 0
+    assert summary["support_cycles"] == 0 and summary["largest_support_cycle"] == 0
 
 
 @needs_rust
@@ -260,3 +268,46 @@ def test_compare_shape_and_type_mismatches_disagree():
     assert not compare_scores([[0.5]], [0], [], [])["agree"]
     assert not compare_scores([[None]], [0], [[0]], [0])["agree"]
     assert compare_scores([[0]], [0], [[0.0]], [0])["agree"]
+
+
+@needs_rust
+def test_shadow_saves_the_input_of_a_disagreement(
+    mocker, monkeypatch, tmp_path, caplog
+):
+    monkeypatch.setattr(worker.settings, "aragorn_scorer", "shadow")
+    monkeypatch.setattr(worker.settings, "aragorn_shadow_dump_dir", str(tmp_path))
+    monkeypatch.setattr(worker, "_shadow_dumps", 0)
+    response = _gen_message(n_results=20, seed=2)
+    store = Store(mocker, response)
+    real = worker.aragorn_score_rs.score_blob
+
+    def skewed(blob, **kw):
+        out, info = real(blob, **kw)
+        info["scores"][0][0] = info["scores"][0][0] / 2  # a disagreement
+        return out, info
+
+    mocker.patch.object(worker.aragorn_score_rs, "score_blob", side_effect=skewed)
+    with caplog.at_level(logging.WARNING, logger="shepherd.aragorn.score"):
+        aragorn_score("r/dis agree", logging.INFO)
+
+    saved = tmp_path / "r_dis_agree.json.zst"
+    assert saved.read_bytes() == store.blob
+    line = next(
+        r.getMessage()
+        for r in caplog.records
+        if "aragorn.score shadow" in r.getMessage()
+    )
+    summary = json.loads(line.split("aragorn.score shadow ", 1)[1])
+    assert summary["agree"] is False
+    assert summary["saved_input"] == str(saved)
+
+
+@needs_rust
+def test_shadow_saves_nothing_when_they_agree(mocker, monkeypatch, tmp_path):
+    monkeypatch.setattr(worker.settings, "aragorn_scorer", "shadow")
+    monkeypatch.setattr(worker.settings, "aragorn_shadow_dump_dir", str(tmp_path))
+    Store(mocker, _gen_message(n_results=20, seed=2))
+
+    aragorn_score("r", logging.INFO)
+
+    assert list(tmp_path.iterdir()) == []

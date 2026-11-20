@@ -16,6 +16,8 @@ on real queries (`ARAGORN_SCORER`, see `workers/aragorn_score/README.md`).
   the same message, and compares them all.
 - **`shadow_report.py`** summarises the comparisons the worker logs in shadow
   mode, on real queries (see `workers/aragorn_score/README.md`).
+- **`support_cycles.py`** reports a message's support-graph cycles, and how
+  many support edges they give each analysis.
 
 ## Running it
 
@@ -25,6 +27,7 @@ cd benchmarks/aragorn_score
 ./run.sh path/to/message.json.zst            # your own message
 REPEAT=10 GEN_ARGS="--results 6000 --genes 1000" ./run.sh
 GEN_ARGS="--results 300 --quirks --nested" ./run.sh   # parity on odd inputs
+GEN_ARGS="--results 300 --cycles" ./run.sh            # support-graph cycles
 VARIANTS="typed:cholesky" ./run.sh           # only the fastest Rust variant
 VARIANTS="typed:cholesky:sonic" ./run.sh     # ... with sonic-rs as the parser
 CHECK_MESSAGES=0 ./run.sh                    # skip the scored-message check

@@ -45,6 +45,35 @@ run of them:
 Shadow mode adds the Rust run, roughly a tenth of the Python time, to each
 task.
 
+To keep the evidence of a disagreement, set `ARAGORN_SHADOW_DUMP_DIR` (in
+compose, `/app/logs/...` is `./logs/...` on the host). The worker then saves
+the stored input of each query the two disagree on there, as
+`<response_id>.json.zst`, at most `ARAGORN_SHADOW_DUMP_MAX` files (default
+20) per worker process. The shadow line names the file (`saved_input`).
+Reproduce it with:
+
+    benchmarks/aragorn_score/run.sh logs/aragorn_shadow/<response_id>.json.zst
+
+## Support-graph cycles
+
+The scorer brings everything reachable through an analysis's support graphs
+into that analysis's graph. Support graphs can form cycles: edge A's support
+holds B, and B's holds A. Every edge in a cycle then brings in the whole
+cycle's support. Both scorers find cycles with Tarjan's
+strongly-connected-components algorithm, so the result doesn't depend on the
+order the edges are walked in.
+
+An earlier version of this change cached closures inside a cycle before they
+were complete. That made scores depend on walk order, so Python and Rust
+disagreed on real messages. Before that version, Python raised
+`RecursionError` on a cycle and scored the answer 0.
+
+Large cycles make large analysis graphs, and scoring time grows with roughly
+the cube of their size. The shadow line reports `support_cycles` and
+`largest_support_cycle` for each query. `benchmarks/aragorn_score/support_cycles.py
+MESSAGE` reports a message's cycles and how many support edges each analysis
+gets.
+
 An unknown value, or `rust`/`shadow` without the module installed (a plain
 local checkout, for example), logs a warning and runs Python. The worker's
 startup log says which scorer it is using.
@@ -58,6 +87,7 @@ does. See `benchmarks/aragorn_score/README.md`.
 Set it in `.env` and recreate the worker:
 
     echo ARAGORN_SCORER=shadow >> .env
+    echo ARAGORN_SHADOW_DUMP_DIR=/app/logs/aragorn_shadow >> .env   # optional
     docker compose up -d --build aragorn_score
 
 ### On Kubernetes

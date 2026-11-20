@@ -602,6 +602,9 @@ services:
       # python (default) | rust | shadow -- see ARAGORN_SCORER in
       # shepherd_utils/config.py. Set it in .env to switch.
       ARAGORN_SCORER: ${ARAGORN_SCORER:-python}
+      # In shadow mode, where to save the input of each query the two
+      # scorers disagree on (empty: don't). /app/logs is ./logs on the host.
+      ARAGORN_SHADOW_DUMP_DIR: ${ARAGORN_SHADOW_DUMP_DIR:-}
     cpus: 4
     mem_limit: 10g
     platform: linux/amd64

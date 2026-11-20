@@ -9,7 +9,10 @@ between pairs of nodes in each answer, attached as an analysis support graph.
     python gen_message.py --results 2000 --out out/synthetic.json.zst
 
 ``--nested`` makes every chemical -> gene edge itself supported by a further
-support graph; ``--quirks`` adds answers that exercise the ranker's odd inputs
+support graph; ``--cycles`` makes support-graph cycles of ``--cycle-size`` inferred edges
+(each one's support graph holding the next) and has each analysis bind a few
+of its cycle's edges; ``--giant-cycle`` links them randomly instead, into one
+cycle spanning nearly every answer (a stress test: slow by design); ``--quirks`` adds answers that exercise the ranker's odd inputs
 and failure paths (string publication lists, p-values as strings, a support
 cycle, an omnicorp edge whose node is missing from the KG, a result missing a
 probe binding), which is what you want when checking parity, not speed.
@@ -192,6 +195,36 @@ def make_message(
     return message
 
 
+def add_cycles(message, seed=0, size=3, bound=2, random_links=0):
+    """Support-graph cycles. The inferred edges are taken in groups of
+    ``size``, and each one's support graph also holds the next in its group,
+    so each group is one cycle; each analysis also binds ``bound`` more
+    inferred edges from its group. ``random_links`` > 0 instead links every
+    inferred edge to that many random others, which joins nearly all of
+    them into one giant cycle -- a stress test: every analysis then brings
+    in nearly the whole graph."""
+    rnd = random.Random(seed)
+    results = message["results"]
+    n = len(results)
+    aux = message["auxiliary_graphs"]
+    for i in range(n):
+        if f"aux_{i}" not in aux:
+            continue
+        if random_links:
+            others = [j for j in rnd.sample(range(n), min(random_links, n)) if j != i]
+            group = others
+        else:
+            first = i - i % size
+            group_size = min(size, n - first)
+            group = [first + k for k in range(group_size) if first + k != i]
+            following = first + (i - first + 1) % group_size  # the next in the group
+            others = [following] if following != i else []
+        aux[f"aux_{i}"]["edges"] += [f"inferred_{j}" for j in others]
+        ids = results[i]["analyses"][0]["edge_bindings"]["t_edge"]["ids"]
+        ids += [f"inferred_{j}" for j in rnd.sample(group, min(bound, len(group)))]
+    return message
+
+
 def add_quirks(message):
     """Answers that take the ranker's unusual paths. Appended at the end."""
     kg = message["knowledge_graph"]
@@ -355,12 +388,25 @@ def main(argv=None):
     p.add_argument("--no-omnicorp", action="store_true")
     p.add_argument("--nested", action="store_true")
     p.add_argument("--quirks", action="store_true")
+    p.add_argument(
+        "--cycles", action="store_true", help="support-graph cycles of --cycle-size"
+    )
+    p.add_argument("--cycle-size", type=int, default=3)
+    p.add_argument(
+        "--giant-cycle",
+        action="store_true",
+        help="link every inferred edge to 2 random others: one giant cycle (slow by design)",
+    )
     p.add_argument("--out", required=True, type=Path)
     a = p.parse_args(argv)
 
     message = make_message(
         a.results, a.genes, a.max_paths, a.seed, not a.no_omnicorp, a.nested
     )
+    if a.cycles or a.giant_cycle:
+        add_cycles(
+            message, a.seed, size=a.cycle_size, random_links=2 if a.giant_cycle else 0
+        )
     if a.quirks:
         add_quirks(message)
     data = orjson.dumps({"message": message})
