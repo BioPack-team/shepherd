@@ -261,7 +261,7 @@ class Settings(BaseSettings):
     )
 
     arax_pathfinder_dbs_dir: str = "arax_pathfinder_dbs"
-    arax_pathfinder_tier_version: str = "tier0-20260621"
+    arax_pathfinder_tier_version: str = "tier0-20260928"
     arax_pathfinder_curie_ngd_sqlite_filename: str = "curie_ngd_v1.0_{version}.sqlite"
     arax_pathfinder_tier0_overlay_sqlite_filename: str = (
         "tier0-info-for-overlay_v1.0_{version}.sqlite"
@@ -279,7 +279,7 @@ class Settings(BaseSettings):
     # for that one file (the defaults are placeholders until the real files are
     # published).
     arax_dbs_dir: str = "arax_dbs"
-    arax_tier_version: str = "tier0-20260621"
+    arax_tier_version: str = "tier0-20260928"
     arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
     arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
     arax_curie_to_pmids_url: str = ""

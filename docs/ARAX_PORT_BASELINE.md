@@ -631,7 +631,7 @@ qedge, with creative-treats widening.
 
 ### 20. Data files a faithful port needs
 
-| File (tier `tier0-20260621` unless noted) | Used by | In Shepherd |
+| File (tier `tier0-20260928` unless noted) | Used by | In Shepherd |
 |---|---|---|
 | `curie_ngd_v1.0_<tier>.sqlite` | CON-*, XCR-* | Yes (the pathfinder download, shared with the `arax` worker) |
 | `tier0-info-for-overlay_v1.0_<tier>.sqlite` (= `kg2c_sqlite`) | CON-*, OVL-05 (FET) | Yes (the pathfinder download, shared with the `arax` worker) |

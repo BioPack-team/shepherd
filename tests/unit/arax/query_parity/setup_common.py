@@ -27,10 +27,10 @@ _spec.loader.exec_module(_mod)
 import fixtures as F  # noqa: E402
 import dbs  # noqa: E402
 
-TIER0 = "tier0-info-for-overlay_v1.0_tier0-20260621.sqlite"
-CURIE_TO_PMIDS = "curie_to_pmids_v1.0_tier0-20260621.sqlite"
-CURIE_NGD = "curie_ngd_v1.0_tier0-20260621.sqlite"
-XDTD = "ExplainableDTD_v1.0_tier0-20260621-all_with_paths.db"
+TIER0 = "tier0-info-for-overlay_v1.0_tier0-20260928.sqlite"
+CURIE_TO_PMIDS = "curie_to_pmids_v1.0_tier0-20260928.sqlite"
+CURIE_NGD = "curie_ngd_v1.0_tier0-20260928.sqlite"
+XDTD = "ExplainableDTD_v1.0_tier0-20260928-all_with_paths.db"
 COHD = "COHDdatabase_v1.0_KG2.8.0.db"
 FDA = "fda_approved_drugs_v1.0.pickle"
 
