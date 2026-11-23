@@ -789,6 +789,14 @@ async def test_meta_knowledge_graph_formats(status_client, mocker):
                 "subject": "biolink:Gene",
                 "predicate": "biolink:interacts_with",
                 "object": "biolink:Gene",
+                "qualifiers": [
+                    {"qualifier_type_id": "biolink:object_aspect_qualifier"},
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "applicable_values": [],
+                    },
+                ],
+                "association": {},
             }
         ],
     }
@@ -821,6 +829,39 @@ async def test_meta_knowledge_graph_formats(status_client, mocker):
         "biolink:knowledge_level",
         "biolink:agent_type",
     ]
+    # upstream trapi2.0 (db6140e7)
+    assert full["edges"][0]["attributes"][0]["constraint_name"] == "original predicate"
+    # TRAPI 2.0 minItems (upstream trapi2.0 2f78aa95): empty lists and objects
+    # inside nodes and edges are left out, at any depth
+    assert full["nodes"] == {"biolink:Gene": {"id_prefixes": ["NCBIGene"]}}
+    assert "association" not in full["edges"][0]
+    assert full["edges"][0]["qualifiers"] == [
+        {"qualifier_type_id": "biolink:object_aspect_qualifier"},
+        {"qualifier_type_id": "biolink:object_direction_qualifier"},
+    ]
+    # the cached meta-KG itself is not changed
+    cached = ksm.KnowledgeSourceMetadata.cached_meta_knowledge_graph
+    assert cached["nodes"]["biolink:Gene"]["attributes"] == []
+
+
+def test_retriever_meta_kg_is_fetched_for_tier_0(mocker):
+    """upstream trapi2.0 (7fd99e72): Expand queries Retriever's tier 0, so the
+    advertised meta-KG is the tier 0 one."""
+    import shepherd_utils.arax.KnowledgeSources.knowledge_source_metadata as ksm
+
+    mocker.patch.object(
+        ksm.settings, "sync_kg_retrieval_url", "http://retriever.test/query"
+    )
+    get = mocker.patch.object(ksm.requests, "get")
+    get.return_value.status_code = 200
+    get.return_value.json.return_value = {"nodes": {}, "edges": []}
+    assert ksm.KnowledgeSourceMetadata()._fetch_retriever_meta_kg() == {
+        "nodes": {},
+        "edges": [],
+    }
+    get.assert_called_once_with(
+        "http://retriever.test/meta_knowledge_graph", params={"tier": 0}, timeout=30
+    )
 
 
 def test_retriever_meta_kg_url(mocker):

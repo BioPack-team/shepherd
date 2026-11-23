@@ -302,6 +302,19 @@ Status (2026-11-23):
   NodeNorm call; the dropped "Normalized ..." lines were DEBUG, which the goldens do not record, so no
   golden rule is needed. Tests: `test_overlay_binding.py`, `test_created_edges_trapi2.py` (FET logs, COHD
   predicates) and `test_infer_trapi2_sync.py`.
+- **Items 38-42** done (synonymizer, meta-KG, models, `/asyncquery_status`). Item 38: NodeNorm and
+  Name Resolver follow `settings.server_maturity` (via `RTXConfiguration().maturity`); upstream's two
+  URL-by-maturity tests run offline in the upstream suite (patching `settings.server_maturity`, not
+  `sys.modules`; 95 offline upstream tests now). Item 39: the meta-KG fetch keeps Shepherd's
+  Retriever URL (DEC-11) and adds `params={"tier": 0}`; the constraint rename is golden rule H22
+  (aux_parity); the empty-container cleanup is in the `/arax/meta_knowledge_graph` endpoint, as
+  upstream has it in its API impl; `kp_selector` filters SmartAPI on
+  `RTXConfiguration().trapi_major_version` ("2.0"), as upstream's KPInfoCacher now does
+  (`FORCED_KP_VERSION` is removed). Item 40: `from_dict` still checks only the keys present
+  (generated-model behavior); Shepherd's intake validates the query against TRAPI 2.0 first.
+  Item 41 applies to every ARA (the route is shared): an ARAX query links `/arax/response/<id>`,
+  any other the generic root `/response/<id>`. Item 42 changes no golden. Tests:
+  `test_models_trapi2_sync.py`, `test_query_status.py`, `test_arax_api.py`.
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|

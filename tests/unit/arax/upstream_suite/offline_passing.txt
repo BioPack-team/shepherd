@@ -49,6 +49,14 @@ test_ARAX_synonymizer.py::test_example_11
 test_ARAX_synonymizer.py::test_example_12
 test_ARAX_synonymizer.py::test_example_6b
 test_ARAX_synonymizer.py::test_example_9
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[development-https://name-lookup.ci.transltr.io]
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[production-https://name-lookup.transltr.io]
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[staging-https://name-lookup.ci.transltr.io]
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[testing-https://name-lookup.test.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[development-https://nodenorm-es.ci.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[production-https://nodenorm-es.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[staging-https://nodenorm-es.ci.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[testing-https://nodenorm-es.test.transltr.io]
 test_ARAX_translate.py::test_fill_error
 test_ARAX_translate.py::test_unknown_operation
 test_ARAX_workflows.py::test_option_group_id

@@ -1,6 +1,12 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/NodeSynonymizer/node_synonymizer.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
+#   - from upstream trapi2.0 (93924f7a, #2913): production NodeNorm is nodenorm-es.transltr.io
+#   - from upstream trapi2.0 (9c38a488, #2913): NAME_RESOLVER_URL_BY_MATURITY and
+#     resolve_name_resolver_url() (class-cached, RENCI fallback), used by __init__. As for
+#     NodeNorm, the maturity is RTXConfiguration().maturity, i.e. settings.server_maturity
+#   - from upstream trapi2.0 (b8e2f499): the always-empty in_kg2pre / name_kg2pre /
+#     category_kg2pre fields and the KG2pre provided_by / name / category attributes are removed
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """API-backed Node Synonymizer for CURIE/name normalization via SRI services."""
 import argparse
@@ -83,33 +89,33 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
       (no /1.5 version prefix); requesting /1.5/... returns HTTP 404.
 
     SRI Name Resolver (free-text name -> best CURIE match):
-      https://name-resolution-sri.renci.org  (RENCI)
+      https://name-lookup.ci.transltr.io  (Translator, one host per tier)
       Main endpoint: POST /bulk-lookup
-      NOTE: RENCI is used because it exposes /bulk-lookup, which this
-      module relies on.
+      NOTE: the Translator name-lookup hosts expose /bulk-lookup, which
+      this module relies on. RENCI is only the fallback.
 
-    The Name Resolver URL is hardcoded; the Node Normalizer URL follows
-    the deployment tier:
-      - NodeNorm:     NODE_NORMALIZER_URL_BY_MATURITY, keyed by the ARAX
-                      maturity (RTXConfiguration, imported lazily), so
-                      arax.test talks to the test tier NodeNorm and
-                      arax.ci to the CI tier. When that import fails,
-                      NODE_NORMALIZER_URL is the fallback (Translator ES
-                      CI host, #2833).
-      - NameResolver: https://name-resolution-sri.renci.org   (RENCI)
+    Both URLs follow the deployment tier, keyed by the ARAX maturity
+    (RTXConfiguration, imported lazily), so arax.test talks to the test
+    tier services and arax.ci to the CI tier:
+      - NodeNorm:     NODE_NORMALIZER_URL_BY_MATURITY. When that import
+                      fails, NODE_NORMALIZER_URL is the fallback
+                      (Translator ES CI host, #2833).
+      - NameResolver: NAME_RESOLVER_URL_BY_MATURITY. When that import
+                      fails, NAME_RESOLVER_URL is the fallback
+                      (https://name-resolution-sri.renci.org, RENCI, #2913).
 
     Why this shape (no env vars, no constructor overrides):
-      1. Each ARAX tier should normalize against its own tier's NodeNorm,
-         the same rule the Test Harness follows. The maturity map encodes
-         that in one place.
+      1. Each ARAX tier should normalize against its own tier's NodeNorm
+         and Name Resolver, the same rule the Test Harness follows. The
+         maturity maps encode that in one place.
       2. The lazy, failure-tolerant import keeps module import cheap and
          degrades to the single hardcoded fallback when RTXConfiguration
          cannot load. The separately maintained standalone package
          (Translator-CATRAX/node-synonymizer) carries its own constants.
-         Name Resolver stays on RENCI because it needs /bulk-lookup.
       3. To point at a different endpoint (private mirror), subclass and
-         override `NODE_NORMALIZER_URL` (changes the fallback) or
-         `resolve_node_normalizer_url()` (pins the URL outright), explicit
+         override `NODE_NORMALIZER_URL` / `NAME_RESOLVER_URL` (changes
+         the fallback) or `resolve_node_normalizer_url()` /
+         `resolve_name_resolver_url()` (pins the URL outright), explicit
          rather than hidden in env vars or configs.
 
     The return contracts (get_canonical_curies, get_equivalent_nodes,
@@ -121,14 +127,13 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
     NAME_RESOLVER_URL = "https://name-resolution-sri.renci.org"
 
     # one Node Normalizer deployment per Translator maturity tier.
-    # production still runs the pre-ElasticSearch service; point it at an
-    # ES host once ITRB stands one up (nodenorm-es.transltr.io has no DNS
-    # as of 2026-09-16).
+    # production uses the ElasticSearch NodeNorm that ITRB deployed to
+    # PROD on 2026-10-08 (same version as nodenorm-es.test), #2913.
     NODE_NORMALIZER_URL_BY_MATURITY = {
         "development": "https://nodenorm-es.ci.transltr.io",
         "staging": "https://nodenorm-es.ci.transltr.io",
         "testing": "https://nodenorm-es.test.transltr.io",
-        "production": "https://nodenorm.transltr.io/1.4",
+        "production": "https://nodenorm-es.transltr.io",
     }
 
     # resolved once per class by resolve_node_normalizer_url() and shared
@@ -163,6 +168,44 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
             cls._resolved_node_normalizer_url = url
         return cls._resolved_node_normalizer_url
 
+    # one Name Resolver deployment per Translator maturity tier (#2913).
+    # development maps to CI, the same as NodeNorm.
+    NAME_RESOLVER_URL_BY_MATURITY = {
+        "development": "https://name-lookup.ci.transltr.io",
+        "staging": "https://name-lookup.ci.transltr.io",
+        "testing": "https://name-lookup.test.transltr.io",
+        "production": "https://name-lookup.transltr.io",
+    }
+
+    # resolved once per class by resolve_name_resolver_url(), like the
+    # Node Normalizer URL above
+    _resolved_name_resolver_url: Optional[str] = None
+
+    @classmethod
+    def resolve_name_resolver_url(cls) -> str:
+        """Return the Name Resolver URL for this deployment's maturity.
+
+        Same rule as resolve_node_normalizer_url(): the maturity comes
+        from RTXConfiguration (arax.test -> "testing" ->
+        name-lookup.test.transltr.io, and so on), and if RTXConfiguration
+        cannot load or read its config the NAME_RESOLVER_URL class
+        attribute is the fallback.
+        """
+        # cache per class (not via inheritance), so a subclass that
+        # overrides NAME_RESOLVER_URL resolves its own value
+        if cls.__dict__.get("_resolved_name_resolver_url") is None:
+            url = cls.NAME_RESOLVER_URL
+            try:
+                # code/ is on sys.path from this module's header block
+                from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
+                url = cls.NAME_RESOLVER_URL_BY_MATURITY.get(
+                    RTXConfiguration().maturity, url)
+            except Exception:
+                # keep the hardcoded fallback
+                pass
+            cls._resolved_name_resolver_url = url
+        return cls._resolved_name_resolver_url
+
     def __init__(self, sqlite_file_name: Optional[str] = None,
                  autocomplete: bool = True,
                  use_async: bool = False):
@@ -189,8 +232,7 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
         self._use_async = use_async
 
         self.api_base_url = self.resolve_node_normalizer_url().rstrip("/")
-        self.name_resolver_url = self.NAME_RESOLVER_URL.rstrip("/")
-        self.kg2_infores_curie = "infores:rtx-kg2"
+        self.name_resolver_url = self.resolve_name_resolver_url().rstrip("/")
         self.sri_nn_infores_curie = "infores:sri-node-normalizer"
         self.arax_infores_curie = "infores:arax"
         self.bmt_tk = get_bmt_toolkit()
@@ -709,13 +751,10 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
     ) -> dict[str, dict[str, Any]]:
         """Build per-node metadata dict from API results.
 
-        The output dict preserves the same field names that
+        The output dict preserves the same SRI field names that
         the old SQLite version produced (in_sri, name_sri,
-        category_sri, in_kg2pre, name_kg2pre, category_kg2pre).
-        In API mode all data comes from the Node Normalizer,
-        so in_sri is always True when we have equivalent IDs,
-        and in_kg2pre is always False (KG2pre source info is
-        not available from the API).
+        category_sri). All data comes from the Node Normalizer,
+        so in_sri is True whenever we have equivalent IDs.
         """
         nodes_dict: dict[str, dict[str, Any]] = {}
         for node_id in all_node_ids:
@@ -747,9 +786,6 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
                 "in_sri": in_sri,
                 "name_sri": name_sri,
                 "category_sri": category_sri,
-                "in_kg2pre": False,
-                "name_kg2pre": None,
-                "category_kg2pre": None,
                 "cluster_id": cluster_id,
                 "cluster_preferred_name": cluster_name
             }
@@ -1442,8 +1478,6 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
         provided_bys = []
         if normalizer_node["in_sri"]:
             provided_bys.append(self.sri_nn_infores_curie)
-        if normalizer_node["in_kg2pre"]:
-            provided_bys.append(self.kg2_infores_curie)
         node.attributes.append(Attribute(
             attribute_type_id="biolink:provided_by",
             value=provided_bys,
@@ -1470,24 +1504,6 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
                 description=(
                     "Category for this identifier in the"
                     " SRI NodeNormalizer bulk download")))
-
-        if normalizer_node["in_kg2pre"]:
-            node.attributes.append(Attribute(
-                attribute_type_id="biolink:name",
-                value=normalizer_node["name_kg2pre"],
-                value_type_id="metatype:String",
-                attribute_source=self.kg2_infores_curie,
-                description=(
-                    "Name for this identifier in"
-                    " RTX-KG2pre")))
-            node.attributes.append(Attribute(
-                attribute_type_id="biolink:category",
-                value=normalizer_node["category_kg2pre"],
-                value_type_id="metatype:Uriorcurie",
-                attribute_source=self.kg2_infores_curie,
-                description=(
-                    "Category for this identifier in"
-                    " RTX-KG2pre")))
 
         return node
 

@@ -208,3 +208,14 @@ def test_collated_qnodes_echo_collate():
         "query_graph"
     ]["nodes"]["n1"]
     assert "is_set" not in qnode and qnode["set_interpretation"] == "COLLATE"
+
+
+def test_meta_kg_original_predicate_constraint_is_renamed():
+    """H22: the meta-KG's biolink:original_predicate constraint is named
+    "original predicate" (upstream trapi2.0 db6140e7); nothing else changes."""
+    old = T.read_json_gz(T.golden_paths("aux_parity")[0])
+    new = T.read_json_gz(T.golden_paths("aux_parity")[1])
+    old_text, new_text = json.dumps(old), json.dumps(new)
+    assert "kg2 ids" not in new_text
+    assert new_text.count('"original predicate"') == old_text.count('"kg2 ids"') > 0
+    assert new_text.replace('"original predicate"', '"kg2 ids"') == old_text

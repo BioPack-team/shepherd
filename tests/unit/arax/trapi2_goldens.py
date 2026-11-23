@@ -82,7 +82,10 @@ Hand rules on top (what TOM does not own):
     as the default ``2.0.0`` too, and keeps declaring ``1.5.0``).
   - H7 aux_parity: the meta-KG (and its simple view) and autocomplete answers
     are the same objects in 2.0 (a MetaKnowledgeGraph shape change would be
-    additions only); the goldens are carried over unchanged.
+    additions only); the goldens are carried over unchanged, but for H22.
+  - H22 aux_parity: the ``biolink:original_predicate`` standard attribute
+    constraint the meta-KG adds to its edges is named ``original predicate``
+    (upstream ``trapi2.0`` db6140e7; was ``kg2 ids``).
   - H8 response_parity: in ARAX's attribute-stripped (``X``) view, a KG edge
     keeps the stored edge's ``knowledge_level`` / ``agent_type`` (see
     ``_unstrip_levels``).
@@ -1002,8 +1005,25 @@ def response_goldens(g16: dict) -> dict:
     return out
 
 
+def _original_predicate_constraint_name(value: Any) -> None:
+    """H22 on a recorded meta-KG value, in place."""
+    if isinstance(value, dict):
+        if (
+            value.get("attribute_type_id") == "biolink:original_predicate"
+            and value.get("constraint_name") == "kg2 ids"
+        ):
+            value["constraint_name"] = "original predicate"
+        for item in value.values():
+            _original_predicate_constraint_name(item)
+    elif isinstance(value, list):
+        for item in value:
+            _original_predicate_constraint_name(item)
+
+
 def aux_goldens(g16: dict) -> dict:
-    return copy.deepcopy(g16)  # H7
+    out = copy.deepcopy(g16)  # H7
+    _original_predicate_constraint_name(out["meta_kg"])  # H22
+    return out
 
 
 TRANSLATE = {
