@@ -1,12 +1,13 @@
 """Shepherd-specific behavior of the ported ARAX Connect (DEC-4, DEC-7, DEC-18).
 
-Upstream parity for the pathfinder is not a target (DEC-7), and xCRG is the
-vendored package (DEC-21, tested in test_xcrg.py), so these check the port's wiring: which
+Upstream parity for the pathfinder is not a target (DEC-7), and xCRG is upstream's
+catrax-xcrg package (DEC-25, ARAX's side tested in test_xcrg.py), so these check the port's wiring: which
 Retriever, data files and limits it uses, and how the results land in the
 envelope.
 """
 
 import json
+from datetime import timedelta
 
 import pytest
 import translator_tom
@@ -319,10 +320,10 @@ XCRG_QG = {
 def xcrg(monkeypatch):
     calls = []
 
-    def fake_run_xcrg(query, config, logger):
-        # A TRAPI 2.0 answer, as the vendored xCRG gives
+    def fake_run_query(query, config, reporter):
+        # A TRAPI 2.0 answer, as catrax-xcrg gives
         calls.append((query, config))
-        logger.info("xcrg ran with %s TFs", 3)
+        reporter.info("xcrg ran with %s TFs", 3)
         return {
             "schema_version": "2.0.0",
             "biolink_version": "4.2.5",
@@ -336,7 +337,7 @@ def xcrg(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(connect_module, "run_xcrg", fake_run_xcrg)
+    monkeypatch.setattr(connect_module.xcrg, "run_query", fake_run_query)
     return calls
 
 
@@ -345,12 +346,13 @@ def test_xcrg_uses_shepherds_retriever_and_data(xcrg):
     ARAXConnect().apply(response, {"action": "xcrg"})
     assert response.status == "OK", response.show()
     ((query, config),) = xcrg
-    assert set(query) == {"message"}  # parameters/submitter are not passed (XCR-02)
+    # DEC-25: the query graph (and the query's parameters, here none) only
+    assert query == {"message": {"query_graph": XCRG_QG}}
     rtx = RTXConfiguration()
     assert config.retriever_url == RETRIEVER
-    assert str(config.ngd_db_path) == rtx.curie_ngd_path
-    assert str(config.curie_to_pmids_db_path) == rtx.curie_to_pmids_path
-    assert config.timeout == 210
+    assert str(config.curie_ngd_db_file) == rtx.curie_ngd_path
+    assert str(config.curie_to_pmids_db_file) == rtx.curie_to_pmids_path
+    assert config.timeout == timedelta(seconds=210)
     assert config.tf_batch_size == 200
     assert list(config.tiers) == [0]
     assert config.resource_id == "infores:arax"
@@ -404,15 +406,15 @@ def test_xcrg_env_overrides(xcrg, monkeypatch):
     ARAXConnect().apply(_response(XCRG_QG), {"action": "xcrg"})
     ((_, config),) = xcrg
     assert config.retriever_url == "http://other.test/query"
-    assert config.timeout == 30
+    assert config.timeout == timedelta(seconds=30)
     assert config.tf_batch_size == 200
 
 
 def test_xcrg_failure_is_a_500(monkeypatch):
-    def boom(query, config, logger):
+    def boom(query, config, reporter):
         raise RuntimeError("no TFs")
 
-    monkeypatch.setattr(connect_module, "run_xcrg", boom)
+    monkeypatch.setattr(connect_module.xcrg, "run_query", boom)
     response = _response(XCRG_QG)
     ARAXConnect().apply(response, {"action": "xcrg"})
     assert response.status == "ERROR"

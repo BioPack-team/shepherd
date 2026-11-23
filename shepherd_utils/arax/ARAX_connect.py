@@ -12,7 +12,10 @@
 #   - the block list is the vendored KnowledgeSources/general_concepts.json (ARAX's own)
 #   - the RTXKG2-mode check around original_query_graph is dropped (E-5)
 #   - main() is dropped
-#   - xcrg runs the vendored xCRG package (shepherd_utils/arax/xcrg/, DEC-21) instead of catrax-xcrg
+#   - xcrg runs upstream's PyPI package catrax-xcrg (1.0.1.dev2), as upstream trapi2.0 does (0513ea95,
+#     fce9cfdd; DEC-25): xcrg.Config / xcrg.run_query / an xcrg.Reporter adapter. xCRG is given the
+#     message's query graph and the query's parameters (xcrg_query), not the whole message: the port's
+#     message may hold the empty auxiliary_graphs 2.0 forbids, which the package rejects
 #   - TRAPI 2.0: convert_to_trapi builds one NodeBinding per qnode and one PathBinding per path (ids) in a plain
 #     Analysis (no PathfinderAnalysis), and AuxiliaryGraph(edges) without attributes; an aux graph without edges is
 #     left out, with its path-binding ids and any analysis/result left empty. The cached-result path no longer
@@ -20,13 +23,15 @@
 #     PathConstraint.required_intermediate_categories
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import json
+import logging
 import sys
+from datetime import timedelta
 
 import requests
+import xcrg
 from shepherd_utils.config import settings
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from pathfinder.Pathfinder import Pathfinder
-from shepherd_utils.arax.xcrg import XCRGConfig, run_xcrg
 
 
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -63,23 +68,23 @@ SHEPHERD_PATHFINDER_HOPS = 4
 SHEPHERD_PATHFINDER_MAX_PATHS = 500
 
 
-class ARAXXCRGLogger:
+class ARAX_XCRG_Reporter(xcrg.Reporter):
     """Adapt xCRG package log calls to ARAXResponse logging."""
 
     def __init__(self, response):
         self.response = response
 
-    def debug(self, message, *args):
-        self.response.debug(self._format(message, args))
-
-    def info(self, message, *args):
-        self.response.info(self._format(message, args))
-
-    def warning(self, message, *args):
-        self.response.warning(self._format(message, args))
-
-    def error(self, message, *args):
-        self.response.error(self._format(message, args), http_status=500)
+    def handle_message(self, message: xcrg.Message):
+        match message:
+            case xcrg.Log_Message(level, message, args, _):
+                match level:
+                    case logging.DEBUG:   self.response.debug(self._format(message, args))
+                    case logging.INFO:    self.response.info(self._format(message, args))
+                    case logging.WARNING: self.response.warning(self._format(message, args))
+                    case logging.ERROR:   self.response.error(self._format(message, args), http_status = 500)
+            case xcrg.Progress_Message(pct_done):
+                # TODO: Report progress to the front-end
+                pass
 
     @staticmethod
     def _format(message, args):
@@ -101,6 +106,16 @@ def get_xcrg_env_int(name, default):
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def xcrg_query(envelope_dict):
+    """The query xCRG is given: the message's query graph and the query's parameters
+    (Shepherd: not the whole message, whose empty containers 2.0 forbids)."""
+    message = envelope_dict.get("message") or {}
+    query = {"message": {"query_graph": message.get("query_graph") or {}}}
+    if envelope_dict.get("parameters"):
+        query["parameters"] = envelope_dict["parameters"]
+    return query
 
 
 def get_xcrg_retriever_url(rtx_config):
@@ -522,41 +537,35 @@ class ARAXConnect:
         if self.response.status != 'OK' or resp == -1:
             return self.response
 
-        query = {
-            "message": self.response.envelope.to_dict()["message"],
-        }
+        query = xcrg_query(self.response.envelope.to_dict())
         qedge_keys = list(query["message"].get("query_graph", {}).get("edges", {}))
         qedge_key = qedge_keys[0] if qedge_keys else "xcrg"
         rtx_config = RTXConfiguration()
-        retriever_url = get_xcrg_retriever_url(rtx_config)
-        timeout = get_xcrg_env_int(XCRG_TIMEOUT_ENV, DEFAULT_XCRG_TIMEOUT)
-        tf_batch_size = get_xcrg_env_int(XCRG_TF_BATCH_SIZE_ENV, DEFAULT_XCRG_TF_BATCH_SIZE)
-        ngd_db_path = get_curie_ngd_path().removeprefix("sqlite:")
-        curie_to_pmids_db_path = get_curie_to_pmids_path().removeprefix("sqlite:")
-        config = XCRGConfig(
-            retriever_url=retriever_url,
-            ngd_db_path=ngd_db_path,
-            curie_to_pmids_db_path=curie_to_pmids_db_path,
-            timeout=timeout,
+        config = xcrg.Config(
+            retriever_url=get_xcrg_retriever_url(rtx_config),
+            curie_ngd_db_file=get_curie_ngd_path().removeprefix("sqlite:"),
+            curie_to_pmids_db_file= get_curie_to_pmids_path().removeprefix("sqlite:"),
+            timeout=timedelta(seconds=get_xcrg_env_int(XCRG_TIMEOUT_ENV, DEFAULT_XCRG_TIMEOUT)),
             tiers=[0],
-            tf_batch_size=tf_batch_size,
+            tf_batch_size= get_xcrg_env_int(XCRG_TF_BATCH_SIZE_ENV, DEFAULT_XCRG_TF_BATCH_SIZE),
             resource_id="infores:arax",
             trapi_schema_version=rtx_config.trapi_version,
             biolink_version=get_current_arax_biolink_version(),
+            # TODO: consider enabling the http cache
         )
         self.response.update_query_plan(
             qedge_key,
             "arax-xcrg",
             "Waiting",
-            f"Sending xCRG lookup query to {retriever_url}",
+            f"Sending xCRG lookup query to {config.retriever_url}",
             query=query,
         )
         start = time.time()
         try:
-            xcrg_response = run_xcrg(
-                query,
+            xcrg_response = xcrg.run_query(
+                query=query,
                 config=config,
-                logger=ARAXXCRGLogger(self.response),
+                reporter=ARAX_XCRG_Reporter(self.response),
             )
         except Exception as e:
             elapsed = round(time.time() - start)

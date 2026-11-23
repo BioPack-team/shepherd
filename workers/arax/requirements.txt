@@ -5,6 +5,8 @@ biolink-helper-pkg==1.0.1
 bmt==1.4.8
 CacheControl==0.14.4
 catrax-pathfinder==2.5.0
+# xCRG for connect(action=xcrg), as upstream ARAX trapi2.0 pins it (DEC-25)
+catrax-xcrg==1.0.1.dev2
 networkx>=3.0
 numpy>=1.24.0
 pandas

@@ -242,7 +242,7 @@ Tags:
 ## 3. Decisions needed (DECIDE)
 
 Status (2026-11-23):
-- **D1** decided: go back to the PyPI package. Not done yet; see the note below the table.
+- **D1** done (DEC-25): `catrax-xcrg==1.0.1.dev2`. Its known bugs are BioPack-team/shepherd#273, #274, #275 and #276.
 - **D2** done (DEC-23).
 - **D3** done (DEC-22).
 - **D4** investigated; see the note below the table.

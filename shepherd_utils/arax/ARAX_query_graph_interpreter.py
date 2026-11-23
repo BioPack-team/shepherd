@@ -2,10 +2,10 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - drop the unused import of knowledge_graph_info (dead code, DEC-5)
-#   - is_xcrg_mvp2_query comes from the vendored xCRG package (shepherd_utils/arax/xcrg/, DEC-21),
-#     which reads TRAPI 2.0. Only an inferred MVP2 query is routed to connect(action=xcrg): the
-#     package's latest check also accepts the one-hop lookup shape, which the catrax-xcrg upstream
-#     ran (c97da53) did not, and which would otherwise leave Expand for xCRG's direct lookup
+#   - from upstream trapi2.0 (0513ea95; DEC-25): an xCRG MVP2 query -- inferred or the one-hop
+#     lookup shape -- is recognized by catrax-xcrg's xcrg.is_valid_query and routed to
+#     connect(action=xcrg). It is checked on the query graph and parameters (ARAX_connect.xcrg_query),
+#     since the port's message may hold empty containers 2.0 forbids
 #   - from upstream trapi2.0 (615baff3): a template may carry an 'error' instead of a 'DSL',
 #     answered with QueryGraphInterpreterUnsupportedGraph (DEC-23)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
@@ -22,7 +22,8 @@ from datetime import datetime
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.query_graph_info import QueryGraphInfo
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
-from shepherd_utils.arax.xcrg import is_xcrg_mvp2_query
+import xcrg
+from shepherd_utils.arax.ARAX_connect import xcrg_query
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 
@@ -31,14 +32,6 @@ from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeG
 from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
 from shepherd_utils.arax.openapi_server.models.q_node import QNode
 from shepherd_utils.arax.openapi_server.models.q_edge import QEdge
-
-
-def is_xcrg_inferred_query(query: dict) -> bool:
-    """An xCRG MVP2 query whose (single) edge is inferred."""
-    if not is_xcrg_mvp2_query(query):
-        return False
-    edges = query["message"]["query_graph"].get("edges") or {}
-    return [edge.get("knowledge_type") for edge in edges.values()] == ["inferred"]
 
 
 class ARAXQueryGraphInterpreter:
@@ -100,7 +93,7 @@ class ARAXQueryGraphInterpreter:
             ]
             return response
 
-        if is_xcrg_inferred_query(response.envelope.to_dict()):
+        if xcrg.is_valid_query(xcrg_query(response.envelope.to_dict())):
             response.info(
                 "QueryGraphInterpreter recognized query_graph as an xCRG MVP2 query: triggering xCRG subsystem."
             )

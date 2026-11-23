@@ -2,6 +2,9 @@
 
 The `test_*.py` files here are upstream ARAX's own tests
 (`RTXteam/RTX @ 9485431`, `code/ARAX/test/`, MIT, see `LICENSE.RTX`).
+The exception is `test_ARAX_xcrg_connect.py`, taken verbatim from upstream's
+`trapi2.0` branch (`3d4ce77`), where it is already TRAPI 2.0 and tests the
+catrax-xcrg package API the port now uses (DEC-25).
 `upstream_alias.py` resolves their imports (`ARAX_query`,
 `Expand.expand_utilities`, `openapi_server.models.*`, `node_synonymizer`, ...)
 to the port's modules under `shepherd_utils/arax/`, so the same tests exercise

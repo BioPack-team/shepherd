@@ -92,16 +92,19 @@ EXPECTED_DIFFERENCES["val_no_edges_or_paths"] = {
     "envelope",
     "logs",
 }
-# DEC-21: connect(action=xcrg) runs the vendored xCRG at catrax-xcrg's latest
-# commit, not the one upstream's goldens were recorded with: it ranks the same
-# answers with its new ranker, sends its TF batches concurrently and logs
-# differently; see test_xcrg_answers_are_upstreams_reranked
+# DEC-25: connect(action=xcrg) runs catrax-xcrg 1.0.1.dev2, not the xCRG
+# upstream's goldens were recorded with: it ranks the same answers with its new
+# ranker, sends its TF batches concurrently and logs differently; see
+# test_xcrg_answers_are_upstreams_reranked
 EXPECTED_DIFFERENCES["mvp2_xcrg_route"] = {"envelope", "logs", "requests"}
 # D-25 fix: a TRAPI qnode's name is resolved to ids, so the query runs instead of
 # failing with QueryGraphNoIds; see test_trapi_qnode_name_runs_as_araxi_name_does
 EXPECTED_DIFFERENCES["trapi_qnode_name"] = set(FIELDS)
 # Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
-XFAIL = {}
+XFAIL = {
+    "mvp2_xcrg_route": "BioPack-team/shepherd#276: catrax-xcrg 1.0.1.dev2 fails "
+    "on the NaN p_value in the mock Retriever's answer (strict JSON parse)",
+}
 
 
 def _upstream_view(field, value):
@@ -222,8 +225,9 @@ def _xcrg_requests(requests):
     return sorted(_sort_ids(requests), key=lambda r: json.dumps(r, sort_keys=True))
 
 
+@pytest.mark.xfail(strict=True, reason=XFAIL["mvp2_xcrg_route"])
 def test_xcrg_answers_are_upstreams_reranked(outputs):
-    """DEC-21: the latest xCRG finds upstream's answers, with the same evidence,
+    """DEC-25: catrax-xcrg finds upstream's answers, with the same evidence,
     support graphs and Retriever lookups; only its ranking (and so the result
     order and scores) and its logs differ."""
     upstream, port = outputs
