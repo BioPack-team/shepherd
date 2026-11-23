@@ -18,10 +18,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__))+"/../ARAXQuery")
 from ARAX_filter_kg import ARAXFilterKG
 from ARAX_query import ARAXQuery
 from ARAX_response import ARAXResponse
+from Filter_KG.remove_nodes import RemoveNodes  # upstream trapi2.0 (56da024c): for test_remove_general_concept_nodes_attribute_shapes
 
 PACKAGE_PARENT = '../../UI/OpenAPI/python-flask-server'
 sys.path.append(os.path.normpath(os.path.join(os.getcwd(), PACKAGE_PARENT)))
+from openapi_server.models.attribute import Attribute  # upstream trapi2.0 (56da024c)
 from openapi_server.models.edge import Edge
+from openapi_server.models.retrieval_source import RetrievalSource  # upstream trapi2.0 (56da024c)
 from openapi_server.models.node import Node
 from openapi_server.models.q_edge import QEdge
 from openapi_server.models.q_node import QNode
@@ -264,11 +267,13 @@ def  test_remove_attribute_known_attributes():
 
 @pytest.mark.slow
 def test_provided_by_filter():
+    # upstream trapi2.0 (2add4986): biolink:affects (Retriever has no entity_negatively_regulates_entity edges
+    # here), and the check is on the KG's edge.sources instead of the result counts
     query = {"operations": {"actions": [
         "create_message",
         "add_qnode(ids=CHEBI:17754, categories=biolink:ChemicalEntity, key=n0)",
         "add_qnode(categories=biolink:Gene, key=n1)",
-        "add_qedge(subject=n1, object=n0, key=e0,predicates=biolink:entity_negatively_regulates_entity)",
+        "add_qedge(subject=n1, object=n0, key=e0,predicates=biolink:affects)",
         "expand(kp=infores:retriever)",
         "filter_kg(action=remove_edges_by_discrete_attribute,edge_attribute=knowledge_source,value=infores:semmeddb,remove_connected_nodes=false)",
         "resultify()",
@@ -277,13 +282,12 @@ def test_provided_by_filter():
         ]}}
     [response, message] = _do_arax_query(query)
     assert response.status == 'OK'
-    count1 = len(message.results)
-    assert count1 == 0
+    filtered_edges = message.knowledge_graph.edges
     query = {"operations": {"actions": [
         "create_message",
         "add_qnode(ids=CHEBI:17754, categories=biolink:ChemicalEntity, key=n0)",
         "add_qnode(categories=biolink:Gene, key=n1)",
-        "add_qedge(subject=n1, object=n0, key=e0,predicates=biolink:entity_negatively_regulates_entity)",
+        "add_qedge(subject=n1, object=n0, key=e0,predicates=biolink:affects)",
         "expand(kp=infores:retriever)",
         #"filter_kg(action=remove_edges_by_discrete_attribute,edge_attribute=biolink:original_source,value=infores:semmeddb,remove_connected_nodes=false)",
         "resultify()",
@@ -292,8 +296,14 @@ def test_provided_by_filter():
         ]}}
     [response, message] = _do_arax_query(query)
     assert response.status == 'OK'
-    count2 = len(message.results)
-    assert count2 > count1
+    unfiltered_edges = message.knowledge_graph.edges
+
+    # Every gene-glycerol pair here also has a non-SemMedDB edge, so the filter removes edges but not results
+    def _has_semmeddb_source(edge) -> bool:
+        return any(source.resource_id == "infores:semmeddb" for source in edge.sources or [])
+    assert any(_has_semmeddb_source(edge) for edge in unfiltered_edges.values())
+    assert not any(_has_semmeddb_source(edge) for edge in filtered_edges.values())
+    assert len(filtered_edges) < len(unfiltered_edges)
 
 @pytest.mark.external
 @pytest.mark.slow
@@ -339,6 +349,45 @@ def test_tuple_bug():
         ]}}
     [response, message] = _do_arax_query(query)
     assert response.status == 'OK'
+
+
+# upstream trapi2.0 (56da024c, #2909): new test
+def _make_node_attribute(name: str, value: list[str], typed: bool) -> Attribute:
+    # Retriever has sent node attributes both as typed attributes and as a generic
+    # biolink:Attribute that carries the name in original_attribute_name (#2841)
+    if typed:
+        return Attribute(attribute_type_id=f"biolink:{name}", value=value)
+    return Attribute(attribute_type_id="biolink:Attribute", original_attribute_name=name, value=value)
+
+
+@pytest.mark.parametrize("typed", [True, False], ids=["typed", "generic"])
+@pytest.mark.parametrize("attribute_name", ["equivalent_identifiers", "xref", "same_as"])
+def test_remove_general_concept_nodes_attribute_shapes(attribute_name: str, typed: bool):
+    # UMLS:C0242912 (Neuroprotective Agents) is blocklisted; the node name is not,
+    # so the node can only be caught through its identifier attribute
+    general = Node(name="test general concept", categories=["biolink:ChemicalEntity"],
+                   attributes=[_make_node_attribute(attribute_name, ["UMLS:C0242912"], typed)])
+    specific = Node(name="Bivalirudin", categories=["biolink:ChemicalEntity"],
+                    attributes=[_make_node_attribute(attribute_name, ["CHEBI:59173"], typed)])
+    gene = Node(name="F2", categories=["biolink:Gene"], attributes=[])
+    message = Message(
+        query_graph=QueryGraph(nodes={"n0": QNode(), "n1": QNode()},
+                               edges={"e0": QEdge(subject="n0", object="n1")}),
+        knowledge_graph=KnowledgeGraph(
+            nodes={"UMLS:C0242912": general, "CHEBI:59173": specific, "NCBIGene:2147": gene},
+            edges={"e_general": Edge(subject="UMLS:C0242912", object="NCBIGene:2147", predicate="biolink:affects",
+                                     sources=[RetrievalSource(resource_id="infores:arax", resource_role="primary_knowledge_source")],
+                                     knowledge_level="not_provided", agent_type="not_provided"),
+                   "e_specific": Edge(subject="CHEBI:59173", object="NCBIGene:2147", predicate="biolink:affects",
+                                      sources=[RetrievalSource(resource_id="infores:arax", resource_role="primary_knowledge_source")],
+                                      knowledge_level="not_provided", agent_type="not_provided")}))
+
+    response = RemoveNodes(ARAXResponse(), message, {}).remove_general_concept_nodes()
+
+    assert response.status == 'OK'
+    assert set(message.knowledge_graph.nodes) == {"CHEBI:59173", "NCBIGene:2147"}
+    assert set(message.knowledge_graph.edges) == {"e_specific"}
+
 
 if __name__ == "__main__":
     pytest.main(['-v'])

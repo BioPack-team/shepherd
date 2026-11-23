@@ -8,6 +8,10 @@
 #   - one QueryGraph class: a pathfinder QG is detected by paths-without-edges
 #   - from upstream trapi2.0 (9782bf6a, 16f5cb79): QNode has no is_set; qnode_is_set() /
 #     set_qnode_is_set() read and write set_interpretation == "COLLATE" (DEC-24)
+#   - from upstream trapi2.0 (b5d02852, #2904): NodeBinding/EdgeBinding ids are sorted (the order
+#     no longer depends on the hash seed)
+#   - from upstream trapi2.0 (2f78aa95): analyze_message_get_referenced_IDs takes
+#     apply_both_endpoints_rule (default True); result_transformer's final cleanup passes False
 # See docs/ARAX_PORT_BASELINE.md (DEC-1, DEC-14) and shepherd_utils/arax/README.md.
 '''This module defines the `ARAXResultify` class whose `_resultify` method
 enumerates subgraphs of a kowledge graph (KG) that match a pattern set by a
@@ -210,8 +214,15 @@ def _extract_aux_graph_contents(
 
 def analyze_message_get_referenced_IDs(
         message: Message,
-        log: ARAXResponse
+        log: ARAXResponse,
+        apply_both_endpoints_rule: bool = True
 ) -> tuple[set[str], set[str], set[str], set[int]]:
+    """Return the IDs of the KG nodes, KG edges, aux graphs and results that the message's results reference.
+
+    apply_both_endpoints_rule: when True (the default), a KG edge whose subject and object are both
+    referenced also counts as referenced (rule (a) below). Pass False for the final TRAPI 2.0 cleanup,
+    which must drop any KG edge that no result or support graph references.
+    """
     kg = message.knowledge_graph
     if kg is None:
         log.error("Message has no knowledge graph; returning")
@@ -453,7 +464,8 @@ def analyze_message_get_referenced_IDs(
             if not hasattr(edge, 'object') or edge.object is None:
                 log.warning(f"KG edge {edge_id} has no object; skipping")
                 continue
-            if edge.subject in referenced_nodes and edge.object in referenced_nodes \
+            if apply_both_endpoints_rule \
+               and edge.subject in referenced_nodes and edge.object in referenced_nodes \
                and edge_id not in referenced_edges:
                 referenced_edges.add(edge_id)
                 added_this_round = True
@@ -1235,11 +1247,11 @@ def _get_results_for_kg_by_qg(kg: KnowledgeGraph,              # all nodes *must
         node_bindings = dict()
         for qnode_key, node_keys in result_graph['nodes'].items():
             if node_keys:
-                node_bindings[qnode_key] = NodeBinding(ids=list(node_keys))
+                node_bindings[qnode_key] = NodeBinding(ids=sorted(node_keys))
         edge_bindings = dict()
         for qedge_key, edge_keys in result_graph['edges'].items():
             if edge_keys:
-                edge_bindings[qedge_key] = EdgeBinding(ids=list(edge_keys))
+                edge_bindings[qedge_key] = EdgeBinding(ids=sorted(edge_keys))
         # Note: for an edgeless QG the analysis has no edge bindings; it is kept in memory (the
         # ranker scores it, as upstream) and dropped when the Response is finalized (ARAX_query)
         result = Result(node_bindings=node_bindings, analyses=[Analysis(resource_id=resource_id,

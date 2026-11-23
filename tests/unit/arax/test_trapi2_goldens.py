@@ -149,7 +149,7 @@ def test_arax_made_edges_get_their_2_0_levels():
     the port's values."""
     old = T.read_json_gz(T.golden_paths("query_parity")[0])
     new = T.read_json_gz(T.golden_paths("query_parity")[1])
-    seen = set()
+    seen, dropped = set(), set()
     for case, rec in old.items():
         edges = (rec["envelope"]["message"].get("knowledge_graph") or {}).get(
             "edges"
@@ -160,10 +160,16 @@ def test_arax_made_edges_get_their_2_0_levels():
             levels = T.arax_edge_levels(edge)
             if levels is None:
                 continue
+            if key not in new_edges:  # H21: no result or support graph uses it
+                dropped.add(edge["predicate"])
+                continue
             seen.add(edge["predicate"])
             got = new_edges[key]
             assert (got["knowledge_level"], got["agent_type"]) == levels, key
-    assert seen == {p for p, _ in T.ARAX_EDGE_LEVELS} | {"biolink:subclass_of"}
+    # H21: no result binds Expand's subclass_of edges (upstream 9485431 kept
+    # them by the both-endpoints rule), so none is left in an envelope
+    assert seen == {p for p, _ in T.ARAX_EDGE_LEVELS}
+    assert "biolink:subclass_of" in dropped
 
 
 def test_envelopes_declare_trapi_2():

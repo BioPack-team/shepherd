@@ -2,12 +2,17 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - TRAPI 2.0 bindings: one NodeBinding / EdgeBinding per qnode / qedge, read and
-#     rebuilt through their `ids` (a binding pruned to no ids stays in memory as an
-#     empty one, like upstream's empty list; ARAX_query drops it from the Response);
+#     rebuilt through their `ids`;
 #     AuxiliaryGraph has no `attributes` in 2.0; an Analysis left with no support graphs
 #     has none (2.0 forbids an empty support_graphs list)
 #   - from upstream trapi2.0 (74768823, #2937): the creative_DTD support-graph attribute's source
 #     is infores:arax, as for the other creative groups (was infores:arax-xdtd)
+#   - from upstream trapi2.0 (b5d02852, #2904): _prune_orphan_node_bindings skips a qnode with
+#     no binding (was a KeyError) and deletes a binding pruned to no ids; the NGD-inf filter
+#     leaves out a qedge with no surviving edges
+#   - from upstream trapi2.0 (2f78aa95): the final KG cleanup passes
+#     apply_both_endpoints_rule=False, so a KG edge that no result or support graph references
+#     is dropped even when both its nodes are referenced (DEC-31)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import os
 import sys
@@ -22,6 +27,25 @@ from shepherd_utils.arax.openapi_server.models.edge import Edge
 from shepherd_utils.arax.openapi_server.models.edge_binding import EdgeBinding
 from shepherd_utils.arax.openapi_server.models.node_binding import NodeBinding
 from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
+
+
+def _prune_orphan_node_bindings(node_bindings: dict, edge_bindings: dict, qnode_keys: set[str], kg_edges: dict[str, Edge]) -> None:
+    """
+    For each of the given qnode keys, removes node ids that are not the subject or object of any edge bound in
+    edge_bindings. In TRAPI 2.0 a NodeBinding's 'ids' may not be empty, so a binding left with no ids is deleted.
+    """
+    node_keys_used_by_result_edges = {node_key for edge_binding in edge_bindings.values()
+                                      for edge_key in edge_binding.ids
+                                      for node_key in (kg_edges[edge_key].subject, kg_edges[edge_key].object)}
+    for qnode_key in qnode_keys:
+        node_binding = node_bindings.get(qnode_key)
+        if node_binding is None:
+            continue
+        non_orphan_node_keys = [node_key for node_key in node_binding.ids if node_key in node_keys_used_by_result_edges]
+        if non_orphan_node_keys:
+            node_binding.ids = non_orphan_node_keys
+        else:
+            del node_bindings[qnode_key]
 
 
 def _support_graph_breaks_without_inf_ngd(
@@ -210,17 +234,8 @@ class ResultTransformer:
                 del node_bindings[virtual_qnode_key]
 
             # Delete bindings for any subclass parent nodes that are now orphans (they'll still be in the KG)
-            qedge_keys_in_result = set(first_analysis.edge_bindings)  # May not include 'optional' edges in QG
-            for non_orphan_qnode_key in non_orphan_qnode_keys:
-                node_keys = set(node_bindings[non_orphan_qnode_key].ids)
-                node_keys_used_by_result_edges = {node_key for qedge_key in qedge_keys_in_result
-                                                  for edge_id in first_analysis.edge_bindings[qedge_key].ids
-                                                  for node_key in {kg_edges[edge_id].subject,
-                                                                   kg_edges[edge_id].object}}
-                orphan_node_keys = node_keys.difference(node_keys_used_by_result_edges)
-                non_orphan_node_ids = [node_id for node_id in node_bindings[non_orphan_qnode_key].ids
-                                       if node_id not in orphan_node_keys]
-                node_bindings[non_orphan_qnode_key] = NodeBinding(ids=non_orphan_node_ids)
+            # (edge_bindings may not include 'optional' edges in QG)
+            _prune_orphan_node_bindings(node_bindings, first_analysis.edge_bindings, non_orphan_qnode_keys, kg_edges)
 
 
             # Creative-mode-only NGD-inf filter.
@@ -271,9 +286,14 @@ class ResultTransformer:
                                 excludable_edge_ids.add(binding_id)
                                 break
 
-                # Tentatively prune excludable bindings from every qedge
-                surviving_bindings = {qk: EdgeBinding(ids=[i for i in b.ids if i not in excludable_edge_ids])
-                                      for qk, b in first_analysis.edge_bindings.items()}
+                # Tentatively prune excludable bindings from every qedge (TRAPI 2.0 EdgeBinding 'ids' may not
+                # be empty, so a qedge with no surviving edges is left out)
+                surviving_bindings = {}
+                for qk, edge_binding in first_analysis.edge_bindings.items():
+                    surviving_edge_ids = [edge_id for edge_id in edge_binding.ids
+                                          if edge_id not in excludable_edge_ids]
+                    if surviving_edge_ids:
+                        surviving_bindings[qk] = EdgeBinding(ids=surviving_edge_ids)
 
                 # Cover check: drop the result if any original qedge has no
                 # surviving binding (then it no longer answers the user's QG)
@@ -283,18 +303,7 @@ class ResultTransformer:
                 first_analysis.edge_bindings = surviving_bindings
 
                 # Re-prune any node bindings that no surviving edge references
-                qedge_keys_after_filter = set(surviving_bindings)
-                for non_orphan_qnode_key in non_orphan_qnode_keys:
-                    node_keys = set(node_bindings[non_orphan_qnode_key].ids)
-                    node_keys_used = {nk
-                                      for qk in qedge_keys_after_filter
-                                      for binding_id in surviving_bindings[qk].ids
-                                      for nk in (kg_edges[binding_id].subject,
-                                                 kg_edges[binding_id].object)}
-                    orphan_node_keys = node_keys - node_keys_used
-                    node_bindings[non_orphan_qnode_key] = NodeBinding(ids=[
-                        node_id for node_id in node_bindings[non_orphan_qnode_key].ids
-                        if node_id not in orphan_node_keys])
+                _prune_orphan_node_bindings(node_bindings, surviving_bindings, non_orphan_qnode_keys, kg_edges)
 
                 new_results.append(result)
             else:
@@ -318,9 +327,11 @@ class ResultTransformer:
         # shared resultify helper to compute the live reference closure
         # (following both `biolink:support_graphs` attributes on KG edges and
         # `Analysis.support_graphs` on results), then rebuild the KG and aux
-        # graphs to contain only what is reachable.
+        # graphs to contain only what is reachable. The "both-endpoints rule" is
+        # turned off here: TRAPI 2.0 forbids KG edges that no result or support
+        # graph references, even if both of their nodes are referenced.
         ref_nodes, ref_edges, ref_aux_graphs, _ref_results = \
-            analyze_message_get_referenced_IDs(message, response)
+            analyze_message_get_referenced_IDs(message, response, apply_both_endpoints_rule=False)
         message.knowledge_graph = KnowledgeGraph(
             {nid: n for nid, n in message.knowledge_graph.nodes.items()
              if nid in ref_nodes},

@@ -143,6 +143,19 @@ Hand rules on top (what TOM does not own):
     leave empty is dropped. (Expand also widens a qedge's
     ``constraints.agent_type.values`` with their Biolink AgentTypeEnum
     subtypes; no recorded case has an agent_type constraint.)
+  - H20 ``row_data`` has no nulls (upstream ``trapi2.0`` b5d02852, #2904):
+    TRAPI 2.0 forbids ``null`` there, so the ranker writes a missing score,
+    essence or essence_category as ``""``, in every envelope ARAX made
+    (query_parity).
+  - H21 the final KG cleanup drops every KG edge no result or support graph
+    references (upstream ``trapi2.0`` 2f78aa95: ResultTransformer passes
+    ``apply_both_endpoints_rule=False``). Upstream 9485431 also kept an edge
+    whose subject and object were both referenced. In every query_parity
+    envelope whose logs show the cleanup ran (``TRANSFORM_DONE``), the KG nodes,
+    KG edges and aux graphs are cut to what the results reach: their node and
+    edge bindings, the endpoints of bound edges, and, transitively, the aux
+    graphs named by an analysis's ``support_graphs`` or a reached edge's
+    ``biolink:support_graphs`` attribute, with their edges and endpoints.
   - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
     ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
     ``has_jaccard_index_with``).
@@ -654,6 +667,91 @@ def _data_release_versions(envelope: Any) -> None:
         envelope["data_release_versions"] = {"infores:arax": ARAX_TIER0_BUILD}
 
 
+def _row_data_strings(envelope: Any) -> None:
+    """H20 on one envelope ARAX made, in place: no null in ``row_data``."""
+    message = (envelope or {}).get("message") if isinstance(envelope, dict) else None
+    for result in (message or {}).get("results") or []:
+        if isinstance(result.get("row_data"), list):
+            result["row_data"] = ["" if v is None else v for v in result["row_data"]]
+
+
+# H21: the INFO line ResultTransformer.transform logs once its KG cleanup ran
+TRANSFORM_DONE = (
+    "Done transforming results to TRAPI 1.5 format (i.e., using support_graphs)"
+)
+
+
+def _support_graph_keys(edge: dict) -> list:
+    return [
+        str(v)
+        for a in edge.get("attributes") or []
+        if a.get("attribute_type_id") == "biolink:support_graphs"
+        for v in (a.get("value") or [])
+        if v is not None
+    ]
+
+
+def _referenced_without_both_endpoints(message: dict) -> tuple:
+    """H21: (nodes, edges, aux graphs) the results reach through bindings and
+    support graphs, transitively (ARAX_resultify.analyze_message_get_referenced_IDs
+    with apply_both_endpoints_rule=False)."""
+    kg_nodes = message["knowledge_graph"].get("nodes") or {}
+    kg_edges = message["knowledge_graph"].get("edges") or {}
+    aux_graphs = message.get("auxiliary_graphs") or {}
+    nodes, edges, aux, worklist = set(), set(), set(), []
+    for result in message.get("results") or []:
+        for binding in (result.get("node_bindings") or {}).values():
+            nodes.update(binding["ids"])
+        for analysis in result.get("analyses") or []:
+            worklist.extend(analysis.get("support_graphs") or [])
+            for binding in (analysis.get("edge_bindings") or {}).values():
+                for edge_id in binding["ids"]:
+                    edges.add(edge_id)
+                    nodes.update(
+                        (kg_edges[edge_id]["subject"], kg_edges[edge_id]["object"])
+                    )
+    while True:
+        for edge_id in list(edges):
+            worklist.extend(_support_graph_keys(kg_edges[edge_id]))
+        grown = False
+        for aux_id in worklist:
+            if aux_id in aux or aux_id not in aux_graphs:
+                continue
+            aux_edges = aux_graphs[aux_id].get("edges") or []
+            if not all(
+                e in kg_edges
+                and kg_edges[e]["subject"] in kg_nodes
+                and kg_edges[e]["object"] in kg_nodes
+                for e in aux_edges
+            ):
+                continue  # ARAX skips a broken aux graph entirely
+            aux.add(aux_id)
+            for e in aux_edges:
+                if e not in edges:
+                    edges.add(e)
+                    grown = True
+                nodes.update((kg_edges[e]["subject"], kg_edges[e]["object"]))
+        worklist = []
+        if not grown:
+            return nodes, edges, aux
+
+
+def _drop_unreferenced(envelope: dict, logs: list) -> None:
+    """H21 on one envelope ARAX made, in place: the final KG cleanup keeps only
+    what a result or support graph references (no both-endpoints rule)."""
+    if not any(entry[2] == TRANSFORM_DONE for entry in logs):
+        return
+    message = envelope["message"]
+    nodes, edges, aux = _referenced_without_both_endpoints(message)
+    kg = message["knowledge_graph"]
+    kg["nodes"] = {k: v for k, v in (kg.get("nodes") or {}).items() if k in nodes}
+    kg["edges"] = {k: v for k, v in (kg.get("edges") or {}).items() if k in edges}
+    if "auxiliary_graphs" in message:
+        message["auxiliary_graphs"] = {
+            k: v for k, v in message["auxiliary_graphs"].items() if k in aux
+        }
+
+
 def _qg_sets(qg: Any, sent: bool) -> None:
     """H14 on one query graph, in place. ``sent``: a graph ARAX sends to a KP."""
     if not isinstance(qg, dict):
@@ -810,6 +908,8 @@ def query_goldens(g16: dict) -> dict:
         new["logs"] = _precomputed_ngd_logs(new["logs"], precomputed)
         new["envelope"] = _xdtd_build(new["envelope"])  # H17
         _data_release_versions(new["envelope"])  # H18
+        _row_data_strings(new["envelope"])  # H20
+        _drop_unreferenced(new["envelope"], new["logs"])  # H21
         plan = (new["envelope"].get("query_options") or {}).get("query_plan")
         if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
             for graph in _sent_graphs(new["requests"], plan):

@@ -13,11 +13,11 @@ Three kinds of test, all in `tests/unit/` and run in CI:
 | Kind | What it compares | Where |
 |---|---|---|
 | **Upstream parity** | The port against goldens recorded by running **upstream ARAX's own code** (RTXteam/RTX @ 9485431) on the same inputs: a mock Retriever, synthetic data files, and deterministic stand-ins for NodeNorm, COHD's web lookup and NCBI eUtils. Upstream ran on TRAPI 1.6; those records are kept (`goldens_trapi16.json.gz`) and the goldens the port is compared with are their TRAPI 2.0 translation, derived offline by `trapi2_goldens.py` (DEC-20). Every field is compared: status, message, envelope, log lines, and every request sent to the KP. The port may differ only where a recorded decision says so, and each such difference is pinned by its own test. | `arax/test_query_parity.py` (75 end-to-end `ARAXQuery` cases), `arax/test_expand_parity.py` (37), `arax/test_response_parity.py` (28 `/response/{id}` lookups), `arax/test_aux_parity.py` (meta-KG and autocomplete) |
-| **Upstream's own test suite** | Upstream's `code/ARAX/test/*.py`, run against the port through an import shim, adapted to TRAPI 2.0 only at `# TRAPI 2.0:` markers (DEC-20). | `arax/upstream_suite/` (321 tests) |
+| **Upstream's own test suite** | Upstream's `code/ARAX/test/*.py`, run against the port through an import shim, adapted to TRAPI 2.0 only at `# TRAPI 2.0:` markers (DEC-20). | `arax/upstream_suite/` (327 tests) |
 | **Shepherd-side tests** | The pieces that are Shepherd's own: the worker, the server's `/arax` routes, the KP cache store, the data files. | `arax/test_trapi_query_cacher.py`, `test_arax.py`, `test_arax_api.py`, `arax/test_ARAX_connect.py`, `arax/test_mock_data.py` |
 
-Upstream's suite has 321 tests. Offline, 81 of them pass on upstream ARAX
-itself, and those 81 pass on the port. Two more are the port's recorded
+Upstream's suite has 327 tests. Offline, 87 of them pass on upstream ARAX
+itself, and those 87 pass on the port. Two more are the port's recorded
 DEC-4 difference and run as strict xfails. The other 238 need the Translator
 services or ARAX's real databases on upstream too. Running them is the live
 check (see [Needs live services](#needs-live-services)).

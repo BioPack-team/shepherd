@@ -1,5 +1,11 @@
 test_ARAX_expand.py::test_xdtd_no_curies
 test_ARAX_filter_kg.py::test_command_definitions
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[equivalent_identifiers-generic]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[equivalent_identifiers-typed]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[same_as-generic]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[same_as-typed]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[xref-generic]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[xref-typed]
 test_ARAX_filter_results.py::test_command_definitions
 test_ARAX_infer.py::test_xdtd_with_qg
 test_ARAX_messenger.py::test_add_qedge_duplicate_key

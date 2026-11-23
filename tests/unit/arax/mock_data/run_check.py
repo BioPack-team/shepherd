@@ -171,6 +171,21 @@ message = {
     "knowledge_graph": {"nodes": kg_nodes, "edges": kg_edges},
     "results": results,
 }
+# The overlays' virtual edges are bound by no result (there is no resultify after
+# them), so the final TRAPI 2.0 KG cleanup drops them (upstream trapi2.0: no
+# unreferenced KG edges). Read them from the KG the result transformer is given.
+from shepherd_utils.arax.result_transformer import ResultTransformer  # noqa: E402
+
+_transform = ResultTransformer.transform
+kg_before_cleanup = {}
+
+
+def _recording_transform(response):
+    kg_before_cleanup.update(response.envelope.message.knowledge_graph.to_dict())
+    return _transform(response)
+
+
+ResultTransformer.transform = staticmethod(_recording_transform)
 response, out_message = run(
     [
         "overlay(action=compute_ngd, virtual_relation_label=N1, subject_qnode_key=n0, object_qnode_key=n1)",
@@ -179,6 +194,8 @@ response, out_message = run(
     ],
     message,
 )
+ResultTransformer.transform = staticmethod(_transform)
+out_message = dict(out_message, knowledge_graph=kg_before_cleanup)
 overlays = {
     "status": response.status,
     "problems": problems(response),

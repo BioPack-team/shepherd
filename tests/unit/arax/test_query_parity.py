@@ -135,11 +135,31 @@ for _case in SUPPORT_EDGE_QEDGE_KEYS_CRASH:
 EXCLUDE_SWEEP = ("araxi_exclude", "trapi_exclude")
 for _case in EXCLUDE_SWEEP:
     EXPECTED_DIFFERENCES[_case] = {"logs"}
+# Upstream trapi2.0 (b5d02852, #2904; sync item 26): ResultTransformer's
+# orphan-binding prune skips a qnode with no binding (a result whose optional
+# group did not match), where upstream 9485431 raised KeyError: 'n2' out of
+# ARAXQuery.query. These queries now complete; the KP requests (sent before the
+# crash) are compared. See test_optional_group_results_without_a_binding_complete
+OPTIONAL_GROUP_PRUNE_CRASH = ("optional_group_query", "araxi_is_set_and_option_group")
+for _case in OPTIONAL_GROUP_PRUNE_CRASH:
+    EXPECTED_DIFFERENCES[_case] = set(FIELDS) - {"requests"}
 # Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
 XFAIL = {
     "mvp2_xcrg_route": "BioPack-team/shepherd#276: catrax-xcrg 1.0.1.dev2 fails "
     "on the NaN p_value in the mock Retriever's answer (strict JSON parse)",
 }
+
+
+def _sort_aux_graph_edges(envelope):
+    """An aux graph's ``edges`` are a set ResultTransformer lists in set order
+    (``list(group_edge_keys)``, upstream too), and that order changes with the
+    order the set was filled in: upstream trapi2.0 (sync item 24) sorts the
+    binding ids it is filled from. Compare them order-insensitively."""
+    message = envelope.get("message") if isinstance(envelope, dict) else None
+    for aux_graph in ((message or {}).get("auxiliary_graphs") or {}).values():
+        if isinstance(aux_graph.get("edges"), list):
+            aux_graph["edges"] = sorted(aux_graph["edges"])
+    return envelope
 
 
 def _upstream_view(field, value):
@@ -186,6 +206,8 @@ def test_query_matches_upstream(outputs, case):
         want, got = _upstream_view(field, upstream[case][field]), port[case][field]
         if field in ("requests", "envelope"):
             want, got = _sort_ids(want), _sort_ids(got)
+        if field == "envelope":
+            want, got = _sort_aux_graph_edges(want), _sort_aux_graph_edges(got)
         diff = _first_diff(want, got, field)
         assert diff is None, f"{case}: differs from upstream ARAX at {diff}"
 
@@ -424,3 +446,22 @@ def test_exclude_sweeps_orphan_nodes_and_support_graphs(outputs, case):
     at = want.index(dropped[0])
     assert want[at : at + 3] == dropped
     assert port[case]["logs"] == want[:at] + added + want[at + 3 :]
+
+
+@pytest.mark.parametrize("case", OPTIONAL_GROUP_PRUNE_CRASH)
+def test_optional_group_results_without_a_binding_complete(outputs, case):
+    """Upstream trapi2.0 (b5d02852, sync item 26): a result whose optional
+    group did not match has no binding for the group's qnode; ResultTransformer
+    skips it instead of raising KeyError, as upstream 9485431 did."""
+    upstream, port = outputs
+    assert upstream[case]["exception"] == "KeyError: 'n2'"
+    rec = port[case]
+    assert rec["exception"] is None
+    assert rec["status"] == "OK", rec["message"]
+    results = rec["envelope"]["message"]["results"]
+    assert {"n0", "n1"} <= set(results[-1]["node_bindings"])
+    without_n2 = [r for r in results if "n2" not in r["node_bindings"]]
+    assert without_n2 and all(
+        set(r["analyses"][0]["edge_bindings"]) == {"e0"} for r in without_n2
+    )
+    assert any("n2" in r["node_bindings"] for r in results)

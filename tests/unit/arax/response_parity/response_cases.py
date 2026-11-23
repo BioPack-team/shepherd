@@ -15,9 +15,9 @@ primary_knowledge_source attribute) and k2 (no provenance) have no
 documents it did not write, and are deliberately left so.
 """
 
-import gzip
 import json
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PK = "0b6a7f2c-7c3e-4ab0-9a55-1d2c3e4f5a6b"
@@ -26,19 +26,25 @@ PK_404 = "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a"
 
 
 def _arax_envelope():
-    """A real ARAX response: one from the query parity goldens."""
-    path = os.path.join(HERE, "..", "query_parity", "goldens.json.gz")
-    with gzip.open(path, "rt") as f:
-        env = json.load(f)["tpl_one_hop_classic"]["envelope"]
-    # as upstream recorded it, before data_release_versions (trapi2_goldens H18)
-    env.pop("data_release_versions", None)
+    """A real ARAX response: one upstream recorded in the query parity goldens,
+    translated as every stored document is (trapi2_goldens.response_case; the
+    query parity golden itself also carries the rules for what the port's ARAX
+    changes, e.g. H18, H20 and H21)."""
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    import trapi2_goldens as T
+
+    path = T.golden_paths("query_parity")[0]
+    env = T.read_json_gz(path)["tpl_one_hop_classic"]["envelope"]
     env["logs"] = [
         {
-            "timestamp": "2026-01-01T00:00:00Z",
+            "code": None,
+            "timestamp": "2026-01-01T00:00:00",
             "level": "INFO",
             "message": "m",
         }
     ]
+    env = T.response_lookup(env)
+    env["logs"][0]["timestamp"] += "Z"  # 2.0 timestamps carry an offset
     return env
 
 

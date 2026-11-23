@@ -281,6 +281,19 @@ Status (2026-11-23):
   keeps DEC-7's limits, Shepherd's Retriever and rehydrate URLs, and the tier0 info-for-overlay file
   it already used (`get_kg2c_db_path` is now `get_info_for_overlay_db_path`). Upstream's otel spans
   around `get_paths` are not taken. No goldens change (Connect is not a parity target, DEC-7).
+- **Items 24-29** done (resultify, result transformer, ranker, filters). Item 24 changes no golden
+  (the parity tests compare binding ids sorted); it changes the set order of ResultTransformer's aux
+  graph `edges`, which `test_query_parity` now compares sorted too. Item 25 is DEC-31 and golden rule
+  H21: the final KG drops every edge no result or support graph references, which removes Expand's
+  `subclass_of` edges and unbound overlay and KP edges from 11 query-parity envelopes (the mock-data check
+  now reads its overlay edges before the cleanup). Item 26 lets `optional_group_query` and
+  `araxi_is_set_and_option_group` complete where upstream 9485431 raised `KeyError: 'n2'` (an
+  expected difference, pinned by `test_optional_group_results_without_a_binding_complete`). Item 27
+  is golden rule H20 and applies to both rankers (`workers/arax_rank/ranker.py` notes it departs
+  from 9485431 there). Item 28 changes no golden; upstream's new
+  `test_remove_general_concept_nodes_attribute_shapes` runs offline (87 offline upstream tests now).
+  Item 29: upstream's `test_provided_by_filter` (live-only) and `test_prune` changes are mirrored.
+  Unit tests are in `tests/unit/arax/test_results_trapi2_sync.py`.
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|
