@@ -247,15 +247,16 @@ Status (2026-11-23):
 - **D3** done (DEC-22).
 - **D4** decided: keep `parameters.timeout` as the whole-query timeout. It's a UI issue (DEC-29a).
 - **Data (items 35-37 and 43-46)** done for the ARAX files (DEC-30). Item 35 is done only in
-  `infer_utilities`; `ARAX_infer` still normalizes its curies. Item 46 (the config rename) is not
-  done. The pathfinder files (`curie_ngd`, tier0-info-for-overlay) move in a separate PR.
+  `infer_utilities`; `ARAX_infer` still normalizes its curies. Item 46 (the config rename) is done
+  below. The pathfinder files (`curie_ngd`, tier0-info-for-overlay) move in a separate PR.
 - **D9** decided: read both sources (DEC-29b). **D10** decided: keep Shepherd's (DEC-29c). **D11** decided: keep the local offset; the heartbeat now has one (DEC-29d).
 - **D5** done (DEC-24).
 - **D6** done (DEC-26). A qnode `name` is still resolved (D-25).
 - **D7** done (DEC-27).
 - **D8** done (DEC-28).
 - **Items 1-8** done (orchestration). Item 2 reads the qualifier slots from BiolinkHelper's cached
-  Biolink 4.2.5 model YAML (the parity harness ships it as `expand_parity/biolink_model_4.2.5.yaml.gz`).
+  Biolink model YAML (4.4.4 since item 47; the parity harness ships it as `expand_parity/biolink_model_4.4.4.yaml.gz`);
+  if the YAML can't be loaded, only the qualifier-type check is skipped, with a warning.
   Item 4 filters only the streamed log lines; the arax worker already filters the stored ones. Item 5
   is golden rule H18. Item 7 changes `wf_connect_knodes` (an expected difference, pinned by
   `test_connect_knodes_runs_upstream_trapi2_translation`). Item 8 reads `additional_properties` and
@@ -297,7 +298,7 @@ Status (2026-11-23):
 - **Items 31, 32, 34 and 35** done (Overlay, Infer; item 33 came with DEC-30). Item 31 reads node
   bindings with `.get()` in `overlay_utilities` (`get_node_pairs_to_overlay` too, as upstream). Item 32's
   virtual QEdge is dropped from the final QG, so no golden changes. Item 34 keeps Shepherd's sqlite path
-  setting (`kg2c_sqlite_path`, owned by the pathfinder-files PR) and calls `KPSelector(log=...)`; the
+  setting (then `kg2c_sqlite_path`, now `info_for_overlay_sqlite_path` (item 46); the file is owned by the pathfinder-files PR) and calls `KPSelector(log=...)`; the
   stand-in still accepts `kg2_mode`. Item 35 follows DEC-9: Infer uses its curies as given, with no
   NodeNorm call; the dropped "Normalized ..." lines were DEBUG, which the goldens do not record, so no
   golden rule is needed. Tests: `test_overlay_binding.py`, `test_created_edges_trapi2.py` (FET logs, COHD
@@ -315,6 +316,21 @@ Status (2026-11-23):
   Item 41 applies to every ARA (the route is shared): an ARAX query links `/arax/response/<id>`,
   any other the generic root `/response/<id>`. Item 42 changes no golden. Tests:
   `test_models_trapi2_sync.py`, `test_query_status.py`, `test_arax_api.py`.
+- **Items 46, 47 and 50** done; **item 48** not done (needs a decision). Item 46: `RTXConfiguration`'s
+  `kg2c_sqlite_path` / `tier0_sqlite_path` are `info_for_overlay_sqlite_path` (same tier0-info-for-overlay
+  file, the pathfinder's download), and `/status?mode=site_config` emits `info_for_overlay_sqlite_version`
+  instead of the two old keys; no aliases (nothing outside the port used them). Item 47: `tool_version`
+  `ARAX 2.0.0` (golden rule H23), validation against Biolink 4.4.4 (H6 extended), and ARAX's Biolink 4.4.4
+  (DEC-32, golden rule H24): the harnesses ship `expand_parity/biolink_lookup_map_4.4.4_v5.pickle` and
+  `biolink_model_4.4.4.yaml.gz` (the 4.2.5 files are gone); no parity case diverges beyond the envelope's
+  `biolink_version`. Item 48: `reasoner-validator==7.1.3` installs cleanly (no pin changes, `pip check`
+  clean; it adds bioregistry, pystow, dictdiffer, poetry-core and a few others), but its constructor
+  requires network access to `standards.ncats.io` (raises `TRAPIAccessError` otherwise; every lookup would
+  then end in the "validator crashed" FAIL result), it fetches the TRAPI schema from GitHub at run time,
+  it maps `2.0.0` to the `v2.0.0-beta2` schema, and it caps Python at `<3.13`. The translator_tom
+  stand-in (offline, final 2.0.0 schema) is kept until someone decides those are acceptable. Item 50:
+  the ranker tests (`test_arax_rank.py`, the query-parity and upstream-suite ranker cases) pass with
+  scipy 1.16.3 and with the venv's 1.17.1; `workers/arax_rank` keeps `scipy>=1.10.0` (no pin needed).
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|
