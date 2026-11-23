@@ -49,6 +49,8 @@ import sys
 from itertools import combinations
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
+
 from shepherd_utils.config import settings
 from shepherd_utils.data_download import (
     ARAX_AUTOCOMPLETE,
@@ -464,12 +466,16 @@ def _fresh_sqlite(path: str) -> sqlite3.Connection:
 
 
 def write_curie_to_pmids(path: str, pmids: Dict[str, List[int]]) -> None:
-    """curie_to_pmids(curie, pmids): pmids is a JSON list of integers."""
+    """curie_to_pmids(curie, pmids): pmids is a packed int32 blob of the sorted
+    PMIDs (the tier0-20260928 layout, DEC-30)."""
     con = _fresh_sqlite(path)
     con.execute("CREATE TABLE curie_to_pmids (curie TEXT PRIMARY KEY, pmids TEXT)")
     con.executemany(
         "INSERT INTO curie_to_pmids VALUES (?, ?)",
-        [(curie, json.dumps(ids)) for curie, ids in sorted(pmids.items())],
+        [
+            (curie, np.array(sorted(ids), dtype=np.int32).tobytes())
+            for curie, ids in sorted(pmids.items())
+        ],
     )
     con.commit()
     con.close()
@@ -712,7 +718,9 @@ def _paths(graph: MockGraph, drug: str, disease: str) -> List[List[str]]:
 
 def write_explainable_dtd(path: str, graph: MockGraph) -> None:
     """ExplainableDTD: prediction scores, explanation paths, and the node and
-    edge mapping tables (ExplianableDTD_db.py, build_mapping_db.py)."""
+    edge mapping tables (ExplianableDTD_db.py, build_mapping_db.py), in the
+    tier0-20260928 layout (DEC-30): core columns plus an ``extra_attributes``
+    JSON object holding the other KGX properties."""
     con = _fresh_sqlite(path)
     con.execute(
         "CREATE TABLE PREDICTION_SCORE_TABLE (drug_id VARCHAR(255), drug_name VARCHAR(255), disease_id VARCHAR(255), disease_name VARCHAR(255), tn_score FLOAT, tp_score FLOAT, unknown_score FLOAT)"
@@ -721,50 +729,45 @@ def write_explainable_dtd(path: str, graph: MockGraph) -> None:
         "CREATE TABLE PATH_RESULT_TABLE (drug_id VARCHAR(255), drug_name VARCHAR(255), disease_id VARCHAR(255), disease_name VARCHAR(255), path VARCHAR(255), path_score FLOAT)"
     )
     con.execute(
-        "CREATE TABLE NODE_MAPPING_TABLE (id TEXT NOT NULL, name TEXT, category TEXT, equivalent_identifiers TEXT, description TEXT, synonym TEXT, xref TEXT, chembl_natural_product TEXT, chembl_availability_type TEXT, chembl_black_box_warning TEXT)"
+        "CREATE TABLE NODE_MAPPING_TABLE (id TEXT NOT NULL, name TEXT, category TEXT, extra_attributes TEXT)"
     )
     con.execute(
-        "CREATE TABLE EDGE_MAPPING_TABLE (subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL, id TEXT, category TEXT, qualifier TEXT, publications TEXT, sources TEXT, resource_id TEXT, resource_role TEXT, knowledge_level TEXT, agent_type TEXT, stage_qualifier TEXT, original_subject TEXT, original_object TEXT, extra_attributes TEXT)"
+        "CREATE TABLE EDGE_MAPPING_TABLE (subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL, id TEXT, category TEXT, extra_attributes TEXT)"
     )
     for curie in sorted(graph.nodes):
         node = graph.nodes[curie]
         con.execute(
-            "INSERT INTO NODE_MAPPING_TABLE VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO NODE_MAPPING_TABLE VALUES (?,?,?,?)",
             (
                 curie,
                 node["name"],
                 json.dumps(node["categories"][:1] or ["biolink:NamedThing"]),
-                json.dumps([curie]),
-                f"Mock description of {node['name']}",
-                json.dumps([node["name"]]),
-                None,
-                None,
-                None,
-                None,
+                json.dumps(
+                    {
+                        "equivalent_identifiers": [curie],
+                        "description": f"Mock description of {node['name']}",
+                        "synonym": [node["name"]],
+                    }
+                ),
             ),
         )
     for key in sorted(graph.edges):
         edge = graph.edges[key]
-        sources = edge["sources"]
+        extras = {
+            **({"publications": edge["publications"]} if edge["publications"] else {}),
+            "sources": edge["sources"],
+            "knowledge_level": "knowledge_assertion",
+            "agent_type": "manual_agent",
+        }
         con.execute(
-            "INSERT INTO EDGE_MAPPING_TABLE VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO EDGE_MAPPING_TABLE VALUES (?,?,?,?,?,?)",
             (
                 edge["subject"],
                 edge["predicate"],
                 edge["object"],
                 key,
                 json.dumps(["biolink:Association"]),
-                None,
-                json.dumps(edge["publications"]) if edge["publications"] else None,
-                json.dumps(sources),
-                "|".join(s.get("resource_id", "") for s in sources),
-                "|".join(s.get("resource_role", "") for s in sources),
-                "knowledge_assertion",
-                "manual_agent",
-                None,
-                None,
-                None,
-                None,
+                json.dumps(extras),
             ),
         )
     drugs = sorted(c for c in graph.nodes if graph.is_drug(c))

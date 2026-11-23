@@ -108,11 +108,27 @@ Hand rules on top (what TOM does not own):
     produced (the envelope's, expand_parity ``qg``) a recorded ``is_set: true``
     becomes ``set_interpretation: COLLATE`` and ``is_set: false`` is dropped.
     The same holds for the stored ARAX documents /response serves back
-    (response_parity). In a query graph ARAX's Expand sends to Retriever
+    (response_parity), as do H16 and H17 below. In a query graph ARAX's Expand sends to Retriever
     (request bodies, the query plan's recorded queries) every id-less qnode is
     COLLATE and a qnode with ids carries neither (upstream 1.6 sent
     ``is_set: true`` for id-less and multi-id qnodes). xCRG's lookups
     (``XCRG_CASES``) copy ARAX's own query graph, so they take the first rule.
+  - H16 NGD from the precomputed curie_ngd (DEC-30, upstream ``trapi2.0``):
+    compute_ngd reads a pair's NGD from curie_ngd first. The query-parity
+    curie_ngd is the pathfinder's tier0-20260621 layout (``dbs.curie_ngd_pairs``:
+    ``[neighbor, ngd]`` pairs, rounded to 6 digits, no shared PMIDs), so for a
+    pair it holds the NGD attribute's value is that stored value, and the
+    edge has no ``publications`` / ``ngd_publications`` attribute. A pair it
+    does not hold is computed from curie_to_pmids as before. The ranker's
+    "Summary of available edge metrics" log line prints those values, so an
+    NGD minimum / maximum whose 6-digit rounding is a stored value is it.
+  - H17 xDTD on the tier0-20260928 build (DEC-30, upstream ``trapi2.0``):
+    the ``created_datetime`` of the edges Infer makes is ``2026-09-28`` (was
+    ``2026-06-28``), and xDTD's infores is ``infores:arax`` (was
+    ``infores:arax-xdtd``, #2937), in sources, attribute sources and the edge
+    keys built from them. An explanation-path edge's publications come from the
+    mapping table's ``extra_attributes`` (#2893): the attribute follows
+    ``biolink:category`` and has no ``original_attribute_name``.
   - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
     ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
     ``has_jaccard_index_with``).
@@ -490,6 +506,129 @@ def _jaccard_predicate(message: Any) -> None:
             ]
 
 
+NGD_NAME = "normalized_google_distance"
+NGD_PUBLICATIONS = ("publications", "ngd_publications")
+
+
+def _precomputed_ngd() -> dict:
+    """H16: {(curie, neighbor): ngd} of the query-parity curie_ngd."""
+    sys.path.insert(0, os.path.join(HERE, "expand_parity"))
+    sys.path.insert(0, os.path.join(HERE, "query_parity"))
+    import dbs
+
+    pmids = {c: set(p) for c, p in dbs.curie_to_pmids_rows()}
+    return {
+        (curie, neighbor): ngd
+        for curie, pairs in dbs.curie_ngd_pairs(pmids).items()
+        for neighbor, ngd in pairs
+    }
+
+
+def _precomputed_ngd_edges(message: Any, precomputed: dict) -> None:
+    """H16 on one produced message, in place."""
+    if not isinstance(message, dict):
+        return
+    for edge in ((message.get("knowledge_graph") or {}).get("edges") or {}).values():
+        attributes = edge.get("attributes") or []
+        ngd = [a for a in attributes if a.get("original_attribute_name") == NGD_NAME]
+        if not ngd:
+            continue
+        pair = (edge.get("subject"), edge.get("object"))
+        value = precomputed.get(pair, precomputed.get(pair[::-1]))
+        if value is None:
+            continue
+        for attribute in ngd:
+            attribute["value"] = str(value)
+        edge["attributes"] = [
+            a
+            for a in attributes
+            if not (
+                a.get("attribute_type_id") == "biolink:publications"
+                and a.get("original_attribute_name") in NGD_PUBLICATIONS
+            )
+        ]
+
+
+METRICS_SUMMARY = "Summary of available edge metrics: "
+
+
+def _precomputed_ngd_logs(logs: list, precomputed: dict) -> list:
+    """H16 on the ranker's edge-metrics summary log line."""
+    import ast
+
+    stored = set(precomputed.values())
+    out = []
+    for entry in logs:
+        text = entry[2] if isinstance(entry, list) and len(entry) == 3 else None
+        if isinstance(text, str) and text.startswith(METRICS_SUMMARY):
+            summary = ast.literal_eval(text[len(METRICS_SUMMARY) :])
+            ngd = summary.get(NGD_NAME)
+            if isinstance(ngd, dict):
+                for key, value in ngd.items():
+                    if isinstance(value, float) and round(value, 6) in stored:
+                        ngd[key] = round(value, 6)
+                entry = [entry[0], entry[1], f"{METRICS_SUMMARY}{summary}"]
+        out.append(entry)
+    return out
+
+
+XDTD_DATETIME = ("2026-06-28", "2026-09-28")
+XDTD_INFORES = ("infores:arax-xdtd", "infores:arax")
+
+
+def _xdtd_build(envelope: dict) -> dict:
+    """H17 on one envelope (a copy)."""
+    text = json.dumps(envelope)
+    if XDTD_INFORES[0] not in text and XDTD_DATETIME[0] not in text:
+        return envelope
+    new = json.loads(text.replace(XDTD_INFORES[0], XDTD_INFORES[1]))
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if (
+                obj.get("original_attribute_name") == "created_datetime"
+                and obj.get("value") == XDTD_DATETIME[0]
+            ):
+                obj["value"] = XDTD_DATETIME[1]
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(new)
+    edges = (new.get("message") or {}).get("knowledge_graph") or {}
+    for edge in (edges.get("edges") or {}).values():
+        attributes = edge.get("attributes") or []
+        if not attributes or attributes[0].get("original_attribute_name") != (
+            "created_datetime"
+        ):
+            continue
+        pubs = [
+            a
+            for a in attributes
+            if a.get("attribute_type_id") == "biolink:publications"
+            and a.get("original_attribute_name") == "publications"
+        ]
+        category = [
+            i
+            for i, a in enumerate(attributes)
+            if a.get("attribute_type_id") == "biolink:category"
+        ]
+        if len(pubs) != 1 or not category:
+            continue
+        (pub,) = pubs
+        rest = [a for a in attributes if a is not pub]
+        at = next(
+            i
+            for i, a in enumerate(rest)
+            if a.get("attribute_type_id") == "biolink:category"
+        )
+        pub = {k: v for k, v in pub.items() if k != "original_attribute_name"}
+        edge["attributes"] = rest[: at + 1] + [pub] + rest[at + 1 :]
+    return new
+
+
 def _qg_sets(qg: Any, sent: bool) -> None:
     """H14 on one query graph, in place. ``sent``: a graph ARAX sends to a KP."""
     if not isinstance(qg, dict):
@@ -584,6 +723,7 @@ def query_goldens(g16: dict) -> dict:
     inputs = load_inputs16("query_parity")["CASES"]
     collated = {c[0]: collated_qnodes(c) for c in inputs}
     members = {c[0]: member_ids_qnodes(c) for c in inputs}
+    precomputed = _precomputed_ngd()
     out = {}
     for case, rec in g16.items():
         new = copy.deepcopy(rec)
@@ -603,6 +743,9 @@ def query_goldens(g16: dict) -> dict:
             _add_member_ids(new, members[case])
         _qg_sets(qg, sent=False)  # H14
         _jaccard_predicate(new["envelope"]["message"])  # H15
+        _precomputed_ngd_edges(new["envelope"]["message"], precomputed)  # H16
+        new["logs"] = _precomputed_ngd_logs(new["logs"], precomputed)
+        new["envelope"] = _xdtd_build(new["envelope"])  # H17
         plan = (new["envelope"].get("query_options") or {}).get("query_plan")
         if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
             for graph in _sent_graphs(new["requests"], plan):
@@ -634,6 +777,8 @@ def response_lookup(result: Any) -> Any:
         declared = result.get("schema_version")
         new = response(result, produced=False)
         _qg_sets(new["message"].get("query_graph"), sent=False)  # H14
+        _precomputed_ngd_edges(new["message"], _precomputed_ngd())  # H16
+        new = _xdtd_build(new)  # H17
         qo = new.get("query_options")
         for graph in _sent_graphs(
             [], qo.get("query_plan") if isinstance(qo, dict) else None

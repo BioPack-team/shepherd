@@ -34,6 +34,7 @@ S.write_data(
     arax,
     arax,
     os.path.join(DATA, "pathfinder"),
+    port=True,
 )
 
 from shepherd_utils.arax.ARAX_query import ARAXQuery  # noqa: E402

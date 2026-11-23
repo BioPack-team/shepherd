@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
 from shepherd_utils import arax_mock_data as M
@@ -89,7 +90,11 @@ def test_curie_to_pmids_gives_finite_ngd_for_seed_edges(paths):
             arax_db_path(ARAX_CURIE_TO_PMIDS), "SELECT curie, pmids FROM curie_to_pmids"
         )
     )
-    pmids = {curie: set(json.loads(v)) for curie, v in rows.items()}
+    # int32 PMID blobs (the tier0-20260928 layout, DEC-30)
+    pmids = {
+        curie: set(np.frombuffer(v, dtype=np.int32).tolist())
+        for curie, v in rows.items()
+    }
     assert set(M.SEED_NODES) <= set(pmids)
     for subject, _, obj, _ in M.SEED_EDGES:
         assert pmids[subject] & pmids[obj], (subject, obj)
@@ -178,9 +183,9 @@ def test_fisher_exact_test_has_every_category(paths):
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="BioPack-team/shepherd#275: catrax-xcrg reads the tier0-20260928 "
-    "formats (curie_ngd triples, u32 PMID blobs); the mock data is in the "
-    "tier0-20260621 ones (pairs, JSON lists)",
+    reason="BioPack-team/shepherd#275: catrax-xcrg reads curie_ngd triples "
+    "(tier0-20260928); the mock curie_ngd is the pathfinder's tier0-20260621 "
+    "pairs, which move with the pathfinder files",
 )
 def test_xcrg_lookups(paths):
     from pathlib import Path

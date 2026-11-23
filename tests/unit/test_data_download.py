@@ -291,7 +291,7 @@ def test_arax_db_paths_fill_the_tier_version(tmp_path, mocker):
         tmp_path / "d" / "curie_to_pmids_v1.0_tier0-X.sqlite"
     )
     assert data_download.arax_db_path(data_download.ARAX_EXPLAINABLE_DTD) == str(
-        tmp_path / "d" / "ExplainableDTD_v1.0_tier0-X-all_with_paths.db"
+        tmp_path / "d" / "ExplainableDTD_v1.0-tier0-X-all_with_paths.db"
     )
     assert data_download.arax_db_path(data_download.ARAX_AUTOCOMPLETE) == str(
         tmp_path / "d" / "autocomplete_v1.0_tier0-X.sqlite"

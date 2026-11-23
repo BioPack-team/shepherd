@@ -246,6 +246,9 @@ Status (2026-11-23):
 - **D2** done (DEC-23).
 - **D3** done (DEC-22).
 - **D4** decided: keep `parameters.timeout` as the whole-query timeout. It's a UI issue (DEC-29a).
+- **Data (items 35-37 and 43-46)** done for the ARAX files (DEC-30). Item 35 is done only in
+  `infer_utilities`; `ARAX_infer` still normalizes its curies. Item 46 (the config rename) is not
+  done. The pathfinder files (`curie_ngd`, tier0-info-for-overlay) move in a separate PR.
 - **D9** decided: read both sources (DEC-29b). **D10** decided: keep Shepherd's (DEC-29c). **D11** decided: keep the local offset; the heartbeat now has one (DEC-29d).
 - **D5** done (DEC-24).
 - **D6** done (DEC-26). A qnode `name` is still resolved (D-25).

@@ -6,6 +6,8 @@
 #     empty one, like upstream's empty list; ARAX_query drops it from the Response);
 #     AuxiliaryGraph has no `attributes` in 2.0; an Analysis left with no support graphs
 #     has none (2.0 forbids an empty support_graphs list)
+#   - from upstream trapi2.0 (74768823, #2937): the creative_DTD support-graph attribute's source
+#     is infores:arax, as for the other creative groups (was infores:arax-xdtd)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import os
 import sys
@@ -154,14 +156,9 @@ class ResultTransformer:
                     group_id_prefix = "_".join(group_id.split("_")[:2])
 
                     # Create an attribute for the support graph that we'll tack onto the treats edge for this result
-                    if group_id_prefix == "creative_DTD":
-                        support_graph_attribute = Attribute(attribute_type_id="biolink:support_graphs",
-                                                            value=[aux_graph_key],
-                                                            attribute_source="infores:arax-xdtd")
-                    else:
-                        support_graph_attribute = Attribute(attribute_type_id="biolink:support_graphs",
-                                                            value=[aux_graph_key],
-                                                            attribute_source="infores:arax")
+                    support_graph_attribute = Attribute(attribute_type_id="biolink:support_graphs",
+                                                        value=[aux_graph_key],
+                                                        attribute_source="infores:arax")
                     # Find the 'treats' edge that this result is all about
                     inferred_qedge_keys = [qedge_key for qedge_key, qedge in response.original_query_graph.edges.items()
                                            if qedge.knowledge_type == "inferred"]

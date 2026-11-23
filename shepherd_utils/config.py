@@ -279,12 +279,14 @@ class Settings(BaseSettings):
     # for that one file (the defaults are placeholders until the real files are
     # published).
     arax_dbs_dir: str = "arax_dbs"
-    arax_tier_version: str = "tier0-20260621"
+    # tier0-20260928 (DEC-30): curie_to_pmids is int32 PMID blobs, and the
+    # ExplainableDTD mapping tables use the extra_attributes schema
+    arax_tier_version: str = "tier0-20260928"
     arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
     arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
     arax_curie_to_pmids_url: str = ""
     arax_explainable_dtd_db_filename: str = (
-        "ExplainableDTD_v1.0_{version}-all_with_paths.db"
+        "ExplainableDTD_v1.0-{version}-all_with_paths.db"
     )
     arax_explainable_dtd_url: str = ""
     arax_autocomplete_sqlite_filename: str = "autocomplete_v1.0_{version}.sqlite"
