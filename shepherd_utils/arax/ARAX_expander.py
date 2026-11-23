@@ -23,6 +23,20 @@
 #     (_handle_creative_treats_predicate_answers: no SemMedDB <10-publication pruning, no
 #     creative_expand_treats_* virtual qedge, no lumped biolink:treats edge); the querier's
 #     heuristic prediction edges remain
+#   - from upstream trapi2.0 (2f78aa95): a knowledge-source ALLOW list no longer filters the KPs
+#     queried (it would drop Retriever, so nothing was queried); it is applied only to the returned
+#     edges (_apply_knowledge_source_constraints). A DENY list still removes KPs. The lists merge
+#     constraints.sources and the knowledge_source attribute constraints (DEC-29b)
+#   - from upstream trapi2.0 (2f78aa95, de6863c3): _apply_knowledge_source_constraints removes every
+#     offending edge, not just the first (the stray breaks are gone)
+#   - from upstream trapi2.0 (2f78aa95): a qedge biolink:evidence_count attribute constraint (>, <, ==,
+#     with not) is supported, applied as a post-filter (_apply_qedge_attribute_post_filters,
+#     _edge_satisfies_numeric_constraint); the port's AttributeConstraint names its negation _not
+#   - from upstream trapi2.0 (2add4986): the unbound KG is merged only where edges still in the KG reach
+#     it through their support graphs (eu.get_support_graph_ids, transitively, both endpoints present);
+#     only the referenced aux graphs are kept, and an aux graph may cite bound edges
+#   - from upstream trapi2.0 (2add4986): _remove_dead_end_paths sweeps up the nodes no edge of their
+#     qnode's (non-exclude) qedges uses anymore after create_results
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import asyncio
 import copy
@@ -50,7 +64,7 @@ from shepherd_utils.arax.openapi_server.models.attribute_constraint import Attri
 from shepherd_utils.arax.openapi_server.models.attribute import Attribute
 from shepherd_utils.arax.openapi_server.models.retrieval_source import RetrievalSource
 from shepherd_utils.arax.openapi_server.models.auxiliary_graph import AuxiliaryGraph
-from shepherd_utils.arax.Expand.trapi_querier import TRAPIQuerier
+from shepherd_utils.arax.Expand.trapi_querier import TRAPIQuerier, ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS
 from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax.Expand.kp_selector import RETRIEVER_INFORES, SKIPPED_NOT_RETRIEVER_MESSAGE
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
@@ -80,7 +94,8 @@ class ARAXExpander:
         self.rtxc = RTXConfiguration()
         # Keep record of which constraints we support (format is: {constraint_id: {operator: {values}}})
         self.supported_qnode_attribute_constraints = {"biolink:highest_FDA_approval_status": {"==": {"regular approval"}}}
-        self.supported_qedge_attribute_constraints = {"knowledge_source": {"==": "*"},
+        self.supported_qedge_attribute_constraints = {"biolink:evidence_count": {">": "*", "<": "*", "==": "*"},
+                                                      "knowledge_source": {"==": "*"},
                                                       "primary_knowledge_source": {"==": "*"},
                                                       "aggregator_knowledge_source": {"==": "*"}}
         # NOTE: nothing in the code-base seems to reference self.supported_qedge_qualifier_constraints;
@@ -437,11 +452,11 @@ class ARAXExpander:
                 # Figure out which KPs would be best to expand this edge with (if no KP was specified)
                 if not user_specified_kp:
                     queriable_kps = set(kp_selector.get_kps_for_single_hop_qg(one_hop_qg))
-                    # remove kps if this edge has kp constraints
-                    allowlist, denylist = eu.get_knowledge_source_constraints(qedge)
+                    # remove kps if this edge's sources constraint denies them. An ALLOW list names knowledge
+                    # sources (e.g. infores:ctd), which an aggregator KP like Retriever can still provide, so
+                    # it is applied to the returned edges (_apply_knowledge_source_constraints), not to KPs
+                    _, denylist = eu.get_knowledge_source_constraints(qedge)
                     kps_to_query = queriable_kps - denylist
-                    if allowlist:
-                        kps_to_query = {kp for kp in kps_to_query if kp in allowlist}
 
                     for skipped_kp in queriable_kps.difference(kps_to_query):
                         skipped_message = "This KP was constrained by this edge"
@@ -585,6 +600,12 @@ class ARAXExpander:
                                                          overarching_kg,
                                                          log)
 
+                # Handle numeric attribute constraints (e.g. biolink:evidence_count > 5) for this qedge
+                self._apply_qedge_attribute_post_filters(qedge_key,
+                                                         message.query_graph,
+                                                         overarching_kg,
+                                                         log)
+
                 # Apply any kryptonite ("not") qedges
                 self._apply_any_kryptonite_edges(overarching_kg,
                                                  message.query_graph,
@@ -641,41 +662,56 @@ class ARAXExpander:
         log.debug(f"message KG node count before merging unbound KG: {len(kg.nodes)}; "
                   f"message KG edge count before merging unbound KG: {len(kg.edges)}")
 
-        for edge_id, edge in unbound_kg.edges.items():
-            if edge_id not in kg.edges:
-                kg.edges[edge_id] = edge
-        for node_id, node in unbound_kg.nodes.items():
-            if node_id not in kg.nodes:
-                kg.nodes[node_id] = node
+        # Only merge in the support (unbound) edges that edges still in the KG reach via their support graphs; edges
+        # and nodes removed during Expand (pruning, exclude=true, qnode constraints) would otherwise leave dangling
+        # support edges behind
+        referenced_aux_graph_ids = set()
+        edges_to_follow = list(kg.edges.values())
+        while edges_to_follow:
+            next_edges_to_follow = []
+            for edge in edges_to_follow:
+                for aux_graph_id in eu.get_support_graph_ids(edge):
+                    if aux_graph_id in referenced_aux_graph_ids or aux_graph_id not in aux_graphs_combined:
+                        continue
+                    referenced_aux_graph_ids.add(aux_graph_id)
+                    for edge_id in aux_graphs_combined[aux_graph_id].edges:
+                        unbound_edge = unbound_kg.edges.get(edge_id)
+                        if edge_id in kg.edges or unbound_edge is None:
+                            continue
+                        if all(node_id in kg.nodes or node_id in unbound_kg.nodes
+                               for node_id in (unbound_edge.subject, unbound_edge.object)):
+                            unbound_edge.qedge_keys = []
+                            kg.edges[edge_id] = unbound_edge
+                            next_edges_to_follow.append(unbound_edge)
+            edges_to_follow = next_edges_to_follow
+        for edge in list(kg.edges.values()):
+            for node_id in (edge.subject, edge.object):
+                if node_id not in kg.nodes and node_id in unbound_kg.nodes:
+                    unbound_node = unbound_kg.nodes[node_id]
+                    unbound_node.qnode_keys = []
+                    kg.nodes[node_id] = unbound_node
 
         log.debug(f"message KG node count after merging unbound KG: {len(kg.nodes)}; "
                   f"message KG edge count after merging unbound KG: {len(kg.edges)}")
 
-        # check aux graphs to see if edges are still in the KG
-        aux_graphs_delete = set()
-
-        for aux_graph_id, aux_graph_obj in aux_graphs_combined.items():
-            aux_graph_dict = aux_graph_obj.to_dict()
-            aux_graph_edges = aux_graph_dict.get("edges", [])
+        # Keep only the aux graphs that KG edges still reference, and within them only edges that are in the KG
+        num_unreferenced_aux_graphs = len(aux_graphs_combined) - len(referenced_aux_graph_ids)
+        if num_unreferenced_aux_graphs:
+            log.debug(f"Dropping {num_unreferenced_aux_graphs} aux graphs that no KG edge references anymore")
+        final_aux_graphs = {}
+        for aux_graph_id in referenced_aux_graph_ids:
+            aux_graph_dict = aux_graphs_combined[aux_graph_id].to_dict()
             aux_graph_edges_final = []
-            for edge_id in aux_graph_edges:
-                if edge_id not in unbound_kg.edges:
-                    log.warning(f"for aux graph {aux_graph_id}, edge {edge_id} is not in the KG; skipping edge")
-                else:
+            for edge_id in aux_graph_dict.get("edges", []):
+                if edge_id in kg.edges:
                     aux_graph_edges_final.append(edge_id)
+                else:
+                    log.warning(f"for aux graph {aux_graph_id}, edge {edge_id} is not in the KG; skipping edge")
             if aux_graph_edges_final:
                 aux_graph_dict["edges"] = aux_graph_edges_final
-                aux_graphs_combined[aux_graph_id] = AuxiliaryGraph.from_dict(aux_graph_dict)
-            else:
-                # slate this aux graph for deletion, since it has no edges
-                # (but don't delete it yet; don't want to modify our iterable
-                # while we are iterating over it):
-                aux_graphs_delete.add(aux_graph_id)
-        # for any aux graph that no longer has _any_ edges, delete that aux graph
-        for aux_graph_id in aux_graphs_delete:
-            aux_graphs_combined.pop(aux_graph_id, None)
+                final_aux_graphs[aux_graph_id] = AuxiliaryGraph.from_dict(aux_graph_dict)
 
-        message.auxiliary_graphs = aux_graphs_combined
+        message.auxiliary_graphs = final_aux_graphs
 
         # Per #2731: ARAX no longer back-fills missing node descriptions from
         # an OSU-built sqlite. Surface the count of bare nodes once, as a
@@ -725,17 +761,70 @@ class ARAXExpander:
                     # Don't keep edges that ONLY come from excluded sources
                     if edge_sources.issubset(denylist):
                         kedges_to_remove.append(kedge_key)
-                        break
                     # Only keep edges that come from at least ONE allowed source
                     elif allowlist and not edge_sources.intersection(allowlist):
                         kedges_to_remove.append(kedge_key)
-                        break
             if kedges_to_remove:
                 log.debug(f"Removing {len(kedges_to_remove)} edges because they do not fulfill knowledge source constraint")
                 # remove kedges which have been determined to be constrained
                 for kedge_key in kedges_to_remove:
                     if kedge_key in overarching_kg.edges_by_qg_id[qedge_key]:
                         del overarching_kg.edges_by_qg_id[qedge_key][kedge_key]
+
+
+    def _apply_qedge_attribute_post_filters(
+        self,
+        qedge_key: str,
+        query_graph: QueryGraph,
+        overarching_kg: QGOrganizedKnowledgeGraph,
+        log: ARAXResponse,
+    ) -> None:
+        """Remove edges fulfilling qedge_key that don't satisfy its numeric attribute constraints (e.g.
+        biolink:evidence_count > 5). Per TRAPI, an edge without the constrained attribute doesn't satisfy it."""
+        qedge = query_graph.edges[qedge_key]
+        attribute_constraints = (qedge.constraints.attributes if qedge.constraints else None) or []
+        constraints_to_apply = [constraint for constraint in attribute_constraints
+                                if constraint.id in ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS]
+        if not constraints_to_apply or qedge_key not in overarching_kg.edges_by_qg_id:
+            return
+        edges_for_qedge = overarching_kg.edges_by_qg_id[qedge_key]
+        edge_keys_to_remove = [edge_key for edge_key, edge in edges_for_qedge.items()
+                               if not all(self._edge_satisfies_numeric_constraint(edge, constraint)
+                                          for constraint in constraints_to_apply)]
+        for edge_key in edge_keys_to_remove:
+            del edges_for_qedge[edge_key]
+        log.info(f"Removed {len(edge_keys_to_remove)} edges fulfilling {qedge_key} that don't satisfy its attribute "
+                 f"constraints ({', '.join(f'{c.id} {c.operator} {c.value}' for c in constraints_to_apply)}); "
+                 f"{len(edges_for_qedge)} remain")
+
+    @staticmethod
+    def _edge_satisfies_numeric_constraint(edge: Edge, constraint: AttributeConstraint) -> bool:
+        def to_number(value):
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                return value
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        edge_values = [to_number(attribute.value) for attribute in (edge.attributes or [])
+                       if attribute.attribute_type_id == constraint.id]
+        edge_values = [value for value in edge_values if value is not None]
+        if not edge_values:
+            return False
+        constraint_values = constraint.value if isinstance(constraint.value, list) else [constraint.value]
+        constraint_values = [value for value in (to_number(value) for value in constraint_values) if value is not None]
+        if not constraint_values:
+            return False
+        if constraint.operator == ">":
+            satisfied = any(edge_value > value for edge_value in edge_values for value in constraint_values)
+        elif constraint.operator == "<":
+            satisfied = any(edge_value < value for edge_value in edge_values for value in constraint_values)
+        else:  # "=="
+            satisfied = any(edge_value == value for edge_value in edge_values for value in constraint_values)
+        return not satisfied if constraint._not else satisfied
 
 
     def _apply_qnode_post_filters(
@@ -1346,6 +1435,16 @@ class ARAXExpander:
         resultify_response = eu.create_results(is_set_true_qg, kg, log)
         if resultify_response.status == "OK":
             pruned_kg = eu.convert_standard_kg_to_qg_organized_kg(resultify_response.envelope.message.knowledge_graph)
+            # Resultify keeps every node of an is_set qnode it starts from, whether or not it's connected, so sweep
+            # up nodes that no edge fulfilling their qnode's qedges uses anymore (e.g., after exclude=true)
+            for qnode_key, nodes in pruned_kg.nodes_by_qg_id.items():
+                connected_qedge_keys = {qedge_key for qedge_key in eu.get_connected_qedge_keys(qnode_key, expands_qg)
+                                        if not expands_qg.edges[qedge_key].exclude and qedge_key in pruned_kg.edges_by_qg_id}
+                if connected_qedge_keys:
+                    node_keys_used = {node_key for qedge_key in connected_qedge_keys
+                                      for node_key in pruned_kg.get_node_keys_used_by_edges_fulfilling_qedge(qedge_key)}
+                    for orphan_node_key in set(nodes).difference(node_keys_used):
+                        del nodes[orphan_node_key]
         else:
             pruned_kg = QGOrganizedKnowledgeGraph()
             log.error(f"Ran into an issue trying to prune using Resultify: {resultify_response.show()}",

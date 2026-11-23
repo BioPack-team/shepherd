@@ -16,6 +16,15 @@
 #     knowledge_assertion / automated_agent; a parent node missing from the answer gets the qnode's
 #     categories (or biolink:NamedThing), as 2.0 requires one
 #   - from upstream trapi2.0 (615baff3): answer_single_node_query and its check are removed (DEC-23)
+#   - from upstream trapi2.0 (2add4986): the request body leaves out qnode
+#     biolink:highest_FDA_approval_status constraints (ARAX post-filters them)
+#   - from upstream trapi2.0 (2f78aa95): the request body leaves out qedge biolink:evidence_count
+#     attribute constraints (ARAX post-filters them; ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS), dropping
+#     emptied containers, and expands constraints.agent_type.values with their Biolink AgentTypeEnum
+#     subtypes (_expand_agent_types). Shepherd reads the enum from BiolinkHelper's cached Biolink model
+#     YAML (arax_biolink_cache_path()), not a copy beside the code
+#   - from upstream trapi2.0 (2add4986): aux graphs that cite a bound edge are re-pointed at its re-keyed
+#     ARAX edge key (kp_to_arax_edge_keys in _load_kp_json_response)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import copy
 import json
@@ -60,6 +69,50 @@ _TREATS_DESCENDANTS = frozenset(
 )
 
 UUID_NAMESPACE = uuid.UUID('31a17f10-c100-45ad-a3bb-2cccc37a8924')
+
+# Qnode constraints that ARAX applies itself after the KP answers (see ARAX_expander._apply_qnode_post_filters);
+#  these are not sent to KPs, since KPs reject queries containing constraints they don't support
+_ARAX_POST_FILTERED_QNODE_CONSTRAINT_IDS = frozenset({"biolink:highest_FDA_approval_status"})
+# Qedge attribute constraints that ARAX applies itself after the KP answers (see
+#  ARAX_expander._apply_qedge_attribute_post_filters); these are not sent to KPs either
+ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS = frozenset({"biolink:evidence_count"})
+
+
+def _expand_agent_types(agent_types: list[str]) -> list[str]:
+    """Add each agent_type's Biolink subtypes (e.g. automated_agent -> data_analysis_pipeline,
+    computational_model, ...), so an agent_type constraint also matches edges with a more specific agent_type"""
+    subtypes_by_agent_type = _get_agent_type_subtypes()
+    expanded = list(agent_types)
+    for agent_type in agent_types:
+        for subtype in subtypes_by_agent_type.get(agent_type, ()):
+            if subtype not in expanded:
+                expanded.append(subtype)
+    return expanded
+
+
+_AGENT_TYPE_SUBTYPES_CACHE: dict[str, list[str]] | None = None
+
+
+def _get_agent_type_subtypes() -> dict[str, list[str]]:
+    """{agent_type: [all of its subtypes]} from the Biolink model's AgentTypeEnum"""
+    global _AGENT_TYPE_SUBTYPES_CACHE
+    if _AGENT_TYPE_SUBTYPES_CACHE is None:
+        import yaml
+        # Shepherd: the Biolink model YAML is the one BiolinkHelper caches in arax_biolink_cache_path()
+        # (downloaded there if it is missing), not a copy beside the code
+        biolink_helper = get_biolink_helper()
+        biolink_helper.download_biolink_model()
+        with open(biolink_helper.biolink_model_file_path) as model_file:
+            permissible_values = yaml.safe_load(model_file)['enums']['AgentTypeEnum']['permissible_values']
+        parents = {value: (info or {}).get('is_a') for value, info in permissible_values.items()}
+        subtypes: dict[str, list[str]] = defaultdict(list)
+        for value in parents:
+            ancestor = parents[value]
+            while ancestor:
+                subtypes[ancestor].append(value)
+                ancestor = parents.get(ancestor)
+        _AGENT_TYPE_SUBTYPES_CACHE = dict(subtypes)
+    return _AGENT_TYPE_SUBTYPES_CACHE
 
 def _remove_attributes_with_invalid_values(response_json: dict,
                                            kp_curie: str,
@@ -524,6 +577,35 @@ class TRAPIQuerier:
         stripped_qedges = {qedge_key: self._strip_empty_properties(qedge)
                            for qedge_key, qedge in qg.edges.items()}
 
+        # Leave out constraints that ARAX applies itself after the KP answers
+        for stripped_qnode in stripped_qnodes.values():
+            if "constraints" in stripped_qnode:
+                kp_constraints = [constraint for constraint in stripped_qnode["constraints"]
+                                  if constraint.get("id") not in _ARAX_POST_FILTERED_QNODE_CONSTRAINT_IDS]
+                if kp_constraints:
+                    stripped_qnode["constraints"] = kp_constraints
+                else:
+                    del stripped_qnode["constraints"]
+
+        for stripped_qedge in stripped_qedges.values():
+            qedge_constraints = stripped_qedge.get("constraints")
+            if not isinstance(qedge_constraints, dict):
+                continue
+            # agent_type constraints also match the given agent_types' Biolink subtypes
+            agent_type_constraint = qedge_constraints.get("agent_type")
+            if isinstance(agent_type_constraint, dict) and agent_type_constraint.get("values"):
+                agent_type_constraint["values"] = _expand_agent_types(agent_type_constraint["values"])
+            # Leave out attribute constraints that ARAX applies itself after the KP answers
+            if qedge_constraints.get("attributes"):
+                kp_attribute_constraints = [constraint for constraint in qedge_constraints["attributes"]
+                                            if constraint.get("id") not in ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS]
+                if kp_attribute_constraints:
+                    qedge_constraints["attributes"] = kp_attribute_constraints
+                else:
+                    del qedge_constraints["attributes"]
+            if not qedge_constraints:
+                del stripped_qedge["constraints"]
+
         # Load the query into a JSON Query object
         json_qg = {'nodes': stripped_qnodes, 'edges': stripped_qedges}
         if not stripped_qedges:
@@ -594,6 +676,7 @@ class TRAPIQuerier:
 
         # Populate our final KG with the returned edges
         unbound_edges = {}
+        kp_to_arax_edge_keys = {}
         nodes_dict = kg.nodes or {}
         edges_dict = kg.edges or {}
         for edge_key, edge in edges_dict.items():
@@ -620,6 +703,7 @@ class TRAPIQuerier:
             arax_edge_key = self._get_arax_edge_key(edge)
 
             if edge_key in kg_to_qg_mappings['edges']:
+                kp_to_arax_edge_keys[edge_key] = arax_edge_key
                 for qedge_key in kg_to_qg_mappings['edges'][edge_key]:
                     # for each `qedge_key` to which this edge is bound,
                     # add the edge to `answer_kg` with the ARAX edge key
@@ -723,6 +807,10 @@ class TRAPIQuerier:
         for nodes in answer_kg.nodes_by_qg_id.values():
             for node_key, node in nodes.items():
                 node.query_ids = eu.convert_to_list(query_curie_mappings.get(node_key))
+
+        # Bound edges were re-keyed with ARAX edge keys above, so point aux graphs at those keys too
+        for aux_graph in aux_graphs.values():
+            aux_graph.edges = [kp_to_arax_edge_keys.get(edge_id, edge_id) for edge_id in aux_graph.edges or []]
 
         # Add subclass_of edges for any parent to child relationships KPs returned
         answer_kg = self._add_subclass_of_edges(answer_kg, qg)

@@ -5,7 +5,7 @@ Usage: PYTHONHASHSEED=0 python run_port.py OUT.json
 fixed hash seed -- the same one Shepherd's Dockerfiles pin.)
 """
 
-import json, os, shutil, sys, tempfile, warnings
+import gzip, json, os, shutil, sys, tempfile, warnings
 
 warnings.simplefilter("ignore")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +30,15 @@ shutil.copy(
     os.path.join(HERE, "biolink_lookup_map_4.2.5_v5.pickle"),
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
+# and its Biolink model YAML (AgentTypeEnum, for the agent_type_constraint case)
+with (
+    gzip.open(os.path.join(HERE, "biolink_model_4.2.5.yaml.gz")) as f_in,
+    open(
+        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.2.5.yaml"),
+        "wb",
+    ) as f_out,
+):
+    shutil.copyfileobj(f_in, f_out)
 
 import fixtures as F  # noqa: E402
 
@@ -49,11 +58,14 @@ from runner_common import run_all  # noqa: E402
 ks.get_smartapi_kp_names = lambda log: set(F.OTHER_KPS)
 F.patch_synonymizer_classes()
 
-from cases import PORT_ONLY_CASES  # noqa: E402
+from cases import PORT_ONLY_CASES, TRAPI2_PORT_ONLY_CASES  # noqa: E402
 
 out = run_all(ARAXResponse, ARAXMessenger, ARAXExpander, only=sys.argv[2:] or None)
 out["_port_only"] = run_all(
-    ARAXResponse, ARAXMessenger, ARAXExpander, cases=PORT_ONLY_CASES
+    ARAXResponse,
+    ARAXMessenger,
+    ARAXExpander,
+    cases=PORT_ONLY_CASES + TRAPI2_PORT_ONLY_CASES,
 )
 with open(sys.argv[1], "w") as f:
     json.dump(out, f, sort_keys=True, default=str)

@@ -162,9 +162,9 @@ cover more with `--arax-live`.
 
 **Found:** upstream defects that CQS-style workflows hit. The port reproduces
 them (DEC-1):
-- **D-23:** the `filter_kgraph_*` operations crash whenever the KP's answer
-  includes support-graph edges, because those edges are kept without
-  `qedge_keys`.
+- **D-23 (fixed in the port, upstream `trapi2.0` 2add4986):** the
+  `filter_kgraph_*` operations crashed whenever the KP's answer included
+  support-graph edges, because those edges were kept without `qedge_keys`.
 - **D-24:** `filter_results_top_n` with a string `max_results` fails an
   assertion.
 - **D-28 (fixed in the port):** `overlay_fisher_exact_test` (and clinical
@@ -173,10 +173,11 @@ them (DEC-1):
   bind in one pass, as upstream's NGD does, with the same bindings.
 - **D-29:** clinical info needs cohd.io at query time (curie to OMOP id
   mapping), with no timeout; when cohd.io is down, those overlays fail.
-- **D-30:** a large multi-hop answer with support graphs can leave edges in
-  the KG whose endpoint node Expand pruned, and the next action that reads
-  every edge's endpoints fails (on a three-hop lookup, the Fisher's exact test
-  in its template).
+- **D-30 (fixed in the port, upstream `trapi2.0` 2add4986):** a large
+  multi-hop answer with support graphs could leave edges in the KG whose
+  endpoint node Expand pruned, and the next action that reads every edge's
+  endpoints failed (on a three-hop lookup, the Fisher's exact test in its
+  template).
 - **D-26:** `overlay_connect_knodes` fails in Jaccard. The port's E-4 change
   removes the disabled overlay action that made it fail sooner upstream.
 

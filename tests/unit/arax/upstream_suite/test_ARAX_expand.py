@@ -1624,8 +1624,14 @@ def test_issue_2662():
     aux_graphs = message.auxiliary_graphs
     assert aux_graphs is not None and len(aux_graphs) > 0
     kg = message.knowledge_graph
-    assert len(kg.nodes) > 3
-    assert len(kg.edges) > 3
+    # upstream trapi2.0 (d6d46883, with 2add4986's support-graph merge): was len(kg.nodes) > 3 and len(kg.edges) > 3
+    # Every support graph Retriever sent must be preserved intact: all of its edges, and their nodes, in the KG
+    for aux_graph in aux_graphs.values():
+        assert aux_graph.edges
+        for edge_key in aux_graph.edges:
+            assert edge_key in kg.edges
+            assert kg.edges[edge_key].subject in kg.nodes
+            assert kg.edges[edge_key].object in kg.nodes
 
 
 def test_issue_2678():

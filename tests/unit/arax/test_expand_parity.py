@@ -83,6 +83,15 @@ for _case in QUERY_ID_LOST["expand_parity"]:
     )
 for _case in ("kryptonite", "prune_threshold", "three_hop"):
     EXPECTED_DIFFERENCES[_case].update({"requests", "plan"})
+# Upstream trapi2.0 (2add4986, sync item 14): only the support graphs (and
+# their edges and nodes) that edges still in the KG reach are kept; upstream
+# 9485431 kept every one Retriever sent, also those of pruned edges. See
+# test_only_reachable_support_graphs_are_kept
+SUPPORT_GRAPH_PRUNED = ("prune_threshold_option",)
+for _case in SUPPORT_GRAPH_PRUNED:
+    EXPECTED_DIFFERENCES.setdefault(_case, set()).update(
+        {"kg", "aux", "edge_qedge_keys", "node_qnode_keys", "logs"}
+    )
 
 
 def _sort_ids(obj):
@@ -225,3 +234,134 @@ def test_subclass_parent_is_not_expressible_in_trapi2(outputs, case):
     for node, parents in want.items():
         if node in got and node not in lost:
             assert got[node] == parents, node
+
+
+def _support_graph_ids(edge):
+    return [
+        aux_id
+        for a in edge.get("attributes") or []
+        if a.get("attribute_type_id") == "biolink:support_graphs"
+        for aux_id in a["value"]
+    ]
+
+
+@pytest.mark.parametrize("case", SUPPORT_GRAPH_PRUNED)
+def test_only_reachable_support_graphs_are_kept(outputs, case):
+    """Upstream trapi2.0 (2add4986): the port's KG and aux graphs are upstream
+    9485431's minus the support graphs no bound edge reaches (transitively),
+    and the support edges and nodes only those held."""
+    upstream, port = outputs
+    want, got = upstream[case], port[case]
+    edges, aux = want["kg"]["edges"], want["aux"]
+    kept_edges = {k for k, q in want["edge_qedge_keys"].items() if q}
+    kept_aux, todo = set(), list(kept_edges)
+    while todo:
+        for aux_id in _support_graph_ids(edges[todo.pop()]):
+            if aux_id in aux and aux_id not in kept_aux:
+                kept_aux.add(aux_id)
+                new = set(aux[aux_id]["edges"]) - kept_edges
+                kept_edges |= new
+                todo.extend(new)
+    assert kept_aux < set(aux), "the case no longer prunes a support graph"
+    kept_nodes = {k for k, q in want["node_qnode_keys"].items() if q} | {
+        n for k in kept_edges for n in (edges[k]["subject"], edges[k]["object"])
+    }
+    assert got["aux"] == {k: aux[k] for k in kept_aux}
+    assert got["kg"]["edges"] == {k: edges[k] for k in kept_edges}
+    assert got["kg"]["nodes"] == {k: want["kg"]["nodes"][k] for k in kept_nodes}
+
+
+def _all_records(port):
+    yield from ((c, r) for c, r in port.items() if c != "_port_only")
+    yield from port["_port_only"].items()
+
+
+def test_support_graphs_are_intact_in_the_kg(outputs):
+    """Upstream trapi2.0's test_issue_2662: every aux graph Expand returns is
+    referenced by a KG edge, and all its edges, and their nodes, are in the KG."""
+    _, port = outputs
+    for case, rec in _all_records(port):
+        kg = rec["kg"] or {"nodes": {}, "edges": {}}
+        referenced = {
+            aux_id for e in kg["edges"].values() for aux_id in _support_graph_ids(e)
+        }
+        for aux_id, aux_graph in rec["aux"].items():
+            assert aux_id in referenced, (case, aux_id)
+            assert aux_graph["edges"], (case, aux_id)
+            for edge_key in aux_graph["edges"]:
+                assert edge_key in kg["edges"], (case, aux_id, edge_key)
+                edge = kg["edges"][edge_key]
+                assert edge["subject"] in kg["nodes"], (case, edge_key)
+                assert edge["object"] in kg["nodes"], (case, edge_key)
+
+
+def _e0_counts(rec):
+    """e0's edge count in Retriever's answer, and after Expand."""
+    (answered,) = [
+        t
+        for _, t in rec["logs"]
+        if t.startswith("infores:retriever: Query for edge e0")
+    ]
+    (final,) = [t for _, t in rec["logs"] if t.startswith("After Expand")]
+    return tuple(int(t.split("(e0: ")[1].split(",")[0]) for t in (answered, final))
+
+
+def test_sources_allow_queries_retriever_and_filters_edges(outputs):
+    """Upstream trapi2.0 (2f78aa95, sync items 9-10): a constraints.sources
+    ALLOW list does not drop Retriever (it names knowledge sources an
+    aggregator provides): Retriever is queried, and every returned edge from no
+    allowed source is removed, not just the first."""
+    _, port = outputs
+    rec = port["_port_only"]["ks_sources_allow"]
+    assert rec["status"] == "OK"
+    (request,) = rec["requests"]
+    assert request["body"]["message"]["query_graph"]["edges"]["e0"]["constraints"] == {
+        "sources": {"behavior": "ALLOW", "values": ["infores:ctd"]}
+    }
+    answered, kept = _e0_counts(rec)
+    assert kept and answered - kept >= 2
+    for edge_key, qedge_keys in rec["edge_qedge_keys"].items():
+        if "e0" in qedge_keys:
+            sources = {
+                s["resource_id"] for s in rec["kg"]["edges"][edge_key]["sources"]
+            }
+            assert "infores:ctd" in sources, edge_key
+
+
+def test_evidence_count_is_an_arax_post_filter(outputs):
+    """Upstream trapi2.0 (2f78aa95, sync items 11-12): a biolink:evidence_count
+    constraint is supported, not sent to Retriever (the emptied constraints
+    object goes with it), and an edge without the attribute fails it."""
+    _, port = outputs
+    rec = port["_port_only"]["evidence_count_constraint"]
+    assert rec["status"] == "OK"
+    (request,) = rec["requests"]
+    assert "constraints" not in request["body"]["message"]["query_graph"]["edges"]["e0"]
+    assert (
+        "INFO",
+        "Removed 6 edges fulfilling e0 that don't satisfy its attribute constraints "
+        "(biolink:evidence_count > 5); 0 remain",
+    ) in [tuple(line) for line in rec["logs"]]
+    assert not any("e0" in q for q in rec["edge_qedge_keys"].values())
+
+
+def test_agent_type_constraint_is_widened_with_its_subtypes(outputs):
+    """Upstream trapi2.0 (2f78aa95, sync item 12): Retriever is sent the
+    agent_type values' Biolink AgentTypeEnum subtypes too."""
+    _, port = outputs
+    (request,) = port["_port_only"]["agent_type_constraint"]["requests"]
+    constraints = request["body"]["message"]["query_graph"]["edges"]["e0"][
+        "constraints"
+    ]
+    assert constraints == {
+        "agent_type": {
+            "behavior": "ALLOW",
+            "values": [
+                "automated_agent",
+                "data_analysis_pipeline",
+                "computational_model",
+                "text_mining_agent",
+                "image_processing_agent",
+            ],
+        }
+    }

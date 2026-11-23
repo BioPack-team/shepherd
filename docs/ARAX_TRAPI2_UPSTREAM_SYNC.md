@@ -261,6 +261,16 @@ Status (2026-11-23):
   `test_connect_knodes_runs_upstream_trapi2_translation`). Item 8 reads `additional_properties` and
   the legacy `query_options` (merged, `additional_properties` wins), and the response still carries
   `query_options`. `bypass_cache` in Connect is item 22.
+- **Items 9-16** done (Expand; item 17 was DEC-27). Item 9 keeps DEC-29b: the allow/deny lists merge
+  `constraints.sources` and the knowledge-source attribute constraints, and only a DENY list removes
+  KPs. Item 12 reads `AgentTypeEnum` from BiolinkHelper's cached Biolink model YAML, as item 2 does;
+  the request-body stripping is golden rule H19. Items 14-16 fix D-23 and D-30: six query-parity cases
+  that crashed upstream @ 9485431 on support-graph edges without `qedge_keys` now run
+  (`wf_filter_kgraph_numeric` then stops at the ranker's D-20 `KeyError`), and Expand's log after an
+  `exclude` qedge and the support graphs of pruned edges differ (expected differences, pinned by
+  `test_filters_run_on_support_graph_edges`, `test_exclude_sweeps_orphan_nodes_and_support_graphs`
+  and `test_only_reachable_support_graphs_are_kept`). New port-only Expand cases cover the 2.0-only
+  constraints (`TRAPI2_PORT_ONLY_CASES`); unit tests are in `test_expand_trapi2_sync.py`.
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|

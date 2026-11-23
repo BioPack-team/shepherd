@@ -134,6 +134,15 @@ Hand rules on top (what TOM does not own):
     ARAX's own data files>}``, Shepherd's ``settings.arax_tier_version``
     (``ARAX_TIER0_BUILD`` here), on every envelope ARAX's ``create_envelope``
     made (query_parity; not the stored documents /response serves back).
+  - H19 constraints ARAX applies itself are not sent to the KP (upstream
+    ``trapi2.0`` 2add4986, 2f78aa95): in a query graph ARAX's Expand sends to
+    Retriever (request bodies, the query plan's recorded queries; not xCRG's
+    lookups), a qnode's ``biolink:highest_FDA_approval_status`` constraints
+    and a qedge's ``biolink:evidence_count`` attribute constraints are left
+    out, and a ``constraints`` list / object (or its ``attributes``) they
+    leave empty is dropped. (Expand also widens a qedge's
+    ``constraints.agent_type.values`` with their Biolink AgentTypeEnum
+    subtypes; no recorded case has an agent_type constraint.)
   - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
     ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
     ``has_jaccard_index_with``).
@@ -472,6 +481,7 @@ def expand_record(rec: dict) -> dict:
     _qg_sets(out["qg"], sent=False)  # H14
     for graph in _sent_graphs(out["requests"], out["plan"]):
         _qg_sets(graph, sent=True)
+        _strip_post_filtered(graph)  # H19
     return out
 
 
@@ -662,6 +672,44 @@ def _qg_sets(qg: Any, sent: bool) -> None:
             qnode["set_interpretation"] = "COLLATE"
 
 
+# H19: the constraint ids ARAX post-filters itself (Expand/trapi_querier.py)
+POST_FILTERED_QNODE_CONSTRAINTS = {"biolink:highest_FDA_approval_status"}
+POST_FILTERED_QEDGE_CONSTRAINTS = {"biolink:evidence_count"}
+
+
+def _strip_post_filtered(qg: Any) -> None:
+    """H19 on one query graph ARAX sends to a KP, in place."""
+    if not isinstance(qg, dict):
+        return
+    for qnode in (qg.get("nodes") or {}).values():
+        if isinstance(qnode, dict) and isinstance(qnode.get("constraints"), list):
+            kept = [
+                c
+                for c in qnode["constraints"]
+                if c.get("id") not in POST_FILTERED_QNODE_CONSTRAINTS
+            ]
+            if kept:
+                qnode["constraints"] = kept
+            else:
+                del qnode["constraints"]
+    for qedge in (qg.get("edges") or {}).values():
+        constraints = qedge.get("constraints") if isinstance(qedge, dict) else None
+        if not isinstance(constraints, dict):
+            continue
+        if constraints.get("attributes"):
+            kept = [
+                c
+                for c in constraints["attributes"]
+                if c.get("id") not in POST_FILTERED_QEDGE_CONSTRAINTS
+            ]
+            if kept:
+                constraints["attributes"] = kept
+            else:
+                del constraints["attributes"]
+        if not constraints:
+            del qedge["constraints"]
+
+
 def _sent_graphs(requests_: list, plan: Any) -> list:
     """The query graphs of recorded KP request bodies and query-plan queries."""
     graphs = [
@@ -769,6 +817,7 @@ def query_goldens(g16: dict) -> dict:
         else:
             for graph in _sent_graphs(new["requests"], plan):
                 _qg_sets(graph, sent=True)
+                _strip_post_filtered(graph)  # H19
         out[case] = new
     return out
 

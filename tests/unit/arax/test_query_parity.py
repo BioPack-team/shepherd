@@ -111,6 +111,30 @@ EXPECTED_DIFFERENCES["val_singular_predicate"] = {"message", "envelope", "logs"}
 # D-25 fix: a TRAPI qnode's name is resolved to ids, so the query runs instead of
 # failing with QueryGraphNoIds; see test_trapi_qnode_name_runs_as_araxi_name_does
 EXPECTED_DIFFERENCES["trapi_qnode_name"] = set(FIELDS)
+# D-23, fixed by upstream trapi2.0 (2add4986, sync items 14-15): support-graph
+# edges and nodes are merged into the KG with empty qedge_keys / qnode_keys, so
+# the filter_kg / filter_results actions that read them no longer crash with
+# "'Edge' object has no attribute 'qedge_keys'" as upstream 9485431 did. The KP
+# requests (sent before the crash) are compared; see
+# test_filters_run_on_support_graph_edges
+SUPPORT_EDGE_QEDGE_KEYS_CRASH = (
+    "dsl_expand_overlays_filters",
+    "filter_kg_top_n_and_percentile",
+    "filter_kg_discrete_attribute_and_property",
+    "filter_results_counts",
+    "wf_filter_kgraph_numeric",
+    "wf_filter_kgraph_discrete",
+)
+for _case in SUPPORT_EDGE_QEDGE_KEYS_CRASH:
+    EXPECTED_DIFFERENCES[_case] = set(FIELDS) - {"requests", "exception"}
+# Upstream trapi2.0 (2add4986, sync items 14 and 16): after an exclude=true
+# qedge, Expand sweeps up the nodes no remaining edge uses, and drops the
+# support graphs of the excluded edges; only Expand's log lines differ (ARAX's
+# final KG cleanup removed them from the envelope already). See
+# test_exclude_sweeps_orphan_nodes_and_support_graphs
+EXCLUDE_SWEEP = ("araxi_exclude", "trapi_exclude")
+for _case in EXCLUDE_SWEEP:
+    EXPECTED_DIFFERENCES[_case] = {"logs"}
 # Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
 XFAIL = {
     "mvp2_xcrg_route": "BioPack-team/shepherd#276: catrax-xcrg 1.0.1.dev2 fails "
@@ -339,3 +363,64 @@ def test_node_only_query_graph_is_rejected(outputs, case):
     assert rec["error_code"] == "MissingQEdgeAndQPath"
     assert rec["http_status"] == 501
     assert rec["requests"] == []
+
+
+@pytest.mark.parametrize("case", SUPPORT_EDGE_QEDGE_KEYS_CRASH)
+def test_filters_run_on_support_graph_edges(outputs, case):
+    """D-23 is fixed (upstream trapi2.0 2add4986): upstream 9485431 crashed on
+    a support-graph edge without qedge_keys; the port gets past the filters.
+    wf_filter_kgraph_numeric then stops at D-20 (the ranker's KeyError on a
+    result binding an edge the KG filters removed), as upstream trapi2.0's
+    ranker would."""
+    upstream, port = outputs
+    assert "has no attribute 'qedge_keys'" in upstream[case]["message"]
+    rec = port[case]
+    assert "qedge_keys" not in (rec["message"] or "")
+    if case == "wf_filter_kgraph_numeric":
+        assert rec["status"] == "ERROR"
+        assert "ranker.aggregate_scores_dmk" in rec["message"]
+        assert "KeyError" in rec["message"]
+    else:
+        assert rec["status"] == "OK", rec["message"]
+        assert rec["envelope"]["message"]["results"]
+
+
+@pytest.mark.parametrize("case", EXCLUDE_SWEEP)
+def test_exclude_sweeps_orphan_nodes_and_support_graphs(outputs, case):
+    """Upstream trapi2.0 (2add4986): Expand's KG after the exclude=true qedge
+    keeps only n1's connected node, and no support graph of an excluded edge
+    (so no warning about its missing edge); the rest of the log is upstream's."""
+    upstream, port = outputs
+    dropped = [
+        [
+            "WARNING",
+            "",
+            "for aux graph aux4, edge missing_edge is not in the KG; skipping edge",
+        ],
+        [
+            "INFO",
+            "",
+            "2 node(s) in the knowledge graph are missing a biolink:description attribute.",
+        ],
+        [
+            "INFO",
+            "",
+            "After Expand, the KG has 6 nodes and 3 edges (e0: 1, n0: 1, n1: 5, Unbound: 0)",
+        ],
+    ]
+    added = [
+        [
+            "INFO",
+            "",
+            "1 node(s) in the knowledge graph are missing a biolink:description attribute.",
+        ],
+        [
+            "INFO",
+            "",
+            "After Expand, the KG has 2 nodes and 1 edges (e0: 1, n0: 1, n1: 1, Unbound: 0)",
+        ],
+    ]
+    want = upstream[case]["logs"]
+    at = want.index(dropped[0])
+    assert want[at : at + 3] == dropped
+    assert port[case]["logs"] == want[:at] + added + want[at + 3 :]
