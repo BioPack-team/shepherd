@@ -45,9 +45,10 @@ FIELDS = [
 REMOVED_OVERLAY = "'overlay_exposures_data', "
 # Fields exempt from comparison, by case
 EXPECTED_DIFFERENCES = {
-    # DEC-4: single-node queries go to Retriever (so they carry
-    # parameters.tiers, and log setting it) instead of infores:rtx-kg2
-    "tpl_one_node": {"requests", "logs"},
+    # DEC-23: a node-only query graph is rejected (MissingQEdgeAndQPath, 501),
+    # as in upstream's trapi2.0; upstream 9485431 answered it from rtx-kg2.
+    # See test_node_only_query_graph_is_rejected
+    "tpl_one_node": set(FIELDS),
     # E-4 / E-6: the legacy `filter` command is removed; see
     # test_removed_filter_command_is_unrecognized
     "dsl_removed_filter_command": {"error_code", "message", "logs", "envelope"},
@@ -82,19 +83,14 @@ for _case in QUERY_ID_LOST["query_parity"]:
     EXPECTED_DIFFERENCES.setdefault(_case, set()).update(
         {"message", "envelope", "logs"}
     )
-# TRAPI 2.0: upstream told a one-node query ("edges": {}, tpl_one_node) from
-# a query graph with no edges or paths (no "edges" key, an error) by the empty
-# map; 2.0 forbids an empty "edges", so both are the same one-node query graph
-# and this case now runs as a one-node query; see
-# test_query_graph_without_edges_is_a_one_node_query
+# DEC-23: still a MissingQEdgeAndQPath error, as upstream recorded, but with
+# upstream trapi2.0's HTTP 501 and message; see
+# test_node_only_query_graph_is_rejected
 EXPECTED_DIFFERENCES["val_no_edges_or_paths"] = {
-    "status",
-    "error_code",
     "http_status",
     "message",
     "envelope",
     "logs",
-    "requests",
 }
 # DEC-21: connect(action=xcrg) runs the vendored xCRG at catrax-xcrg's latest
 # commit, not the one upstream's goldens were recorded with: it ranks the same
@@ -167,7 +163,11 @@ def test_removed_filter_command_is_unrecognized(outputs):
 def test_stored_response_url_is_shepherds(outputs):
     """DEC-3: envelope.id is where Shepherd serves the stored response."""
     upstream, port = outputs
-    stored = [n for n, rec in upstream.items() if rec["envelope_id"] and n not in XFAIL]
+    stored = [
+        n
+        for n, rec in upstream.items()
+        if rec["envelope_id"] and n not in XFAIL and n != "tpl_one_node"  # DEC-23
+    ]
     assert stored
     for name in stored:
         assert port[name]["envelope_id"] == "http://shepherd.test/arax/response/R1"
@@ -257,9 +257,13 @@ def test_trapi_qnode_name_runs_as_araxi_name_does(outputs):
         "Resolved QueryGraph node 'n0' name 'MONDO thing 2' to ids ['MONDO:2']",
     ] in rec["logs"]
     (request,) = rec["requests"]
+    # DEC-24: only the id-less qnode is sent as a set (COLLATE)
     assert request["body"]["message"]["query_graph"]["nodes"] == {
-        "n0": {"ids": ["MONDO:2"], "is_set": False},
-        "n1": {"categories": ["biolink:ChemicalEntity"], "is_set": True},
+        "n0": {"ids": ["MONDO:2"]},
+        "n1": {
+            "categories": ["biolink:ChemicalEntity"],
+            "set_interpretation": "COLLATE",
+        },
     }
     assert rec["envelope"]["message"]["query_graph"]["nodes"]["n0"]["ids"] == [
         "MONDO:2"
@@ -293,16 +297,13 @@ def test_connect_knodes_translation_is_upstreams_minus_the_disabled_action(outpu
     assert actions(port[case]) == want
 
 
-def test_query_graph_without_edges_is_a_one_node_query(outputs):
-    """TRAPI 2.0 has no empty "edges" map: a query graph with nodes only is a
-    one-node query, answered as tpl_one_node's is."""
-    upstream, port = outputs
-    assert upstream["val_no_edges_or_paths"]["status"] == "ERROR"
-    rec, one_node = port["val_no_edges_or_paths"], port["tpl_one_node"]
-    for field in ("exception", "status", "error_code", "http_status"):
-        assert rec[field] == one_node[field], field
-    (request,) = rec["requests"]
-    qg = request["body"]["message"]["query_graph"]
-    assert "edges" not in qg
-    assert qg["nodes"]["n0"]["ids"] == ["CHEBI:1"]
-    assert rec["message"] == "Normal completion with 1 results."
+@pytest.mark.parametrize("case", ["val_no_edges_or_paths", "tpl_one_node"])
+def test_node_only_query_graph_is_rejected(outputs, case):
+    """DEC-23: TRAPI 2.0 allows a query graph with nodes only, but Retriever
+    needs an edge, so ARAX answers 501 Not Implemented and queries nothing."""
+    _, port = outputs
+    rec = port[case]
+    assert rec["status"] == "ERROR"
+    assert rec["error_code"] == "MissingQEdgeAndQPath"
+    assert rec["http_status"] == 501
+    assert rec["requests"] == []

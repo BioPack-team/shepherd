@@ -241,6 +241,14 @@ Tags:
 
 ## 3. Decisions needed (DECIDE)
 
+Status (2026-11-23):
+- **D1** decided: go back to the PyPI package. Not done yet; see the note below the table.
+- **D2** done (DEC-23).
+- **D3** done (DEC-22).
+- **D4** investigated; see the note below the table.
+- **D5** done (DEC-24).
+- **D6, D7, D8** still open.
+
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|
 | D1 | xCRG | PyPI `catrax-xcrg==1.0.1.dev2`, an official 2.0 release with a new API (`xcrg.Config`, `run_query`, `Reporter`, `is_valid_query`) | Vendored `e67f2c0`, converted by hand (DEC-21, whose "no 2.0 release" premise is now stale). Re-vendor or keep. |
@@ -254,6 +262,30 @@ Tags:
 | D9 | Knowledge-source constraints | Read only from `constraints.sources` | Also from the `knowledge_source` attribute constraints |
 | D10 | Multi-id qnode subclass parent | Warn and map no parent | Infer it from a `subclass_of` edge (DEC-20a; keep) |
 | D11 | Log timestamps | `LogEntry`, UTC `…Z` | Local-offset ISO. Both are valid, but Shepherd's heartbeat (`arax.py:_heartbeat_line`) has no offset at all, which is a small bug |
+
+**D1 note.** Moving to `catrax-xcrg==1.0.1.dev2` depends on two things:
+- **Data.** The package reads only the new `curie_ngd` triples and the u32
+  `curie_to_pmids` blobs, which ship with `tier0-20260928` (items 43-45). Our
+  `tier0-20260621` files hold `[neighbor, ngd]` pairs and JSON PMID lists.
+- **Fixes not in the package.** Our vendored copy fixes three problems that
+  1.0.1.dev2 still has:
+  - a KL/AT value with no ranking weight (2.0's `not_provided` agent type, or
+    `data_analysis_pipeline`) raises `ValueError` in the ranker;
+  - lookups send no `parameters.timeout` or `tiers`;
+  - the whole query dict is parsed, so an ARAX envelope's empty containers can
+    fail 2.0 validation.
+
+  The direct-lookup filter bug is fixed in 1.0.1.dev2.
+
+**D4 note.** The UI field is labelled "REMOTE API TIMEOUT DURING ARAX
+EXPANSION", so it is meant as ARAX's **per-KP timeout** (`kp_timeout`), not a
+whole-query timeout.
+- Upstream commit 18ae5be1 moved it from `query_options.kp_timeout` to
+  `parameters.timeout`, in both the UI and the tests.
+- But upstream's server still reads `kp_timeout` only from
+  `additional_properties`, so upstream silently drops the setting.
+- Recommendation: on ARAX `/query`, map `parameters.timeout` to `kp_timeout`, and
+  stop treating it as Shepherd's whole-query wait.
 
 Keep Shepherd's version (no action):
 - the `/response/{id}` real status codes and `POST /response` storage (upstream's FastAPI port broke both);

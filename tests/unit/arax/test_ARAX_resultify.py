@@ -15,7 +15,11 @@ import pytest
 
 from shepherd_utils.arax import ARAX_resultify
 from shepherd_utils.arax.ARAX_response import ARAXResponse
-from shepherd_utils.arax.ARAX_resultify import ARAXResultify
+from shepherd_utils.arax.ARAX_resultify import (
+    ARAXResultify,
+    qnode_is_set,
+    set_qnode_is_set,
+)
 from shepherd_utils.arax.actions_parser import ActionsParser
 from shepherd_utils.arax.openapi_server.models.edge import Edge
 from shepherd_utils.arax.openapi_server.models.node import Node
@@ -86,12 +90,13 @@ def _create_edges(kg_edge_info: Iterable[Dict[str, any]]) -> Dict[str, Edge]:
 
 
 def _create_qnodes(qg_node_info: Iterable[Dict[str, any]]) -> Dict[str, QNode]:
-    return {
-        qnode_info["node_key"]: QNode(
-            categories=qnode_info["categories"], is_set=qnode_info["is_set"]
-        )
-        for qnode_info in qg_node_info
-    }
+    # DEC-24 (as upstream trapi2.0's test): QNode has no is_set; a set is COLLATE
+    qnodes = {}
+    for qnode_info in qg_node_info:
+        qnode = QNode(categories=qnode_info["categories"])
+        set_qnode_is_set(qnode, bool(qnode_info["is_set"]))
+        qnodes[qnode_info["node_key"]] = qnode
+    return qnodes
 
 
 def _create_qedges(qg_edge_info: Iterable[Dict[str, any]]) -> Dict[str, QEdge]:
@@ -201,11 +206,13 @@ def _run_resultify_directly(
 def _convert_shorthand_to_qg(
     shorthand_qnodes: Dict[str, str], shorthand_qedges: Dict[str, str]
 ) -> QueryGraph:
+    qnodes = {}
+    for qnode_key, is_set in shorthand_qnodes.items():
+        qnode = QNode()
+        set_qnode_is_set(qnode, bool(is_set))  # DEC-24
+        qnodes[qnode_key] = qnode
     return QueryGraph(
-        nodes={
-            qnode_key: QNode(is_set=bool(is_set))
-            for qnode_key, is_set in shorthand_qnodes.items()
-        },
+        nodes=qnodes,
         edges={
             qedge_key: QEdge(
                 subject=qnodes.split("--")[0], object=qnodes.split("--")[1]
@@ -1247,15 +1254,14 @@ def test_trapi2_one_binding_per_qnode_and_qedge():
 
 
 def test_trapi2_collate_is_honoured_like_is_set():
-    """set_interpretation COLLATE on an unpinned qnode (2.0) is ARAX's
-    is_set=true (the QNode model reports is_set for it), so resultify collates it."""
+    """set_interpretation COLLATE on an unpinned qnode (2.0) is ARAX's set
+    (qnode_is_set, DEC-24), so resultify collates it."""
     query_graph, knowledge_graph = _set_qg_and_kg()
     qg_dict = query_graph.to_dict()
-    qg_dict["nodes"]["n01"].pop("is_set")
     qg_dict["nodes"]["n01"]["set_interpretation"] = "COLLATE"
     message = ARAXMessenger().from_dict({"query_graph": qg_dict})
-    assert message.query_graph.nodes["n01"].is_set is True
-    assert message.query_graph.nodes["n00"].is_set is False
+    assert qnode_is_set(message.query_graph.nodes["n01"]) is True
+    assert qnode_is_set(message.query_graph.nodes["n00"]) is False
     response, message = _run_resultify_directly(message.query_graph, knowledge_graph)
     assert response.status == "OK"
     assert len(message.results) == 2
@@ -1266,7 +1272,7 @@ def test_trapi2_collate_is_honoured_like_is_set():
     # without COLLATE (or is_set), each n01 node is its own result
     qg_dict["nodes"]["n01"]["set_interpretation"] = "BATCH"
     message = ARAXMessenger().from_dict({"query_graph": qg_dict})
-    assert message.query_graph.nodes["n01"].is_set is False
+    assert qnode_is_set(message.query_graph.nodes["n01"]) is False
     response, message = _run_resultify_directly(message.query_graph, knowledge_graph)
     assert response.status == "OK"
     assert len(message.results) == 3
@@ -1277,7 +1283,7 @@ def test_trapi2_option_group_bindings_are_never_empty():
     shorthand_qnodes = {"n00": "", "n01": ""}
     shorthand_qedges = {"e00": "n00--n01"}
     query_graph = _convert_shorthand_to_qg(shorthand_qnodes, shorthand_qedges)
-    query_graph.nodes["n02"] = QNode(is_set=True, option_group_id="1")
+    query_graph.nodes["n02"] = QNode(set_interpretation="COLLATE", option_group_id="1")
     query_graph.edges["e01"] = QEdge(subject="n01", object="n02", option_group_id="1")
     shorthand_kg_nodes = {
         "n00": ["DOID:1"],

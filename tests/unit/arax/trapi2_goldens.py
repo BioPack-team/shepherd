@@ -99,10 +99,19 @@ Hand rules on top (what TOM does not own):
     result's score (``{"resource_id": "infores:arax", "score": 1.0}``): that
     score is lost with it in 2.0. The same holds for the mock Retriever's
     one-node answers.
-  - H12 a qnode whose recorded ``is_set: true`` the 2.0 case expresses as
-    ``set_interpretation: COLLATE`` (``collated_qnodes``) echoes both in the
-    envelope's query graph: the vendored QNode reads COLLATE as ``is_set``
-    and keeps the client's own value.
+  - H12 (superseded by H14) a qnode whose recorded ``is_set: true`` the 2.0
+    case expresses as ``set_interpretation: COLLATE`` (``collated_qnodes``)
+    keeps it in the envelope's query graph.
+  - H14 sets are ``set_interpretation: COLLATE`` (DEC-24, upstream
+    ``trapi2.0``): the port's QNode has no ``is_set``. In a query graph ARAX
+    produced (the envelope's, expand_parity ``qg``) a recorded ``is_set: true``
+    becomes ``set_interpretation: COLLATE`` and ``is_set: false`` is dropped.
+    The same holds for the stored ARAX documents /response serves back
+    (response_parity). In a query graph ARAX's Expand sends to Retriever
+    (request bodies, the query plan's recorded queries) every id-less qnode is
+    COLLATE and a qnode with ids carries neither (upstream 1.6 sent
+    ``is_set: true`` for id-less and multi-id qnodes). xCRG's lookups
+    (``XCRG_CASES``) copy ARAX's own query graph, so they take the first rule.
   - H13 a qnode's ``member_ids`` (a MANY / ALL set's members) are echoed in
     the envelope's query graph as the query gave them: upstream's generated
     QNode had no ``member_ids`` and dropped them, and the port's 2.0 QNode
@@ -428,6 +437,9 @@ def expand_record(rec: dict) -> dict:
     out["plan"] = query_plan(rec["plan"])
     out["requests"] = requests(rec["requests"])
     out["logs"] = [(level, log_text(text)) for level, text in rec["logs"]]
+    _qg_sets(out["qg"], sent=False)  # H14
+    for graph in _sent_graphs(out["requests"], out["plan"]):
+        _qg_sets(graph, sent=True)
     return out
 
 
@@ -442,6 +454,50 @@ def log_text(text: str) -> str:
 
 def expand_goldens(g16: dict) -> dict:
     return {case: expand_record(rec) for case, rec in g16.items()}
+
+
+# H14: cases whose recorded Retriever requests xCRG built from ARAX's query graph
+XCRG_CASES = {"mvp2_xcrg_route"}
+
+
+def _qg_sets(qg: Any, sent: bool) -> None:
+    """H14 on one query graph, in place. ``sent``: a graph ARAX sends to a KP."""
+    if not isinstance(qg, dict):
+        return
+    for qnode in (qg.get("nodes") or {}).values():
+        if not isinstance(qnode, dict):
+            continue
+        is_set = qnode.pop("is_set", None)
+        if sent:
+            if qnode.get("ids"):
+                if qnode.get("set_interpretation") == "COLLATE":
+                    del qnode["set_interpretation"]
+            else:
+                qnode["set_interpretation"] = "COLLATE"
+        elif is_set is True:
+            qnode["set_interpretation"] = "COLLATE"
+
+
+def _sent_graphs(requests_: list, plan: Any) -> list:
+    """The query graphs of recorded KP request bodies and query-plan queries."""
+    graphs = [
+        ((r.get("body") or {}).get("message") or {}).get("query_graph")
+        for r in requests_ or []
+    ]
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            q = obj.get("query")
+            if isinstance(q, dict):
+                graphs.append((q.get("message") or {}).get("query_graph"))
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(plan)
+    return graphs
 
 
 def collated_qnodes(case: tuple) -> list:
@@ -515,6 +571,14 @@ def query_goldens(g16: dict) -> dict:
         new["requests"] = requests(rec["requests"])
         if members.get(case):  # H13
             _add_member_ids(new, members[case])
+        _qg_sets(qg, sent=False)  # H14
+        plan = (new["envelope"].get("query_options") or {}).get("query_plan")
+        if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
+            for graph in _sent_graphs(new["requests"], plan):
+                _qg_sets(graph, sent=False)
+        else:
+            for graph in _sent_graphs(new["requests"], plan):
+                _qg_sets(graph, sent=True)
         out[case] = new
     return out
 
@@ -538,6 +602,12 @@ def response_lookup(result: Any) -> Any:
     if isinstance(result, dict) and isinstance(result.get("message"), dict):
         declared = result.get("schema_version")
         new = response(result, produced=False)
+        _qg_sets(new["message"].get("query_graph"), sent=False)  # H14
+        qo = new.get("query_options")
+        for graph in _sent_graphs(
+            [], qo.get("query_plan") if isinstance(qo, dict) else None
+        ):
+            _qg_sets(graph, sent=True)
         if declared not in (None, "1.6.0"):
             new["schema_version"] = declared  # H6: a stored 1.5.0 stays 1.5.0
         return _validation_version(new)

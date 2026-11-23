@@ -188,7 +188,8 @@ def test_analyses_have_bindings():
 
 
 def test_collated_qnodes_echo_collate():
-    """H12: the qnode the 2.0 case sends as COLLATE echoes it with is_set."""
+    """H12/H14: the qnode the 2.0 case sends as COLLATE echoes it, with no
+    is_set (DEC-24)."""
     new = T.read_json_gz(T.golden_paths("query_parity")[1])
     collated = {
         c[0]: T.collated_qnodes(c)
@@ -199,4 +200,4 @@ def test_collated_qnodes_echo_collate():
     qnode = new["trapi_set_interpretation_many_and_is_set"]["envelope"]["message"][
         "query_graph"
     ]["nodes"]["n1"]
-    assert qnode["is_set"] is True and qnode["set_interpretation"] == "COLLATE"
+    assert "is_set" not in qnode and qnode["set_interpretation"] == "COLLATE"

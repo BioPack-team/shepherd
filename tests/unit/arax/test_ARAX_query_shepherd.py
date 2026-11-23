@@ -420,7 +420,7 @@ def test_finalize_drops_forbidden_empties():
     envelope = response.envelope.to_dict()
     assert envelope["parameters"] == {"timeout": 5}
     assert "auxiliary_graphs" not in envelope["message"]
-    assert envelope["message"]["query_graph"]["nodes"]["n0"] == {"is_set": False}
+    assert envelope["message"]["query_graph"]["nodes"]["n0"] == {}  # DEC-24: no is_set
     assert "predicates" not in envelope["message"]["query_graph"]["edges"]["e0"]
     (result,) = envelope["message"]["results"]
     assert result["node_bindings"] == {"n0": {"ids": ["A:1"]}}
@@ -518,9 +518,9 @@ def test_result_transformer_moves_virtual_bindings_to_support_graphs():
     assert message.query_graph is response.original_query_graph
 
 
-def test_node_only_query_graph_is_an_edgeless_one():
-    """2.0 has no `edges: {}`: a QG with nodes only is the edgeless QG, not a
-    MissingQEdgeAndQPath error (as a 1.x QG without edges and paths was)."""
+def test_node_only_query_graph_is_rejected():
+    """DEC-23 (upstream trapi2.0): a QG with nodes only is valid TRAPI 2.0, but
+    Retriever needs an edge, so ARAX answers MissingQEdgeAndQPath with 501."""
     from shepherd_utils.arax.ARAX_query import ARAXQuery
 
     araxq = ARAXQuery()
@@ -531,7 +531,51 @@ def test_node_only_query_graph_is_an_edgeless_one():
         }
     )
     response = araxq.response
-    assert response.status == "OK", response.show()
-    assert response.envelope.to_dict()["message"]["query_graph"] == {
-        "nodes": {"n0": {"ids": ["CHEBI:1"], "is_set": False}}
-    }
+    assert response.status == "ERROR"
+    assert response.error_code == "MissingQEdgeAndQPath"
+    assert response.http_status == 501
+
+
+def test_obsolete_qnode_set_properties_are_rejected():
+    """DEC-24 (upstream trapi2.0): a TRAPI qnode's is_set / set_id are 1.x;
+    ARAX answers UnknownQNodeProperty with the 2.0 replacement."""
+    from shepherd_utils.arax.ARAX_query import ARAXQuery
+
+    for prop, value, hint in (
+        ("is_set", True, "'set_interpretation': 'COLLATE'"),
+        ("set_id", "uuid:1", "'member_ids'"),
+    ):
+        araxq = ARAXQuery()
+        araxq.query(
+            {
+                "message": {
+                    "query_graph": {
+                        "nodes": {"n0": {"ids": ["CHEBI:1"]}, "n1": {prop: value}},
+                        "edges": {"e0": {"subject": "n0", "object": "n1"}},
+                    }
+                },
+                "operations": {"actions": ["return(message=true, store=false)"]},
+            }
+        )
+        response = araxq.response
+        assert response.status == "ERROR"
+        assert response.error_code == "UnknownQNodeProperty"
+        assert hint in response.message
+
+
+def test_one_node_template_is_an_unsupported_graph():
+    """DEC-23 (upstream trapi2.0): the one_node_with_curie template carries an
+    'error' instead of a DSL, which the interpreter answers."""
+    from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
+    from shepherd_utils.arax.ARAX_query_graph_interpreter import (
+        ARAXQueryGraphInterpreter,
+    )
+
+    response = _response()
+    response.envelope.message = ARAXMessenger().from_dict(
+        {"query_graph": {"nodes": {"n0": {"ids": ["CHEBI:1"]}}}}
+    )
+    ARAXQueryGraphInterpreter().translate_to_araxi(response)
+    assert response.status == "ERROR"
+    assert response.error_code == "QueryGraphInterpreterUnsupportedGraph"
+    assert "Retriever requires at least one edge" in response.message

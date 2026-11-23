@@ -54,9 +54,10 @@ FIELDS = [
 ]
 # Intended differences from upstream, by case: the fields exempt from comparison.
 EXPECTED_DIFFERENCES = {
-    # DEC-4: single-node queries go to Retriever (so they carry
-    # parameters.tiers, and log setting it) instead of infores:rtx-kg2
-    "single_node": {"requests", "logs"},
+    # DEC-23: single-node (edge-less) expand is rejected, as in upstream's
+    # trapi2.0 (Retriever needs an edge); upstream 9485431 sent it to rtx-kg2.
+    # See test_single_node_is_rejected
+    "single_node": set(FIELDS),
 }
 # TRAPI 2.0 (H5 in trapi2_goldens.py): these cases bind a subclass child to a
 # qnode with several ids, and upstream learned which one it fulfils from
@@ -162,11 +163,15 @@ def test_expand_matches_upstream(outputs, case):
         assert diff is None, f"{case}: differs from upstream ARAX at {diff}"
 
 
-def test_single_node_goes_to_retriever(outputs):
+@pytest.mark.parametrize("case", ["single_node", "kp_forwarded_single_node"])
+def test_single_node_is_rejected(outputs, case):
+    """DEC-23: an orphan qnode (expand with no edge_key, or node_key) is not
+    expanded on its own -- with or without a kp list -- and nothing is sent."""
     _, port = outputs
-    (request,) = port["single_node"]["requests"]
-    assert request["path"] == "/query"
-    assert request["body"]["parameters"] == {"tiers": [0]}
+    rec = port[case] if case in port else port["_port_only"][case]
+    assert rec["status"] == "ERROR"
+    assert rec["error_code"] == "InvalidQuery"
+    assert rec["requests"] == []
 
 
 @pytest.mark.parametrize(
@@ -174,7 +179,6 @@ def test_single_node_goes_to_retriever(outputs):
     [
         ("kp_forwarded", ["infores:ctd", "infores:drugbank", "infores:ctd"]),
         ("kp_forwarded_single", ["infores:drugbank"]),
-        ("kp_forwarded_single_node", ["infores:rtx-kg2"]),
     ],
 )
 def test_kp_list_is_forwarded_to_retriever(outputs, case, expected_kp):
