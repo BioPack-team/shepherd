@@ -25,13 +25,14 @@ ARAX_VERSION = "2.0.0"  # info.version
 # The port speaks TRAPI 2.0 (upstream: 1.6.0), the version of Shepherd's models
 # (shepherd_utils.trapi.SCHEMA_VERSION); ARAX stamps it on its envelopes.
 TRAPI_VERSION = "2.0.0"  # info.x-trapi.version
-# ARAX's own pinned Biolink version, kept rather than Shepherd's
-# (shepherd_utils.trapi.BIOLINK_VERSION): BiolinkHelper builds its category and
-# predicate hierarchies from it, which decide what Expand, the QG interpreter
-# and Resultify match, and the parity goldens were recorded with it. A
-# response leaving Shepherd carries Shepherd's biolink_version (the envelope is
-# added on delivery, finalize_response / finish_query).
-BIOLINK_VERSION = "4.2.5"  # info.x-translator.biolink-version
+# ARAX's own pinned Biolink version, kept separate from Shepherd's
+# (shepherd_utils.trapi.BIOLINK_VERSION, also 4.4.4 today): BiolinkHelper builds
+# its category and predicate hierarchies from it, which decide what Expand, the
+# QG interpreter and Resultify match. Upstream trapi2.0 (2db91bc8) moved it from
+# 4.2.5 to 4.4.4 (DEC-32). A response leaving Shepherd carries Shepherd's
+# biolink_version (the envelope is added on delivery, finalize_response /
+# finish_query).
+BIOLINK_VERSION = "4.4.4"  # info.x-translator.biolink-version
 
 
 class RTXConfiguration:

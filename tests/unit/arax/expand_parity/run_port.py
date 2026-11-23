@@ -25,16 +25,16 @@ os.environ["ARAX_KP_CACHE_ENABLED"] = "false"
 os.environ["ARAX_BIOLINK_CACHE_DIR"] = os.path.join(DATA, "biolink")
 os.environ["SERVER_MATURITY"] = "development"
 os.makedirs(os.environ["ARAX_BIOLINK_CACHE_DIR"])
-# Biolink 4.2.5 lookup map built by biolink-helper-pkg 1.0.1, so no GitHub fetch
+# Biolink 4.4.4 lookup map built by biolink-helper-pkg 1.0.1 (DEC-32), so no GitHub fetch
 shutil.copy(
-    os.path.join(HERE, "biolink_lookup_map_4.2.5_v5.pickle"),
+    os.path.join(HERE, "biolink_lookup_map_4.4.4_v5.pickle"),
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
 # and its Biolink model YAML (AgentTypeEnum, for the agent_type_constraint case)
 with (
-    gzip.open(os.path.join(HERE, "biolink_model_4.2.5.yaml.gz")) as f_in,
+    gzip.open(os.path.join(HERE, "biolink_model_4.4.4.yaml.gz")) as f_in,
     open(
-        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.2.5.yaml"),
+        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.4.4.yaml"),
         "wb",
     ) as f_out,
 ):

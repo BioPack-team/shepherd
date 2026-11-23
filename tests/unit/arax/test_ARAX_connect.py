@@ -410,7 +410,7 @@ def test_xcrg_uses_shepherds_retriever_and_data(xcrg):
     assert list(config.tiers) == [0]
     assert config.resource_id == "infores:arax"
     assert config.trapi_schema_version == rtx.trapi_version
-    assert config.biolink_version == "4.2.5"
+    assert config.biolink_version == "4.4.4"
 
     assert response.total_results_count == 2
     assert response.data["xcrg_connect"] is True

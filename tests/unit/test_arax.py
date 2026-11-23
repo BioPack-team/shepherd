@@ -546,7 +546,7 @@ def test_warm_biolink_cache_builds_the_lookup_map(tmp_path, mocker, caplog):
             os.path.dirname(__file__),
             "arax",
             "expand_parity",
-            "biolink_lookup_map_4.2.5_v5.pickle",
+            "biolink_lookup_map_4.4.4_v5.pickle",
         ),
         tmp_path,
     )
@@ -555,7 +555,7 @@ def test_warm_biolink_cache_builds_the_lookup_map(tmp_path, mocker, caplog):
     worker.warm_biolink_cache(logger)
 
     assert "Biolink lookup map ready" in caplog.text
-    assert (tmp_path / "biolink_lookup_map_4.2.5_v5.pickle").exists()
+    assert (tmp_path / "biolink_lookup_map_4.4.4_v5.pickle").exists()
 
 
 def test_warm_biolink_cache_failure_only_warns(mocker, caplog):

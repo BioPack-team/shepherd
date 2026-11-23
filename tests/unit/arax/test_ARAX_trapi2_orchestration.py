@@ -17,12 +17,12 @@ EXPAND = os.path.join(HERE, "expand_parity")
 
 @pytest.fixture(scope="module")
 def _biolink_dir(tmp_path_factory):
-    """Biolink 4.2.5's lookup map and model YAML, so nothing is fetched."""
+    """Biolink 4.4.4's lookup map and model YAML, so nothing is fetched."""
     path = tmp_path_factory.mktemp("biolink")
-    shutil.copy(os.path.join(EXPAND, "biolink_lookup_map_4.2.5_v5.pickle"), path)
+    shutil.copy(os.path.join(EXPAND, "biolink_lookup_map_4.4.4_v5.pickle"), path)
     with (
-        gzip.open(os.path.join(EXPAND, "biolink_model_4.2.5.yaml.gz")) as f_in,
-        open(path / "biolink_model_4.2.5.yaml", "wb") as f_out,
+        gzip.open(os.path.join(EXPAND, "biolink_model_4.4.4.yaml.gz")) as f_in,
+        open(path / "biolink_model_4.4.4.yaml", "wb") as f_out,
     ):
         shutil.copyfileobj(f_in, f_out)
     return str(path)
@@ -197,6 +197,21 @@ def test_qualifier_check_is_skipped_with_a_warning_when_biolink_yaml_is_unavaila
     assert any("skipping the qualifier type check" in w for w in warnings), warnings
     # predicates are still validated
     response = _run(_query({"predicates": ["biolink:foo"], "constraints": qualifiers}))
+    assert response.error_code == "InvalidPredicate"
+
+
+def test_predicates_are_checked_against_biolink_4_4_4():
+    """DEC-32: ARAX's Biolink is 4.4.4 (upstream trapi2.0), not 4.2.5."""
+    from shepherd_utils.arax.BiolinkHelper.biolink_helper import (
+        get_current_arax_biolink_version,
+    )
+
+    assert get_current_arax_biolink_version() == "4.4.4"
+    # new in 4.4.x
+    response = _run(_query({"predicates": ["biolink:has_preventative_intervention"]}))
+    assert response.status == "OK", response.show()
+    # 4.2.5 only
+    response = _run(_query({"predicates": ["biolink:affects_response_to"]}))
     assert response.error_code == "InvalidPredicate"
 
 

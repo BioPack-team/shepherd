@@ -1,7 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/BiolinkHelper/biolink_helper.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
-#   - the Biolink version is ARAX's pinned 4.2.5 (RTXConfiguration.BIOLINK_VERSION) instead of being read from ARAX's OpenAPI YAML/JSON
+#   - the Biolink version is ARAX's pinned 4.4.4 (RTXConfiguration.BIOLINK_VERSION; 4.2.5 @ 9485431, 4.4.4 on upstream trapi2.0 2db91bc8, DEC-32) instead of being read from ARAX's OpenAPI YAML/JSON
 #   - the lookup-map cache lives in arax_biolink_cache_path() (writable; on the ARAX data volume by default) instead of beside this file
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """

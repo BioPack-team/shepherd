@@ -30,16 +30,16 @@ os.environ["ARAX_BIOLINK_CACHE_DIR"] = os.path.join(DATA, "biolink")
 os.environ["SERVER_URL"] = "http://shepherd.test"
 os.makedirs(os.environ["ARAX_BIOLINK_CACHE_DIR"])
 shutil.copy(
-    os.path.join(HERE, "..", "expand_parity", "biolink_lookup_map_4.2.5_v5.pickle"),
+    os.path.join(HERE, "..", "expand_parity", "biolink_lookup_map_4.4.4_v5.pickle"),
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
 # and its Biolink model YAML (the qualifier types ARAXQuery validates against)
 with (
     gzip.open(
-        os.path.join(HERE, "..", "expand_parity", "biolink_model_4.2.5.yaml.gz")
+        os.path.join(HERE, "..", "expand_parity", "biolink_model_4.4.4.yaml.gz")
     ) as f_in,
     open(
-        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.2.5.yaml"),
+        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.4.4.yaml"),
         "wb",
     ) as f_out,
 ):

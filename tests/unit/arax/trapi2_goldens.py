@@ -165,6 +165,14 @@ Hand rules on top (what TOM does not own):
     2db91bc8: the OpenAPI ``info.version`` ARAX reads it from; was ``ARAX
     1.6.2``), on every envelope ARAX's ``create_envelope`` made (query_parity;
     not the stored documents /response serves back).
+  - H24 ARAX's ``biolink_version`` is ``4.4.4`` (DEC-32, upstream
+    ``trapi2.0`` 2db91bc8; was ``4.2.5``), on every envelope ARAX's
+    ``create_envelope`` made (query_parity; not the stored documents). The
+    BiolinkHelper hierarchies are 4.4.4's too (the harnesses ship
+    ``expand_parity/biolink_lookup_map_4.4.4_v5.pickle`` and
+    ``biolink_model_4.4.4.yaml.gz``); no recorded case depends on a part of
+    the hierarchy that differs between 4.2.5 and 4.4.4, so nothing else
+    changes.
   - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
     ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
     ``has_jaccard_index_with``).
@@ -682,6 +690,12 @@ def _tool_version(envelope: Any) -> None:
         envelope["tool_version"] = "ARAX 2.0.0"
 
 
+def _biolink_version(envelope: Any) -> None:
+    """H24 on one envelope ARAX made, in place."""
+    if isinstance(envelope, dict) and envelope.get("biolink_version") == "4.2.5":
+        envelope["biolink_version"] = "4.4.4"
+
+
 def _row_data_strings(envelope: Any) -> None:
     """H20 on one envelope ARAX made, in place: no null in ``row_data``."""
     message = (envelope or {}).get("message") if isinstance(envelope, dict) else None
@@ -925,6 +939,7 @@ def query_goldens(g16: dict) -> dict:
         _data_release_versions(new["envelope"])  # H18
         _row_data_strings(new["envelope"])  # H20
         _tool_version(new["envelope"])  # H23
+        _biolink_version(new["envelope"])  # H24
         _drop_unreferenced(new["envelope"], new["logs"])  # H21
         plan = (new["envelope"].get("query_options") or {}).get("query_plan")
         if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
