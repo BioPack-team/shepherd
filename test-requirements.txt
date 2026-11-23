@@ -23,5 +23,5 @@ sympy
 tox
 tox-venv
 biothings_annotator @ git+https://github.com/biothings/biothings_annotator@82d3accf6c219860583d3b9b91029538b6a434a1
-catrax-pathfinder==2.5.0
+catrax-pathfinder==3.1.0
 catrax-xcrg==1.0.1.dev2

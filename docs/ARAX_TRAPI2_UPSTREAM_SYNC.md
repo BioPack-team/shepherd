@@ -271,6 +271,16 @@ Status (2026-11-23):
   `test_filters_run_on_support_graph_edges`, `test_exclude_sweeps_orphan_nodes_and_support_graphs`
   and `test_only_reachable_support_graphs_are_kept`). New port-only Expand cases cover the 2.0-only
   constraints (`TRAPI2_PORT_ONLY_CASES`); unit tests are in `test_expand_trapi2_sync.py`.
+- **Items 18-23, 30 and 49** done (KP cache and Connect). Items 18-20 are in the Redis cacher; the old
+  `test_refresh_retries_a_cached_timeout_after_a_minute` is now
+  `test_refresh_skips_a_cached_timeout_and_a_lookup_retries_it_after_a_minute`. Item 23's three upstream
+  tests run on the fakeredis store in `tests/unit/arax/test_trapi_query_cacher.py`. Item 22 reads
+  `parameters.bypass_cache` and the legacy `query_options`, as Expand does. Item 49:
+  `catrax-pathfinder==3.1.0` in `workers/arax/requirements.txt` and `test-requirements.txt` (same
+  numpy/pandas/xgboost pins as 2.5.0). Connect passes the maturity (`settings.server_maturity`) and
+  keeps DEC-7's limits, Shepherd's Retriever and rehydrate URLs, and the tier0 info-for-overlay file
+  it already used (`get_kg2c_db_path` is now `get_info_for_overlay_db_path`). Upstream's otel spans
+  around `get_paths` are not taken. No goldens change (Connect is not a parity target, DEC-7).
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|

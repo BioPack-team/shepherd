@@ -18,6 +18,7 @@ from shepherd_utils.arax.ARAX_connect import ARAXConnect
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.openapi_server.models.analysis import Analysis
+from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from shepherd_utils.config import settings
 
@@ -60,7 +61,7 @@ class FakePathfinder:
         FakePathfinder.instances.append(self)
 
     def get_paths(self, **kwargs):
-        # the shapes catrax-pathfinder 2.5.0 returns (ResultPerPathConverter /
+        # the shapes catrax-pathfinder 3.1.0 returns (ResultPerPathConverter /
         # PathConverter): TRAPI 1.x-style binding lists and aux graphs
         self.calls.append(kwargs)
         result = {
@@ -151,6 +152,9 @@ def test_connect_nodes_uses_shepherds_pathfinder_setup(pathfinder):
         f"sqlite:{config.curie_ngd_path}",
         f"sqlite:{config.kg2c_sqlite_path}",
     )
+    # catrax-pathfinder 3.x (upstream trapi2.0 7667278f): the response, then the maturity
+    assert instance.args[5] is response
+    assert instance.args[6] == config.maturity == settings.server_maturity
     (call,) = instance.calls
     # DEC-7: Shepherd's limits, whatever max_path_length / max_pathfinder_paths say
     assert call["hops_numbers"] == call["max_hops_to_explore"] == 4
@@ -161,6 +165,7 @@ def test_connect_nodes_uses_shepherds_pathfinder_setup(pathfinder):
     ((url, kwargs),) = pathfinder
     assert url == REHYDRATE
     assert kwargs["json"]["parameters"] == {"rehydrate": True, "tier": 0}
+    assert kwargs["json"]["submitter"] == f"arax-pathfinder@{config.maturity}"
 
     message = response.envelope.message
     (result,) = message.results
@@ -198,6 +203,32 @@ def _assert_valid_trapi_2_0(message):
             "biolink:knowledge_level",
             "biolink:agent_type",
         }
+
+
+def test_convert_to_trapi_starts_a_missing_or_edgeless_kg(pathfinder):
+    """upstream trapi2.0 (01740b70): a missing KG starts as a KnowledgeGraph, not
+    a dict, and a KG whose edges are None gets an edges dict."""
+    fake = FakePathfinder()
+    result, aux_graphs, kg = fake.get_paths()
+    for edges in ("missing", None):
+        response = _response(PATHFINDER_QG)
+        connect = ARAXConnect()
+        connect.response = response
+        if edges == "missing":
+            response.envelope.message.knowledge_graph = None
+        else:
+            response.envelope.message.knowledge_graph = KnowledgeGraph(
+                nodes={}, edges=None
+            )
+        connect.convert_to_trapi(
+            json.loads(json.dumps(result)), aux_graphs, kg, RETRIEVER, "testing"
+        )
+        assert set(response.envelope.message.knowledge_graph.edges) == {"e1"}
+        assert set(response.envelope.message.knowledge_graph.nodes) == {
+            "CHEBI:1",
+            "MONDO:1",
+        }
+    assert pathfinder[-1][1]["json"]["submitter"] == "arax-pathfinder@testing"
 
 
 def test_connect_nodes_reads_required_intermediate_categories(pathfinder):
@@ -300,6 +331,28 @@ def test_connect_nodes_stores_its_result_but_does_not_read_it_back(
     assert _cached_kp_curies(arax_kp_cache_store) == ["PathFinder"]
 
 
+def test_connect_nodes_does_not_cache_an_empty_or_failed_answer(
+    pathfinder, monkeypatch, arax_kp_cache_store
+):
+    """upstream trapi2.0 (a9665495, #2939): only a 200 with results is stored."""
+
+    def no_paths(self, **kwargs):
+        return {"id": "result", "node_bindings": {}, "analyses": []}, {}, {}
+
+    def boom(self, **kwargs):
+        raise RuntimeError("retriever down")
+
+    for get_paths, message in (
+        (no_paths, "Not caching PathFinder result (http_status=200, n_results=0)"),
+        (boom, "Not caching PathFinder result (http_status=500, n_results=0)"),
+    ):
+        monkeypatch.setattr(FakePathfinder, "get_paths", get_paths)
+        response = _response(PATHFINDER_QG)
+        ARAXConnect().apply(response, {"action": "connect_nodes"})
+        assert any(m["message"] == message for m in response.messages)
+    assert _cached_kp_curies(arax_kp_cache_store) == []
+
+
 XCRG_QG = {
     "nodes": {
         "chem": {"categories": ["biolink:ChemicalEntity"]},
@@ -396,6 +449,57 @@ def test_xcrg_bypass_cache_runs_it_again(xcrg):
     assert any(
         m["message"] == "bypass_cache is set; skipping cache lookup for xCRG"
         for m in response.messages
+    )
+
+
+def test_xcrg_bypass_cache_from_trapi_parameters(xcrg):
+    ARAXConnect().apply(_response(XCRG_QG), {"action": "xcrg"})
+    response = _response(XCRG_QG)
+    response.envelope.parameters = {"bypass_cache": True}
+    ARAXConnect().apply(response, {"action": "xcrg"})
+    assert len(xcrg) == 2
+
+
+def test_an_empty_xcrg_answer_is_neither_stored_nor_reused(
+    xcrg, monkeypatch, arax_kp_cache_store
+):
+    """upstream trapi2.0 (a9665495, #2939): an empty xCRG answer is most likely a
+    transient failure, so it is not cached, and an empty one already in the
+    cache (stored before this change) is not reused."""
+
+    def empty(query, config, reporter):
+        xcrg.append((query, config))
+        return {"message": {"query_graph": query["message"]["query_graph"]}}
+
+    monkeypatch.setattr(connect_module.xcrg, "run_query", empty)
+    response = _response(XCRG_QG)
+    ARAXConnect().apply(response, {"action": "xcrg"})
+    assert any(
+        m["message"] == "Not caching xCRG result (http_status=200, n_results=0)"
+        for m in response.messages
+    )
+    assert _cached_kp_curies(arax_kp_cache_store) == []
+
+    # an empty answer stored under the same key is a miss
+    connect = ARAXConnect()
+    seeded = _response(XCRG_QG)
+    seeded.envelope.message.results = []
+    connect_module.KPQueryCacher().store_response(
+        "xCRG",
+        "xCRG",
+        {
+            "query_graph": seeded.envelope.to_dict()["message"]["query_graph"],
+            "parameters": connect._clean_parameters({"action": "xcrg"}),
+        },
+        seeded.envelope.to_dict(),
+        200,
+        1.0,
+    )
+    response = _response(XCRG_QG)
+    ARAXConnect().apply(response, {"action": "xcrg"})
+    assert len(xcrg) == 2
+    assert not any(
+        m["message"].startswith("Found a cached result") for m in response.messages
     )
 
 

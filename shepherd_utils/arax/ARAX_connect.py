@@ -21,6 +21,18 @@
 #     left out, with its path-binding ids and any analysis/result left empty. The cached-result path no longer
 #     re-types analyses (there is one Analysis model). get_constraint_category reads
 #     PathConstraint.required_intermediate_categories
+#   - from upstream trapi2.0 (a9665495, #2939): a cached xCRG answer with 0 results is never reused, and a
+#     Connect answer is only stored when http_status == 200 and it has results ("Not caching ..." otherwise)
+#   - Connect reads bypass_cache from the TRAPI 2.0 query parameters (as upstream trapi2.0 18ae5be1 does) and,
+#     like the port's Expand, still from the legacy query_options
+#   - from upstream trapi2.0 (7667278f, f8d7ee8d, 264aae6d, 090d73b7): catrax-pathfinder 3.1.0: Pathfinder(...,
+#     response, maturity) with the info-for-overlay db as its degree db (Path_Finder/utility
+#     .get_info_for_overlay_db_path, the same tier0 file as before); convert_to_trapi / rehydrate take the maturity
+#     (RTXConfiguration().maturity, i.e. settings.server_maturity) and the rehydrate payload carries submitter
+#     "arax-pathfinder@<maturity>"
+#   - from upstream trapi2.0 (01740b70): convert_to_trapi starts a missing KG as KnowledgeGraph(nodes={}, edges={})
+#     (not a dict) and tolerates its edges being None. Upstream's otel spans around get_paths / convert_to_trapi
+#     are not taken (shepherd_utils.arax_tracing instruments the HTTP calls)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import json
 import logging
@@ -42,7 +54,7 @@ from collections import Counter
 import copy
 import time
 
-from shepherd_utils.arax.Path_Finder.utility import get_curie_ngd_path, get_curie_to_pmids_path, get_kg2c_db_path
+from shepherd_utils.arax.Path_Finder.utility import get_curie_ngd_path, get_curie_to_pmids_path, get_info_for_overlay_db_path
 from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 
@@ -310,16 +322,24 @@ class ARAXConnect:
             bypass_cache = query_options["bypass_cache"] is not None and str(query_options["bypass_cache"]).lower() != 'false'
         else:
             bypass_cache = False
+        # TRAPI 2.0 carries bypass_cache in the query's parameters (as Expand reads it)
+        trapi_parameters = getattr(self.response.envelope, "parameters", None)
+        if isinstance(trapi_parameters, dict) and trapi_parameters.get("bypass_cache") is True:
+            bypass_cache = True
         if bypass_cache:
             self.response.debug(f"bypass_cache is set; skipping cache lookup for {kp_curie}")
             response_code = -2
         else:
             self.response.info(f"Looking for a previously cached result from {kp_curie}")
             response_data, response_code, elapsed_time, error = cacher.get_cached_result(kp_curie, pathfinder_input_data)
+        #### Never reuse an empty xCRG answer: it is most likely a transient upstream failure, not a real empty result
         if (
                 response_code != -2
                 and response_code == 200
-                and (is_xcrg_action or self.response.envelope.message.results)
+                and (
+                    (is_xcrg_action and (cacher._get_n_results(response_data) or 0) > 0)
+                    or (not is_xcrg_action and self.response.envelope.message.results)
+                )
         ):
             n_results = cacher._get_n_results(response_data)
             # Note: This logging message is keyed off to provide progress updates to the RTX front-end.
@@ -354,17 +374,22 @@ class ARAXConnect:
             elapsed_time = time.time() - start
             self.response.info(f"Got result from ARAX {kp_curie} Connect after {elapsed_time}. Converting to_dict()")
             response_object = self.response.envelope.to_dict()
-            self.response.info(f"Storing resulting dict in the cache")
-            cacher.store_response(
-                kp_curie=kp_curie,
-                query_url=kp_url,
-                query_object=pathfinder_input_data,
-                response_object=response_object,
-                http_code=http_status,
-                elapsed_time=elapsed_time,
-                status=status
-            )
-            self.response.info(f"Stored result in the cache.")
+            #### Only cache successful, non-empty answers so a transient failure is not replayed later
+            n_results = len(self.response.envelope.message.results or [])
+            if http_status == 200 and n_results > 0:
+                self.response.info(f"Storing resulting dict in the cache")
+                cacher.store_response(
+                    kp_curie=kp_curie,
+                    query_url=kp_url,
+                    query_object=pathfinder_input_data,
+                    response_object=response_object,
+                    http_code=http_status,
+                    elapsed_time=elapsed_time,
+                    status=status
+                )
+                self.response.info(f"Stored result in the cache.")
+            else:
+                self.response.info(f"Not caching {kp_curie} result (http_status={http_status}, n_results={n_results})")
 
         if self.report_stats:  # helper to report information in debug if class self.report_stats = True
             self.response = self.report_response_stats(self.response)
@@ -488,10 +513,11 @@ class ARAXConnect:
         pathfinder = Pathfinder(
             f"retriever:{retriever_url}",
             get_curie_ngd_path(),
-            get_kg2c_db_path(),
+            get_info_for_overlay_db_path(),
             blocked_curies,
             blocked_synonyms,
-            self.response
+            self.response,
+            rtx_config.maturity
         )
         # DEC-7: Shepherd's pathfinder limits, whatever max_path_length / max_pathfinder_paths say
         max_pathfinder_paths = SHEPHERD_PATHFINDER_MAX_PATHS
@@ -518,7 +544,7 @@ class ARAXConnect:
                                   f"with a max path length of {self.parameters['max_path_length']}.")
             return self.response
 
-        self.convert_to_trapi(result, aux_graphs, knowledge_graph, retriever_url)
+        self.convert_to_trapi(result, aux_graphs, knowledge_graph, retriever_url, rtx_config.maturity)
 
         if not hasattr(self.response, "original_query_graph"):
             self.response.original_query_graph = copy.deepcopy(self.response.envelope.message.query_graph)
@@ -599,7 +625,7 @@ class ARAXConnect:
         synonyms = set(s.lower() for s in json_block_list['synonyms'])
         return set(json_block_list['curies']), synonyms
 
-    def convert_to_trapi(self, result, aux_graphs, knowledge_graph, retriever_url):
+    def convert_to_trapi(self, result, aux_graphs, knowledge_graph, retriever_url, maturity):
         if self.response.envelope.message.results is None:
             self.response.envelope.message.results = []
 
@@ -607,9 +633,11 @@ class ARAXConnect:
             self.response.envelope.message.auxiliary_graphs = {}
 
         if self.response.envelope.message.knowledge_graph is None:
-            self.response.envelope.message.knowledge_graph = {}
-        rehydrated_kg = self.rehydrate(knowledge_graph, retriever_url)
-        kg = KnowledgeGraph().from_dict(rehydrated_kg)
+            self.response.envelope.message.knowledge_graph = KnowledgeGraph(nodes={}, edges={})
+        if self.response.envelope.message.knowledge_graph.edges is None:
+            self.response.envelope.message.knowledge_graph.edges = {}
+        rehydrated_kg = self.rehydrate(knowledge_graph, retriever_url, maturity)
+        kg = KnowledgeGraph.from_dict(rehydrated_kg)
 
         # TRAPI 2.0: an aux graph needs edges, so one whose edges PathFinder could not
         # extract is left out, with the path bindings to it (and an analysis left without any)
@@ -649,10 +677,10 @@ class ARAXConnect:
             self.response.envelope.message.auxiliary_graphs[key] = AuxiliaryGraph(
                 edges=value['edges']
             )
-        self.response.envelope.message.knowledge_graph.edges.update(kg.edges)
+        self.response.envelope.message.knowledge_graph.edges.update(kg.edges or {})
         self.response.envelope.message.knowledge_graph.nodes.update(kg.nodes)
 
-    def rehydrate(self, kg, retriever_url):
+    def rehydrate(self, kg, retriever_url, maturity):
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         payload = {
             "message": {
@@ -661,7 +689,8 @@ class ARAXConnect:
             "parameters": {
                 "rehydrate": True,
                 "tier": 0
-            }
+            },
+            "submitter": f"arax-pathfinder@{maturity}"
         }
 
         try:
