@@ -245,7 +245,8 @@ Status (2026-11-23):
 - **D1** done (DEC-25): `catrax-xcrg==1.0.1.dev2`. Its known bugs are BioPack-team/shepherd#273, #274, #275 and #276.
 - **D2** done (DEC-23).
 - **D3** done (DEC-22).
-- **D4** investigated; see the note below the table.
+- **D4** decided: keep `parameters.timeout` as the whole-query timeout. It's a UI issue (DEC-29a).
+- **D9** decided: read both sources (DEC-29b). **D10** decided: keep Shepherd's (DEC-29c). **D11** decided: keep the local offset; the heartbeat now has one (DEC-29d).
 - **D5** done (DEC-24).
 - **D6** done (DEC-26). A qnode `name` is still resolved (D-25).
 - **D7** done (DEC-27).

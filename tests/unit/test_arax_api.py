@@ -1092,3 +1092,12 @@ async def test_streamed_query_body_is_validated_then_streamed(query_client):
     assert response.status_code == 200
     stream.assert_awaited_once()
     sync.assert_not_called()
+
+
+def test_heartbeat_timestamp_carries_an_offset():
+    """A stream heartbeat's timestamp is RFC 3339 with the local offset (as
+    ARAX's own log entries are), not a naive local time (D11)."""
+    from datetime import datetime
+
+    line = json.loads(api._heartbeat_line())
+    assert datetime.fromisoformat(line["timestamp"]).utcoffset() is not None

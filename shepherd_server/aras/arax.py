@@ -82,7 +82,7 @@ def _heartbeat_line() -> str:
     return (
         json.dumps(
             {
-                "timestamp": str(datetime.now().isoformat()),
+                "timestamp": datetime.now().astimezone().isoformat(),
                 "level": "DEBUG",
                 "code": "",
                 "message": "Query is still progressing...",
