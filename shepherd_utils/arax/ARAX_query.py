@@ -39,7 +39,9 @@
 #     InvalidPredicate (400), a constraints.qualifiers type that is not a Biolink qualifier slot is
 #     InvalidQualifier (422) (_get_valid_biolink_predicates / _get_valid_biolink_qualifier_types). The
 #     Biolink model YAML is BiolinkHelper's cached copy in arax_biolink_cache_path(), read only when a
-#     query has a qualifier constraint. A QG whose edges are null (paths only) skips the qedge checks
+#     query has a qualifier constraint; if it can't be loaded (e.g. the download fails), only the
+#     qualifier-type check is skipped, with a warning. A QG whose edges are null (paths only) skips the
+#     qedge checks
 #   - from upstream trapi2.0 (2f78aa95): a warning when parameters.tiers is not [0] (ARAX answers from
 #     Tier 0 only); query_return_stream leaves out the log lines below parameters.log_level
 #     (_requested_log_level_rank / _log_entry_is_wanted). The envelope's logs are not filtered here:
@@ -756,6 +758,8 @@ class ARAXQuery:
 
             #### Check that predicates and qualifier types are real Biolink terms
             valid_predicates = _get_valid_biolink_predicates()
+            valid_qualifier_types = None
+            skip_qualifier_check = False
             for id,qedge in message['query_graph']['edges'].items():
                 for predicate in qedge.get('predicates') or []:
                     if predicate not in valid_predicates:
@@ -764,8 +768,19 @@ class ARAXQuery:
                 constraints = qedge.get('constraints') or {}
                 for qualifier_set in constraints.get('qualifiers') or []:
                     for qualifier_type in qualifier_set or {}:
-                        # Shepherd: the Biolink model YAML is read only when a query has a qualifier constraint
-                        if qualifier_type not in _get_valid_biolink_qualifier_types():
+                        # Shepherd: the Biolink model YAML is read only when a query has a qualifier constraint.
+                        # If it can't be read (e.g. the download fails), only this check is skipped, with a warning
+                        if skip_qualifier_check:
+                            continue
+                        if valid_qualifier_types is None:
+                            try:
+                                valid_qualifier_types = _get_valid_biolink_qualifier_types()
+                            except Exception as error:
+                                response.warning(f"Could not load the Biolink model to validate qualifier types "
+                                                 f"({type(error).__name__}: {error}); skipping the qualifier type check")
+                                skip_qualifier_check = True
+                                continue
+                        if qualifier_type not in valid_qualifier_types:
                             response.error(f"QueryGraph edge '{id}' has a qualifier constraint with qualifier type '{qualifier_type}', which is not a Biolink qualifier", error_code="InvalidQualifier", http_status=422)
                             return response
 

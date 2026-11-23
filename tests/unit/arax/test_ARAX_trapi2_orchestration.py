@@ -176,6 +176,25 @@ def test_a_non_biolink_qualifier_type_is_invalid():
     assert "'biolink:foo_qualifier'" in response.message
 
 
+def test_qualifier_check_is_skipped_with_a_warning_when_biolink_yaml_is_unavailable(
+    monkeypatch,
+):
+    from biolink_helper_pkg import BiolinkHelper
+
+    def fail(self):
+        raise RuntimeError("Biolink YAML download failed")
+
+    monkeypatch.setattr(BiolinkHelper, "download_biolink_model", fail)
+    qualifiers = {"qualifiers": [{"biolink:foo_qualifier": "x"}]}
+    response = _run(_query({"constraints": qualifiers}))
+    assert response.status == "OK", response.show()
+    warnings = [m["message"] for m in response.messages if m["level"] == "WARNING"]
+    assert any("skipping the qualifier type check" in w for w in warnings), warnings
+    # predicates are still validated
+    response = _run(_query({"predicates": ["biolink:foo"], "constraints": qualifiers}))
+    assert response.error_code == "InvalidPredicate"
+
+
 def test_biolink_predicates_and_qualifiers_are_valid():
     from shepherd_utils.arax.ARAX_query import (
         _get_valid_biolink_predicates,
