@@ -644,7 +644,7 @@ qedge, with creative-treats widening.
 | File (ARAX files: tier `tier0-20260928`, DEC-30; pathfinder files: their own tier) | Used by | In Shepherd |
 |---|---|---|
 | `curie_ngd_v1.0_<tier>.sqlite` | CON-*, XCR-* | Yes (the pathfinder download, shared with the `arax` worker) |
-| `tier0-info-for-overlay_v1.0_<tier>.sqlite` (= `kg2c_sqlite`) | CON-*, OVL-05 (FET) | Yes (the pathfinder download, shared with the `arax` worker) |
+| `tier0-info-for-overlay_v1.0_<tier>.sqlite` (= `info_for_overlay_sqlite`, formerly `kg2c_sqlite`) | CON-*, OVL-05 (FET) | Yes (the pathfinder download, shared with the `arax` worker) |
 | `curie_to_pmids_v1.0_<tier>.sqlite` (int32 PMID blobs) | OVL-01, OVL-04, XCR-* | Download set up (`arax` worker); placeholder URL (DEC-6) |
 | `ExplainableDTD_v1.0-<tier>-all_with_paths.db` (mapping tables with `extra_attributes`) | INF-* | Download set up (`arax` worker); placeholder URL (DEC-6) |
 | `COHDdatabase_v1.0_KG2.8.0.db` (old KG) | OVL-02 | Download set up (`arax` worker); placeholder URL (DEC-6) |

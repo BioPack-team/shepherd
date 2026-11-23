@@ -1,13 +1,13 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/Overlay/fisher_exact_test.py.
 # Changes from upstream:
 #   - import paths / sys.path hacks only
-#   - the tier0 overlay sqlite path comes from RTXConfiguration.kg2c_sqlite_path (Shepherd's pathfinder download) instead of RTX/code/ARAX/KnowledgeSources/KG2c/
+#   - the tier0 overlay sqlite path comes from RTXConfiguration.info_for_overlay_sqlite_path (Shepherd's pathfinder download) instead of RTX/code/ARAX/KnowledgeSources/Tier0/
 #   - the rel_edge_key background-count query goes to infores:retriever instead of infores:gandalf (DEC-4: Retriever queries Gandalf; upstream trapi2.0 does the same since 615baff3)
 #   - the virtual edges are bound to the results in one pass after the loop, not one call per edge (D-28)
 #   - from upstream trapi2.0 (615baff3, 090d73b7, 6eb740c8): dead kp='infores:rtx-kg2' variable, the kp parameter
 #     of query_size_of_adjacent_nodes and the "Only KG2 is allowable" branch dropped; RETRIEVER_INFORES_CURIE constant;
 #     log texts/comments say "tier0 info-for-overlay sqlite" / "info-for-overlay sqlite" instead of KG2c/infores:rtx-kg2;
-#     KPSelector(log=...) without kg2_mode (the sqlite path setting itself is unchanged here)
+#     KPSelector(log=...) without kg2_mode; RTX_CONFIG.kg2c_sqlite_path is info_for_overlay_sqlite_path (090d73b7)
 #   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type; upstream sets none, so they take compute_ngd's values for ARAX's virtual edges (statistical_association / automated_agent)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # ruff: noqa: E402
@@ -48,7 +48,7 @@ class ComputeFTEST:
         self.nodesynonymizer = NodeSynonymizer()
 
         ## construct the path to the info-for-overlay sqlite file
-        self.sqlite_file_path = Path(RTX_CONFIG.kg2c_sqlite_path)
+        self.sqlite_file_path = Path(RTX_CONFIG.info_for_overlay_sqlite_path)
 
 
     def fisher_exact_test(self):

@@ -3,6 +3,8 @@
 # OpenAPI YAML, git branch names and the deployment domain. This keeps the same
 # class name and exposes only the attributes the ported modules read, backed by
 # Shepherd's settings. Add attributes here as more modules are ported.
+# From upstream trapi2.0 (090d73b7): kg2c_sqlite_path / tier0_sqlite_path (and
+# their site_config versions) are info_for_overlay_sqlite_path / _version.
 # See docs/ARAX_PORT_BASELINE.md (DEC-6, DEC-14).
 from urllib.parse import urlparse
 
@@ -54,9 +56,10 @@ class RTXConfiguration:
         return self.maturity == "production"
 
     @property
-    def kg2c_sqlite_path(self) -> str:
-        # ARAX's kg2c_sqlite and tier0_sqlite point at the same
-        # tier0-info-for-overlay file, which the pathfinder already downloads.
+    def info_for_overlay_sqlite_path(self) -> str:
+        # Upstream trapi2.0 (090d73b7) renamed kg2c_sqlite / tier0_sqlite (the
+        # same file) to info_for_overlay_sqlite: the tier0-info-for-overlay
+        # file, which the pathfinder already downloads.
         return arax_pathfinder_sqlite_paths()[1]
 
     @property
@@ -78,10 +81,6 @@ class RTXConfiguration:
     @property
     def explainable_dtd_db_path(self) -> str:
         return arax_db_path(ARAX_EXPLAINABLE_DTD)
-
-    @property
-    def tier0_sqlite_path(self) -> str:
-        return self.kg2c_sqlite_path
 
     @property
     def autocomplete_path(self) -> str:
@@ -118,8 +117,7 @@ class RTXConfiguration:
             ("cohd_database", ".db"),
             ("curie_to_pmids", ".sqlite"),
             ("curie_ngd", ".sqlite"),
-            ("kg2c_sqlite", ".sqlite"),
-            ("tier0_sqlite", ".sqlite"),
+            ("info_for_overlay_sqlite", ".sqlite"),
             ("fda_approved_drugs", ".pickle"),
             ("autocomplete", ".sqlite"),
             ("explainable_dtd_db", ".db"),

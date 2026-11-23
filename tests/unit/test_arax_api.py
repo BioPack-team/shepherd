@@ -658,6 +658,10 @@ async def test_status_site_config_kp_cache_and_system_load(status_client):
         load = (await client.get("/status", params={"mode": "system_load"})).json()
     assert config["config"]["arax_version"] == "1.6.2"
     assert config["config"]["cohd_database_version"] == "1.0_KG2.8.0"
+    # upstream trapi2.0 (090d73b7): kg2c_sqlite / tier0_sqlite are info_for_overlay_sqlite
+    assert "info_for_overlay_sqlite_version" in config["config"]
+    assert "kg2c_sqlite_version" not in config["config"]
+    assert "tier0_sqlite_version" not in config["config"]
     assert kp_cache["cache_stats"]["n_cached_queries"] == 0
     assert kp_cache["cache_data"] == []
     assert kp_cache["column_data"][0]["key"] == "kp_query_id"

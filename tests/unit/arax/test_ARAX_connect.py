@@ -150,7 +150,7 @@ def test_connect_nodes_uses_shepherds_pathfinder_setup(pathfinder):
     assert instance.args[:3] == (
         f"retriever:{RETRIEVER}",
         f"sqlite:{config.curie_ngd_path}",
-        f"sqlite:{config.kg2c_sqlite_path}",
+        f"sqlite:{config.info_for_overlay_sqlite_path}",
     )
     # catrax-pathfinder 3.x (upstream trapi2.0 7667278f): the response, then the maturity
     assert instance.args[5] is response
