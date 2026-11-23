@@ -27,6 +27,7 @@
 #     6.0.2) only knows TRAPI <= 1.6; the ValidatorFailed log entries it adds carry
 #     an RFC 3339 timestamp with offset, as 2.0 LogEntry requires; the X view's
 #     stripped node/edge `attributes` and edge `sources` are omitted, not null
+#   - from upstream trapi2.0 (ae9b9b2d): validation is against Biolink 4.4.4 (was 4.4.2)
 #   - get_response takes an optional load_local (an async loader for a Shepherd
 #     response id), so the server can finish its stored form; default: upstream's
 # Everything else -- the branch order, the validator calls and result shapes,
@@ -52,7 +53,7 @@ def eprint(*args, **kwargs):
 
 # only certain versions of TRAPI can be validated; place default in position [0]
 valid_trapi_versions = ['2.0.0']
-biolink_version = '4.4.2'
+biolink_version = '4.4.4'
 
 try:
     validator_version = f"translator_tom {metadata.version('translator_tom')}"

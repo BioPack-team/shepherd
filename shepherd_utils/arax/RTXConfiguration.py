@@ -19,8 +19,9 @@ from shepherd_utils.data_download import (
     arax_pathfinder_sqlite_paths,
 )
 
-# ARAX's UI/OpenAPI/python-flask-server/openapi_server/openapi/openapi.yaml @ 9485431
-ARAX_VERSION = "1.6.2"  # info.version
+# ARAX's UI/OpenAPI/python-flask-server/openapi_server/openapi/openapi.yaml on
+# upstream trapi2.0 (2db91bc8; 1.6.2 @ 9485431)
+ARAX_VERSION = "2.0.0"  # info.version
 # The port speaks TRAPI 2.0 (upstream: 1.6.0), the version of Shepherd's models
 # (shepherd_utils.trapi.SCHEMA_VERSION); ARAX stamps it on its envelopes.
 TRAPI_VERSION = "2.0.0"  # info.x-trapi.version

@@ -154,7 +154,7 @@ async def test_query_runs_in_process_and_saves_arax_response(
     assert saved["id"] == "http://shepherd.test/arax/response/response_id"
     assert set(saved["message"]["query_graph"]["nodes"]) == {"n0", "n1"}
     assert saved["operations"]["actions"] == OPERATIONS_QUERY["operations"]["actions"]
-    assert saved["tool_version"] == "ARAX 1.6.2"
+    assert saved["tool_version"] == "ARAX 2.0.0"
     # Stored in Shepherd's stored form: no delivery envelope ...
     assert not set(ENVELOPE_MEMBERS) & set(saved)
     # ... and ARAX's log, part of its response, is in the query's log store,

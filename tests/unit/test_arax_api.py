@@ -380,7 +380,7 @@ async def test_get_response_is_a_trapi_2_response(arax_client, mocker):
     stored = {
         "message": {"knowledge_graph": {"nodes": {}, "edges": {}}, "results": []},
         "status": "Success",
-        "tool_version": "ARAX 1.6.2",
+        "tool_version": "ARAX 2.0.0",
     }
     mocker.patch("shepherd_utils.db.get_message_sync", return_value=stored)
     lookup = mocker.patch.object(
@@ -656,7 +656,7 @@ async def test_status_site_config_kp_cache_and_system_load(status_client):
         config = (await client.get("/status", params={"mode": "site_config"})).json()
         kp_cache = (await client.get("/status", params={"mode": "kp_cache"})).json()
         load = (await client.get("/status", params={"mode": "system_load"})).json()
-    assert config["config"]["arax_version"] == "1.6.2"
+    assert config["config"]["arax_version"] == "2.0.0"
     assert config["config"]["cohd_database_version"] == "1.0_KG2.8.0"
     # upstream trapi2.0 (090d73b7): kg2c_sqlite / tier0_sqlite are info_for_overlay_sqlite
     assert "info_for_overlay_sqlite_version" in config["config"]

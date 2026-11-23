@@ -96,9 +96,14 @@ def _stream(araxq, query):
 def test_an_uncaught_error_outside_the_action_loop_ends_the_stream(monkeypatch, target):
     """upstream trapi2.0 (775b97a1): asynchronous_query records the exception
     and still sets DONE, so query_return_stream ends."""
+    import time
+
     from shepherd_utils.arax.ARAX_query import ARAXQuery
 
     def boom(*args, **kwargs):
+        # Not at once: query_return_stream (upstream's) yields nothing at all
+        # when the query thread is already DONE at its first status check
+        time.sleep(0.5)
         raise RuntimeError("boom")
 
     monkeypatch.setattr(target, boom)

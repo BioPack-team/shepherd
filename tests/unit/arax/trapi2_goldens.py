@@ -79,7 +79,9 @@ Hand rules on top (what TOM does not own):
     the TRAPI version ARAX validates against: ``2.0.0`` (ARAX's only valid
     version under TRAPI 2.0; the ``local_trapi_1_5`` stored response still
     declares ``1.5.0``, which is no longer a valid version, so it is validated
-    as the default ``2.0.0`` too, and keeps declaring ``1.5.0``).
+    as the default ``2.0.0`` too, and keeps declaring ``1.5.0``). The Biolink
+    version in that key is ``4.4.4`` (upstream ``trapi2.0`` ae9b9b2d; was
+    ``4.4.2``).
   - H7 aux_parity: the meta-KG (and its simple view) and autocomplete answers
     are the same objects in 2.0 (a MetaKnowledgeGraph shape change would be
     additions only); the goldens are carried over unchanged, but for H22.
@@ -159,6 +161,10 @@ Hand rules on top (what TOM does not own):
     edge bindings, the endpoints of bound edges, and, transitively, the aux
     graphs named by an analysis's ``support_graphs`` or a reached edge's
     ``biolink:support_graphs`` attribute, with their edges and endpoints.
+  - H23 ARAX's ``tool_version`` is ``ARAX 2.0.0`` (upstream ``trapi2.0``
+    2db91bc8: the OpenAPI ``info.version`` ARAX reads it from; was ``ARAX
+    1.6.2``), on every envelope ARAX's ``create_envelope`` made (query_parity;
+    not the stored documents /response serves back).
   - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
     ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
     ``has_jaccard_index_with``).
@@ -670,6 +676,12 @@ def _data_release_versions(envelope: Any) -> None:
         envelope["data_release_versions"] = {"infores:arax": ARAX_TIER0_BUILD}
 
 
+def _tool_version(envelope: Any) -> None:
+    """H23 on one envelope ARAX made, in place."""
+    if isinstance(envelope, dict) and envelope.get("tool_version") == "ARAX 1.6.2":
+        envelope["tool_version"] = "ARAX 2.0.0"
+
+
 def _row_data_strings(envelope: Any) -> None:
     """H20 on one envelope ARAX made, in place: no null in ``row_data``."""
     message = (envelope or {}).get("message") if isinstance(envelope, dict) else None
@@ -912,6 +924,7 @@ def query_goldens(g16: dict) -> dict:
         new["envelope"] = _xdtd_build(new["envelope"])  # H17
         _data_release_versions(new["envelope"])  # H18
         _row_data_strings(new["envelope"])  # H20
+        _tool_version(new["envelope"])  # H23
         _drop_unreferenced(new["envelope"], new["logs"])  # H21
         plan = (new["envelope"].get("query_options") or {}).get("query_plan")
         if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
@@ -935,6 +948,8 @@ def _validation_version(result: Any) -> Any:
     for old in ("1.6.0", "1.5.0"):
         text = text.replace(f'"version": "{old}"', '"version": "2.0.0"')
         text = text.replace(f"info.checked.{old}.", "info.checked.2.0.0.")
+    # ... and the Biolink version it validates against: 4.4.4 (upstream trapi2.0 ae9b9b2d)
+    text = text.replace("info.checked.2.0.0.4.4.2", "info.checked.2.0.0.4.4.4")
     result["validation_result"] = json.loads(text)
     return result
 
