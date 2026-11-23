@@ -3,7 +3,6 @@
 #   - import paths / sys.path hacks only
 #   - every KP query goes to infores:retriever (DEC-4); with a user-specified kp list, Retriever is queried with that list forwarded as parameters.kp (DEC-10), and every other valid KP is marked Skipped in the query plan (DEC-12)
 #   - the kp parameter is no longer validated against valid_kps (InvalidKP); it is kept exactly as given, since Retriever decides what is valid (DEC-10)
-#   - single-node queries go to infores:retriever instead of infores:rtx-kg2 (DEC-4), with the kp list forwarded
 #   - the FDA-approved-drugs pickle path comes from RTXConfiguration.fda_approved_drugs_path (DEC-6)
 #   - the unused plover_url attribute is dropped (dead code, DEC-5)
 #   - inferred 'affects' qedges (the legacy xCRG route, not MVP2) still call ARAXInfer's
@@ -12,10 +11,18 @@
 #     failure on the missing xCRG models
 #   - TRAPI 2.0: qedge attribute constraints and qualifier sets are read from qedge.constraints
 #     (attributes / qualifiers, a qualifier set being a {qualifier_type_id: value} dict); a result's
-#     node binding is one {"ids": [...]} object; the lumped creative-treats edge sets
-#     knowledge_level / agent_type as top-level Edge properties, and the text-mining elevation check
+#     node binding is one {"ids": [...]} object; the text-mining elevation check
 #     reads the top-level agent_type; a TRAPI parameters.bypass_cache=true also bypasses the KP cache;
 #     a query graph without 'edges' (optional in 2.0, e.g. single-node) is read as having none
+#   - from upstream trapi2.0 (16f5cb79): sets are set_interpretation COLLATE (set_qnode_is_set),
+#     so _prune_kg really un-sets a collated qnode for FET pruning (DEC-24)
+#   - from upstream trapi2.0 (615baff3): single-node expand is removed (Retriever needs an edge);
+#     expand(node_key=...), including orphan qnodes picked when no edge_key/node_key is given, is an
+#     InvalidQuery error (DEC-23)
+#   - from upstream trapi2.0 (2add4986, DEC-22): creative-treats lumping is removed
+#     (_handle_creative_treats_predicate_answers: no SemMedDB <10-publication pruning, no
+#     creative_expand_treats_* virtual qedge, no lumped biolink:treats edge); the querier's
+#     heuristic prediction edges remain
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import asyncio
 import copy
@@ -31,6 +38,7 @@ from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_biolink_helper
 import shepherd_utils.arax.Expand.expand_utilities as eu
+from shepherd_utils.arax.ARAX_resultify import set_qnode_is_set
 from shepherd_utils.arax.Expand.expand_utilities import QGOrganizedKnowledgeGraph
 from shepherd_utils.arax.Expand.kp_selector import KPSelector
 from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeGraph
@@ -64,7 +72,6 @@ def trim_to_size(input_list, length):
         return input_list
 
 KPS_THAT_RETURN_PREFERRED_NODE_CURIES = {'infores:retriever'}
-KP_THAT_CAN_HANDLE_SINGLE_NODE_QUERIES = {RETRIEVER_INFORES}
 
 class ARAXExpander:
 
@@ -80,7 +87,6 @@ class ARAXExpander:
         #       that makes me wonder if there is a bug, and if we should be using this attribute, somewhere? (SAR):
         self.supported_qedge_qualifier_constraints = {"biolink:qualified_predicate", "biolink:object_direction_qualifier",
                                                       "biolink:object_aspect_qualifier"}
-        self.treats_like_predicates = set(self.bh.get_descendants("biolink:treats_or_applied_or_studied_to_treat")).difference({"biolink:treats"})
 
     def describe_me(self):
         """
@@ -131,8 +137,9 @@ class ARAXExpander:
                 "is_required": False,
                 "examples": ["n00", "[n00, n01]"],
                 "type": "string",  # TODO: A string OR list is allowed... way to specify that?
-                "description": "A query graph node ID or list of such IDs to expand (default is to expand "
-                               "entire query graph)."
+                "description": "A query graph node ID or list of such IDs to expand on their own. Not currently "
+                               "supported (single-node queries require a KP that answers edge-less queries, and "
+                               "Retriever does not), so specifying this results in an error."
             },
             "prune_threshold": {
                 "is_required": False,
@@ -286,6 +293,11 @@ class ARAXExpander:
                       error_code="InvalidQG")
             return response
         qnode_keys_to_expand = eu.convert_to_list(parameters['node_key'])
+        if qnode_keys_to_expand:
+            log.error(f"Cannot expand qnode(s) {', '.join(qnode_keys_to_expand)} on their own: single-node (edge-less) "
+                      f"queries are not supported, because Retriever requires at least one qedge",
+                      error_code="InvalidQuery")
+            return response
         user_specified_kp = True if parameters['kp'] else False
 
         # Convert message knowledge graph to format organized by QG keys, for faster processing
@@ -573,13 +585,6 @@ class ARAXExpander:
                                                          overarching_kg,
                                                          log)
 
-                # If there are creative-treats edges: handle Expand's creative treats predicate answers
-                if be_creative_treats and qedge_key in overarching_kg.edges_by_qg_id:
-                    self._handle_creative_treats_predicate_answers(qedge_key,
-                                                                   overarching_kg,
-                                                                   message.query_graph,
-                                                                   log)
-
                 # Apply any kryptonite ("not") qedges
                 self._apply_any_kryptonite_edges(overarching_kg,
                                                  message.query_graph,
@@ -616,23 +621,6 @@ class ARAXExpander:
                                     f"no paths remain from any KPs that satisfy qedge(s) {unfulfilled_qedge_keys}.")
                     else:
                         log.warning(f"No paths were found in any KPs satisfying qedge {unfulfilled_qedge_keys}.")
-                    return response
-
-        # Expand any specified nodes
-        if qnode_keys_to_expand:
-            kps_to_use = [RETRIEVER_INFORES]  # DEC-4: Retriever answers single-node queries
-            for qnode_key in qnode_keys_to_expand:
-                answer_kg = self._expand_node(qnode_key,
-                                              kps_to_use,
-                                              query_graph,
-                                              user_specified_kp,
-                                              kp_timeout,
-                                              log,
-                                              forwarded_kps=parameters["kp"])
-                if log.status != 'OK':
-                    return response
-                self._merge_answer_into_message_kg(answer_kg, overarching_kg, message.query_graph, query_graph, log)
-                if log.status != 'OK':
                     return response
 
         # Get rid of any lingering expand-added subclass self-qedges that are no longer relevant (edges pruned)
@@ -777,118 +765,6 @@ class ARAXExpander:
                                   f"approval constraint ({round((len(nodes_to_remove) / len(answer_node_ids)) * 100)}%)")
                         overarching_kg.remove_nodes(nodes_to_remove, qnode_key, query_graph)
 
-
-    def _handle_creative_treats_predicate_answers(
-        self,
-        qedge_key: str,
-        overarching_kg: QGOrganizedKnowledgeGraph,
-        query_graph: QueryGraph,
-        log: ARAXResponse,
-    ) -> None:
-        qedge = query_graph.edges[qedge_key]
-        # First remove any SemMedDB treats_or_applied-type edges with < 10 associated publications (not trustworthy)
-        edge_keys_to_remove = {
-            edge_key
-            for edge_key, edge in overarching_kg.edges_by_qg_id[qedge_key].items()
-            if edge.predicate in self.treats_like_predicates
-            and any(source.resource_id == "infores:semmeddb" for source in edge.sources)
-            and (
-                (pub_count := next(
-                    (
-                        len(x.value)
-                        for x in (edge.attributes or [])
-                        if x.attribute_type_id == "biolink:publications"
-                    ),
-                    None,
-                )) is not None
-                and pub_count < 10
-            )
-        }
-        # edge_keys_to_remove = {edge_key for edge_key, edge in overarching_kg.edges_by_qg_id[qedge_key].items()
-        #                        if edge.predicate in self.treats_like_predicates and
-        #                        any(source.resource_id == "infores:semmeddb" for source in edge.sources) and
-        #                        [len(x.value) for x in edge.attributes if x.attribute_type_id == "biolink:publications"][0] < 10}
-        log.debug(f"Removing {len(edge_keys_to_remove)} semmeddb treats_or_applied-type edges with < 10 associated publications "
-                  f"fulfilling {qedge_key}")
-        for edge_key in edge_keys_to_remove:
-            del overarching_kg.edges_by_qg_id[qedge_key][edge_key]
-
-        # Use remaining treats-like edges as support for one merged 'treats' edge (per subj/obj pair)
-        higher_level_treats_edges = {edge_key: edge
-                                     for edge_key, edge in overarching_kg.edges_by_qg_id[qedge_key].items()
-                                     if edge.predicate in self.treats_like_predicates}
-        if higher_level_treats_edges:
-
-            higher_level_treats_edges_temp = {}
-            for edge_key_temp, edge_temp in higher_level_treats_edges.items():
-
-                # issue2634 - curated CTKP edges implement elevation to treats prediction if and only if elevate_to_prediction = True is returned by KTKP.
-                if (edge_temp.predicate == "biolink:in_clinical_trials_for" and
-                    any(source.resource_id == "infores:multiomics-clinicaltrials" for source in edge_temp.sources) and
-                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "elevate_to_prediction"]) > 0):
-                    if [x.value for x in edge_temp.attributes if x.attribute_type_id == "elevate_to_prediction"][0]:
-                        higher_level_treats_edges_temp[edge_key_temp] = edge_temp
-
-                # issue2634 - curated DAKP/FAERS edges implement elevation to treats prediction if and only if the applied_to_treat predicate has evidence count (N_cases) >10
-                elif (edge_temp.predicate == "biolink:applied_to_treat" and
-                    (any(source.resource_id == "infores:multiomics-drugapprovals" for source in edge_temp.sources) or any(source.resource_id == "infores:faers" for source in edge_temp.sources)) and
-                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "biolink:number_of_cases"]) > 0):
-                    if [x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:number_of_cases"][0] > 24:
-                        higher_level_treats_edges_temp[edge_key_temp] = edge_temp
-
-                # issue2634 - curated TMKP edges implement elevation to treats prediction if and only if the treats_or_applied_or_studied_to_treat predicate has evidence count (biolink:evidence_count) > 5
-                elif (edge_temp.predicate == "biolink:treats_or_applied_or_studied_to_treat" and
-                      any(source.resource_id == "infores:text-mining-provider-cooccurrence" for source in edge_temp.sources) and
-                    edge_temp.agent_type == "text_mining_agent" and
-                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "biolink:evidence_count"]) > 0):
-                    if [x.value for x in edge_temp.attributes if x.attribute_type_id == "biolink:evidence_count"][0] > 5:
-                        higher_level_treats_edges_temp[edge_key_temp] = edge_temp
-
-                # issue2634 - allow elevation to treats prediction for all curated CTD edges
-                elif any(source.resource_id == "infores:ctd" for source in edge_temp.sources):
-                    higher_level_treats_edges_temp[edge_key_temp] = edge_temp
-
-                # issue2634 - SemMedDB treats_or_applied-type edges with >= 10 associated publications are elevated to treats prediction
-                elif (any(source.resource_id == "infores:semmeddb" for source in edge_temp.sources) and
-                    len([x.value for x in edge_temp.attributes or [] if x.attribute_type_id == "biolink:publications"]) > 0 and
-                    [len(x.value) for x in edge_temp.attributes if x.attribute_type_id == "biolink:publications"][0] >= 10):
-                        higher_level_treats_edges_temp[edge_key_temp] = edge_temp
-
-                # issue2634 - for other non-treats edges, do not elevate to treats prediction
-                else:
-                    pass
-            higher_level_treats_edges = higher_level_treats_edges_temp
-
-            # Add a virtual edge to the QG to capture all higher-level treats edges ('support' edges)
-            virtual_qedge_key = f"creative_expand_treats_{qedge_key}"
-            virtual_qedge = QEdge(subject=qedge.subject,
-                                  object=qedge.object,
-                                  option_group_id=f"creative_expand_treats_group_{qedge_key}")
-            virtual_qedge.filled = True  # Resultify needs this flag
-            query_graph.edges[virtual_qedge_key] = virtual_qedge
-            overarching_kg.edges_by_qg_id[virtual_qedge_key] = {}
-
-            # Lump the higher-level treats edges together by subject/object
-            subj_obj_map = defaultdict(set)
-            for higher_treats_edge_key, higher_treats_edge in higher_level_treats_edges.items():
-                hash_key = (higher_treats_edge.subject, higher_treats_edge.object)
-                subj_obj_map[hash_key].add(higher_treats_edge_key)
-
-            for (subj_key, obj_key), higher_treats_edge_keys in subj_obj_map.items():
-                # Create a lumped edge to represent all of these edges
-                lumped_edge = Edge(subject=subj_key, object=obj_key, predicate="biolink:treats",
-                                   sources=[RetrievalSource(resource_id="infores:arax",
-                                                            resource_role="primary_knowledge_source")],
-                                   knowledge_level="prediction",
-                                   agent_type="computational_model")
-                lumped_edge_key = f"creative_expand_treats_edge:{subj_key}--treats--{obj_key}--infores:arax"
-                overarching_kg.edges_by_qg_id[qedge_key][lumped_edge_key] = lumped_edge
-
-                # Move the higher-level treats edges so that they fulfill the virtual qedge instead
-                for higher_treats_edge_key in higher_treats_edge_keys:
-                    higher_treats_edge = overarching_kg.edges_by_qg_id[qedge_key][higher_treats_edge_key]
-                    overarching_kg.edges_by_qg_id[virtual_qedge_key][higher_treats_edge_key] = higher_treats_edge
-                    del overarching_kg.edges_by_qg_id[qedge_key][higher_treats_edge_key]
 
     @staticmethod
     def get_inferred_answers(inferred_qedge_keys: list[str],
@@ -1159,44 +1035,6 @@ class ARAXExpander:
 
         return qg_org_kg, aux_graphs, log
 
-    @staticmethod
-    def _expand_node(qnode_key: str,
-                     kps_to_use: list[str],
-                     query_graph: QueryGraph,
-                     user_specified_kp: bool,
-                     kp_timeout: Optional[int],
-                     log: ARAXResponse,
-                     forwarded_kps: Optional[list[str]] = None) -> QGOrganizedKnowledgeGraph:
-        # This function expands a single node using the specified knowledge provider (for now only KG2 is supported)
-        log.debug(f"Expanding node {qnode_key} using {kps_to_use}")
-        qnode = query_graph.nodes[qnode_key]
-        if qnode.ids:
-            qnode.ids = eu.get_canonical_curies_list(qnode.ids, log)
-        single_node_qg = QueryGraph(nodes={qnode_key: qnode}, edges={})
-        answer_kg = QGOrganizedKnowledgeGraph()
-        if log.status != 'OK':
-            return answer_kg
-        if not qnode.ids:
-            log.error("Cannot expand a single query node if it doesn't have a curie", error_code="InvalidQuery")
-            return answer_kg
-
-        # Answer the query using the proper KP (only our own KP answers single-node queries for now)
-        kps_to_use_that_cannot_handle_single_node_queries = set(kps_to_use) - KP_THAT_CAN_HANDLE_SINGLE_NODE_QUERIES
-        if kps_to_use_that_cannot_handle_single_node_queries:
-            log.error("these KPs cannot answer single-node queries: "
-                      f"{kps_to_use_that_cannot_handle_single_node_queries}",
-                      error_code="InvalidKP")
-            return answer_kg
-
-        kp_querier = TRAPIQuerier(response_object=log,
-                                  kp_name=next(iter(KP_THAT_CAN_HANDLE_SINGLE_NODE_QUERIES)),
-                                  user_specified_kp=user_specified_kp,
-                                  kp_timeout=kp_timeout,
-                                  forwarded_kps=forwarded_kps)
-        answer_kg = kp_querier.answer_single_node_query(single_node_qg)
-        log.info(f"Query for node {qnode_key} returned results ({eu.get_printable_counts_by_qg_id(answer_kg)})")
-        return answer_kg
-
     def _get_query_graph_for_edge(self, qedge_key: str, full_qg: QueryGraph, overarching_kg: QGOrganizedKnowledgeGraph, log: ARAXResponse) -> QueryGraph:
         # This function creates a query graph for the specified qedge, updating its qnodes' curies as needed
         edge_qg = QueryGraph(nodes={}, edges={})
@@ -1450,7 +1288,7 @@ class ARAXExpander:
         kg_copy = copy.deepcopy(kg)
         qg_for_resultify = copy.deepcopy(qg)
         # Necessary for assessment of answer quality:
-        qg_for_resultify.nodes[qnode_key_to_prune].is_set = False
+        set_qnode_is_set(qg_for_resultify.nodes[qnode_key_to_prune], False)
         num_edges_in_kg = sum([len(edges) for edges in kg.edges_by_qg_id.values()])
         overlay_fet = True if num_edges_in_kg < 100000 else False
         # Use fisher exact test and the ranker to prune down answers for this qnode
@@ -1504,7 +1342,7 @@ class ARAXExpander:
         is_set_true_qg = copy.deepcopy(expands_qg)
         for qnode in is_set_true_qg.nodes.values():
             # this makes resultify run faster and doesn't hurt in this case:
-            qnode.is_set = True
+            set_qnode_is_set(qnode, True)
         resultify_response = eu.create_results(is_set_true_qg, kg, log)
         if resultify_response.status == "OK":
             pruned_kg = eu.convert_standard_kg_to_qg_organized_kg(resultify_response.envelope.message.knowledge_graph)

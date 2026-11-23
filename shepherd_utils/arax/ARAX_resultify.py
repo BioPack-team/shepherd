@@ -6,6 +6,8 @@
 #     is gone) and no binding attributes. Readers of bindings (the reference closure,
 #     recompute_qg_keys) read `ids`; a result without `analyses` is valid in 2.0.
 #   - one QueryGraph class: a pathfinder QG is detected by paths-without-edges
+#   - from upstream trapi2.0 (9782bf6a, 16f5cb79): QNode has no is_set; qnode_is_set() /
+#     set_qnode_is_set() read and write set_interpretation == "COLLATE" (DEC-24)
 # See docs/ARAX_PORT_BASELINE.md (DEC-1, DEC-14) and shepherd_utils/arax/README.md.
 '''This module defines the `ARAXResultify` class whose `_resultify` method
 enumerates subgraphs of a kowledge graph (KG) that match a pattern set by a
@@ -55,6 +57,21 @@ from shepherd_utils.arax.openapi_server.models.analysis import Analysis
 from shepherd_utils.arax.openapi_server.models.auxiliary_graph import AuxiliaryGraph
 from shepherd_utils.arax.openapi_server.models.message import Message
 from shepherd_utils.arax.openapi_server.models.attribute import Attribute
+
+
+def qnode_is_set(qnode: QNode) -> bool:
+    """TRAPI 2.0 replacement for the removed QNode.is_set: a qnode is treated as a set
+    when its set_interpretation is COLLATE"""
+    return qnode.set_interpretation == "COLLATE"
+
+
+def set_qnode_is_set(qnode: QNode, is_set: bool) -> None:
+    """TRAPI 2.0 replacement for assigning QNode.is_set; only clears set_interpretation
+    if it was COLLATE, so BATCH/ALL/MANY are left untouched"""
+    if is_set:
+        qnode.set_interpretation = "COLLATE"
+    elif qnode_is_set(qnode):
+        qnode.set_interpretation = None
 
 # SAR: defining this without leading underscore since we may
 # want to start using this function in ARAX_expander.py
@@ -830,7 +847,7 @@ def _get_essence_node_for_qg(qg: QueryGraph) -> Optional[str]:
     all_nodes = set(node_keys_list)
     node_degrees = list(map(len, adj_map.values()))
     leaf_nodes = set(node_keys_list[i] for i, k in enumerate(node_degrees) if k == 1)
-    is_set_nodes = set(qnode_key for qnode_key, qnode in qg.nodes.items() if qnode.is_set)
+    is_set_nodes = set(qnode_key for qnode_key, qnode in qg.nodes.items() if qnode_is_set(qnode))
     specific_nodes = set(qnode_key for qnode_key, qnode in qg.nodes.items() if _is_specific_query_node(qnode_key, qnode))
     optional_nodes = {qnode_key for qnode_key, qnode in qg.nodes.items() if qnode.option_group_id}
     non_specific_nodes = all_nodes - specific_nodes
@@ -1167,7 +1184,7 @@ def _get_results_for_kg_by_qg(kg: KnowledgeGraph,              # all nodes *must
             option_group_results_dict[option_group_id] = result_graphs_for_option_group
 
         # Organize our results for the 'required' portion of the QG by the IDs of their is_set=False nodes
-        required_non_set_qnode_keys = [qnode_key for qnode_key, qnode in required_qg.nodes.items() if not qnode.is_set]
+        required_non_set_qnode_keys = [qnode_key for qnode_key, qnode in required_qg.nodes.items() if not qnode_is_set(qnode)]
         log.debug(f"Required non-set qnodes are: {required_non_set_qnode_keys}")
         result_graphs_by_key = dict()
         for result_graph in result_graphs_required:
@@ -1244,7 +1261,7 @@ def _get_results_for_kg_by_qg(kg: KnowledgeGraph,              # all nodes *must
                     parent_keys = {child_to_parent_map[essence_qnode_key][node_key] for node_key in essence_kg_node_key_set}
                     if len(parent_keys) == 1:
                         essence_kg_node_key = next(iter(parent_keys))
-                    elif not essence_qnode.is_set:
+                    elif not qnode_is_set(essence_qnode):
                         log.warning(f"Result contains more than one 'parent' concept fulfilling the essence qnode "
                                     f"({essence_qnode_key}, which has is_set=False). Seems suspicious!")
                         log.info(f"Parent node keys for {essence_qnode_key} in this result are: {parent_keys}")
@@ -1641,13 +1658,13 @@ def _create_result_graphs(qg: QueryGraph,
 
         # Initialize our result graphs if this is our first iteration
         if not result_graphs:
-            log.debug(f"Initiating result graphs with nodes for {current_qnode_key} (is_set={current_qnode.is_set})")
+            log.debug(f"Initiating result graphs with nodes for {current_qnode_key} (is_set={qnode_is_set(current_qnode)})")
             all_node_keys_in_kg_for_this_qnode_key = kg_node_keys_by_qg_key.get(current_qnode_key)
             assert all_node_keys_in_kg_for_this_qnode_key is not None, \
                 f"unexpected None state for all_node_keys_in_kg_for_this_qnode_key; current_qnode_key: {current_qnode_key}"
 
             # We'll start with one result graph with ALL corresponding nodes in the KG in this spot if is_set=True
-            if current_qnode.is_set:
+            if qnode_is_set(current_qnode):
                 log.debug(f"Starting with one result graph because is_set=True for {current_qnode_key}")
                 new_result_graph = _create_new_empty_result_graph()
                 new_result_graph["nodes"][current_qnode_key] = all_node_keys_in_kg_for_this_qnode_key  # Parents included already
@@ -1661,7 +1678,7 @@ def _create_result_graphs(qg: QueryGraph,
                     result_graphs.append(new_result_graph)
         # Otherwise fan out our existing result graphs, filling out this qnode spot in them based on prior contents
         else:
-            log.debug(f"Adding a layer to each result graph for qnode {current_qnode_key} (is_set={current_qnode.is_set})")
+            log.debug(f"Adding a layer to each result graph for qnode {current_qnode_key} (is_set={qnode_is_set(current_qnode)})")
             new_result_graphs = []
             sub_qg_adj_map = _extract_sub_qg_adj_map(qg_adj_map, qnode_keys_already_handled.union({current_qnode_key}))
             for result_graph in result_graphs:
@@ -1674,7 +1691,7 @@ def _create_result_graphs(qg: QueryGraph,
 
                 # Fan out or add to result graphs as appropriate
                 if final_connected_kg_nodes:
-                    if current_qnode.is_set:
+                    if qnode_is_set(current_qnode):
                         # Replace this result graph with a new one with all valid connections listed under this qnode
                         new_result_graph = _copy_result_graph(result_graph)
                         new_result_graph["nodes"][current_qnode_key] = final_connected_kg_nodes

@@ -1,6 +1,7 @@
 # Ported from RTXteam/RTX @ 9485431, code/ARAX/ARAXQuery/ARAX_query_graph_interpreter_templates.yaml.
 # Changes from upstream: the templates that can never match are removed (dead code, DEC-5 / E-3):
 #   one_node_with_categories, one_node_with_no_categories, one_hop_classic_question_curie2ChemicalSubstance, one_hop_drug_treats_disease, one_hop_drug_somehow_related_to_disease, two_hop_drug_disease, four_node_forked_two_pinned_question
+# From upstream trapi2.0 (615baff3): one_node_with_curie answers an error instead of a DSL (DEC-23).
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 ARAX_QG_DSL_mapping: 0.2
 
@@ -27,10 +28,7 @@ templates:
     description: A single node question, where the one node has a curie
     template:
       - n00(ids)
-    DSL:
-      - expand(node_key=n00)
-      - filter_kg(action=remove_general_concept_nodes,perform_action=True)
-      - resultify()
+    error: Single-node queries are not currently supported, because Retriever requires at least one edge.
 
   ####################################################################################################
   #### Two node, one-hop questions

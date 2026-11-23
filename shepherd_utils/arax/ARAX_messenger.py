@@ -8,6 +8,8 @@
 #   - create_envelope keeps the query's TRAPI 2.0 `parameters` from a previous envelope
 #   - TRAPI 2.0 forbids an empty QNode.constraints: add_qnode / from_dict leave it unset
 #     rather than the model's [] default
+#   - from upstream trapi2.0 (9782bf6a): add_qnode's is_set parameter sets / clears
+#     set_interpretation COLLATE (set_qnode_is_set); QNode has no is_set (DEC-24)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, flush=True, **kwargs)
@@ -23,7 +25,7 @@ import numpy as np
 import requests
 
 from shepherd_utils.arax.ARAX_response import ARAXResponse
-from shepherd_utils.arax.ARAX_resultify import ARAXResultify
+from shepherd_utils.arax.ARAX_resultify import ARAXResultify, qnode_is_set, set_qnode_is_set
 from shepherd_utils.arax.query_graph_info import QueryGraphInfo
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
@@ -269,7 +271,7 @@ class ARAXMessenger:
         
         # Set the is_set parameter to what the user selected
         if parameters['is_set'] is not None:
-            qnode.is_set = ( parameters['is_set'].lower() == 'true' or parameters['is_set'].lower() == 't' )
+            set_qnode_is_set(qnode, parameters['is_set'].lower() == 'true' or parameters['is_set'].lower() == 't')
 
         #### If the ids is specified, try to find that
         if parameters['ids'] is not None:
@@ -283,9 +285,9 @@ class ARAXMessenger:
                 id_list = parameters['ids']
                 is_id_a_list = True
                 if len(id_list) == 1:
-                    if qnode.is_set == True:
+                    if qnode_is_set(qnode):
                         response.warning(f"Specified ids '{parameters['ids']}' is singular, but is_set=true, which doesn't make sense, so automatically setting to false. Avoid this warning by not explictly setting to true.")
-                        qnode.is_set = False
+                        set_qnode_is_set(qnode, False)
 
             # Or if it's neither a list or a string, then error out. This cannot be handled at present
             else:
@@ -337,7 +339,7 @@ class ARAXMessenger:
             else:
                 qnode.categories = parameters['categories']
             if parameters['is_set'] is not None:
-                qnode.is_set = (parameters['is_set'].lower() == 'true')
+                set_qnode_is_set(qnode, parameters['is_set'].lower() == 'true')
             message.query_graph.nodes[key] = qnode
             return response
 

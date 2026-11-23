@@ -22,8 +22,11 @@ They are now in the **TRAPI 2.0** shape (DEC-20 in
   `PathfinderQueryGraph`, their `*AllOf` / `OneOf*` unions, and
   `QualifierConstraint` (a qualifier set is a plain dict in 2.0).
 - Hand edits: `base_model_.Model.to_dict` omits unset (None) members, since
-  2.0 has no nulls; `QNode.set_interpretation` accepts `COLLATE`, which
-  `QNode.is_set` reports as `True`; `QNode.member_ids` added.
+  2.0 has no nulls; `QNode.set_interpretation` accepts `COLLATE`;
+  `QNode.member_ids` added; `QNode.is_set` and `QNode.set_id` removed, as
+  upstream's `trapi2.0` models did (a set is `set_interpretation: COLLATE`,
+  read and written by `ARAX_resultify.qnode_is_set` / `set_qnode_is_set`;
+  DEC-24).
 
 The ARAX port (`shepherd_utils/arax/`) runs on these classes rather than on
 plain dicts so that ARAX's behavior carries over unchanged: its extra in-memory

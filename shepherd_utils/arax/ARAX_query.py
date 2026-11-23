@@ -15,9 +15,7 @@
 #     2.0-valid when query() returns (no nulls, and none of the empty containers 2.0
 #     forbids, e.g. the in-memory Analysis of an edgeless result, which has no bindings);
 #     the incoming QG's qedges may carry 2.0 `constraints` (not 1.x attribute_constraints /
-#     qualifier_constraints); a QG with neither edges nor paths is the 2.0 form of an
-#     edgeless QG (1.x `edges: {}`), no longer a MissingQEdgeAndQPath error; stream
-#     heartbeats carry an RFC 3339 timestamp with offset
+#     qualifier_constraints); stream heartbeats carry an RFC 3339 timestamp with offset
 #   - a TRAPI qnode with a name and no ids is resolved to ids (resolve_qnode_names), as ARAXi's
 #     add_qnode(name=...) resolves a name; upstream accepts the name but ignores it (D-25)
 #   - TRAPI 2.0: a message the plan starts from (the query's own, or one loaded by message_uris)
@@ -26,6 +24,10 @@
 #   - removed as dead code (DEC-5): the RTXKG2 mode (E-5), the ARAXFilter import and the
 #     filter and fetch_message DSL commands (E-4, E-6), the `if False:` block,
 #     query_tracker_reset(), limit_message() and stringify_dict() (no callers)
+#   - from upstream trapi2.0 (9782bf6a, 07195cce): a qnode's is_set / set_id are obsolete
+#     (UnknownQNodeProperty, with a migration hint); sets are set_interpretation COLLATE (DEC-24)
+#   - from upstream trapi2.0: a QG with neither edges nor paths (node-only, valid 2.0) is a
+#     MissingQEdgeAndQPath error with HTTP 501, since Retriever needs an edge (DEC-23)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import copy
 import sys
@@ -610,21 +612,30 @@ class ARAXQuery:
         response.info("Validating the input query graph")
 
         # Define allowed qnode and qedge attributes to check later
-        allowed_qnode_attributes = { 'ids': 1, 'categories':1, 'is_set': 1, 'set_interpretation': 1, 'set_id': 1, 'member_ids': 1, 'option_group_id': 1, 'name': 1, 'constraints': 1 }
+        allowed_qnode_attributes = { 'ids': 1, 'categories':1, 'set_interpretation': 1, 'member_ids': 1, 'option_group_id': 1, 'name': 1, 'constraints': 1 }
         allowed_qedge_attributes = { 'predicates': 1, 'subject': 1, 'object': 1, 'option_group_id': 1, 'exclude': 1, 'relation': 1, 'constraints': 1, 'knowledge_type': 1 }
+
+        # Properties from older TRAPI versions that are no longer valid, with migration hints
+        obsolete_qnode_attributes = { 'is_set': "use 'set_interpretation': 'COLLATE' instead",
+                                      'set_id': "it was removed; for a set query, put the set UUID in 'ids' and its members in 'member_ids'" }
 
         #### Loop through nodes checking the attributes
         for id,qnode in message['query_graph']['nodes'].items():
             for attr in qnode:
+                if attr in obsolete_qnode_attributes:
+                    response.error(f"QueryGraph node '{id}' has an obsolete property '{attr}', which is not valid in TRAPI 2.0: {obsolete_qnode_attributes[attr]}. Your query may be from an older TRAPI version and should be migrated to TRAPI 2.0", error_code="UnknownQNodeProperty")
+                    return response
                 if attr not in allowed_qnode_attributes:
                     response.error(f"QueryGraph node '{id}' has an unexpected property '{attr}'. This property is not understood and therefore processing is halted, rather than answer an incompletely understood query", error_code="UnknownQNodeProperty")
                     return response
 
-        #### Check to ensure that either edges EOR paths is present
-        #### (TRAPI 2.0: `edges` has at least one entry, so an edgeless query graph -- 1.x `edges: {}` --
-        #### has neither; ARAX works on it as on the 1.x one, with empty edges, which the Response omits)
-        if 'edges' not in message['query_graph'] and 'paths' not in message['query_graph']:
-            message['query_graph']['edges'] = {}
+        #### Check to ensure that either edges EOR paths is present. A node-only QueryGraph is valid TRAPI 2.0,
+        #### but ARAX can't answer it (Retriever needs at least one edge), so it is "Not Implemented" (501)
+        if not message['query_graph'].get('edges') and not message['query_graph'].get('paths'):
+            response.error("QueryGraph has no 'edges' or 'paths'. Node-only queries are valid TRAPI 2.0, but ARAX does not "
+                           "support them: at least one edge or path must be present.", error_code="MissingQEdgeAndQPath",
+                           http_status=501)
+            return response
 
         #### Loop through edges checking the attributes
         if 'edges' in message['query_graph']:

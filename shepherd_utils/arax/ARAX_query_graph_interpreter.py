@@ -6,6 +6,8 @@
 #     which reads TRAPI 2.0. Only an inferred MVP2 query is routed to connect(action=xcrg): the
 #     package's latest check also accepts the one-hop lookup shape, which the catrax-xcrg upstream
 #     ran (c97da53) did not, and which would otherwise leave Expand for xCRG's direct lookup
+#   - from upstream trapi2.0 (615baff3): a template may carry an 'error' instead of a 'DSL',
+#     answered with QueryGraphInterpreterUnsupportedGraph (DEC-23)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -228,7 +230,14 @@ class ARAXQueryGraphInterpreter:
 
         # If the final best template name is a real one in templates, then get the ARAXI for it
         if query_graph_template_name in self.query_graph_templates['templates']:
-            araxi_commands = self.query_graph_templates['templates'][query_graph_template_name]['DSL']
+            template = self.query_graph_templates['templates'][query_graph_template_name]
+
+            # Some templates describe query graphs we don't support; those have an 'error' instead of 'DSL'
+            if 'error' in template:
+                response.error(template['error'], error_code="QueryGraphInterpreterUnsupportedGraph")
+                return response
+
+            araxi_commands = template['DSL']
 
             # Need to remap the theoretical node and edge ids into the actual ones
             # Do it in two passes in case there are overlaps in the names. Issue #1457

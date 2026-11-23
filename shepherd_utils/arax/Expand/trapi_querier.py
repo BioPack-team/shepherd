@@ -9,7 +9,10 @@
 #     agent_type as top-level Edge properties (not attributes); AuxiliaryGraph has no attributes; a
 #     TRAPI parameters.bypass_cache=true is forwarded to Retriever in parameters (2.0 requires it);
 #     a KP knowledge graph without edges (optional in 2.0) is an empty one, not a malformed one;
-#     request bodies leave out empty containers (a single-node query graph has no 'edges')
+#     request bodies leave out empty containers
+#   - from upstream trapi2.0 (16f5cb79): the request body marks only id-less qnodes as sets, with
+#     set_interpretation COLLATE (a qnode with ids gets none), on a copy of the query graph (DEC-24)
+#   - from upstream trapi2.0 (615baff3): answer_single_node_query and its check are removed (DEC-23)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import copy
 import json
@@ -29,6 +32,7 @@ from shepherd_utils.arax.Expand.expand_utilities import QGOrganizedKnowledgeGrap
 from shepherd_utils.arax.Expand.kp_selector import KPSelector
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
+from shepherd_utils.arax.ARAX_resultify import set_qnode_is_set
 from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax import util
 from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_biolink_helper
@@ -276,28 +280,6 @@ class TRAPIQuerier:
             kg_edges_for_qedge.update(add_bound_edges)
         return result_kg, result_aux_graphs
 
-    def answer_single_node_query(
-            self, single_node_qg: QueryGraph
-    ) -> QGOrganizedKnowledgeGraph:
-        """
-        This function answers a single-node (edge-less) query using the specified KP.
-        :param single_node_qg: A TRAPI query graph containing a single node (no edges).
-        :return: An (almost) TRAPI knowledge graph containing all of the nodes and edges returned as
-           results for the query. (Organized by QG IDs.)
-        """
-        log = self.log
-        final_kg = QGOrganizedKnowledgeGraph()
-        qg_copy = copy.deepcopy(single_node_qg)
-
-        # Verify this query graph is valid, preprocess it for the KP's needs, and make sure it's answerable by the KP
-        self._verify_is_single_node_query_graph(qg_copy)
-        if log.status != 'OK':
-            return final_kg
-
-        # Answer the query using the KP and load its answers into our object model
-        final_kg, _ = self._answer_query_using_kp(qg_copy)
-        return final_kg
-
     def _verify_is_one_hop_query_graph(self, query_graph: QueryGraph):
         if len(query_graph.edges) != 1:
             self.log.error(f"answer_one_hop_query() was passed a query graph that is not one-hop: "
@@ -307,11 +289,6 @@ class TRAPIQuerier:
                            f"{query_graph.to_dict()}", error_code="InvalidQuery")
         elif len(query_graph.nodes) < 2:
             self.log.error(f"answer_one_hop_query() was passed a query graph with less than two nodes: "
-                           f"{query_graph.to_dict()}", error_code="InvalidQuery")
-
-    def _verify_is_single_node_query_graph(self, query_graph: QueryGraph):
-        if len(query_graph.edges) > 0:
-            self.log.error(f"answer_single_node_query() was passed a query graph that has edges: "
                            f"{query_graph.to_dict()}", error_code="InvalidQuery")
 
     def _get_kg_to_qg_mappings_from_results(
@@ -531,22 +508,16 @@ class TRAPIQuerier:
         return self._load_kp_json_response(json_response, query_graph)
 
     def _get_prepped_request_body(self, qg: QueryGraph) -> dict:
-        # Liberally use is_set to improve performance since we don't need individual results
+        # Liberally use COLLATE (TRAPI 2.0's replacement for is_set) to improve performance since we
+        # don't need individual results; TRAPI 2.0 only allows COLLATE on qnodes without ids.
+        # Work on a copy so that the caller's query graph is not modified.
+        qg = copy.deepcopy(qg)
         for qnode_key, qnode in qg.nodes.items():
-            if not qnode.ids or len(qnode.ids) > 1:
-                qnode.is_set = True
+            set_qnode_is_set(qnode, not qnode.ids)
 
         # Strip non-essential and 'empty' properties off of our qnodes and qedges
         stripped_qnodes = {qnode_key: self._strip_empty_properties(qnode)
                            for qnode_key, qnode in qg.nodes.items()}
-        # TRAPI 2.0 (Shepherd change): a query's set_interpretation COLLATE is
-        # ARAX's is_set, which ARAX honours itself (resultify), and which the
-        # request above already carries as is_set. It is not forwarded: ARAX
-        # never asked the KP to collate, and COLLATE is only valid on a qnode
-        # without ids, which a later hop's qnode has.
-        for stripped_qnode in stripped_qnodes.values():
-            if stripped_qnode.get("set_interpretation") == "COLLATE":
-                del stripped_qnode["set_interpretation"]
         stripped_qedges = {qedge_key: self._strip_empty_properties(qedge)
                            for qedge_key, qedge in qg.edges.items()}
 
