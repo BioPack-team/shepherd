@@ -268,6 +268,14 @@ def test_fisher_exact_test_virtual_edges(monkeypatch, tmp_path):
     fet.sqlite_file_path = sqlite
     fet.fisher_exact_test()
     assert response.status == "OK", response.show()
+    # upstream trapi2.0 (615baff3, 090d73b7): no KG2 in the logs any more
+    logs = [m["message"] for m in response.messages]
+    assert (
+        "The tier0 info-for-overlay sqlite was used to calculate total object"
+        " nodes in Fisher's Exact Test"
+    ) in logs
+    assert any("was found in the info-for-overlay sqlite" in line for line in logs)
+    assert not any("KG2" in line or "rtx-kg2" in line for line in logs)
     created = new_edge_keys(message, before)
     assert_valid_edges(
         message.knowledge_graph.to_dict(),
@@ -307,6 +315,8 @@ def test_clinical_info_virtual_edges(monkeypatch):
         },
     ).add_virtual_edge(name="paired_concept_frequency", default=0)
     assert response.status == "OK", response.show()
+    # upstream trapi2.0 (b5d02852): the virtual QEdge's predicates is a list
+    assert message.query_graph.edges["C1"].predicates == ["biolink:associated_with"]
     created = new_edge_keys(message, before)
     assert_valid_edges(
         message.knowledge_graph.to_dict(),

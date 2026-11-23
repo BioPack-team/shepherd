@@ -294,6 +294,14 @@ Status (2026-11-23):
   `test_remove_general_concept_nodes_attribute_shapes` runs offline (87 offline upstream tests now).
   Item 29: upstream's `test_provided_by_filter` (live-only) and `test_prune` changes are mirrored.
   Unit tests are in `tests/unit/arax/test_results_trapi2_sync.py`.
+- **Items 31, 32, 34 and 35** done (Overlay, Infer; item 33 came with DEC-30). Item 31 reads node
+  bindings with `.get()` in `overlay_utilities` (`get_node_pairs_to_overlay` too, as upstream). Item 32's
+  virtual QEdge is dropped from the final QG, so no golden changes. Item 34 keeps Shepherd's sqlite path
+  setting (`kg2c_sqlite_path`, owned by the pathfinder-files PR) and calls `KPSelector(log=...)`; the
+  stand-in still accepts `kg2_mode`. Item 35 follows DEC-9: Infer uses its curies as given, with no
+  NodeNorm call; the dropped "Normalized ..." lines were DEBUG, which the goldens do not record, so no
+  golden rule is needed. Tests: `test_overlay_binding.py`, `test_created_edges_trapi2.py` (FET logs, COHD
+  predicates) and `test_infer_trapi2_sync.py`.
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|
