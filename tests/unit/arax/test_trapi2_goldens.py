@@ -145,7 +145,8 @@ def test_query_id_lost_cases_are_the_ones_listed(suite):
 
 
 def test_arax_made_edges_get_their_2_0_levels():
-    """H9: the overlay edges upstream made without KL/AT get the port's values."""
+    """H9: the overlay and subclass_of edges upstream made without KL/AT get
+    the port's values."""
     old = T.read_json_gz(T.golden_paths("query_parity")[0])
     new = T.read_json_gz(T.golden_paths("query_parity")[1])
     seen = set()
@@ -162,7 +163,7 @@ def test_arax_made_edges_get_their_2_0_levels():
             seen.add(edge["predicate"])
             got = new_edges[key]
             assert (got["knowledge_level"], got["agent_type"]) == levels, key
-    assert seen == {p for p, _ in T.ARAX_EDGE_LEVELS}
+    assert seen == {p for p, _ in T.ARAX_EDGE_LEVELS} | {"biolink:subclass_of"}
 
 
 def test_envelopes_declare_trapi_2():

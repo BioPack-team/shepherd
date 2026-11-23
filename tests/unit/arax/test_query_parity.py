@@ -97,6 +97,8 @@ EXPECTED_DIFFERENCES["val_no_edges_or_paths"] = {
 # ranker, sends its TF batches concurrently and logs differently; see
 # test_xcrg_answers_are_upstreams_reranked
 EXPECTED_DIFFERENCES["mvp2_xcrg_route"] = {"envelope", "logs", "requests"}
+# DEC-26: still UnknownQEdgeProperty, with upstream trapi2.0's TRAPI 2.0 wording
+EXPECTED_DIFFERENCES["val_singular_predicate"] = {"message", "envelope", "logs"}
 # D-25 fix: a TRAPI qnode's name is resolved to ids, so the query runs instead of
 # failing with QueryGraphNoIds; see test_trapi_qnode_name_runs_as_araxi_name_does
 EXPECTED_DIFFERENCES["trapi_qnode_name"] = set(FIELDS)

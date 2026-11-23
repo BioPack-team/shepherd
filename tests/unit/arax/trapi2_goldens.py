@@ -89,8 +89,9 @@ Hand rules on top (what TOM does not own):
   - H9 the edges ARAX's overlays make without KL/AT attributes upstream get
     the values the 2.0 port gives them (ARAX_EDGE_LEVELS: Jaccard and Fisher's
     exact test ``statistical_association`` / ``automated_agent``, as NGD's
-    own; COHD ``statistical_association`` / ``data_analysis_pipeline``)
-    instead of TOM's ``not_provided``.
+    own; COHD ``statistical_association`` / ``automated_agent``; Expand's
+    ``subclass_of`` edges ``knowledge_assertion`` / ``automated_agent``:
+    DEC-27, upstream ``trapi2.0``) instead of TOM's ``not_provided``.
   - H11 an Analysis with neither ``edge_bindings`` nor ``path_bindings`` is
     dropped, and a result's emptied ``analyses`` with it: TRAPI 2.0 requires
     an Analysis to have one or both (a schema anyOf, which the ARS validator
@@ -112,6 +113,9 @@ Hand rules on top (what TOM does not own):
     COLLATE and a qnode with ids carries neither (upstream 1.6 sent
     ``is_set: true`` for id-less and multi-id qnodes). xCRG's lookups
     (``XCRG_CASES``) copy ARAX's own query graph, so they take the first rule.
+  - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
+    ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
+    ``has_jaccard_index_with``).
   - H13 a qnode's ``member_ids`` (a MANY / ALL set's members) are echoed in
     the envelope's query graph as the query gave them: upstream's generated
     QNode had no ``member_ids`` and dropped them, and the port's 2.0 QNode
@@ -308,9 +312,12 @@ ARAX_EDGE_LEVELS = {
     ),
     ("biolink:associated_with", "infores:cohd"): (
         "statistical_association",
-        "data_analysis_pipeline",
+        "automated_agent",  # DEC-27, upstream trapi2.0
     ),
 }
+# H9 (DEC-27, upstream trapi2.0): the subclass_of edges Expand makes (they list
+# infores:arax among their sources) are knowledge_assertion / automated_agent
+ARAX_SUBCLASS_LEVELS = ("knowledge_assertion", "automated_agent")
 
 
 def arax_edge_levels(edge: dict):
@@ -331,6 +338,10 @@ def arax_edge_levels(edge: dict):
         levels = ARAX_EDGE_LEVELS.get((edge.get("predicate"), source))
         if levels:
             return levels
+    if edge.get("predicate") == "biolink:subclass_of" and any(
+        s.get("resource_id") == "infores:arax" for s in edge.get("sources") or []
+    ):
+        return ARAX_SUBCLASS_LEVELS
     return None
 
 
@@ -460,6 +471,25 @@ def expand_goldens(g16: dict) -> dict:
 XCRG_CASES = {"mvp2_xcrg_route"}
 
 
+JACCARD_PREDICATE_16 = "biolink:has_jaccard_index_with"
+JACCARD_PREDICATE = "biolink:similar_to"
+
+
+def _jaccard_predicate(message: Any) -> None:
+    """H15 on one produced message, in place."""
+    if not isinstance(message, dict):
+        return
+    for edge in ((message.get("knowledge_graph") or {}).get("edges") or {}).values():
+        if isinstance(edge, dict) and edge.get("predicate") == JACCARD_PREDICATE_16:
+            edge["predicate"] = JACCARD_PREDICATE
+    for qedge in ((message.get("query_graph") or {}).get("edges") or {}).values():
+        if isinstance(qedge, dict) and qedge.get("predicates"):
+            qedge["predicates"] = [
+                JACCARD_PREDICATE if p == JACCARD_PREDICATE_16 else p
+                for p in qedge["predicates"]
+            ]
+
+
 def _qg_sets(qg: Any, sent: bool) -> None:
     """H14 on one query graph, in place. ``sent``: a graph ARAX sends to a KP."""
     if not isinstance(qg, dict):
@@ -572,6 +602,7 @@ def query_goldens(g16: dict) -> dict:
         if members.get(case):  # H13
             _add_member_ids(new, members[case])
         _qg_sets(qg, sent=False)  # H14
+        _jaccard_predicate(new["envelope"]["message"])  # H15
         plan = (new["envelope"].get("query_options") or {}).get("query_plan")
         if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
             for graph in _sent_graphs(new["requests"], plan):

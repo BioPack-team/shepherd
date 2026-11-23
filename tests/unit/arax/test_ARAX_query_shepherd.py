@@ -579,3 +579,35 @@ def test_one_node_template_is_an_unsupported_graph():
     assert response.status == "ERROR"
     assert response.error_code == "QueryGraphInterpreterUnsupportedGraph"
     assert "Retriever requires at least one edge" in response.message
+
+
+@pytest.mark.parametrize(
+    "prop,value,hint",
+    [
+        ("relation", "x", "removed from the TRAPI QEdge schema"),
+        ("predicate", "biolink:treats", "plural 'predicates'"),
+        ("attribute_constraints", [], "'constraints.attributes'"),
+        ("qualifier_constraints", [], "'constraints.qualifiers'"),
+    ],
+)
+def test_obsolete_qedge_properties_are_rejected(prop, value, hint):
+    """DEC-26 (upstream trapi2.0): 1.x qedge properties are UnknownQEdgeProperty,
+    with the 2.0 replacement in the message."""
+    from shepherd_utils.arax.ARAX_query import ARAXQuery
+
+    araxq = ARAXQuery()
+    araxq.query(
+        {
+            "message": {
+                "query_graph": {
+                    "nodes": {"n0": {"ids": ["CHEBI:1"]}, "n1": {}},
+                    "edges": {"e0": {"subject": "n0", "object": "n1", prop: value}},
+                }
+            },
+            "operations": {"actions": ["return(message=true, store=false)"]},
+        }
+    )
+    response = araxq.response
+    assert response.status == "ERROR"
+    assert response.error_code == "UnknownQEdgeProperty"
+    assert hint in response.message

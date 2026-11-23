@@ -247,7 +247,9 @@ Status (2026-11-23):
 - **D3** done (DEC-22).
 - **D4** investigated; see the note below the table.
 - **D5** done (DEC-24).
-- **D6, D7, D8** still open.
+- **D6** done (DEC-26). A qnode `name` is still resolved (D-25).
+- **D7** done (DEC-27).
+- **D8** done (DEC-28).
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|

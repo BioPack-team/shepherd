@@ -119,7 +119,7 @@ def test_jaccard():
     print(response.show())
     assert response.status == 'OK'
     edge_predicates_in_kg = Counter([x.predicate for x in message.knowledge_graph.edges.values()])
-    assert 'biolink:has_jaccard_index_with' in edge_predicates_in_kg
+    assert 'biolink:similar_to' in edge_predicates_in_kg  # DEC-28 (upstream trapi2.0): was has_jaccard_index_with
     jaccard_edges = []
     for edge in message.knowledge_graph.edges.values():
         assert 'primary_knowledge_source' in [source.resource_role for source in edge.sources]
@@ -746,7 +746,7 @@ def test_jaccard_not_above_1():
     print(response.show())
     assert response.status == 'OK'
     edge_predicates_in_kg = Counter([x.predicate for x in message.knowledge_graph.edges.values()])
-    assert 'biolink:has_jaccard_index_with' in edge_predicates_in_kg
+    assert 'biolink:similar_to' in edge_predicates_in_kg  # DEC-28 (upstream trapi2.0): was has_jaccard_index_with
     jaccard_edges = []
     for edge in message.knowledge_graph.edges.values():
         assert 'primary_knowledge_source' in [source.resource_role for source in edge.sources]

@@ -26,6 +26,9 @@
 #     query_tracker_reset(), limit_message() and stringify_dict() (no callers)
 #   - from upstream trapi2.0 (9782bf6a, 07195cce): a qnode's is_set / set_id are obsolete
 #     (UnknownQNodeProperty, with a migration hint); sets are set_interpretation COLLATE (DEC-24)
+#   - from upstream trapi2.0 (07195cce; DEC-26): a qedge's relation, predicate,
+#     attribute_constraints and qualifier_constraints are obsolete (UnknownQEdgeProperty, with
+#     a migration hint). A qnode's name stays accepted and resolved (D-25), unlike upstream
 #   - from upstream trapi2.0: a QG with neither edges nor paths (node-only, valid 2.0) is a
 #     MissingQEdgeAndQPath error with HTTP 501, since Retriever needs an edge (DEC-23)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
@@ -613,11 +616,15 @@ class ARAXQuery:
 
         # Define allowed qnode and qedge attributes to check later
         allowed_qnode_attributes = { 'ids': 1, 'categories':1, 'set_interpretation': 1, 'member_ids': 1, 'option_group_id': 1, 'name': 1, 'constraints': 1 }
-        allowed_qedge_attributes = { 'predicates': 1, 'subject': 1, 'object': 1, 'option_group_id': 1, 'exclude': 1, 'relation': 1, 'constraints': 1, 'knowledge_type': 1 }
+        allowed_qedge_attributes = { 'predicates': 1, 'subject': 1, 'object': 1, 'option_group_id': 1, 'exclude': 1, 'constraints': 1, 'knowledge_type': 1 }
 
         # Properties from older TRAPI versions that are no longer valid, with migration hints
         obsolete_qnode_attributes = { 'is_set': "use 'set_interpretation': 'COLLATE' instead",
                                       'set_id': "it was removed; for a set query, put the set UUID in 'ids' and its members in 'member_ids'" }
+        obsolete_qedge_attributes = { 'predicate': "it should be plural 'predicates' (TRAPI 1.4 and higher)",
+                                      'attribute_constraints': "use 'constraints.attributes' instead",
+                                      'qualifier_constraints': "use 'constraints.qualifiers' instead",
+                                      'relation': "it was removed from the TRAPI QEdge schema" }
 
         #### Loop through nodes checking the attributes
         for id,qnode in message['query_graph']['nodes'].items():
@@ -642,8 +649,8 @@ class ARAXQuery:
             for id,qedge in message['query_graph']['edges'].items():
                 for attr in qedge:
                     if attr not in allowed_qedge_attributes:
-                        if attr == 'predicate':
-                            response.error(f"QueryGraph edge '{id}' has an obsolete property '{attr}'. This property should be plural 'predicates' in TRAPI 1.4 and higher. Your query may be TRAPI 1.3 or lower and should be checked carefully and migrated to TRAPI 1.4", error_code="UnknownQEdgeProperty")
+                        if attr in obsolete_qedge_attributes:
+                            response.error(f"QueryGraph edge '{id}' has an obsolete property '{attr}', which is not valid in TRAPI 2.0: {obsolete_qedge_attributes[attr]}. Your query may be from an older TRAPI version and should be migrated to TRAPI 2.0", error_code="UnknownQEdgeProperty")
                         else:
                             response.error(f"QueryGraph edge '{id}' has an unexpected property '{attr}'. This property is not understood and therefore processing is halted, rather than answer an incompletely understood query", error_code="UnknownQEdgeProperty")
                         return response
