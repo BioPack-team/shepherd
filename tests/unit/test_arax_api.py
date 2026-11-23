@@ -1068,6 +1068,15 @@ async def test_query_rejects_a_trapi_1_or_invalid_body(query_client, body):
             "return_minimal_metadata": True,
             "max_results": 10,
         },
+        # the ARAX UI's options, which upstream trapi2.0 sends in additional_properties
+        {
+            "message": {"query_graph": QG_2},
+            "additional_properties": {
+                "prune_threshold": 50,
+                "max_pathfinder_paths": 10,
+                "max_path_length": 3,
+            },
+        },
         # ARAX translates and validates a TRAPI workflow itself (DEC-17)
         {"message": {"query_graph": QG_2}, "workflow": [{"id": "teleport"}]},
         # nothing at all: ARAX answers NoQueryMessageOrOperations itself

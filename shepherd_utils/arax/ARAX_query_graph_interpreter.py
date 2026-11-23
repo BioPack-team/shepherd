@@ -8,6 +8,12 @@
 #     since the port's message may hold empty containers 2.0 forbids
 #   - from upstream trapi2.0 (615baff3): a template may carry an 'error' instead of a 'DSL',
 #     answered with QueryGraphInterpreterUnsupportedGraph (DEC-23)
+#   - from upstream trapi2.0 (615baff3, d83d0686): the template's compute_ngd overlay steps are dropped
+#     when a qedge has a knowledge_level, agent_type or qualifiers constraint
+#     (_has_klat_or_qualifier_constraints)
+#   - from upstream trapi2.0 (18ae5be1): a pathfinder query's max_pathfinder_paths / max_path_length are
+#     read from the query's additional_properties; Shepherd also reads the legacy query_options
+#     (ARAXQuery merges them into envelope.additional_properties, additional_properties winning)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -78,15 +84,17 @@ class ARAXQueryGraphInterpreter:
             # Note: This logging message is keyed off to provide progress updates to the RTX front-end.
             response.info("QueryGraphInterpreter recognized query_graph as a 'pathfinder' query: triggering pathfinder subsystem.")
 
+            # Shepherd: ARAXQuery merges the legacy query_options into these (additional_properties wins)
+            additional_properties = getattr(response.envelope, 'additional_properties', None) or response.envelope.query_options or {}
             max_pathfinder_paths_str = ''
-            if 'max_pathfinder_paths' in response.envelope.query_options:
-                max_pathfinder_paths_str = f", max_pathfinder_paths={response.envelope.query_options['max_pathfinder_paths']}"
-                response.info(f"QueryGraphInterpreter setting max_pathfinder_paths={response.envelope.query_options['max_pathfinder_paths']}")
+            if 'max_pathfinder_paths' in additional_properties:
+                max_pathfinder_paths_str = f", max_pathfinder_paths={additional_properties['max_pathfinder_paths']}"
+                response.info(f"QueryGraphInterpreter setting max_pathfinder_paths={additional_properties['max_pathfinder_paths']}")
 
             max_path_length_str = ', max_path_length=4'
-            if 'max_path_length' in response.envelope.query_options:
-                max_path_length_str = f", max_path_length={response.envelope.query_options['max_path_length']}"
-                response.info(f"QueryGraphInterpreter setting max_path_length={response.envelope.query_options['max_path_length']}")
+            if 'max_path_length' in additional_properties:
+                max_path_length_str = f", max_path_length={additional_properties['max_path_length']}"
+                response.info(f"QueryGraphInterpreter setting max_path_length={additional_properties['max_path_length']}")
 
             response.data['araxi_commands'] = [
                 f"connect(action=connect_nodes{max_path_length_str}{max_pathfinder_paths_str})",
@@ -271,6 +279,15 @@ class ARAXQueryGraphInterpreter:
 
                 new_araxi_commands.append(new_command)
 
+            # NGD virtual edges are statistical_association edges with no qualifiers, so they would violate
+            # knowledge_level/agent_type or qualifier constraints on a qedge. Skip the NGD overlay for such queries.
+            if self._has_klat_or_qualifier_constraints(response.envelope.message.query_graph):
+                ngd_commands = [command for command in new_araxi_commands if 'action=compute_ngd' in command]
+                if ngd_commands:
+                    response.info("Skipping the NGD overlay because the query graph has knowledge_level, "
+                                  "agent_type, or qualifier constraints")
+                    new_araxi_commands = [command for command in new_araxi_commands if command not in ngd_commands]
+
             # TODO: Create the restated_question from the template
             response.data['araxi_commands'] = new_araxi_commands
             return response
@@ -286,6 +303,18 @@ class ARAXQueryGraphInterpreter:
         ]
 
         return response
+
+
+    @staticmethod
+    def _has_klat_or_qualifier_constraints(query_graph) -> bool:
+        """True if any qedge has a knowledge_level, agent_type, or qualifier constraint (TRAPI 2.0 QEdge.constraints)"""
+        for qedge in (getattr(query_graph, 'edges', None) or {}).values():
+            constraints = getattr(qedge, 'constraints', None)
+            if constraints is not None and (constraints.knowledge_level is not None
+                                            or constraints.agent_type is not None
+                                            or constraints.qualifiers):
+                return True
+        return False
 
 
     # #### Read the YAML file containing the current QueryGraph templates

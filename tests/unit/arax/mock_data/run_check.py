@@ -9,6 +9,7 @@ are stubbed from the mock graph, so nothing leaves the machine.
 """
 
 import copy
+import gzip
 import json
 import os
 import shutil
@@ -32,6 +33,17 @@ shutil.copy(
     os.path.join(HERE, "..", "expand_parity", "biolink_lookup_map_4.2.5_v5.pickle"),
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
+# and its Biolink model YAML (the qualifier types ARAXQuery validates against)
+with (
+    gzip.open(
+        os.path.join(HERE, "..", "expand_parity", "biolink_model_4.2.5.yaml.gz")
+    ) as f_in,
+    open(
+        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.2.5.yaml"),
+        "wb",
+    ) as f_out,
+):
+    shutil.copyfileobj(f_in, f_out)
 
 from shepherd_utils import arax_mock_data as M  # noqa: E402
 

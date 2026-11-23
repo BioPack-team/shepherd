@@ -52,11 +52,20 @@ EXPECTED_DIFFERENCES = {
     # E-4 / E-6: the legacy `filter` command is removed; see
     # test_removed_filter_command_is_unrecognized
     "dsl_removed_filter_command": {"error_code", "message", "logs", "envelope"},
-    # E-4: overlay_connect_knodes no longer emits the disabled
-    # predict_drug_treats_disease overlay (which fails the plan upstream), so
-    # the plan runs on to the next overlay; see
-    # test_connect_knodes_translation_is_upstreams_minus_the_disabled_action
-    "wf_connect_knodes": {"error_code", "message", "logs", "envelope", "status"},
+    # E-4 and upstream trapi2.0 (2add4986): overlay_connect_knodes no longer
+    # emits the disabled predict_drug_treats_disease overlay (which fails the
+    # plan upstream @ 9485431) nor COHD's paired_concept_frequency, and makes
+    # one NGD per qnode pair, Fisher only for qedge-connected pairs and Jaccard
+    # only through a connected middle qnode, so the plan completes; see
+    # test_connect_knodes_runs_upstream_trapi2_translation
+    "wf_connect_knodes": {
+        "error_code",
+        "message",
+        "logs",
+        "envelope",
+        "status",
+        "http_status",
+    },
     # DEC-10: a user-specified KP list (fill's allowlist) is forwarded to
     # Retriever as parameters.kp instead of being checked against SmartAPI
     # metadata, which in upstream rejects the query
@@ -287,20 +296,37 @@ def test_fill_allowlist_is_forwarded_to_retriever(outputs):
     assert forwarded["body"]["parameters"]["kp"] == ["infores:retriever"]
 
 
-def test_connect_knodes_translation_is_upstreams_minus_the_disabled_action(outputs):
-    """E-4: upstream's plan fails on predict_drug_treats_disease; the port's runs
-    the same actions without it."""
+def test_connect_knodes_runs_upstream_trapi2_translation(outputs):
+    """upstream trapi2.0 (2add4986): upstream @ 9485431's plan fails on
+    predict_drug_treats_disease; the port runs upstream trapi2.0's rewritten
+    overlay_connect_knodes, and the plan completes. The KP requests are
+    upstream's."""
     upstream, port = outputs
     case = "wf_connect_knodes"
-
-    def actions(rec):
-        return rec["envelope"]["operations"]["actions"]
-
-    want = [
-        a for a in actions(upstream[case]) if "predict_drug_treats_disease" not in a
+    rec = port[case]
+    assert upstream[case]["error_code"] == "UnknownAction"
+    assert rec["status"] == "OK"
+    assert rec["requests"] == upstream[case]["requests"]
+    ngd = (
+        "overlay(action=compute_ngd,default_value=inf,virtual_relation_label="
+        "connect_knodes_ngd_{0}_{1},subject_qnode_key={0},object_qnode_key={1})"
+    )
+    fisher = (
+        "overlay(action=fisher_exact_test,virtual_relation_label="
+        "connect_knodes_fisher_n1_n2,subject_qnode_key={0},object_qnode_key={1})"
+    )
+    assert rec["envelope"]["operations"]["actions"] == [
+        "expand()",
+        "scoreless_resultify(ignore_edge_direction=true)",
+        ngd.format("n0", "n1"),
+        ngd.format("n0", "n2"),
+        ngd.format("n1", "n2"),
+        fisher.format("n1", "n2"),
+        fisher.format("n2", "n1"),
+        "overlay(action=compute_jaccard,virtual_relation_label=connect_knodes_jaccard_n2_n0,"
+        "start_node_key=n2,end_node_key=n0,intermediate_node_key=n1)",
+        "rank_results()",
     ]
-    assert len(want) == len(actions(upstream[case])) - 1
-    assert actions(port[case]) == want
 
 
 @pytest.mark.parametrize("case", ["val_no_edges_or_paths", "tpl_one_node"])

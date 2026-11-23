@@ -3,7 +3,7 @@
 Usage: PYTHONHASHSEED=0 python run_port.py OUT.json [case ...]
 """
 
-import json, os, shutil, sys, tempfile, warnings
+import gzip, json, os, shutil, sys, tempfile, warnings
 
 warnings.simplefilter("ignore")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -26,6 +26,15 @@ shutil.copy(
     os.path.join(S.EXPAND, "biolink_lookup_map_4.2.5_v5.pickle"),
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
+# and its Biolink model YAML (the qualifier types ARAXQuery validates against)
+with (
+    gzip.open(os.path.join(S.EXPAND, "biolink_model_4.2.5.yaml.gz")) as f_in,
+    open(
+        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.2.5.yaml"),
+        "wb",
+    ) as f_out,
+):
+    shutil.copyfileobj(f_in, f_out)
 arax = os.path.join(DATA, "arax")
 S.write_data(
     os.path.join(DATA, "pathfinder"),

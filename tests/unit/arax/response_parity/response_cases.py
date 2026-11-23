@@ -30,6 +30,8 @@ def _arax_envelope():
     path = os.path.join(HERE, "..", "query_parity", "goldens.json.gz")
     with gzip.open(path, "rt") as f:
         env = json.load(f)["tpl_one_hop_classic"]["envelope"]
+    # as upstream recorded it, before data_release_versions (trapi2_goldens H18)
+    env.pop("data_release_versions", None)
     env["logs"] = [
         {
             "timestamp": "2026-01-01T00:00:00Z",

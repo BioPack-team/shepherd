@@ -106,7 +106,8 @@ def validate_arax_query(query: dict) -> None:
     """Validate the TRAPI 2.0 members of a body posted to ARAX's ``/query``.
 
     ARAX's ``/query`` also takes its own members (``operations``,
-    ``stream_progress``, ``query_options``, ``return_minimal_metadata``, ...),
+    ``stream_progress``, ``additional_properties``, the legacy
+    ``query_options``, ``return_minimal_metadata``, ...),
     which the 2.0 Query allows as additional properties, and a body with only
     ARAXi ``operations`` and no ``message`` (TRAPI's Query requires one):
     ARAX answers a body with neither itself (``NoQueryMessageOrOperations``).

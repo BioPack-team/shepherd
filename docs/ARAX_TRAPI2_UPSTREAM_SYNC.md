@@ -254,6 +254,13 @@ Status (2026-11-23):
 - **D6** done (DEC-26). A qnode `name` is still resolved (D-25).
 - **D7** done (DEC-27).
 - **D8** done (DEC-28).
+- **Items 1-8** done (orchestration). Item 2 reads the qualifier slots from BiolinkHelper's cached
+  Biolink 4.2.5 model YAML (the parity harness ships it as `expand_parity/biolink_model_4.2.5.yaml.gz`).
+  Item 4 filters only the streamed log lines; the arax worker already filters the stored ones. Item 5
+  is golden rule H18. Item 7 changes `wf_connect_knodes` (an expected difference, pinned by
+  `test_connect_knodes_runs_upstream_trapi2_translation`). Item 8 reads `additional_properties` and
+  the legacy `query_options` (merged, `additional_properties` wins), and the response still carries
+  `query_options`. `bypass_cache` in Connect is item 22.
 
 | # | Topic | Upstream `trapi2.0` | Port today |
 |---|---|---|---|

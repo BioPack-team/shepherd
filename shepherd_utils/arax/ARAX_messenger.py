@@ -10,6 +10,9 @@
 #     rather than the model's [] default
 #   - from upstream trapi2.0 (9782bf6a): add_qnode's is_set parameter sets / clears
 #     set_interpretation COLLATE (set_qnode_is_set); QNode has no is_set (DEC-24)
+#   - from upstream trapi2.0 (07195cce): create_envelope sets TRAPI 2.0 data_release_versions
+#     {"infores:arax": "<tier0 build>"} (_get_data_release_versions); the build is Shepherd's
+#     settings.arax_tier_version (ARAX's own data files) instead of the directory names in config_dbs.json
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, flush=True, **kwargs)
@@ -40,6 +43,7 @@ from shepherd_utils.arax.openapi_server.models.q_path import QPath
 
 from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
 from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_current_arax_biolink_version
+from shepherd_utils.config import settings
 
 
 class ARAXMessenger:
@@ -63,6 +67,16 @@ class ARAXMessenger:
         description_list.append(self.add_qedge(0,0,describe=True))
         description_list.append(self.add_qpath(0,0,describe=True))
         return description_list
+
+
+    @staticmethod
+    def _get_data_release_versions() -> dict | None:
+        """TRAPI 2.0 data_release_versions: the Tier0 build that ARAX's own databases (NGD, xDTD, overlay
+        info, etc.) were made from (Shepherd: settings.arax_tier_version, e.g. tier0-20260928)"""
+        tier0_build = settings.arax_tier_version
+        if not tier0_build:
+            return None
+        return {"infores:arax": tier0_build}
 
 
     # #### Create a fresh ARAXResponse object as an envelple and fill with defaults
@@ -114,6 +128,7 @@ class ARAXMessenger:
         envelope.tool_version = RTXConfiguration().version
         envelope.schema_version = RTXConfiguration().trapi_version
         envelope.biolink_version = get_current_arax_biolink_version()
+        envelope.data_release_versions = self._get_data_release_versions()
         envelope.status = "OK"
         envelope.description = "Created empty template response"
         envelope.context = "https://raw.githubusercontent.com/biolink/biolink-model/master/context.jsonld"

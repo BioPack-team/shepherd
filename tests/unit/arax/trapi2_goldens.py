@@ -129,6 +129,11 @@ Hand rules on top (what TOM does not own):
     keys built from them. An explanation-path edge's publications come from the
     mapping table's ``extra_attributes`` (#2893): the attribute follows
     ``biolink:category`` and has no ``original_attribute_name``.
+  - H18 ARAX's envelopes carry TRAPI 2.0 ``data_release_versions``
+    (upstream ``trapi2.0`` 07195cce): ``{"infores:arax": <the Tier0 build of
+    ARAX's own data files>}``, Shepherd's ``settings.arax_tier_version``
+    (``ARAX_TIER0_BUILD`` here), on every envelope ARAX's ``create_envelope``
+    made (query_parity; not the stored documents /response serves back).
   - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
     ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
     ``has_jaccard_index_with``).
@@ -629,6 +634,16 @@ def _xdtd_build(envelope: dict) -> dict:
     return new
 
 
+# H18: settings.arax_tier_version (shepherd_utils/config.py)
+ARAX_TIER0_BUILD = "tier0-20260928"
+
+
+def _data_release_versions(envelope: Any) -> None:
+    """H18 on one envelope ARAX made, in place."""
+    if isinstance(envelope, dict) and envelope.get("resource_id") == "ARAX":
+        envelope["data_release_versions"] = {"infores:arax": ARAX_TIER0_BUILD}
+
+
 def _qg_sets(qg: Any, sent: bool) -> None:
     """H14 on one query graph, in place. ``sent``: a graph ARAX sends to a KP."""
     if not isinstance(qg, dict):
@@ -746,6 +761,7 @@ def query_goldens(g16: dict) -> dict:
         _precomputed_ngd_edges(new["envelope"]["message"], precomputed)  # H16
         new["logs"] = _precomputed_ngd_logs(new["logs"], precomputed)
         new["envelope"] = _xdtd_build(new["envelope"])  # H17
+        _data_release_versions(new["envelope"])  # H18
         plan = (new["envelope"].get("query_options") or {}).get("query_plan")
         if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
             for graph in _sent_graphs(new["requests"], plan):
