@@ -43,7 +43,9 @@ Usage:
 Every pair of responses is saved under --out (default
 responses/arax-compare/<case>.{port,upstream}.json), with a per-case diff in
 <case>.diff.json and a summary in summary.json and summary.md. The exit code is
-1 if any case is DIFF (not SAME / SIMILAR).
+1 if any case is DIFF (not SAME, SIMILAR or EXPECTED). A case whose
+difference comes from a recorded decision or from how upstream's deployment
+behaves is EXPECTED (listed in EXPECTED, with the reason).
 """
 
 import argparse
@@ -61,6 +63,35 @@ import test_arax_queries as Q  # noqa: E402
 DEFAULT_UPSTREAM = "https://arax.ncats.io/devED/api/arax/v2.0"
 DEFAULT_PORT = "http://localhost:5439/arax"
 EXAMPLES = 5  # how many differing items to show per layer
+ERROR_CHARS = 400  # how much of an error message to keep
+
+# Differences that come from recorded decisions or from how upstream's
+# deployment behaves, not from the port. A case listed here whose answers
+# differ is EXPECTED (its diff is still saved in full).
+EXPECTED = {
+    "any_is_set": (
+        "upstream's pydantic QNode silently drops the 1.x is_set (extra='ignore'), so "
+        "upstream's own check never sees it; the port rejects it as upstream's code "
+        "intends (DEC-24)"
+    ),
+    "val_unknown_qnode_property": (
+        "upstream's pydantic models drop unknown qnode properties before its "
+        "validation runs; the port rejects them (DEC-24/26)"
+    ),
+    "val_singular_predicate": (
+        "upstream's pydantic QEdge drops the 1.x 'predicate' before its validation "
+        "runs (so it answers with no predicate); the port rejects it (DEC-26)"
+    ),
+    "val_bad_kp_timeout": (
+        "upstream's pydantic Query drops the legacy query_options, so its kp_timeout "
+        "is never read; the port also reads query_options (sync item 8)"
+    ),
+    "query_by_name_trapi": "the port resolves a qnode's name to ids (D-25)",
+    "val_no_message": (
+        "Shepherd answers an empty query with ARAX's own error (400), upstream's "
+        "FastAPI with its schema error (422)"
+    ),
+}
 
 # Cases that are not comparable side by side: they reuse an earlier response
 # of the same instance, or only exercise Shepherd
@@ -151,6 +182,48 @@ def summarize(http_status: int, body) -> dict:
             },
             key=str,
         ),
+        "edge_details": {
+            (
+                e.get("subject"),
+                e.get("predicate"),
+                e.get("object"),
+                primary_source(e),
+            ): (
+                tuple(
+                    sorted(
+                        {
+                            a.get("attribute_type_id")
+                            for a in e.get("attributes") or []
+                            if isinstance(a, dict)
+                        },
+                        key=str,
+                    )
+                ),
+                e.get("knowledge_level"),
+                e.get("agent_type"),
+            )
+            for e in (kg.get("edges") or {}).values()
+        },
+        "errors": [
+            str(entry.get("message"))[:ERROR_CHARS]
+            for entry in logs
+            if entry.get("level") == "ERROR"
+        ][:2]
+        or (
+            [str(body.get("description"))[:ERROR_CHARS]]
+            if body.get("description")
+            and body.get("status") not in (None, "Success", "OK")
+            else []
+        )
+        or (
+            [
+                str(body.get("detail") or body.get("_error") or body.get("_not_json"))[
+                    :ERROR_CHARS
+                ]
+            ]
+            if (body.get("detail") or body.get("_error") or body.get("_not_json"))
+            else []
+        ),
         "aux_sizes": sorted(len((g or {}).get("edges") or []) for g in aux.values()),
         "log_codes": sorted(
             {
@@ -207,7 +280,47 @@ def compare_results(port: list, upstream: list) -> dict:
         and isinstance(up_score.get(k), (int, float))
     ]
     out["max_score_diff"] = round(max(diffs), 6) if diffs else 0.0
+    out["largest_score_diffs"] = [
+        {
+            "result": str(k),
+            "port": port_score[k],
+            "upstream": up_score[k],
+            "rank_port": port_rank[k],
+            "rank_upstream": up_rank[k],
+        }
+        for k in sorted(
+            (
+                k
+                for k in common
+                if isinstance(port_score.get(k), (int, float))
+                and isinstance(up_score.get(k), (int, float))
+            ),
+            key=lambda k: -abs(port_score[k] - up_score[k]),
+        )[:3]
+    ]
     return out
+
+
+def compare_edge_details(port: dict, upstream: dict) -> dict:
+    """For the KG edges both sides have: which differ in their attribute types
+    or knowledge level / agent type (what the ranker scores on)."""
+    common = set(port) & set(upstream)
+    differing = [k for k in common if port[k] != upstream[k]]
+    examples = []
+    for k in sorted(differing, key=str)[:EXAMPLES]:
+        p_attrs, p_kl, p_at = port[k]
+        u_attrs, u_kl, u_at = upstream[k]
+        examples.append(
+            {
+                "edge": str(k),
+                "attributes_only_port": sorted(set(p_attrs) - set(u_attrs), key=str),
+                "attributes_only_upstream": sorted(
+                    set(u_attrs) - set(p_attrs), key=str
+                ),
+                "kl_at": {"port": [p_kl, p_at], "upstream": [u_kl, u_at]},
+            }
+        )
+    return {"common": len(common), "differing": len(differing), "examples": examples}
 
 
 def compare(port: dict, upstream: dict, similar_at: float) -> dict:
@@ -220,8 +333,12 @@ def compare(port: dict, upstream: dict, similar_at: float) -> dict:
         "results": compare_results(port["results"], upstream["results"]),
         "kg_nodes": _set_diff(port["kg_nodes"], upstream["kg_nodes"]),
         "kg_edges": _set_diff(port["kg_edges"], upstream["kg_edges"]),
+        "edge_details": compare_edge_details(
+            port["edge_details"], upstream["edge_details"]
+        ),
         "aux_sizes": {"port": port["aux_sizes"], "upstream": upstream["aux_sizes"]},
         "log_codes": _set_diff(port["log_codes"], upstream["log_codes"]),
+        "errors": {"port": port["errors"], "upstream": upstream["errors"]},
     }
     r = diff["results"]
     identical = (
@@ -233,6 +350,7 @@ def compare(port: dict, upstream: dict, similar_at: float) -> dict:
         and diff["kg_edges"]["jaccard"] == 1.0
         and port["aux_sizes"] == upstream["aux_sizes"]
         and diff["log_codes"]["jaccard"] == 1.0
+        and diff["edge_details"]["differing"] == 0
     )
     if identical:
         verdict = "SAME"
@@ -290,18 +408,35 @@ def run_case(c, args, out_dir: Path) -> dict:
         up_f = pool.submit(_post, args.upstream, upstream_body, timeout)
         port_http, port_resp, port_s = port_f.result()
         up_http, up_resp, up_s = up_f.result()
-    (out_dir / f"{c.name}.port.json").write_text(json.dumps(port_resp, indent=2))
-    (out_dir / f"{c.name}.upstream.json").write_text(json.dumps(up_resp, indent=2))
+    (out_dir / f"{c.name}.port.json").write_text(
+        json.dumps(port_resp, indent=2), encoding="utf-8"
+    )
+    (out_dir / f"{c.name}.upstream.json").write_text(
+        json.dumps(up_resp, indent=2), encoding="utf-8"
+    )
     diff = compare(
         summarize(port_http, port_resp), summarize(up_http, up_resp), args.similar_at
     )
+    if diff["verdict"] != "SAME" and c.name in EXPECTED:
+        diff["verdict"] = "EXPECTED"
+        diff["expected_because"] = EXPECTED[c.name]
     diff.update(
         case=c.name,
         group=c.group,
         seconds={"port": round(port_s, 1), "upstream": round(up_s, 1)},
     )
-    (out_dir / f"{c.name}.diff.json").write_text(json.dumps(diff, indent=2))
+    (out_dir / f"{c.name}.diff.json").write_text(
+        json.dumps(diff, indent=2), encoding="utf-8"
+    )
     return diff
+
+
+VERDICTS = ("DIFF", "EXPECTED", "SIMILAR", "SAME")
+
+
+def _first_error(d: dict, side: str) -> str:
+    errors = (d.get("errors") or {}).get(side) or []
+    return errors[0].replace("\n", " ")[:160] if errors else ""
 
 
 def report_line(d: dict) -> str:
@@ -314,41 +449,61 @@ def report_line(d: dict) -> str:
         if d["outcome"]
         else ""
     )
-    return (
-        f"{d['verdict']:7} {d['case']:45} results {r['port']}/{r['upstream']} "
+    line = (
+        f"{d['verdict']:8} {d['case']:45} results {r['port']}/{r['upstream']} "
         f"(J={r['jaccard']}, top10={r['top10_overlap']}, Δscore={r['max_score_diff']}) "
-        f"edges J={d['kg_edges']['jaccard']}{outcome}"
+        f"edges J={d['kg_edges']['jaccard']}, "
+        f"attrs≠{d['edge_details']['differing']}/{d['edge_details']['common']}{outcome}"
     )
+    for side in ("port", "upstream"):
+        if d["outcome"] and _first_error(d, side):
+            line += f"\n         {side}: {_first_error(d, side)}"
+    return line
+
+
+def _counts(diffs: list) -> dict:
+    return {v: sum(d["verdict"] == v for d in diffs) for v in VERDICTS}
+
+
+def _counts_text(counts: dict) -> str:
+    return ", ".join(f"{counts[v]} {v}" for v in reversed(VERDICTS))
+
+
+def _cell(text: str) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
 
 
 def write_summary(diffs: list, out_dir: Path, args) -> None:
-    (out_dir / "summary.json").write_text(json.dumps(diffs, indent=2))
-    counts = {
-        v: sum(d["verdict"] == v for d in diffs) for v in ("SAME", "SIMILAR", "DIFF")
-    }
+    (out_dir / "summary.json").write_text(json.dumps(diffs, indent=2), encoding="utf-8")
     lines = [
         "# ARAX parity: Shepherd port vs. upstream",
         "",
         f"- port: `{args.port}`",
         f"- upstream: `{args.upstream}`",
         f"- bypass_cache: {args.bypass_cache}; SIMILAR at Jaccard ≥ {args.similar_at}",
-        f"- {counts['SAME']} SAME, {counts['SIMILAR']} SIMILAR, {counts['DIFF']} DIFF",
+        f"- {_counts_text(_counts(diffs))}",
         "",
-        "| verdict | case | results port/upstream | results J | top-10 overlap | max Δscore | KG edges J | outcome differences |",
-        "|---|---|---|---|---|---|---|---|",
+        "| verdict | case | results port/upstream | results J | top-10 overlap "
+        "| max Δscore | KG edges J | edges with other attributes / KL / AT "
+        "| outcome differences | port error | upstream error |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for d in sorted(
-        diffs, key=lambda d: ("DIFF", "SIMILAR", "SAME").index(d["verdict"])
-    ):
+    for d in sorted(diffs, key=lambda d: VERDICTS.index(d["verdict"])):
         r = d["results"]
         outcome = "; ".join(
             f"{k}: {v['port']} vs {v['upstream']}" for k, v in d["outcome"].items()
         )
+        if d.get("expected_because"):
+            outcome = f"{outcome} (expected: {d['expected_because']})"
         lines.append(
-            f"| {d['verdict']} | {d['case']} | {r['port']}/{r['upstream']} | {r['jaccard']} "
-            f"| {r['top10_overlap']} | {r['max_score_diff']} | {d['kg_edges']['jaccard']} | {outcome} |"
+            f"| {d['verdict']} | {d['case']} | {r['port']}/{r['upstream']} "
+            f"| {r['jaccard']} | {r['top10_overlap']} | {r['max_score_diff']} "
+            f"| {d['kg_edges']['jaccard']} "
+            f"| {d['edge_details']['differing']}/{d['edge_details']['common']} "
+            f"| {_cell(outcome)} | {_cell(_first_error(d, 'port'))} "
+            f"| {_cell(_first_error(d, 'upstream'))} |"
         )
-    (out_dir / "summary.md").write_text("\n".join(lines) + "\n")
+    (out_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -418,13 +573,8 @@ def main() -> int:
             print(report_line(d), flush=True)
             diffs.append(d)
     write_summary(diffs, out_dir, args)
-    counts = {
-        v: sum(d["verdict"] == v for d in diffs) for v in ("SAME", "SIMILAR", "DIFF")
-    }
-    print(
-        f"\n{counts['SAME']} SAME, {counts['SIMILAR']} SIMILAR, {counts['DIFF']} DIFF; "
-        f"details in {out_dir}/summary.md"
-    )
+    counts = _counts(diffs)
+    print(f"\n{_counts_text(counts)}; " f"details in {out_dir}/summary.md")
     return 1 if counts["DIFF"] else 0
 
 

@@ -34,6 +34,7 @@ comparing:
 
 ```bash
 python scripts/arax_compare.py --port http://localhost:5439/arax
+python scripts/arax_compare.py --upstream https://arax.ncats.io/beta/api/arax/v2.0   # another upstream instance
 ```
 
 Other options:
@@ -57,8 +58,16 @@ Each case is:
   support-graph sizes and the same WARNING / ERROR log codes;
 - **SIMILAR**: the same outcome, and results and KG edges overlap at least 90%
   (`--similar-at`). Ranks or scores may differ;
+- **EXPECTED**: the answers differ, for a reason recorded in the script's
+  `EXPECTED` table (a decision in `docs/ARAX_PORT_BASELINE.md`, or how upstream's
+  deployment behaves). The reason is in the summary;
 - **DIFF**: anything else. Open `<case>.diff.json` to see which layer differs,
   with examples on each side.
+
+For each case the diff also records each side's first ERROR log messages
+(`errors`), the results with the largest score differences, and the KG edges
+both sides have but with other attribute types or knowledge level / agent type
+(`edge_details`; the ranker scores on those).
 
 Results are matched by their node bindings, and KG edges by subject, predicate,
 object and primary knowledge source, so edge keys don't matter.

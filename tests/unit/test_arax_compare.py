@@ -95,3 +95,25 @@ def test_bodies_differ_only_by_shepherds_switch():
     assert port["parameters"].pop("arax_internal") is True
     assert port == upstream
     assert upstream["parameters"]["bypass_cache"] is True
+
+
+def test_same_edges_with_other_attributes_are_counted():
+    a = _response([("B:1", 0.9)], {"e1": "B:1"})
+    b = _response([("B:1", 0.9)], {"e1": "B:1"})
+    b["message"]["knowledge_graph"]["edges"]["e1"]["attributes"] = [
+        {"attribute_type_id": "biolink:publications", "value": ["PMID:1"]}
+    ]
+    diff = _verdict(a, b)
+    assert diff["verdict"] == "SIMILAR"
+    (example,) = diff["edge_details"]["examples"]
+    assert example["attributes_only_upstream"] == ["biolink:publications"]
+
+
+def test_errors_are_kept_for_each_side():
+    error = _response(
+        [],
+        status="UnhandledError",
+        logs=[{"level": "ERROR", "code": "UnhandledError", "message": "boom"}],
+    )
+    diff = _verdict(_response([("B:1", 0.9)]), error, http=(200, 400))
+    assert diff["errors"] == {"port": [], "upstream": ["boom"]}
