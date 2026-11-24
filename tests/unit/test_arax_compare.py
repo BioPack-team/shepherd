@@ -117,3 +117,25 @@ def test_errors_are_kept_for_each_side():
     )
     diff = _verdict(_response([("B:1", 0.9)]), error, http=(200, 400))
     assert diff["errors"] == {"port": [], "upstream": ["boom"]}
+
+
+def test_digest_keeps_only_what_the_top_results_use():
+    body = _response([("B:1", 0.9), ("B:2", 0.5)], {"e1": "B:1", "e2": "B:2"})
+    results = body["message"]["results"]
+    results[0]["analyses"][0]["edge_bindings"] = {"t": {"ids": ["e1"]}}
+    results[0]["analyses"][0]["support_graphs"] = ["aux1"]
+    body["message"]["knowledge_graph"]["edges"]["s1"] = {
+        "subject": "B:1",
+        "predicate": "biolink:related_to",
+        "object": "C:1",
+    }
+    body["message"]["auxiliary_graphs"] = {"aux1": {"edges": ["s1"]}, "aux2": {}}
+    body["logs"] = [
+        {"level": "INFO", "message": "fine"},
+        {"level": "ERROR", "message": "bad"},
+    ]
+    d = AC.digest(body, 200)
+    assert d["http"] == 200 and d["n_results"] == 2 and d["n_kg_edges"] == 3
+    assert set(d["knowledge_graph"]["edges"]) == {"e1", "s1"}
+    assert set(d["auxiliary_graphs"]) == {"aux1"}
+    assert [e["message"] for e in d["logs"]] == ["bad"]

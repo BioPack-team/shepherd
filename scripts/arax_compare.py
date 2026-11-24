@@ -409,26 +409,165 @@ def run_case(c, args, out_dir: Path) -> dict:
         port_http, port_resp, port_s = port_f.result()
         up_http, up_resp, up_s = up_f.result()
     (out_dir / f"{c.name}.port.json").write_text(
-        json.dumps(port_resp, indent=2), encoding="utf-8"
+        json.dumps(port_resp), encoding="utf-8"
     )
     (out_dir / f"{c.name}.upstream.json").write_text(
-        json.dumps(up_resp, indent=2), encoding="utf-8"
+        json.dumps(up_resp), encoding="utf-8"
     )
+    meta = {
+        "http": {"port": port_http, "upstream": up_http},
+        "seconds": {"port": round(port_s, 1), "upstream": round(up_s, 1)},
+    }
+    (out_dir / f"{c.name}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    return diff_case(c, port_resp, up_resp, meta, args, out_dir)
+
+
+def diff_case(c, port_resp, up_resp, meta: dict, args, out_dir: Path) -> dict:
+    http = meta.get("http") or {}
     diff = compare(
-        summarize(port_http, port_resp), summarize(up_http, up_resp), args.similar_at
+        summarize(http.get("port"), port_resp),
+        summarize(http.get("upstream"), up_resp),
+        args.similar_at,
     )
     if diff["verdict"] != "SAME" and c.name in EXPECTED:
         diff["verdict"] = "EXPECTED"
         diff["expected_because"] = EXPECTED[c.name]
-    diff.update(
-        case=c.name,
-        group=c.group,
-        seconds={"port": round(port_s, 1), "upstream": round(up_s, 1)},
-    )
+    diff.update(case=c.name, group=c.group, seconds=meta.get("seconds"))
     (out_dir / f"{c.name}.diff.json").write_text(
         json.dumps(diff, indent=2), encoding="utf-8"
     )
     return diff
+
+
+def _read_json(path: Path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def saved_meta(c, out_dir: Path) -> dict:
+    """The HTTP statuses of a saved pair: from <case>.meta.json, or (runs before
+    meta files) from the outcome of the earlier diff, which recorded them only
+    when they differed (else they compare equal)."""
+    meta_path = out_dir / f"{c.name}.meta.json"
+    if meta_path.exists():
+        return _read_json(meta_path)
+    diff_path = out_dir / f"{c.name}.diff.json"
+    old = _read_json(diff_path) if diff_path.exists() else {}
+    http = (old.get("outcome") or {}).get("http") or {"port": None, "upstream": None}
+    return {"http": http, "seconds": old.get("seconds")}
+
+
+def rediff_saved(c, args, out_dir: Path):
+    """The diff of a case from its saved responses, without querying again."""
+    port_path = out_dir / f"{c.name}.port.json"
+    up_path = out_dir / f"{c.name}.upstream.json"
+    if not (port_path.exists() and up_path.exists()):
+        return None
+    return diff_case(
+        c,
+        _read_json(port_path),
+        _read_json(up_path),
+        saved_meta(c, out_dir),
+        args,
+        out_dir,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pack: a small, shareable bundle of a run
+# ---------------------------------------------------------------------------
+
+DIGEST_RESULTS = 25  # top results kept in a digest
+
+
+def digest(body, http=None) -> dict:
+    """What it takes to explain a difference, without the bulk: the outcome,
+    the ERROR / WARNING logs, the query plan, the top results with their
+    analyses, and only the KG nodes, edges and support graphs those results
+    use (with their attributes)."""
+    if not isinstance(body, dict):
+        return {"http": http, "body": str(body)[:2000]}
+    message = _message(body)
+    kg = message.get("knowledge_graph") or {}
+    edges, nodes = kg.get("edges") or {}, kg.get("nodes") or {}
+    aux = message.get("auxiliary_graphs") or {}
+    results = (message.get("results") or [])[:DIGEST_RESULTS]
+    edge_ids, node_ids, aux_ids = set(), set(), set()
+    for result in results:
+        for binding in (result.get("node_bindings") or {}).values():
+            node_ids.update((binding or {}).get("ids") or [])
+        for analysis in result.get("analyses") or []:
+            aux_ids.update(analysis.get("support_graphs") or [])
+            for binding in (analysis.get("edge_bindings") or {}).values():
+                edge_ids.update((binding or {}).get("ids") or [])
+    pending = list(aux_ids)
+    while pending:  # support graphs, transitively through their edges' support graphs
+        for edge_id in (aux.get(pending.pop()) or {}).get("edges") or []:
+            if edge_id in edge_ids:
+                continue
+            edge_ids.add(edge_id)
+            for attribute in (edges.get(edge_id) or {}).get("attributes") or []:
+                if attribute.get("attribute_type_id") == "biolink:support_graphs":
+                    for aux_id in attribute.get("value") or []:
+                        if aux_id not in aux_ids:
+                            aux_ids.add(aux_id)
+                            pending.append(aux_id)
+    for edge_id in edge_ids:
+        edge = edges.get(edge_id) or {}
+        node_ids.update(filter(None, (edge.get("subject"), edge.get("object"))))
+    logs = body.get("logs") or []
+    query_options = body.get("query_options") or {}
+    return {
+        "http": http,
+        "status": body.get("status"),
+        "description": body.get("description"),
+        "schema_version": body.get("schema_version"),
+        "biolink_version": body.get("biolink_version"),
+        "tool_version": body.get("tool_version"),
+        "n_results": len(message.get("results") or []),
+        "n_kg_nodes": len(nodes),
+        "n_kg_edges": len(edges),
+        "n_aux_graphs": len(aux),
+        "n_logs": len(logs),
+        "logs": [e for e in logs if e.get("level") in ("WARNING", "ERROR")],
+        "query_plan": body.get("query_plan") or query_options.get("query_plan"),
+        "query_graph": message.get("query_graph"),
+        "results": results,
+        "knowledge_graph": {
+            "nodes": {k: nodes[k] for k in sorted(node_ids) if k in nodes},
+            "edges": {k: edges[k] for k in sorted(edge_ids) if k in edges},
+        },
+        "auxiliary_graphs": {k: aux[k] for k in sorted(aux_ids) if k in aux},
+    }
+
+
+def pack(cases: list, out_dir: Path) -> Path:
+    """<out>/arax-compare-pack.zip: the summary, every diff, and a digest of
+    every saved response."""
+    import zipfile
+
+    path = out_dir / "arax-compare-pack.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in ("summary.md", "summary.json"):
+            if (out_dir / name).exists():
+                zf.write(out_dir / name, name)
+        for c in cases:
+            meta = saved_meta(c, out_dir)
+            if (out_dir / f"{c.name}.diff.json").exists():
+                zf.write(out_dir / f"{c.name}.diff.json", f"{c.name}.diff.json")
+            for side in ("port", "upstream"):
+                saved = out_dir / f"{c.name}.{side}.json"
+                if saved.exists():
+                    zf.writestr(
+                        f"{c.name}.{side}.digest.json",
+                        json.dumps(
+                            digest(
+                                _read_json(saved), (meta.get("http") or {}).get(side)
+                            ),
+                            indent=1,
+                        ),
+                    )
+    return path
 
 
 VERDICTS = ("DIFF", "EXPECTED", "SIMILAR", "SAME")
@@ -554,6 +693,17 @@ def main() -> int:
         default=0.9,
         help="results / KG-edge Jaccard at or above which a case is SIMILAR (default 0.9)",
     )
+    parser.add_argument(
+        "--from-saved",
+        action="store_true",
+        help="re-compare the responses saved under --out, without querying again",
+    )
+    parser.add_argument(
+        "--pack",
+        action="store_true",
+        help="also write <out>/arax-compare-pack.zip: the summary, the diffs and a "
+        "small digest of each response (to share a run)",
+    )
     args = parser.parse_args()
 
     cases = comparable_cases(args.only, args.group)
@@ -566,13 +716,26 @@ def main() -> int:
         return 2
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"comparing {len(cases)} cases: port {args.port} vs upstream {args.upstream}")
     diffs = []
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for d in pool.map(lambda c: run_case(c, args, out_dir), cases):
-            print(report_line(d), flush=True)
-            diffs.append(d)
+    if args.from_saved:
+        print(f"re-comparing the saved responses in {out_dir}")
+        for c in cases:
+            d = rediff_saved(c, args, out_dir)
+            if d is not None:
+                print(report_line(d), flush=True)
+                diffs.append(d)
+    else:
+        print(
+            f"comparing {len(cases)} cases: port {args.port} vs upstream {args.upstream}"
+        )
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for d in pool.map(lambda c: run_case(c, args, out_dir), cases):
+                print(report_line(d), flush=True)
+                diffs.append(d)
     write_summary(diffs, out_dir, args)
+    if args.pack:
+        path = pack(cases, out_dir)
+        print(f"packed {path} ({path.stat().st_size / 1e6:.1f} MB)")
     counts = _counts(diffs)
     print(f"\n{_counts_text(counts)}; " f"details in {out_dir}/summary.md")
     return 1 if counts["DIFF"] else 0

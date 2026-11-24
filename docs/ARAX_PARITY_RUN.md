@@ -49,6 +49,19 @@ python scripts/arax_compare.py --workers 1                  # gentler on the dev
 Every pair of responses, and the diff of each case, is saved under `--out`
 (default `responses/arax-compare/`). `summary.md` is the table to read first.
 
+The saved responses can be large (the full answers, a couple of GB for all
+cases). To share a run, pack it:
+
+```bash
+python scripts/arax_compare.py --from-saved --pack    # re-diff the saved responses, no new queries
+```
+
+`--from-saved` recomputes every diff from the saved responses (useful after
+the script's comparison changes), and `--pack` writes
+`responses/arax-compare/arax-compare-pack.zip`: the summary, every case's diff,
+and a digest of each response (outcome, ERROR / WARNING logs, query plan, the
+top 25 results, and only the KG edges and support graphs they use).
+
 ## 3. Reading the results
 
 Each case is:
