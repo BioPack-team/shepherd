@@ -43,9 +43,18 @@ Usage:
 Every pair of responses is saved under --out (default
 responses/arax-compare/<case>.{port,upstream}.json), with a per-case diff in
 <case>.diff.json and a summary in summary.json and summary.md. The exit code is
-1 if any case is DIFF (not SAME, SIMILAR or EXPECTED). A case whose
-difference comes from a recorded decision or from how upstream's deployment
-behaves is EXPECTED (listed in EXPECTED, with the reason).
+1 if any case is DIFF. A case whose difference comes from a recorded
+decision or from how upstream's deployment behaves is EXPECTED (listed in
+EXPECTED, with the reason); one where only upstream failed (an error status, a
+gateway error, no answer) is UPSTREAM_ERROR, with upstream's message.
+
+Ranking ties: ARAX's final scores are positional (_break_ties_and_preserve_order
+gives results with equal raw scores 0.001 apart in the order they arrive, and 0
+past the 1000th), and that order comes from hash and answer order, which differs
+between processes. So results with tied raw scores can swap scores, and a
+result cap (e.g. 500) can keep different tied results, on two runs of the SAME
+instance. Run a control (--port set to the upstream URL, --no-arax-internal) to
+see how much of a case's difference is this noise.
 """
 
 import argparse
@@ -87,6 +96,11 @@ EXPECTED = {
         "is never read; the port also reads query_options (sync item 8)"
     ),
     "query_by_name_trapi": "the port resolves a qnode's name to ids (D-25)",
+    "pathfinder_trapi_paths": (
+        "a TRAPI pathfinder query (query_graph.paths) is answered by Shepherd's "
+        "arax.pathfinder worker, not ARAX (DEC-7): its envelope has no ARAX status "
+        "or tool_version, and its paths come from Shepherd's pathfinder"
+    ),
     "val_no_message": (
         "Shepherd answers an empty query with ARAX's own error (400), upstream's "
         "FastAPI with its schema error (422)"
@@ -146,6 +160,46 @@ def primary_source(edge: dict):
     return None
 
 
+def edge_identity(e: dict) -> tuple:
+    """What makes two KG edges the same assertion: two KP edges can share
+    subject, predicate, object and primary source (e.g. an xDTD and a heuristic
+    treats edge, or one per knowledge level), so all of these count."""
+    qualifiers = tuple(
+        sorted(
+            (q.get("qualifier_type_id"), str(q.get("qualifier_value")))
+            for q in e.get("qualifiers") or []
+            if isinstance(q, dict)
+        )
+    )
+    return (
+        e.get("subject"),
+        e.get("predicate"),
+        e.get("object"),
+        primary_source(e),
+        e.get("knowledge_level"),
+        e.get("agent_type"),
+        qualifiers,
+    )
+
+
+def edge_details(edges: dict) -> dict:
+    """{edge identity: sorted list of each such edge's attribute types}"""
+    out = {}
+    for e in edges.values():
+        types = tuple(
+            sorted(
+                {
+                    a.get("attribute_type_id")
+                    for a in e.get("attributes") or []
+                    if isinstance(a, dict)
+                },
+                key=str,
+            )
+        )
+        out.setdefault(edge_identity(e), []).append(types)
+    return {k: sorted(v) for k, v in out.items()}
+
+
 def summarize(http_status: int, body) -> dict:
     """The comparable layers of one response."""
     if not isinstance(body, dict):
@@ -182,28 +236,7 @@ def summarize(http_status: int, body) -> dict:
             },
             key=str,
         ),
-        "edge_details": {
-            (
-                e.get("subject"),
-                e.get("predicate"),
-                e.get("object"),
-                primary_source(e),
-            ): (
-                tuple(
-                    sorted(
-                        {
-                            a.get("attribute_type_id")
-                            for a in e.get("attributes") or []
-                            if isinstance(a, dict)
-                        },
-                        key=str,
-                    )
-                ),
-                e.get("knowledge_level"),
-                e.get("agent_type"),
-            )
-            for e in (kg.get("edges") or {}).values()
-        },
+        "edge_details": edge_details(kg.get("edges") or {}),
         "errors": [
             str(entry.get("message"))[:ERROR_CHARS]
             for entry in logs
@@ -302,22 +335,20 @@ def compare_results(port: list, upstream: list) -> dict:
 
 
 def compare_edge_details(port: dict, upstream: dict) -> dict:
-    """For the KG edges both sides have: which differ in their attribute types
-    or knowledge level / agent type (what the ranker scores on)."""
+    """For the KG edges both sides have (by full identity, see edge_identity):
+    which carry other attribute types (what the ranker scores on)."""
     common = set(port) & set(upstream)
     differing = [k for k in common if port[k] != upstream[k]]
     examples = []
     for k in sorted(differing, key=str)[:EXAMPLES]:
-        p_attrs, p_kl, p_at = port[k]
-        u_attrs, u_kl, u_at = upstream[k]
+        p_attrs = {t for types in port[k] for t in types}
+        u_attrs = {t for types in upstream[k] for t in types}
         examples.append(
             {
                 "edge": str(k),
-                "attributes_only_port": sorted(set(p_attrs) - set(u_attrs), key=str),
-                "attributes_only_upstream": sorted(
-                    set(u_attrs) - set(p_attrs), key=str
-                ),
-                "kl_at": {"port": [p_kl, p_at], "upstream": [u_kl, u_at]},
+                "attributes_only_port": sorted(p_attrs - u_attrs, key=str),
+                "attributes_only_upstream": sorted(u_attrs - p_attrs, key=str),
+                "count": {"port": len(port[k]), "upstream": len(upstream[k])},
             }
         )
     return {"common": len(common), "differing": len(differing), "examples": examples}
@@ -432,11 +463,31 @@ def diff_case(c, port_resp, up_resp, meta: dict, args, out_dir: Path) -> dict:
     if diff["verdict"] != "SAME" and c.name in EXPECTED:
         diff["verdict"] = "EXPECTED"
         diff["expected_because"] = EXPECTED[c.name]
+    elif diff["verdict"] == "DIFF" and upstream_failed_alone(
+        http.get("port"), port_resp, http.get("upstream"), up_resp
+    ):
+        diff["verdict"] = "UPSTREAM_ERROR"
     diff.update(case=c.name, group=c.group, seconds=meta.get("seconds"))
     (out_dir / f"{c.name}.diff.json").write_text(
         json.dumps(diff, indent=2), encoding="utf-8"
     )
     return diff
+
+
+OK_STATUSES = (None, "Success", "OK")
+
+
+def _failed(http, body) -> bool:
+    if http is not None and (http == 0 or http >= 400):
+        return True
+    if not isinstance(body, dict) or "_not_json" in body or "_error" in body:
+        return True
+    return body.get("status") not in OK_STATUSES
+
+
+def upstream_failed_alone(port_http, port_resp, up_http, up_resp) -> bool:
+    """Upstream answered with an error (or not at all) where the port answered."""
+    return _failed(up_http, up_resp) and not _failed(port_http, port_resp)
 
 
 def _read_json(path: Path):
@@ -570,7 +621,7 @@ def pack(cases: list, out_dir: Path) -> Path:
     return path
 
 
-VERDICTS = ("DIFF", "EXPECTED", "SIMILAR", "SAME")
+VERDICTS = ("DIFF", "UPSTREAM_ERROR", "EXPECTED", "SIMILAR", "SAME")
 
 
 def _first_error(d: dict, side: str) -> str:

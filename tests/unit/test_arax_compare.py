@@ -139,3 +139,28 @@ def test_digest_keeps_only_what_the_top_results_use():
     assert set(d["knowledge_graph"]["edges"]) == {"e1", "s1"}
     assert set(d["auxiliary_graphs"]) == {"aux1"}
     assert [e["message"] for e in d["logs"]] == ["bad"]
+
+
+def test_edges_sharing_subject_predicate_object_and_source_are_told_apart():
+    a = _response([("B:1", 0.9)], {"e1": "B:1", "e2": "B:1"})
+    edges = a["message"]["knowledge_graph"]["edges"]
+    edges["e1"].update(knowledge_level="prediction", agent_type="automated_agent")
+    edges["e2"].update(
+        knowledge_level="prediction",
+        agent_type="computational_model",
+        attributes=[{"attribute_type_id": "EDAM-DATA:0951", "value": 0.9}],
+    )
+    b = _response([("B:1", 0.9)], {"e2": "B:1", "e1": "B:1"})
+    b["message"]["knowledge_graph"]["edges"] = {
+        "x": dict(edges["e2"]),
+        "y": dict(edges["e1"]),
+    }
+    assert _verdict(a, b)["edge_details"]["differing"] == 0
+
+
+def test_only_upstream_failing_is_an_upstream_error():
+    ok = _response([("B:1", 0.9)])
+    assert AC.upstream_failed_alone(200, ok, 502, {"_not_json": "<html>"})
+    assert AC.upstream_failed_alone(200, ok, 400, {"status": "UnhandledError"})
+    assert not AC.upstream_failed_alone(400, {"status": "X"}, 400, {"status": "Y"})
+    assert not AC.upstream_failed_alone(200, ok, 200, ok)
