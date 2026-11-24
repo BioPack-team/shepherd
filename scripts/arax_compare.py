@@ -71,7 +71,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_arax_queries as Q  # noqa: E402
 
-DEFAULT_UPSTREAM = "https://arax.ncats.io/devED/api/arax/v2.0"
+DEFAULT_UPSTREAM = "https://arax.ncats.io/beta/api/arax/v2.0"
 DEFAULT_PORT = "http://localhost:5439/arax"
 EXAMPLES = 5  # how many differing items to show per layer
 ERROR_CHARS = 400  # how much of an error message to keep
