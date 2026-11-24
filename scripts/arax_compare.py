@@ -14,7 +14,9 @@ case at a time per worker) and compares the answers layer by layer:
                   host noise, so only codes are compared)
 
 The cases are the TRAPI 2.0 query cases of scripts/test_arax_queries.py
-(lookups, creative mode, ARAXi, workflows, validation errors). Cases that only
+(lookups, creative mode, ARAXi, workflows, validation errors), except the
+pathfinder cases (Shepherd answers path queries with its own arax.pathfinder
+worker, DEC-7; upstream's pathfinder is no longer used). Cases that only
 test Shepherd (its 400 for TRAPI 1.x spellings, the UI's X prefix), endpoint
 cases and cases that reuse an earlier response are left out.
 
@@ -96,11 +98,6 @@ EXPECTED = {
         "is never read; the port also reads query_options (sync item 8)"
     ),
     "query_by_name_trapi": "the port resolves a qnode's name to ids (D-25)",
-    "pathfinder_trapi_paths": (
-        "a TRAPI pathfinder query (query_graph.paths) is answered by Shepherd's "
-        "arax.pathfinder worker, not ARAX (DEC-7): its envelope has no ARAX status "
-        "or tool_version, and its paths come from Shepherd's pathfinder"
-    ),
     "val_no_message": (
         "Shepherd answers an empty query with ARAX's own error (400), upstream's "
         "FastAPI with its schema error (422)"
@@ -110,12 +107,20 @@ EXPECTED = {
 # Cases that are not comparable side by side: they reuse an earlier response
 # of the same instance, or only exercise Shepherd
 NOT_COMPARABLE = {"message_uris_reuse_a_response"}
+# Pathfinder is not compared: Shepherd answers path queries with its own
+# arax.pathfinder worker (DEC-7), and upstream ARAX's pathfinder is no longer used
+NOT_COMPARED_PREFIXES = ("pathfinder_",)
 
 
 def comparable_cases(only=None, groups=None) -> list:
     cases = []
     for c in Q.CASES:
-        if c.method or c.after or c.name in NOT_COMPARABLE:
+        if (
+            c.method
+            or c.after
+            or c.name in NOT_COMPARABLE
+            or c.name.startswith(NOT_COMPARED_PREFIXES)
+        ):
             continue  # endpoint cases, or cases that need an earlier response
         if (c.arax or {}).get("skip"):
             continue  # only tests Shepherd

@@ -164,3 +164,7 @@ def test_only_upstream_failing_is_an_upstream_error():
     assert AC.upstream_failed_alone(200, ok, 400, {"status": "UnhandledError"})
     assert not AC.upstream_failed_alone(400, {"status": "X"}, 400, {"status": "Y"})
     assert not AC.upstream_failed_alone(200, ok, 200, ok)
+
+
+def test_pathfinder_cases_are_not_compared():
+    assert not [c for c in AC.comparable_cases() if c.name.startswith("pathfinder_")]

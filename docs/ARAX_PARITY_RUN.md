@@ -2,8 +2,10 @@
 
 `scripts/arax_compare.py` sends the same TRAPI 2.0 query to Shepherd's ARAX port
 and to a deployed upstream ARAX at the same time, and diffs the answers. It uses
-the 67 query cases of `scripts/test_arax_queries.py` (lookups, creative mode,
-ARAXi, workflows, validation errors). Run it from a machine that can reach both
+the query cases of `scripts/test_arax_queries.py` (lookups, creative mode,
+ARAXi, workflows, validation errors), except pathfinder: Shepherd answers path
+queries with its own `arax.pathfinder` worker (DEC-7), and upstream's pathfinder
+is no longer used. Run it from a machine that can reach both
 instances.
 
 Upstream's development instance runs the `trapi2.0` code the port follows:
@@ -97,8 +99,6 @@ port defects:
   `constraints.sources`.
 - **A multi-id qnode's subclass parent** is inferred from a `subclass_of` edge
   in the KP answer (DEC-29c). Upstream maps no parent.
-- **`connect(action=connect_nodes)`** uses Shepherd's pathfinder limits, 4 hops
-  and 500 paths (DEC-7).
 - **A `kp` list** is forwarded to Retriever as `parameters.kp` (DEC-10).
 - **xCRG** runs the same package as upstream (DEC-25), so its known bugs
   (BioPack-team/shepherd#273, #274, #275 and #276) affect both sides alike.
