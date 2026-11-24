@@ -68,8 +68,8 @@ def normalize(obj):
         '"timestamp": "T"',
         text,
     )
-    # the validator's version (translator_tom's in the port, reasoner-validator's
-    # upstream, "" where the goldens were recorded): not ARAX's behavior
+    # the validator's version (reasoner-validator's, in the port and
+    # upstream, or "" where the goldens were recorded): not ARAX's behavior
     text = re.sub(r'"validator_version": "[^"]*"', '"validator_version": ""', text)
     return json.loads(text)
 

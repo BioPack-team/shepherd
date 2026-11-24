@@ -242,6 +242,7 @@ Tags:
 ## 3. Decisions needed (DECIDE)
 
 Status (2026-11-23):
+- **Item 48** done (DEC-33): `/response/{id}` validates with reasoner-validator 7.1.3; TOM is still used everywhere else.
 - **D1** done (DEC-25): `catrax-xcrg==1.0.1.dev2`. Its known bugs are BioPack-team/shepherd#273, #274, #275 and #276.
 - **D2** done (DEC-23).
 - **D3** done (DEC-22).
