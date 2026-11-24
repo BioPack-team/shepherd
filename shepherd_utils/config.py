@@ -319,9 +319,8 @@ class Settings(BaseSettings):
     # .tar.gz holding graphenrich.duckdb (the basename of
     # graphenrich_duckdb_path) at its top level, extracted into that
     # file's directory. Empty skips the download.
-    # TODO: a placeholder until the database is published.
     graphenrich_duckdb_url: str = (
-        "https://example.org/graphenrich/graphenrich.duckdb.tar.gz"
+        "https://stars.renci.org/var/translator/ac/answer-coalesce-hierarchy-pruned-2026-9-14.duckdb"
     )
 
     pathfinder_embeddings_dir: str = "/app/pathfinder_embeddings"
