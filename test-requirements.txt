@@ -2,6 +2,8 @@ aiohttp
 CacheControl==0.14.4
 biolink-helper-pkg==1.0.1
 bmt==1.4.8
+# aragorn.graphenrich (workers/aragorn_graphenrich/requirements.txt)
+duckdb>=1.4,<2
 fakeredis
 # imported by upstream ARAX's test suite (tests/unit/arax/upstream_suite)
 graphviz
@@ -12,6 +14,7 @@ moto[s3]
 networkx
 numpy
 pandas
+pyarrow>=17,<19
 pytest
 pytest-asyncio
 pytest-cov
