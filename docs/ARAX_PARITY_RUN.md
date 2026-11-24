@@ -105,5 +105,17 @@ port defects:
 - **NGD publications** are missing on the port's side until the pathfinder
   files move to tier0-20260928 (see section 1).
 
+### Ties between results
+
+ARAX gives results with equal raw scores positional scores (0.001 apart, 0
+past the 1000th) in the order resultify creates them, which is Python set order
+and so follows the process's string-hash seed. Tied results can therefore swap
+scores, and a result cap can keep different tied results, between Shepherd and
+upstream, though each is repeatable on its own: the `arax` worker runs with
+`PYTHONHASHSEED=0`, and upstream forks every query from one server process.
+Expect this in one-hop answers with many equally supported edges (text-mining
+answers, for example). To measure it, restart the `arax` worker with another
+`PYTHONHASHSEED` and compare the port with itself.
+
 The comparison ignores where each side puts its query plan, the envelope `id`,
 and log texts and timestamps.

@@ -144,3 +144,10 @@ def test_every_compose_worker_runs_under_an_init():
     }
     assert workers
     assert [name for name, s in workers.items() if s.get("init") is not True] == []
+
+
+def test_the_arax_worker_has_a_fixed_hash_seed():
+    """ARAX orders tied results by set order, so a fixed seed makes its answers
+    reproducible across processes and restarts."""
+    instructions = _instructions(REPO / "workers" / "arax" / "Dockerfile")
+    assert "ENV PYTHONHASHSEED=0" in instructions
