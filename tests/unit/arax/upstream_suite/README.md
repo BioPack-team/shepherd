@@ -2,6 +2,12 @@
 
 The `test_*.py` files here are upstream ARAX's own tests
 (`RTXteam/RTX @ 9485431`, `code/ARAX/test/`, MIT, see `LICENSE.RTX`).
+The exception is `test_ARAX_xcrg_connect.py`, taken verbatim from upstream's
+`trapi2.0` branch (`3d4ce77`), where it is already TRAPI 2.0 and tests the
+catrax-xcrg package API the port now uses (DEC-25).
+Where the port takes a change from upstream's `trapi2.0` branch, the matching
+change to upstream's tests (and any new test that comes with it) is mirrored
+here, marked `# upstream trapi2.0 (<commit>)`.
 `upstream_alias.py` resolves their imports (`ARAX_query`,
 `Expand.expand_utilities`, `openapi_server.models.*`, `node_synonymizer`, ...)
 to the port's modules under `shepherd_utils/arax/`, so the same tests exercise
@@ -23,9 +29,9 @@ shows exactly what changed. Code that was already broken upstream (the TRAPI
 
 ## In CI (offline)
 
-`pytest tests/unit/arax/upstream_suite` runs the 81 tests in
+`pytest tests/unit/arax/upstream_suite` runs the 87 tests in
 `offline_passing.txt`. These are every upstream test that passes on upstream
-ARAX itself with no network and no ARAX data files (and all 81 pass on the
+ARAX itself with no network and no ARAX data files (and all 87 pass on the
 port, adapted to TRAPI 2.0 as above). The rest are skipped because they fail
 offline on upstream too. The two xfails are the port's recorded difference
 DEC-4 (xCRG uses Shepherd's Retriever).

@@ -2,10 +2,18 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - drop the unused import of knowledge_graph_info (dead code, DEC-5)
-#   - is_xcrg_mvp2_query comes from the vendored xCRG package (shepherd_utils/arax/xcrg/, DEC-21),
-#     which reads TRAPI 2.0. Only an inferred MVP2 query is routed to connect(action=xcrg): the
-#     package's latest check also accepts the one-hop lookup shape, which the catrax-xcrg upstream
-#     ran (c97da53) did not, and which would otherwise leave Expand for xCRG's direct lookup
+#   - from upstream trapi2.0 (0513ea95; DEC-25): an xCRG MVP2 query -- inferred or the one-hop
+#     lookup shape -- is recognized by catrax-xcrg's xcrg.is_valid_query and routed to
+#     connect(action=xcrg). It is checked on the query graph and parameters (ARAX_connect.xcrg_query),
+#     since the port's message may hold empty containers 2.0 forbids
+#   - from upstream trapi2.0 (615baff3): a template may carry an 'error' instead of a 'DSL',
+#     answered with QueryGraphInterpreterUnsupportedGraph (DEC-23)
+#   - from upstream trapi2.0 (615baff3, d83d0686): the template's compute_ngd overlay steps are dropped
+#     when a qedge has a knowledge_level, agent_type or qualifiers constraint
+#     (_has_klat_or_qualifier_constraints)
+#   - from upstream trapi2.0 (18ae5be1): a pathfinder query's max_pathfinder_paths / max_path_length are
+#     read from the query's additional_properties; Shepherd also reads the legacy query_options
+#     (ARAXQuery merges them into envelope.additional_properties, additional_properties winning)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -20,7 +28,8 @@ from datetime import datetime
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.query_graph_info import QueryGraphInfo
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
-from shepherd_utils.arax.xcrg import is_xcrg_mvp2_query
+import xcrg
+from shepherd_utils.arax.ARAX_connect import xcrg_query
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 
@@ -29,14 +38,6 @@ from shepherd_utils.arax.openapi_server.models.knowledge_graph import KnowledgeG
 from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
 from shepherd_utils.arax.openapi_server.models.q_node import QNode
 from shepherd_utils.arax.openapi_server.models.q_edge import QEdge
-
-
-def is_xcrg_inferred_query(query: dict) -> bool:
-    """An xCRG MVP2 query whose (single) edge is inferred."""
-    if not is_xcrg_mvp2_query(query):
-        return False
-    edges = query["message"]["query_graph"].get("edges") or {}
-    return [edge.get("knowledge_type") for edge in edges.values()] == ["inferred"]
 
 
 class ARAXQueryGraphInterpreter:
@@ -83,22 +84,24 @@ class ARAXQueryGraphInterpreter:
             # Note: This logging message is keyed off to provide progress updates to the RTX front-end.
             response.info("QueryGraphInterpreter recognized query_graph as a 'pathfinder' query: triggering pathfinder subsystem.")
 
+            # Shepherd: ARAXQuery merges the legacy query_options into these (additional_properties wins)
+            additional_properties = getattr(response.envelope, 'additional_properties', None) or response.envelope.query_options or {}
             max_pathfinder_paths_str = ''
-            if 'max_pathfinder_paths' in response.envelope.query_options:
-                max_pathfinder_paths_str = f", max_pathfinder_paths={response.envelope.query_options['max_pathfinder_paths']}"
-                response.info(f"QueryGraphInterpreter setting max_pathfinder_paths={response.envelope.query_options['max_pathfinder_paths']}")
+            if 'max_pathfinder_paths' in additional_properties:
+                max_pathfinder_paths_str = f", max_pathfinder_paths={additional_properties['max_pathfinder_paths']}"
+                response.info(f"QueryGraphInterpreter setting max_pathfinder_paths={additional_properties['max_pathfinder_paths']}")
 
             max_path_length_str = ', max_path_length=4'
-            if 'max_path_length' in response.envelope.query_options:
-                max_path_length_str = f", max_path_length={response.envelope.query_options['max_path_length']}"
-                response.info(f"QueryGraphInterpreter setting max_path_length={response.envelope.query_options['max_path_length']}")
+            if 'max_path_length' in additional_properties:
+                max_path_length_str = f", max_path_length={additional_properties['max_path_length']}"
+                response.info(f"QueryGraphInterpreter setting max_path_length={additional_properties['max_path_length']}")
 
             response.data['araxi_commands'] = [
                 f"connect(action=connect_nodes{max_path_length_str}{max_pathfinder_paths_str})",
             ]
             return response
 
-        if is_xcrg_inferred_query(response.envelope.to_dict()):
+        if xcrg.is_valid_query(xcrg_query(response.envelope.to_dict())):
             response.info(
                 "QueryGraphInterpreter recognized query_graph as an xCRG MVP2 query: triggering xCRG subsystem."
             )
@@ -228,7 +231,14 @@ class ARAXQueryGraphInterpreter:
 
         # If the final best template name is a real one in templates, then get the ARAXI for it
         if query_graph_template_name in self.query_graph_templates['templates']:
-            araxi_commands = self.query_graph_templates['templates'][query_graph_template_name]['DSL']
+            template = self.query_graph_templates['templates'][query_graph_template_name]
+
+            # Some templates describe query graphs we don't support; those have an 'error' instead of 'DSL'
+            if 'error' in template:
+                response.error(template['error'], error_code="QueryGraphInterpreterUnsupportedGraph")
+                return response
+
+            araxi_commands = template['DSL']
 
             # Need to remap the theoretical node and edge ids into the actual ones
             # Do it in two passes in case there are overlaps in the names. Issue #1457
@@ -269,6 +279,15 @@ class ARAXQueryGraphInterpreter:
 
                 new_araxi_commands.append(new_command)
 
+            # NGD virtual edges are statistical_association edges with no qualifiers, so they would violate
+            # knowledge_level/agent_type or qualifier constraints on a qedge. Skip the NGD overlay for such queries.
+            if self._has_klat_or_qualifier_constraints(response.envelope.message.query_graph):
+                ngd_commands = [command for command in new_araxi_commands if 'action=compute_ngd' in command]
+                if ngd_commands:
+                    response.info("Skipping the NGD overlay because the query graph has knowledge_level, "
+                                  "agent_type, or qualifier constraints")
+                    new_araxi_commands = [command for command in new_araxi_commands if command not in ngd_commands]
+
             # TODO: Create the restated_question from the template
             response.data['araxi_commands'] = new_araxi_commands
             return response
@@ -284,6 +303,18 @@ class ARAXQueryGraphInterpreter:
         ]
 
         return response
+
+
+    @staticmethod
+    def _has_klat_or_qualifier_constraints(query_graph) -> bool:
+        """True if any qedge has a knowledge_level, agent_type, or qualifier constraint (TRAPI 2.0 QEdge.constraints)"""
+        for qedge in (getattr(query_graph, 'edges', None) or {}).values():
+            constraints = getattr(qedge, 'constraints', None)
+            if constraints is not None and (constraints.knowledge_level is not None
+                                            or constraints.agent_type is not None
+                                            or constraints.qualifiers):
+                return True
+        return False
 
 
     # #### Read the YAML file containing the current QueryGraph templates

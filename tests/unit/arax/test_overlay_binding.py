@@ -226,3 +226,18 @@ def test_results_without_analyses_or_edge_bindings_are_skipped():
     assert message.results[0].analyses[0].edge_bindings["e1"].ids == ["b0", "N1_0"]
     assert message.results[1].analyses is None
     assert log.lines == []
+
+
+def test_a_result_missing_a_node_binding_contributes_no_curies():
+    # upstream trapi2.0 (b5d02852): node bindings are read with .get(), so a
+    # result with no binding for one of a qedge's qnodes is skipped, not a KeyError
+    message = _one_result_message()
+    del message.results[0].node_bindings["n2"]
+    log = Log()
+    ou.update_results_with_overlay_edge_list(
+        [(("G:1", "D:1"), "N1_0"), (("C:1", "G:1"), "N1_1")], message, log
+    )
+    arax = message.results[0].analyses[0]
+    assert arax.edge_bindings["e1"].ids == ["b0"]
+    assert arax.edge_bindings["e0"].ids == ["a0", "N1_1"]
+    assert log.lines == []

@@ -1,0 +1,247 @@
+"""The comparison logic of scripts/arax_compare.py (the side-by-side parity
+run of Shepherd's ARAX port against a deployed upstream ARAX)."""
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+import arax_compare as AC  # noqa: E402
+
+
+def _response(results, edges=None, status="Success", logs=()):
+    return {
+        "status": status,
+        "logs": list(logs),
+        "message": {
+            "results": [
+                {
+                    "node_bindings": {"n0": {"ids": ["A:1"]}, "n1": {"ids": [curie]}},
+                    "analyses": [{"resource_id": "infores:arax", "score": score}],
+                }
+                for curie, score in results
+            ],
+            "knowledge_graph": {
+                "nodes": {},
+                "edges": {
+                    key: {
+                        "subject": "A:1",
+                        "predicate": "biolink:treats",
+                        "object": obj,
+                        "sources": [
+                            {
+                                "resource_id": "infores:x",
+                                "resource_role": "primary_knowledge_source",
+                            }
+                        ],
+                    }
+                    for key, obj in (edges or {}).items()
+                },
+            },
+        },
+    }
+
+
+def _verdict(port, upstream, http=(200, 200)):
+    return AC.compare(AC.summarize(http[0], port), AC.summarize(http[1], upstream), 0.9)
+
+
+def test_identical_answers_are_same():
+    r = _response([("B:1", 0.9), ("B:2", 0.5)], {"e1": "B:1"})
+    assert _verdict(r, r)["verdict"] == "SAME"
+
+
+def test_edge_keys_do_not_matter_only_the_edges():
+    a = _response([("B:1", 0.9)], {"e1": "B:1"})
+    b = _response([("B:1", 0.9)], {"other_key": "B:1"})
+    assert _verdict(a, b)["verdict"] == "SAME"
+
+
+def test_reranked_results_are_similar():
+    a = _response([("B:1", 0.9), ("B:2", 0.5)])
+    b = _response([("B:2", 0.95), ("B:1", 0.4)])
+    diff = _verdict(a, b)
+    assert diff["verdict"] == "SIMILAR"
+    assert diff["results"]["max_rank_shift"] == 1
+    assert diff["results"]["max_score_diff"] == 0.5
+
+
+def test_different_results_or_outcome_are_a_diff():
+    a = _response([("B:1", 0.9), ("B:2", 0.5)])
+    assert _verdict(a, _response([("B:3", 0.9)]))["verdict"] == "DIFF"
+    error = _response([], status="ERROR", logs=[{"level": "ERROR", "code": "X"}])
+    diff = _verdict(a, error, http=(200, 400))
+    assert diff["verdict"] == "DIFF"
+    assert diff["outcome"]["http"] == {"port": 200, "upstream": 400}
+    assert diff["outcome"]["error_code"] == {"port": None, "upstream": "X"}
+
+
+def test_cases_are_trapi_2_queries_without_shepherd_only_ones():
+    cases = AC.comparable_cases()
+    assert cases
+    names = {c.name for c in cases}
+    assert "message_uris_reuse_a_response" not in names
+    assert all(c.body and not c.method for c in cases)
+    assert not any((c.arax or {}).get("skip") for c in cases)
+
+
+def test_bodies_differ_only_by_shepherds_switch():
+    (c,) = AC.comparable_cases(only=["lookup_one_hop_treats"])
+
+    class Args:
+        bypass_cache = True
+        arax_internal = True
+        port_params = {}
+        upstream_params = {}
+
+    port, upstream = AC.bodies(c, Args)
+    assert port["parameters"].pop("arax_internal") is True
+    assert port == upstream
+    assert upstream["parameters"]["bypass_cache"] is True
+
+
+def test_each_side_can_have_its_own_parameters():
+    """Shepherd compared with itself: normalization off vs on."""
+    (c,) = AC.comparable_cases(only=["lookup_one_hop_treats"])
+
+    class Args:
+        bypass_cache = True
+        arax_internal = True
+        port_params = {"arax_node_normalization": "off"}
+        upstream_params = {"arax_internal": True}
+
+    port, upstream = AC.bodies(c, Args)
+    assert port["parameters"]["arax_node_normalization"] == "off"
+    assert port["parameters"]["arax_internal"] is True
+    assert upstream["parameters"]["arax_internal"] is True
+    assert "arax_node_normalization" not in upstream["parameters"]
+
+
+def _with_report(report):
+    message = "Node normalization compared: " + json.dumps(report)
+    return {
+        "logs": [
+            {"level": "INFO", "code": AC.NORMALIZATION_LOG_CODE, "message": message}
+        ]
+    }
+
+
+def test_normalization_report_sums_call_sites_across_cases(tmp_path):
+    cases = AC.comparable_cases(only=["lookup_one_hop_treats", "mvp1"])[:2]
+    site = "Overlay/compute_ngd.py:_get_canonical_curies_map"
+    example = {"curie": "MESH:D1", "normalized": "CHEBI:1"}
+    for i, c in enumerate(cases):
+        report = {
+            "mode": "compare",
+            "totals": {},
+            "sites": {
+                site: {
+                    "calls": 1,
+                    "curies": 10,
+                    "id": i,
+                    "examples": {"id": [example]} if i else {},
+                }
+            },
+        }
+        (tmp_path / f"{c.name}.port.json").write_text(json.dumps(_with_report(report)))
+    path = AC.normalization_report(cases, tmp_path)
+    data = json.loads((tmp_path / "normalization.json").read_text())
+    total = data["sites"][site]
+    assert (total["calls"], total["curies"], total["id"]) == (2, 20, 1)
+    assert total["cases"]["id"] == [cases[1].name]
+    assert total["examples"]["id"] == [example]
+    assert "MESH:D1" in path.read_text()
+
+
+def test_no_normalization_report_without_one(tmp_path):
+    (c,) = AC.comparable_cases(only=["lookup_one_hop_treats"])
+    (tmp_path / f"{c.name}.port.json").write_text(json.dumps({"logs": []}))
+    assert AC.normalization_report([c], tmp_path) is None
+
+
+def test_same_edges_with_other_attributes_are_counted():
+    a = _response([("B:1", 0.9)], {"e1": "B:1"})
+    b = _response([("B:1", 0.9)], {"e1": "B:1"})
+    b["message"]["knowledge_graph"]["edges"]["e1"]["attributes"] = [
+        {"attribute_type_id": "biolink:publications", "value": ["PMID:1"]}
+    ]
+    diff = _verdict(a, b)
+    assert diff["verdict"] == "SIMILAR"
+    (example,) = diff["edge_details"]["examples"]
+    assert example["attributes_only_upstream"] == ["biolink:publications"]
+
+
+def test_errors_are_kept_for_each_side():
+    error = _response(
+        [],
+        status="UnhandledError",
+        logs=[{"level": "ERROR", "code": "UnhandledError", "message": "boom"}],
+    )
+    diff = _verdict(_response([("B:1", 0.9)]), error, http=(200, 400))
+    assert diff["errors"] == {"port": [], "upstream": ["boom"]}
+
+
+def test_digest_keeps_only_what_the_top_results_use():
+    body = _response([("B:1", 0.9), ("B:2", 0.5)], {"e1": "B:1", "e2": "B:2"})
+    results = body["message"]["results"]
+    results[0]["analyses"][0]["edge_bindings"] = {"t": {"ids": ["e1"]}}
+    results[0]["analyses"][0]["support_graphs"] = ["aux1"]
+    body["message"]["knowledge_graph"]["edges"]["s1"] = {
+        "subject": "B:1",
+        "predicate": "biolink:related_to",
+        "object": "C:1",
+    }
+    body["message"]["auxiliary_graphs"] = {"aux1": {"edges": ["s1"]}, "aux2": {}}
+    body["logs"] = [
+        {"level": "INFO", "message": "fine"},
+        {"level": "ERROR", "message": "bad"},
+    ]
+    d = AC.digest(body, 200)
+    assert d["http"] == 200 and d["n_results"] == 2 and d["n_kg_edges"] == 3
+    assert set(d["knowledge_graph"]["edges"]) == {"e1", "s1"}
+    assert set(d["auxiliary_graphs"]) == {"aux1"}
+    assert [e["message"] for e in d["logs"]] == ["bad"]
+
+
+def test_edges_sharing_subject_predicate_object_and_source_are_told_apart():
+    a = _response([("B:1", 0.9)], {"e1": "B:1", "e2": "B:1"})
+    edges = a["message"]["knowledge_graph"]["edges"]
+    edges["e1"].update(knowledge_level="prediction", agent_type="automated_agent")
+    edges["e2"].update(
+        knowledge_level="prediction",
+        agent_type="computational_model",
+        attributes=[{"attribute_type_id": "EDAM-DATA:0951", "value": 0.9}],
+    )
+    b = _response([("B:1", 0.9)], {"e2": "B:1", "e1": "B:1"})
+    b["message"]["knowledge_graph"]["edges"] = {
+        "x": dict(edges["e2"]),
+        "y": dict(edges["e1"]),
+    }
+    assert _verdict(a, b)["edge_details"]["differing"] == 0
+
+
+def test_only_upstream_failing_is_an_upstream_error():
+    ok = _response([("B:1", 0.9)])
+    assert AC.upstream_failed_alone(200, ok, 502, {"_not_json": "<html>"})
+    assert AC.upstream_failed_alone(200, ok, 400, {"status": "UnhandledError"})
+    assert not AC.upstream_failed_alone(400, {"status": "X"}, 400, {"status": "Y"})
+    assert not AC.upstream_failed_alone(200, ok, 200, ok)
+
+
+def test_pathfinder_cases_are_not_compared():
+    assert not [c for c in AC.comparable_cases() if c.name.startswith("pathfinder_")]
+
+
+def test_an_off_mode_report_has_no_difference_columns(tmp_path):
+    """Off mode doesn't compare, so its report must not show zero differences."""
+    (c,) = AC.comparable_cases(only=["lookup_one_hop_treats"])
+    report = {
+        "mode": "off",
+        "totals": {"calls": 1, "curies": 3},
+        "sites": {"Overlay/compute_ngd.py:x": {"calls": 1, "curies": 3}},
+    }
+    (tmp_path / f"{c.name}.port.json").write_text(json.dumps(_with_report(report)))
+    text = AC.normalization_report([c], tmp_path).read_text()
+    assert "| call site | lookups | CURIEs | asked Node Normalizer | \n" in text
+    assert "| Overlay/compute_ngd.py:x | 1 | 3 | no | \n" in text
+    assert "equivalents" not in text

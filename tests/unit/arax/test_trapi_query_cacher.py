@@ -230,16 +230,144 @@ def test_refresh_failure_is_recorded(kp, arax_kp_cache_store):
     assert get_result()[0] == _response()  # the old response is kept
 
 
-def test_refresh_retries_a_cached_timeout_after_a_minute(kp, arax_kp_cache_store):
+def test_refresh_skips_a_cached_timeout_and_a_lookup_retries_it_after_a_minute(
+    kp, arax_kp_cache_store
+):
+    # upstream trapi2.0 (d4585991): refresh_cache never retries a timed-out query;
+    # instead a lookup treats a timeout older than AGE_BEFORE_TIMEOUT_RETRY_HOURS as a miss
     kp.reply = TimeoutError()
     get_result()
     _, query_hash = _record(arax_kp_cache_store)
     kp.reply = (_response(), 200, 0.5, None)
+    assert get_result()[1:4:2] == (-1, "from cache")  # too recent to retry
+    _age(arax_kp_cache_store, query_hash, tqc.AGE_BEFORE_REFRESH_HOURS + 1)
     KPQueryCacher().refresh_cache()
-    assert len(kp.calls) == 1  # too recent
-    _age(arax_kp_cache_store, query_hash, 2 * tqc.AGE_BEFORE_TIMEOUT_RETRY_HOURS)
-    KPQueryCacher().refresh_cache()
+    assert len(kp.calls) == 1
+    data, code, _, error = get_result()
+    assert (data, code, error) == (_response(), 200, None)  # a miss: queried again
     assert len(kp.calls) == 2
+    record, _ = _record(arax_kp_cache_store)
+    assert record["first_query_http_code"] == 200
+
+
+def test_a_cached_timeout_is_a_miss_after_a_minute(kp, arax_kp_cache_store):
+    kp.reply = TimeoutError()
+    get_result()
+    _, query_hash = _record(arax_kp_cache_store)
+    _age(arax_kp_cache_store, query_hash, 2 * tqc.AGE_BEFORE_TIMEOUT_RETRY_HOURS)
+    kp.reply = (_response(), 200, 0.5, None)
+    assert get_result()[1:4:2] == (200, None)
+
+
+def test_non_http_entries_are_a_miss_after_the_refresh_age(kp):
+    # upstream trapi2.0 (a9665495, #2939): refresh_cache never refreshes xCRG / PathFinder
+    # entries, so a lookup expires them by age
+    cacher = KPQueryCacher()
+    cacher.store_response("xCRG", "xCRG", {"q": 1}, _response(), 200, 1.0)
+    assert cacher.get_cached_result("xCRG", {"q": 1})[:2] == (_response(), 200)
+    record = cacher._get_record_by_id(1)
+    record["first_request_datetime"] = (
+        datetime.now() - timedelta(hours=tqc.AGE_BEFORE_REFRESH_HOURS + 0.1)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    cacher._put_record(record)
+    assert cacher.get_cached_result("xCRG", {"q": 1})[:2] == (
+        None,
+        tqc.NO_CACHED_RESPONSE,
+    )
+    # an http entry of the same age is still served (refresh_cache keeps it current)
+    get_result()
+    _, query_hash = _record(cacher.db)
+    _age(cacher.db, query_hash, tqc.AGE_BEFORE_REFRESH_HOURS + 1)
+    assert get_result()[3] == "from cache"
+
+
+# Adapted from upstream trapi2.0 code/ARAX/test/test_trapi_query_cacher.py (c72c8463, #2932):
+# storing over an existing record. Lookups return `last_refresh_http_code or
+# first_query_http_code`, so a refresh code left over from an earlier response could hide
+# what was just stored. Upstream's SQLite fixture is the fakeredis store here.
+
+UPSTREAM_URL = "https://kp.example.org/query"
+UPSTREAM_QUERY = {"message": {"query_graph": {"nodes": {}, "edges": {}}}}
+TIMEOUT_CODE = -1
+
+
+def _store(cacher, response, http_code):
+    cacher.store_response(
+        kp_curie="infores:retriever",
+        query_url=UPSTREAM_URL,
+        query_object=UPSTREAM_QUERY,
+        response_object=response,
+        http_code=http_code,
+        elapsed_time=0.1,
+    )
+
+
+def _mark_refreshed_ok(cacher):
+    # What refresh_cache() writes after a successful refresh
+    record = cacher._get_record_by_id(1)
+    record.update(
+        last_refresh_http_code=200,
+        last_attempted_refresh_http_code=200,
+        last_attempted_refresh_datetime="2020-01-01 00:00:00",
+        last_successful_refresh_datetime="2020-01-01 00:00:00",
+        last_refresh_elapsed=1.0,
+        last_refresh_n_results=1,
+    )
+    cacher._put_record(record)
+
+
+def _age_record(cacher, hours):
+    record = cacher._get_record_by_id(1)
+    record["first_request_datetime"] = (
+        datetime.now() - timedelta(hours=hours)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    cacher._put_record(record)
+
+
+def test_timeout_over_refreshed_record_is_not_reported_as_success():
+    cacher = KPQueryCacher()
+    _store(cacher, {"message": {"results": [{}]}}, 200)
+    _mark_refreshed_ok(cacher)
+
+    _store(cacher, None, TIMEOUT_CODE)  # e.g. bypass_cache=true, and the KP timed out
+
+    response, http_code, _, _ = cacher.get_cached_result(UPSTREAM_URL, UPSTREAM_QUERY)
+    assert response is None
+    assert http_code == TIMEOUT_CODE
+
+
+def test_timeout_over_refreshed_record_expires_like_any_other_timeout():
+    cacher = KPQueryCacher()
+    _store(cacher, {"message": {"results": [{}]}}, 200)
+    _mark_refreshed_ok(cacher)
+    _store(cacher, None, TIMEOUT_CODE)
+
+    _age_record(cacher, hours=1)
+
+    response, http_code, _, _ = cacher.get_cached_result(UPSTREAM_URL, UPSTREAM_QUERY)
+    assert response is None
+    assert http_code == tqc.NO_CACHED_RESPONSE
+
+
+def test_storing_again_clears_all_refresh_fields():
+    cacher = KPQueryCacher()
+    _store(cacher, {"message": {"results": [{}]}}, 200)
+    _mark_refreshed_ok(cacher)
+
+    new_response = {"message": {"results": [{}, {}]}}
+    _store(cacher, new_response, 200)
+
+    record = cacher._get_record_by_id(1)
+    assert record["last_refresh_http_code"] is None
+    assert record["last_attempted_refresh_http_code"] is None
+    assert record["last_attempted_refresh_datetime"] is None
+    assert record["last_successful_refresh_datetime"] is None
+    assert record["last_refresh_elapsed"] is None
+    assert record["last_refresh_n_results"] is None
+
+    response, http_code, _, _ = cacher.get_cached_result(UPSTREAM_URL, UPSTREAM_QUERY)
+    assert response == new_response
+    assert http_code == 200
 
 
 def test_refresh_does_not_extend_an_entrys_life(kp, arax_kp_cache_store, monkeypatch):

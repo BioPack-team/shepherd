@@ -241,6 +241,14 @@ class Settings(BaseSettings):
     # parameters.arax_internal itself: false sends it to arax_url, true runs it
     # in-process.
     arax_internal_default: bool = False
+    # Whether the ARAX port calls the Node Normalizer: "on" (as upstream does),
+    # "off" (every CURIE is taken as already normalized, with the name and
+    # categories Retriever gave it), "compare" (calls it, and logs where "off"
+    # would have answered differently) or "query_nodes" ("off" for
+    # knowledge-graph nodes, "on" for the query's own ids and names). A query's
+    # parameters.arax_node_normalization overrides it; see
+    # shepherd_utils/arax_normalization.py.
+    arax_node_normalization: str = "on"
     # Where the ARAX port's BiolinkHelper caches the Biolink model and its
     # lookup map (must be writable; upstream writes next to its own source
     # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so
@@ -279,6 +287,8 @@ class Settings(BaseSettings):
     # for that one file (the defaults are placeholders until the real files are
     # published).
     arax_dbs_dir: str = "arax_dbs"
+    # tier0-20260928 (DEC-30): curie_to_pmids is int32 PMID blobs, and the
+    # ExplainableDTD mapping tables use the extra_attributes schema
     arax_tier_version: str = "tier0-20260928"
     arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0-20260928"
     arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"

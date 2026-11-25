@@ -9,6 +9,7 @@ are stubbed from the mock graph, so nothing leaves the machine.
 """
 
 import copy
+import gzip
 import json
 import os
 import shutil
@@ -29,9 +30,20 @@ os.environ["ARAX_BIOLINK_CACHE_DIR"] = os.path.join(DATA, "biolink")
 os.environ["SERVER_URL"] = "http://shepherd.test"
 os.makedirs(os.environ["ARAX_BIOLINK_CACHE_DIR"])
 shutil.copy(
-    os.path.join(HERE, "..", "expand_parity", "biolink_lookup_map_4.2.5_v5.pickle"),
+    os.path.join(HERE, "..", "expand_parity", "biolink_lookup_map_4.4.4_v5.pickle"),
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
+# and its Biolink model YAML (the qualifier types ARAXQuery validates against)
+with (
+    gzip.open(
+        os.path.join(HERE, "..", "expand_parity", "biolink_model_4.4.4.yaml.gz")
+    ) as f_in,
+    open(
+        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.4.4.yaml"),
+        "wb",
+    ) as f_out,
+):
+    shutil.copyfileobj(f_in, f_out)
 
 from shepherd_utils import arax_mock_data as M  # noqa: E402
 
@@ -159,6 +171,21 @@ message = {
     "knowledge_graph": {"nodes": kg_nodes, "edges": kg_edges},
     "results": results,
 }
+# The overlays' virtual edges are bound by no result (there is no resultify after
+# them), so the final TRAPI 2.0 KG cleanup drops them (upstream trapi2.0: no
+# unreferenced KG edges). Read them from the KG the result transformer is given.
+from shepherd_utils.arax.result_transformer import ResultTransformer  # noqa: E402
+
+_transform = ResultTransformer.transform
+kg_before_cleanup = {}
+
+
+def _recording_transform(response):
+    kg_before_cleanup.update(response.envelope.message.knowledge_graph.to_dict())
+    return _transform(response)
+
+
+ResultTransformer.transform = staticmethod(_recording_transform)
 response, out_message = run(
     [
         "overlay(action=compute_ngd, virtual_relation_label=N1, subject_qnode_key=n0, object_qnode_key=n1)",
@@ -167,6 +194,8 @@ response, out_message = run(
     ],
     message,
 )
+ResultTransformer.transform = staticmethod(_transform)
+out_message = dict(out_message, knowledge_graph=kg_before_cleanup)
 overlays = {
     "status": response.status,
     "problems": problems(response),

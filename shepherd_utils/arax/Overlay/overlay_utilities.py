@@ -4,6 +4,8 @@
 #   - new update_results_with_overlay_edge_list (one walk of the results for edges that may share a node pair), for callers that bound their overlay edges one at a time (D-28); update_results_with_overlay_edges's body moved to _bind_overlay_edges, unchanged
 #   - TRAPI 2.0 bindings: one NodeBinding/EdgeBinding per qnode/qedge with `ids`; an overlay edge's key is unioned into
 #     the qedge's EdgeBinding.ids (1.x appended an EdgeBinding(id=...) to the qedge's list), in the same order
+#   - from upstream trapi2.0 (b5d02852): node bindings read with .get() in get_node_pairs_to_overlay and
+#     _bind_overlay_edges (a result with no binding for a qnode contributes no curies instead of raising KeyError)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This file contains utilities/helper functions for general use within the Overlay module
 import itertools
@@ -53,10 +55,10 @@ def get_node_pairs_to_overlay(subject_qnode_key: str, object_qnode_key: str, que
     if resultify_response.status == 'OK':
         node_pairs: set[tuple[str, str]] = set()
         for result in sub_message.results:
-            subject_curies_in_this_result = {node_id for key, node_binding in result.node_bindings.items() for node_id in node_binding.ids if
-                                            key == subject_qnode_key}
-            object_curies_in_this_result = {node_id for key, node_binding in result.node_bindings.items() for node_id in node_binding.ids if
-                                            key == object_qnode_key}
+            subject_node_binding = result.node_bindings.get(subject_qnode_key)
+            object_node_binding = result.node_bindings.get(object_qnode_key)
+            subject_curies_in_this_result = set(subject_node_binding.ids) if subject_node_binding else set()
+            object_curies_in_this_result = set(object_node_binding.ids) if object_node_binding else set()
             pairs_in_this_result: set[tuple[str, str]] = set(itertools.product(subject_curies_in_this_result, object_curies_in_this_result))
             node_pairs = node_pairs.union(pairs_in_this_result)
         log.debug(f"Identified {len(node_pairs)} node pairs to overlay (with help of resultify)")
@@ -154,10 +156,13 @@ def _bind_overlay_edges(kedges: Iterable[tuple[tuple[str, str], str]], message: 
                         # itself the signal that something upstream has gone wrong.
                         log.warning("Encountered a result edge binding which does not exist in the query graph")
                         continue
-                    covered_curies = set(result.node_bindings[qedge.subject].ids)
-                    covered_curies |= set(result.node_bindings[qedge.object].ids)
-                    binding_place = _BindingPlace(edge_binding, covered_curies,
-                                                  set(edge_binding.ids))
+                    # TRAPI 2.0: one NodeBinding/EdgeBinding per qnode/qedge key, each with a list of 'ids'
+                    covered_curies = set()
+                    for qnode_key in (qedge.subject, qedge.object):
+                        node_binding = result.node_bindings.get(qnode_key)
+                        if node_binding:
+                            covered_curies |= set(node_binding.ids)
+                    binding_place = _BindingPlace(edge_binding, covered_curies, set(edge_binding.ids))
                     for curie in covered_curies:
                         binding_places_by_curie[curie].append(binding_place)
 

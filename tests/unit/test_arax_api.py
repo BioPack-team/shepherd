@@ -380,7 +380,7 @@ async def test_get_response_is_a_trapi_2_response(arax_client, mocker):
     stored = {
         "message": {"knowledge_graph": {"nodes": {}, "edges": {}}, "results": []},
         "status": "Success",
-        "tool_version": "ARAX 1.6.2",
+        "tool_version": "ARAX 2.0.0",
     }
     mocker.patch("shepherd_utils.db.get_message_sync", return_value=stored)
     lookup = mocker.patch.object(
@@ -656,8 +656,12 @@ async def test_status_site_config_kp_cache_and_system_load(status_client):
         config = (await client.get("/status", params={"mode": "site_config"})).json()
         kp_cache = (await client.get("/status", params={"mode": "kp_cache"})).json()
         load = (await client.get("/status", params={"mode": "system_load"})).json()
-    assert config["config"]["arax_version"] == "1.6.2"
+    assert config["config"]["arax_version"] == "2.0.0"
     assert config["config"]["cohd_database_version"] == "1.0_KG2.8.0"
+    # upstream trapi2.0 (090d73b7): kg2c_sqlite / tier0_sqlite are info_for_overlay_sqlite
+    assert "info_for_overlay_sqlite_version" in config["config"]
+    assert "kg2c_sqlite_version" not in config["config"]
+    assert "tier0_sqlite_version" not in config["config"]
     assert kp_cache["cache_stats"]["n_cached_queries"] == 0
     assert kp_cache["cache_data"] == []
     assert kp_cache["column_data"][0]["key"] == "kp_query_id"
@@ -789,6 +793,14 @@ async def test_meta_knowledge_graph_formats(status_client, mocker):
                 "subject": "biolink:Gene",
                 "predicate": "biolink:interacts_with",
                 "object": "biolink:Gene",
+                "qualifiers": [
+                    {"qualifier_type_id": "biolink:object_aspect_qualifier"},
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "applicable_values": [],
+                    },
+                ],
+                "association": {},
             }
         ],
     }
@@ -821,6 +833,39 @@ async def test_meta_knowledge_graph_formats(status_client, mocker):
         "biolink:knowledge_level",
         "biolink:agent_type",
     ]
+    # upstream trapi2.0 (db6140e7)
+    assert full["edges"][0]["attributes"][0]["constraint_name"] == "original predicate"
+    # TRAPI 2.0 minItems (upstream trapi2.0 2f78aa95): empty lists and objects
+    # inside nodes and edges are left out, at any depth
+    assert full["nodes"] == {"biolink:Gene": {"id_prefixes": ["NCBIGene"]}}
+    assert "association" not in full["edges"][0]
+    assert full["edges"][0]["qualifiers"] == [
+        {"qualifier_type_id": "biolink:object_aspect_qualifier"},
+        {"qualifier_type_id": "biolink:object_direction_qualifier"},
+    ]
+    # the cached meta-KG itself is not changed
+    cached = ksm.KnowledgeSourceMetadata.cached_meta_knowledge_graph
+    assert cached["nodes"]["biolink:Gene"]["attributes"] == []
+
+
+def test_retriever_meta_kg_is_fetched_for_tier_0(mocker):
+    """upstream trapi2.0 (7fd99e72): Expand queries Retriever's tier 0, so the
+    advertised meta-KG is the tier 0 one."""
+    import shepherd_utils.arax.KnowledgeSources.knowledge_source_metadata as ksm
+
+    mocker.patch.object(
+        ksm.settings, "sync_kg_retrieval_url", "http://retriever.test/query"
+    )
+    get = mocker.patch.object(ksm.requests, "get")
+    get.return_value.status_code = 200
+    get.return_value.json.return_value = {"nodes": {}, "edges": []}
+    assert ksm.KnowledgeSourceMetadata()._fetch_retriever_meta_kg() == {
+        "nodes": {},
+        "edges": [],
+    }
+    get.assert_called_once_with(
+        "http://retriever.test/meta_knowledge_graph", params={"tier": 0}, timeout=30
+    )
 
 
 def test_retriever_meta_kg_url(mocker):
@@ -1068,6 +1113,15 @@ async def test_query_rejects_a_trapi_1_or_invalid_body(query_client, body):
             "return_minimal_metadata": True,
             "max_results": 10,
         },
+        # the ARAX UI's options, which upstream trapi2.0 sends in additional_properties
+        {
+            "message": {"query_graph": QG_2},
+            "additional_properties": {
+                "prune_threshold": 50,
+                "max_pathfinder_paths": 10,
+                "max_path_length": 3,
+            },
+        },
         # ARAX translates and validates a TRAPI workflow itself (DEC-17)
         {"message": {"query_graph": QG_2}, "workflow": [{"id": "teleport"}]},
         # nothing at all: ARAX answers NoQueryMessageOrOperations itself
@@ -1092,3 +1146,12 @@ async def test_streamed_query_body_is_validated_then_streamed(query_client):
     assert response.status_code == 200
     stream.assert_awaited_once()
     sync.assert_not_called()
+
+
+def test_heartbeat_timestamp_carries_an_offset():
+    """A stream heartbeat's timestamp is RFC 3339 with the local offset (as
+    ARAX's own log entries are), not a naive local time (D11)."""
+    from datetime import datetime
+
+    line = json.loads(api._heartbeat_line())
+    assert datetime.fromisoformat(line["timestamp"]).utcoffset() is not None

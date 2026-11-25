@@ -4,22 +4,24 @@
 #   - the legacy xCRG action chemical_gene_regulation_graph_expansion is removed, with its
 #     parameter descriptors, command definition and the creativeCRG import (dead code,
 #     E-2, DEC-5); allowable_actions and describe_me list only
-#     drug_treatment_graph_expansion. The module docstring is upstream's, unchanged
+#     drug_treatment_graph_expansion
 #   - main() is dropped
 #   - TRAPI 2.0: the unused QualifierConstraint import is dropped (the model no longer exists)
+#   - from upstream trapi2.0 (f7812633, #2922): NodeSynonymizer and _normalize_curie removed; drug/disease curies are
+#     used as given (the xDTD training graph is pre-normalized; DEC-9), so no NodeNorm call and no "Normalized ..." /
+#     "Could not normalize ..." logs
+#   - from upstream trapi2.0 (d858a642, #2825): module and class docstrings describe the one remaining action
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 """
-ARAX Infer Module -- Inference engine for drug-disease treatment and chemical-gene regulation prediction.
+ARAX Infer Module -- Inference engine for drug-disease treatment prediction.
 
-This module provides two main inference actions:
+This module provides the following inference action:
   1. drug_treatment_graph_expansion: Predicts drug-disease treatment relationships using the xDTD model.
      Given a drug and/or disease CURIE, returns predicted treatment pairs with explanation paths.
-  2. chemical_gene_regulation_graph_expansion: Predicts chemical-gene regulation relationships using the xCRG model.
-     Given a chemical or gene CURIE, returns predicted regulation pairs with explanation paths.
 
 Notes:
   - The drug_treatment_graph_expansion action queries the precomputed xDTD prediction results that are stored in the ExplainableDTD database.
-  - The chemical_gene_regulation_graph_expansion action executes the xCRG model on the fly to predict the regulation relationship between chemicals and genes.
+  - Chemical-gene regulation (xCRG) has been moved to ARAX_connect.py (connect(action=xcrg)).
 
 """
 
@@ -30,8 +32,6 @@ from collections import Counter
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 
 from shepherd_utils.arax.openapi_server.models.qualifier import Qualifier
-
-from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
 
 from shepherd_utils.arax.Infer.scripts.infer_utilities import InferUtilities
 from shepherd_utils.arax.Infer.scripts.ExplianableDTD_db import ExplainableDTD
@@ -47,9 +47,8 @@ class ARAXInfer:
     """
     ARAXInfer implements the ARAX 'infer' DSL command.
 
-    It supports two actions:
+    It supports the following action:
       - drug_treatment_graph_expansion: xDTD-based drug-disease treatment prediction
-      - chemical_gene_regulation_graph_expansion: xCRG-based chemical-gene regulation prediction
 
     Usage: ARAXInfer().apply(response, input_parameters)
     """
@@ -140,14 +139,6 @@ Valid disease categories: biolink:Disease, biolink:PhenotypicFeature.
     # ──────────────────────────────────────────────────────────────────────────
     #  Helper methods
     # ──────────────────────────────────────────────────────────────────────────
-
-    def _normalize_curie(self, curie):
-        """Resolve a curie to its preferred canonical form via the NodeSynonymizer.
-        Returns (preferred_curie, was_normalized) tuple."""
-        result = self.synonymizer.get_canonical_curies(curie)[curie]
-        if result:
-            return result['preferred_curie'], True
-        return curie, False
 
     def _validate_int_param(self, param_name, default, max_val=None):
         """Validate and coerce an integer parameter with optional ceiling.
@@ -274,7 +265,6 @@ Valid disease categories: biolink:Disease, biolink:PhenotypicFeature.
             response = ARAXResponse()
         self.response = response
         self.message = response.envelope.message
-        self.synonymizer = NodeSynonymizer()
 
         if not isinstance(input_parameters, dict):
             self.response.error("Provided parameters is not a dict", error_code="ParametersNotDict")
@@ -311,9 +301,8 @@ Valid disease categories: biolink:Disease, biolink:PhenotypicFeature.
         Predict drug-disease treatment relationships using the xDTD model.
 
         Workflow:
-          1. Validate and normalize drug/disease CURIEs via NodeSynonymizer.
-          2. Query ExplainableDTD database for prediction scores and explanation paths.
-          3. Delegate to InferUtilities.genrete_treat_subgraphs to build TRAPI subgraph.
+          1. Query ExplainableDTD database for prediction scores and explanation paths using drug/disease CURIE as-is (training graph is pre-normalized).
+          2. Delegate to InferUtilities.genrete_treat_subgraphs to build TRAPI subgraph.
         """
         message = self.message
         parameters = self.parameters
@@ -373,13 +362,13 @@ Valid disease categories: biolink:Disease, biolink:PhenotypicFeature.
                 if parameters['drug_curie'] not in all_qnode_curie_ids:
                     self.response.error(f"drug_curie '{parameters['drug_curie']}' not found in query graph")
                     return self.response
-                preferred_drug_curie, _ = self._normalize_curie(parameters['drug_curie'])
+                preferred_drug_curie = parameters['drug_curie']
 
             if 'disease_curie' in parameters and parameters['disease_curie']:
                 if parameters['disease_curie'] not in all_qnode_curie_ids:
                     self.response.error(f"disease_curie '{parameters['disease_curie']}' not found in query graph")
                     return self.response
-                preferred_disease_curie, _ = self._normalize_curie(parameters['disease_curie'])
+                preferred_disease_curie = parameters['disease_curie']
 
             if not preferred_drug_curie and not preferred_disease_curie:
                 self.response.error("At least one of 'drug_curie' or 'disease_curie' must have a non-empty value")
@@ -400,21 +389,13 @@ Valid disease categories: biolink:Disease, biolink:PhenotypicFeature.
                 raw = parameters['drug_curie']
                 parameters['drug_curie'] = None if raw == 'None' else raw
                 if parameters['drug_curie']:
-                    preferred_drug_curie, normalized = self._normalize_curie(parameters['drug_curie'])
-                    if normalized:
-                        self.response.debug(f"Normalized drug curie {parameters['drug_curie']} -> {preferred_drug_curie}")
-                    else:
-                        self.response.warning(f"Could not normalize drug curie {parameters['drug_curie']}, using as-is")
+                    preferred_drug_curie = parameters['drug_curie']
 
             if 'disease_curie' in parameters:
                 raw = parameters['disease_curie']
                 parameters['disease_curie'] = None if raw == 'None' else raw
                 if parameters['disease_curie']:
-                    preferred_disease_curie, normalized = self._normalize_curie(parameters['disease_curie'])
-                    if normalized:
-                        self.response.debug(f"Normalized disease curie {parameters['disease_curie']} -> {preferred_disease_curie}")
-                    else:
-                        self.response.warning(f"Could not normalize disease curie {parameters['disease_curie']}, using as-is")
+                    preferred_disease_curie = parameters['disease_curie']
 
             if not preferred_drug_curie and not preferred_disease_curie:
                 self.response.error("At least one of 'drug_curie' or 'disease_curie' must have a non-empty value")

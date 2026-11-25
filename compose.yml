@@ -663,6 +663,8 @@ services:
       # ARAX puts no ceiling on a query, and Expand waits up to 120 s per hop,
       # so the shared 300 s default would kill slow multi-hop queries.
       POOL_TASK_TIMEOUT_SEC: "900"
+      # Node Normalizer calls: on / off / compare / query_nodes (DEC-34, docs/ARAX_PARITY_RUN.md)
+      ARAX_NODE_NORMALIZATION: "on"
     platform: linux/amd64
     build:
       context: .

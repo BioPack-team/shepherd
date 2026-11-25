@@ -82,7 +82,7 @@ def _heartbeat_line() -> str:
     return (
         json.dumps(
             {
-                "timestamp": str(datetime.now().isoformat()),
+                "timestamp": datetime.now().astimezone().isoformat(),
                 "level": "DEBUG",
                 "code": "",
                 "message": "Query is still progressing...",
@@ -106,7 +106,8 @@ def validate_arax_query(query: dict) -> None:
     """Validate the TRAPI 2.0 members of a body posted to ARAX's ``/query``.
 
     ARAX's ``/query`` also takes its own members (``operations``,
-    ``stream_progress``, ``query_options``, ``return_minimal_metadata``, ...),
+    ``stream_progress``, ``additional_properties``, the legacy
+    ``query_options``, ``return_minimal_metadata``, ...),
     which the 2.0 Query allows as additional properties, and a body with only
     ARAXi ``operations`` and no ``message`` (TRAPI's Query requires one):
     ARAX answers a body with neither itself (``NoQueryMessageOrOperations``).
@@ -558,12 +559,36 @@ async def post_entity(request: Request) -> Response:
     return _arax_json(await asyncio.to_thread(_normalizer_results, body))
 
 
+def _drop_empty_containers(value):
+    """Return a copy of value with empty lists/dicts left out of every nested dict.
+
+    TRAPI 2.0 requires optional list fields in the meta KG (e.g. MetaEdge.qualifiers,
+    MetaQualifier.applicable_values) to have at least one item or be left out
+    (upstream ``trapi2.0`` 2f78aa95, meta_knowledge_graph_api_impl).
+    """
+    if isinstance(value, dict):
+        cleaned = {key: _drop_empty_containers(item) for key, item in value.items()}
+        return {key: item for key, item in cleaned.items() if item != [] and item != {}}
+    if isinstance(value, list):
+        return [_drop_empty_containers(item) for item in value]
+    return value
+
+
 def _meta_knowledge_graph(format_):
     from shepherd_utils.arax.KnowledgeSources.knowledge_source_metadata import (
         KnowledgeSourceMetadata,
     )
 
-    return KnowledgeSourceMetadata().get_meta_knowledge_graph(format_=format_)
+    meta_kg_dict = KnowledgeSourceMetadata().get_meta_knowledge_graph(format_=format_)
+    if meta_kg_dict is None:
+        return None
+    # Top-level 'nodes' and 'edges' are required, so only clean inside them
+    # (upstream trapi2.0's endpoint does the same)
+    cleaned = dict(meta_kg_dict)
+    for key in ("nodes", "edges"):
+        if key in cleaned:
+            cleaned[key] = _drop_empty_containers(cleaned[key])
+    return cleaned
 
 
 @ARAX.get("/meta_knowledge_graph")

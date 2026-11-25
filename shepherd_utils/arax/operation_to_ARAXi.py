@@ -2,10 +2,14 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - remove the sort_results_edge_attribute and sort_results_node_attribute operations, which always crashed with a NameError (dead code, DEC-5 / E-4); they now get the NotImplementedError reply other unimplemented operations get
-#   - overlay_connect_knodes no longer emits overlay(action=predict_drug_treats_disease), a disabled action that made the whole plan fail (DEC-5 / E-4)
+#   - overlay_connect_knodes no longer emits overlay(action=predict_drug_treats_disease), a disabled action that made the whole plan fail (DEC-5 / E-4; upstream trapi2.0 dropped it too, 2add4986)
 #   - drop the broken CLI main() (DEC-5 / E-4)
 #   - TRAPI 2.0 has no nulls, so the query graph dict (QueryGraph.to_dict()) omits an unset
 #     qnode `categories`; overlay_connect_knodes reads it with .get()
+#   - from upstream trapi2.0 (2add4986): overlay_connect_knodes makes one compute_ngd per qnode pair
+#     (connect_knodes_ngd_{s}_{t}), no COHD paired_concept_frequency step, Fisher's exact test only for
+#     qedge-connected pairs and Jaccard only when the intermediate qnode is qedge-connected to both ends,
+#     each with its own virtual relation label. The QG's edges are read with .get() (2.0 may omit them)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This will be a translation table between the Operations JSON spec (https://github.com/NCATSTranslator/OperationsAndWorkflows/) and ARAXi
 import json
@@ -79,19 +83,26 @@ class WorkflowToARAXi:
             response.warning("This query graph has 3 or more nodes. This may take a while")
         nodes_keys_with_categories = [key for key,node in query_graph['nodes'].items() if node.get('categories') is not None]
         qnode_pairs = itertools.combinations(nodes_keys_with_categories,2)
-        ARAXi.append(f"overlay(action=compute_ngd,default_value=inf,virtual_relation_label=connect_knodes_ngd)")
-        ARAXi.append(f"overlay(action=overlay_clinical_info,COHD_method=paired_concept_frequency,virtual_relation_label=connect_knodes_paired_freq)")
-        #ARAXi.append(f"overlay(action=overlay_clinical_info,COHD_method=observed_expected_ratio,virtual_relation_label=connect_knodes_obs_exp)")
-        #ARAXi.append(f"overlay(action=overlay_clinical_info,COHD_method=chi_square,virtual_relation_label=connect_knodes_chi_sqr)")
+        # Each virtual relation label becomes one virtual qedge, so every qnode pair gets its own label
+        for source, target in itertools.combinations(query_graph['nodes'].keys(), 2):
+            ARAXi.append(f"overlay(action=compute_ngd,default_value=inf,virtual_relation_label=connect_knodes_ngd_{source}_{target},subject_qnode_key={source},object_qnode_key={target})")
+        # Fisher's exact test needs a qedge connecting the two qnodes
+        qedge_qnode_pairs = {frozenset((qedge['subject'], qedge['object'])) for qedge in (query_graph.get('edges') or {}).values()}
         for qnode_pair in qnode_pairs:
-            ARAXi.append(f"overlay(action=fisher_exact_test,virtual_relation_label=connect_knodes_fisher,subject_qnode_key={qnode_pair[0]},object_qnode_key={qnode_pair[1]})")
-            ARAXi.append(f"overlay(action=fisher_exact_test,virtual_relation_label=connect_knodes_fisher,subject_qnode_key={qnode_pair[1]},object_qnode_key={qnode_pair[0]})")
+            if frozenset(qnode_pair) not in qedge_qnode_pairs:
+                continue
+            fisher_label = f"connect_knodes_fisher_{qnode_pair[0]}_{qnode_pair[1]}"
+            ARAXi.append(f"overlay(action=fisher_exact_test,virtual_relation_label={fisher_label},subject_qnode_key={qnode_pair[0]},object_qnode_key={qnode_pair[1]})")
+            ARAXi.append(f"overlay(action=fisher_exact_test,virtual_relation_label={fisher_label},subject_qnode_key={qnode_pair[1]},object_qnode_key={qnode_pair[0]})")
         if len(query_graph['nodes']) >= 3:
             qnode_triples = itertools.combinations(query_graph['nodes'].keys(),3)
             for qnode_triple in qnode_triples:
-                ARAXi.append(f"overlay(action=compute_jaccard,virtual_relation_label=connect_knodes_jaccard,start_node_key={qnode_triple[0]},end_node_key={qnode_triple[1]},intermediate_node_key={qnode_triple[2]})")
-                ARAXi.append(f"overlay(action=compute_jaccard,virtual_relation_label=connect_knodes_jaccard,start_node_key={qnode_triple[2]},end_node_key={qnode_triple[0]},intermediate_node_key={qnode_triple[1]})")
-                ARAXi.append(f"overlay(action=compute_jaccard,virtual_relation_label=connect_knodes_jaccard,start_node_key={qnode_triple[1]},end_node_key={qnode_triple[2]},intermediate_node_key={qnode_triple[0]})")
+                for start, end, intermediate in ((qnode_triple[0], qnode_triple[1], qnode_triple[2]),
+                                                 (qnode_triple[2], qnode_triple[0], qnode_triple[1]),
+                                                 (qnode_triple[1], qnode_triple[2], qnode_triple[0])):
+                    # Jaccard needs the intermediate qnode connected by qedges to both the start and end qnodes
+                    if frozenset((start, intermediate)) in qedge_qnode_pairs and frozenset((intermediate, end)) in qedge_qnode_pairs:
+                        ARAXi.append(f"overlay(action=compute_jaccard,virtual_relation_label=connect_knodes_jaccard_{start}_{end},start_node_key={start},end_node_key={end},intermediate_node_key={intermediate})")
         return ARAXi
 
     @staticmethod

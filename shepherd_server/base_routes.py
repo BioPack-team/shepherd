@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -1047,6 +1048,19 @@ async def callback(
     return Response("Callback received.", 200)
 
 
+def trapi_response_url(target: Optional[str], response_id: str) -> str:
+    """A URL a client can GET for the query's TRAPI Response.
+
+    ARAX serves its stored responses at ``/arax/response/{id}`` (its own route,
+    shepherd_server/aras/arax.py); every other ARA's is served by the generic
+    ``/response/{id}`` route, which is mounted at the server root.
+    """
+    base = str(settings.server_url).rstrip("/")
+    if target == ARATargetEnum.ARAX.value:
+        return f"{base}/arax/response/{response_id}"
+    return f"{base}/response/{response_id}"
+
+
 @base_router.get("/asyncquery_status/{qid}", status_code=200)
 async def query_status(
     qid: str,
@@ -1067,6 +1081,7 @@ async def query_status(
     if query_state is None:
         return JSONResponse(content={"error": "Not found"}, status_code=404)
 
+    target = query_state[5]
     response_id = query_state[7]
     state = query_state[9]
     status = query_state[10]
@@ -1089,13 +1104,25 @@ async def query_status(
         trapi_status = "Failed"
         default_description = f"Query finished with status {status}."
 
-    return ORJSONResponse(
-        content={
-            "status": trapi_status,
-            "description": description or default_description,
-            "logs": logs,
-        }
-    )
+    description = description or default_description
+    if not logs:
+        # TRAPI 2.0: logs has minItems 1. As upstream ARAX's tracker does
+        # (trapi2.0 1770d452), report the status itself as an INFO entry.
+        logs = [
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": "INFO",
+                "message": description,
+            }
+        ]
+    content = {
+        "status": trapi_status,
+        "description": description,
+        "logs": logs,
+    }
+    if response_id:
+        content["response_url"] = trapi_response_url(target, response_id)
+    return ORJSONResponse(content=content)
 
 
 @base_router.get("/response/{query_id}", status_code=200)

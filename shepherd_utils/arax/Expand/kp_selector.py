@@ -4,8 +4,8 @@
 #   - no KPInfoCacher / meta-KG pickle: queries go only to infores:retriever
 #     (DEC-4), so there is no per-KP meta map to load
 #   - kp_urls holds only infores:retriever, at settings.sync_kg_retrieval_url
-#   - valid_kps = the KPs SmartAPI lists for TRAPI 1.6.0 at this maturity (the
-#     same filter ARAX's KPInfoCacher applies), plus infores:retriever. It is
+#   - valid_kps = the KPs SmartAPI lists for ARAX's TRAPI major version (2.0) at this
+#     maturity (the same filter ARAX's KPInfoCacher applies), plus infores:retriever. It is
 #     used only to fill the query plan the ARAX UI shows (DEC-12), fetched with
 #     ARAX's own SmartAPI client and cached in-process for an hour (ARAX's
 #     background refresh interval)
@@ -17,6 +17,9 @@
 #     curie-prefix conversion or canonicalization (DEC-9)
 #   - the supported-prefix / meta-map helpers are dropped, as nothing calls them
 #   - main() is dropped
+#   - from upstream trapi2.0 (0b02392a, 6b8c2ea1, #2904): SmartAPI KPs are filtered on
+#     RTX_CONFIG.trapi_major_version ("2.0"), as KPInfoCacher now does, instead of the
+#     forced '1.6.0' (FORCED_KP_VERSION is removed), so the UI's KP list shows 2.0 KPs
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import threading
 import time
@@ -32,8 +35,6 @@ from shepherd_utils.config import settings
 RTX_CONFIG = RTXConfiguration()
 KPS_SKIP_METAKG_CHECKS = {'infores:retriever'}
 RETRIEVER_INFORES = "infores:retriever"
-# ARAX's KPInfoCacher.forced_kp_version: KPs are filtered on this TRAPI version
-FORCED_KP_VERSION = '1.6.0'
 # ARAX's background tasker refreshes the KP info caches this often
 SMARTAPI_REFRESH_SEC = 3600
 SKIPPED_NOT_RETRIEVER_MESSAGE = "Shepherd's ARAX sends every query to infores:retriever"
@@ -50,7 +51,7 @@ def _retriever_endpoint() -> str:
 
 
 def get_smartapi_kp_names(log: ARAXResponse) -> set[str]:
-    """KPs registered in SmartAPI for TRAPI 1.6.0 at this maturity (ARAX's filter).
+    """KPs registered in SmartAPI for ARAX's TRAPI major version at this maturity (ARAX's filter).
 
     Cached for an hour. If SmartAPI can't be reached, the last good list is kept
     (as ARAX keeps its previous cache); with no previous list it is empty. Either
@@ -64,7 +65,7 @@ def get_smartapi_kp_names(log: ARAXResponse) -> set[str]:
         try:
             from shepherd_utils.arax.Expand.smartapi import SmartAPI
             registrations = SmartAPI().get_all_trapi_kp_registrations(
-                trapi_version=FORCED_KP_VERSION, req_maturity=RTX_CONFIG.maturity)
+                trapi_version=RTX_CONFIG.trapi_major_version, req_maturity=RTX_CONFIG.maturity)
             names = {registration["infores_name"] for registration in registrations
                      if registration.get("infores_name")}
             if names or _smartapi_kps is None:

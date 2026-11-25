@@ -333,15 +333,14 @@ def test_get_normalizer_results():
             assert results[input_entity]["nodes"]
             assert len(results[input_entity]["nodes"]) > 1
             for equivalent_node in results[input_entity]["nodes"]:
-                assert {"identifier", "category", "label", "major_branch", "in_sri", "name_sri", "category_sri",
-                        "in_kg2pre", "name_kg2pre", "category_kg2pre"} == set(equivalent_node)
+                # upstream trapi2.0 (b8e2f499): the always-empty KG2pre fields are gone
+                assert {"identifier", "category", "label", "major_branch", "in_sri", "name_sri",
+                        "category_sri"} == set(equivalent_node)
                 assert equivalent_node["identifier"]
                 assert equivalent_node["category"]
                 assert equivalent_node["category"].startswith("biolink:")
                 if equivalent_node["category_sri"]:
                     assert equivalent_node["category_sri"].startswith("biolink:")
-                if equivalent_node["category_kg2pre"]:
-                    assert equivalent_node["category_kg2pre"].startswith("biolink:")
 
 
 def test_improper_curie_prefix_capitalization():
@@ -447,6 +446,36 @@ def test_truncate_cluster():
     assert results[PARKINSONS_CURIE]["total_synonyms"] > 2
     assert results[PARKINSONS_CURIE]["categories"]["biolink:Disease"] > 2
     assert "biolink:Drug" not in results[PARKINSONS_CURIE]["categories"]
+
+
+# upstream trapi2.0 (93924f7a, #2913): each maturity must use its own tier's NodeNorm, so PROD never calls CI
+@pytest.mark.parametrize("maturity, expected_url", [
+    ("development", "https://nodenorm-es.ci.transltr.io"),
+    ("staging", "https://nodenorm-es.ci.transltr.io"),
+    ("testing", "https://nodenorm-es.test.transltr.io"),
+    ("production", "https://nodenorm-es.transltr.io"),
+])
+def test_node_normalizer_url_by_maturity(monkeypatch, maturity, expected_url):
+    # Shepherd: the maturity is settings.server_maturity (RTXConfiguration reads it), not a sys.modules stand-in
+    from shepherd_utils.config import settings
+    monkeypatch.setattr(settings, "server_maturity", maturity)
+    monkeypatch.setattr(NodeSynonymizer, "_resolved_node_normalizer_url", None)
+    assert NodeSynonymizer.resolve_node_normalizer_url() == expected_url
+
+
+# upstream trapi2.0 (9c38a488, #2913): each maturity must use its own tier's Name Resolver
+@pytest.mark.parametrize("maturity, expected_url", [
+    ("development", "https://name-lookup.ci.transltr.io"),
+    ("staging", "https://name-lookup.ci.transltr.io"),
+    ("testing", "https://name-lookup.test.transltr.io"),
+    ("production", "https://name-lookup.transltr.io"),
+])
+def test_name_resolver_url_by_maturity(monkeypatch, maturity, expected_url):
+    # Shepherd: the maturity is settings.server_maturity (RTXConfiguration reads it), not a sys.modules stand-in
+    from shepherd_utils.config import settings
+    monkeypatch.setattr(settings, "server_maturity", maturity)
+    monkeypatch.setattr(NodeSynonymizer, "_resolved_name_resolver_url", None)
+    assert NodeSynonymizer.resolve_name_resolver_url() == expected_url
 
 
 if __name__ == "__main__":

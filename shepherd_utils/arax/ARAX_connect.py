@@ -12,21 +12,38 @@
 #   - the block list is the vendored KnowledgeSources/general_concepts.json (ARAX's own)
 #   - the RTXKG2-mode check around original_query_graph is dropped (E-5)
 #   - main() is dropped
-#   - xcrg runs the vendored xCRG package (shepherd_utils/arax/xcrg/, DEC-21) instead of catrax-xcrg
+#   - xcrg runs upstream's PyPI package catrax-xcrg (1.0.1.dev2), as upstream trapi2.0 does (0513ea95,
+#     fce9cfdd; DEC-25): xcrg.Config / xcrg.run_query / an xcrg.Reporter adapter. xCRG is given the
+#     message's query graph and the query's parameters (xcrg_query), not the whole message: the port's
+#     message may hold the empty auxiliary_graphs 2.0 forbids, which the package rejects
 #   - TRAPI 2.0: convert_to_trapi builds one NodeBinding per qnode and one PathBinding per path (ids) in a plain
 #     Analysis (no PathfinderAnalysis), and AuxiliaryGraph(edges) without attributes; an aux graph without edges is
 #     left out, with its path-binding ids and any analysis/result left empty. The cached-result path no longer
 #     re-types analyses (there is one Analysis model). get_constraint_category reads
 #     PathConstraint.required_intermediate_categories
+#   - from upstream trapi2.0 (a9665495, #2939): a cached xCRG answer with 0 results is never reused, and a
+#     Connect answer is only stored when http_status == 200 and it has results ("Not caching ..." otherwise)
+#   - Connect reads bypass_cache from the TRAPI 2.0 query parameters (as upstream trapi2.0 18ae5be1 does) and,
+#     like the port's Expand, still from the legacy query_options
+#   - from upstream trapi2.0 (7667278f, f8d7ee8d, 264aae6d, 090d73b7): catrax-pathfinder 3.1.0: Pathfinder(...,
+#     response, maturity) with the info-for-overlay db as its degree db (Path_Finder/utility
+#     .get_info_for_overlay_db_path, the same tier0 file as before); convert_to_trapi / rehydrate take the maturity
+#     (RTXConfiguration().maturity, i.e. settings.server_maturity) and the rehydrate payload carries submitter
+#     "arax-pathfinder@<maturity>"
+#   - from upstream trapi2.0 (01740b70): convert_to_trapi starts a missing KG as KnowledgeGraph(nodes={}, edges={})
+#     (not a dict) and tolerates its edges being None. Upstream's otel spans around get_paths / convert_to_trapi
+#     are not taken (shepherd_utils.arax_tracing instruments the HTTP calls)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import json
+import logging
 import sys
+from datetime import timedelta
 
 import requests
+import xcrg
 from shepherd_utils.config import settings
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
 from pathfinder.Pathfinder import Pathfinder
-from shepherd_utils.arax.xcrg import XCRGConfig, run_xcrg
 
 
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -37,7 +54,7 @@ from collections import Counter
 import copy
 import time
 
-from shepherd_utils.arax.Path_Finder.utility import get_curie_ngd_path, get_curie_to_pmids_path, get_kg2c_db_path
+from shepherd_utils.arax.Path_Finder.utility import get_curie_ngd_path, get_curie_to_pmids_path, get_info_for_overlay_db_path
 from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 
@@ -63,23 +80,23 @@ SHEPHERD_PATHFINDER_HOPS = 4
 SHEPHERD_PATHFINDER_MAX_PATHS = 500
 
 
-class ARAXXCRGLogger:
+class ARAX_XCRG_Reporter(xcrg.Reporter):
     """Adapt xCRG package log calls to ARAXResponse logging."""
 
     def __init__(self, response):
         self.response = response
 
-    def debug(self, message, *args):
-        self.response.debug(self._format(message, args))
-
-    def info(self, message, *args):
-        self.response.info(self._format(message, args))
-
-    def warning(self, message, *args):
-        self.response.warning(self._format(message, args))
-
-    def error(self, message, *args):
-        self.response.error(self._format(message, args), http_status=500)
+    def handle_message(self, message: xcrg.Message):
+        match message:
+            case xcrg.Log_Message(level, message, args, _):
+                match level:
+                    case logging.DEBUG:   self.response.debug(self._format(message, args))
+                    case logging.INFO:    self.response.info(self._format(message, args))
+                    case logging.WARNING: self.response.warning(self._format(message, args))
+                    case logging.ERROR:   self.response.error(self._format(message, args), http_status = 500)
+            case xcrg.Progress_Message(pct_done):
+                # TODO: Report progress to the front-end
+                pass
 
     @staticmethod
     def _format(message, args):
@@ -101,6 +118,16 @@ def get_xcrg_env_int(name, default):
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def xcrg_query(envelope_dict):
+    """The query xCRG is given: the message's query graph and the query's parameters
+    (Shepherd: not the whole message, whose empty containers 2.0 forbids)."""
+    message = envelope_dict.get("message") or {}
+    query = {"message": {"query_graph": message.get("query_graph") or {}}}
+    if envelope_dict.get("parameters"):
+        query["parameters"] = envelope_dict["parameters"]
+    return query
 
 
 def get_xcrg_retriever_url(rtx_config):
@@ -295,16 +322,24 @@ class ARAXConnect:
             bypass_cache = query_options["bypass_cache"] is not None and str(query_options["bypass_cache"]).lower() != 'false'
         else:
             bypass_cache = False
+        # TRAPI 2.0 carries bypass_cache in the query's parameters (as Expand reads it)
+        trapi_parameters = getattr(self.response.envelope, "parameters", None)
+        if isinstance(trapi_parameters, dict) and trapi_parameters.get("bypass_cache") is True:
+            bypass_cache = True
         if bypass_cache:
             self.response.debug(f"bypass_cache is set; skipping cache lookup for {kp_curie}")
             response_code = -2
         else:
             self.response.info(f"Looking for a previously cached result from {kp_curie}")
             response_data, response_code, elapsed_time, error = cacher.get_cached_result(kp_curie, pathfinder_input_data)
+        #### Never reuse an empty xCRG answer: it is most likely a transient upstream failure, not a real empty result
         if (
                 response_code != -2
                 and response_code == 200
-                and (is_xcrg_action or self.response.envelope.message.results)
+                and (
+                    (is_xcrg_action and (cacher._get_n_results(response_data) or 0) > 0)
+                    or (not is_xcrg_action and self.response.envelope.message.results)
+                )
         ):
             n_results = cacher._get_n_results(response_data)
             # Note: This logging message is keyed off to provide progress updates to the RTX front-end.
@@ -339,17 +374,22 @@ class ARAXConnect:
             elapsed_time = time.time() - start
             self.response.info(f"Got result from ARAX {kp_curie} Connect after {elapsed_time}. Converting to_dict()")
             response_object = self.response.envelope.to_dict()
-            self.response.info(f"Storing resulting dict in the cache")
-            cacher.store_response(
-                kp_curie=kp_curie,
-                query_url=kp_url,
-                query_object=pathfinder_input_data,
-                response_object=response_object,
-                http_code=http_status,
-                elapsed_time=elapsed_time,
-                status=status
-            )
-            self.response.info(f"Stored result in the cache.")
+            #### Only cache successful, non-empty answers so a transient failure is not replayed later
+            n_results = len(self.response.envelope.message.results or [])
+            if http_status == 200 and n_results > 0:
+                self.response.info(f"Storing resulting dict in the cache")
+                cacher.store_response(
+                    kp_curie=kp_curie,
+                    query_url=kp_url,
+                    query_object=pathfinder_input_data,
+                    response_object=response_object,
+                    http_code=http_status,
+                    elapsed_time=elapsed_time,
+                    status=status
+                )
+                self.response.info(f"Stored result in the cache.")
+            else:
+                self.response.info(f"Not caching {kp_curie} result (http_status={http_status}, n_results={n_results})")
 
         if self.report_stats:  # helper to report information in debug if class self.report_stats = True
             self.response = self.report_response_stats(self.response)
@@ -473,10 +513,11 @@ class ARAXConnect:
         pathfinder = Pathfinder(
             f"retriever:{retriever_url}",
             get_curie_ngd_path(),
-            get_kg2c_db_path(),
+            get_info_for_overlay_db_path(),
             blocked_curies,
             blocked_synonyms,
-            self.response
+            self.response,
+            rtx_config.maturity
         )
         # DEC-7: Shepherd's pathfinder limits, whatever max_path_length / max_pathfinder_paths say
         max_pathfinder_paths = SHEPHERD_PATHFINDER_MAX_PATHS
@@ -503,7 +544,7 @@ class ARAXConnect:
                                   f"with a max path length of {self.parameters['max_path_length']}.")
             return self.response
 
-        self.convert_to_trapi(result, aux_graphs, knowledge_graph, retriever_url)
+        self.convert_to_trapi(result, aux_graphs, knowledge_graph, retriever_url, rtx_config.maturity)
 
         if not hasattr(self.response, "original_query_graph"):
             self.response.original_query_graph = copy.deepcopy(self.response.envelope.message.query_graph)
@@ -522,41 +563,35 @@ class ARAXConnect:
         if self.response.status != 'OK' or resp == -1:
             return self.response
 
-        query = {
-            "message": self.response.envelope.to_dict()["message"],
-        }
+        query = xcrg_query(self.response.envelope.to_dict())
         qedge_keys = list(query["message"].get("query_graph", {}).get("edges", {}))
         qedge_key = qedge_keys[0] if qedge_keys else "xcrg"
         rtx_config = RTXConfiguration()
-        retriever_url = get_xcrg_retriever_url(rtx_config)
-        timeout = get_xcrg_env_int(XCRG_TIMEOUT_ENV, DEFAULT_XCRG_TIMEOUT)
-        tf_batch_size = get_xcrg_env_int(XCRG_TF_BATCH_SIZE_ENV, DEFAULT_XCRG_TF_BATCH_SIZE)
-        ngd_db_path = get_curie_ngd_path().removeprefix("sqlite:")
-        curie_to_pmids_db_path = get_curie_to_pmids_path().removeprefix("sqlite:")
-        config = XCRGConfig(
-            retriever_url=retriever_url,
-            ngd_db_path=ngd_db_path,
-            curie_to_pmids_db_path=curie_to_pmids_db_path,
-            timeout=timeout,
+        config = xcrg.Config(
+            retriever_url=get_xcrg_retriever_url(rtx_config),
+            curie_ngd_db_file=get_curie_ngd_path().removeprefix("sqlite:"),
+            curie_to_pmids_db_file= get_curie_to_pmids_path().removeprefix("sqlite:"),
+            timeout=timedelta(seconds=get_xcrg_env_int(XCRG_TIMEOUT_ENV, DEFAULT_XCRG_TIMEOUT)),
             tiers=[0],
-            tf_batch_size=tf_batch_size,
+            tf_batch_size= get_xcrg_env_int(XCRG_TF_BATCH_SIZE_ENV, DEFAULT_XCRG_TF_BATCH_SIZE),
             resource_id="infores:arax",
             trapi_schema_version=rtx_config.trapi_version,
             biolink_version=get_current_arax_biolink_version(),
+            # TODO: consider enabling the http cache
         )
         self.response.update_query_plan(
             qedge_key,
             "arax-xcrg",
             "Waiting",
-            f"Sending xCRG lookup query to {retriever_url}",
+            f"Sending xCRG lookup query to {config.retriever_url}",
             query=query,
         )
         start = time.time()
         try:
-            xcrg_response = run_xcrg(
-                query,
+            xcrg_response = xcrg.run_query(
+                query=query,
                 config=config,
-                logger=ARAXXCRGLogger(self.response),
+                reporter=ARAX_XCRG_Reporter(self.response),
             )
         except Exception as e:
             elapsed = round(time.time() - start)
@@ -590,7 +625,7 @@ class ARAXConnect:
         synonyms = set(s.lower() for s in json_block_list['synonyms'])
         return set(json_block_list['curies']), synonyms
 
-    def convert_to_trapi(self, result, aux_graphs, knowledge_graph, retriever_url):
+    def convert_to_trapi(self, result, aux_graphs, knowledge_graph, retriever_url, maturity):
         if self.response.envelope.message.results is None:
             self.response.envelope.message.results = []
 
@@ -598,9 +633,11 @@ class ARAXConnect:
             self.response.envelope.message.auxiliary_graphs = {}
 
         if self.response.envelope.message.knowledge_graph is None:
-            self.response.envelope.message.knowledge_graph = {}
-        rehydrated_kg = self.rehydrate(knowledge_graph, retriever_url)
-        kg = KnowledgeGraph().from_dict(rehydrated_kg)
+            self.response.envelope.message.knowledge_graph = KnowledgeGraph(nodes={}, edges={})
+        if self.response.envelope.message.knowledge_graph.edges is None:
+            self.response.envelope.message.knowledge_graph.edges = {}
+        rehydrated_kg = self.rehydrate(knowledge_graph, retriever_url, maturity)
+        kg = KnowledgeGraph.from_dict(rehydrated_kg)
 
         # TRAPI 2.0: an aux graph needs edges, so one whose edges PathFinder could not
         # extract is left out, with the path bindings to it (and an analysis left without any)
@@ -640,10 +677,10 @@ class ARAXConnect:
             self.response.envelope.message.auxiliary_graphs[key] = AuxiliaryGraph(
                 edges=value['edges']
             )
-        self.response.envelope.message.knowledge_graph.edges.update(kg.edges)
+        self.response.envelope.message.knowledge_graph.edges.update(kg.edges or {})
         self.response.envelope.message.knowledge_graph.nodes.update(kg.nodes)
 
-    def rehydrate(self, kg, retriever_url):
+    def rehydrate(self, kg, retriever_url, maturity):
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         payload = {
             "message": {
@@ -652,7 +689,8 @@ class ARAXConnect:
             "parameters": {
                 "rehydrate": True,
                 "tier": 0
-            }
+            },
+            "submitter": f"arax-pathfinder@{maturity}"
         }
 
         try:

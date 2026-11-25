@@ -8,6 +8,11 @@
 #   - create_envelope keeps the query's TRAPI 2.0 `parameters` from a previous envelope
 #   - TRAPI 2.0 forbids an empty QNode.constraints: add_qnode / from_dict leave it unset
 #     rather than the model's [] default
+#   - from upstream trapi2.0 (9782bf6a): add_qnode's is_set parameter sets / clears
+#     set_interpretation COLLATE (set_qnode_is_set); QNode has no is_set (DEC-24)
+#   - from upstream trapi2.0 (07195cce): create_envelope sets TRAPI 2.0 data_release_versions
+#     {"infores:arax": "<tier0 build>"} (_get_data_release_versions); the build is Shepherd's
+#     settings.arax_tier_version (ARAX's own data files) instead of the directory names in config_dbs.json
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, flush=True, **kwargs)
@@ -23,7 +28,7 @@ import numpy as np
 import requests
 
 from shepherd_utils.arax.ARAX_response import ARAXResponse
-from shepherd_utils.arax.ARAX_resultify import ARAXResultify
+from shepherd_utils.arax.ARAX_resultify import ARAXResultify, qnode_is_set, set_qnode_is_set
 from shepherd_utils.arax.query_graph_info import QueryGraphInfo
 
 from shepherd_utils.arax.RTXConfiguration import RTXConfiguration
@@ -38,6 +43,7 @@ from shepherd_utils.arax.openapi_server.models.q_path import QPath
 
 from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
 from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_current_arax_biolink_version
+from shepherd_utils.config import settings
 
 
 class ARAXMessenger:
@@ -61,6 +67,16 @@ class ARAXMessenger:
         description_list.append(self.add_qedge(0,0,describe=True))
         description_list.append(self.add_qpath(0,0,describe=True))
         return description_list
+
+
+    @staticmethod
+    def _get_data_release_versions() -> dict | None:
+        """TRAPI 2.0 data_release_versions: the Tier0 build that ARAX's own databases (NGD, xDTD, overlay
+        info, etc.) were made from (Shepherd: settings.arax_tier_version, e.g. tier0-20260928)"""
+        tier0_build = settings.arax_tier_version
+        if not tier0_build:
+            return None
+        return {"infores:arax": tier0_build}
 
 
     # #### Create a fresh ARAXResponse object as an envelple and fill with defaults
@@ -112,6 +128,7 @@ class ARAXMessenger:
         envelope.tool_version = RTXConfiguration().version
         envelope.schema_version = RTXConfiguration().trapi_version
         envelope.biolink_version = get_current_arax_biolink_version()
+        envelope.data_release_versions = self._get_data_release_versions()
         envelope.status = "OK"
         envelope.description = "Created empty template response"
         envelope.context = "https://raw.githubusercontent.com/biolink/biolink-model/master/context.jsonld"
@@ -269,7 +286,7 @@ class ARAXMessenger:
         
         # Set the is_set parameter to what the user selected
         if parameters['is_set'] is not None:
-            qnode.is_set = ( parameters['is_set'].lower() == 'true' or parameters['is_set'].lower() == 't' )
+            set_qnode_is_set(qnode, parameters['is_set'].lower() == 'true' or parameters['is_set'].lower() == 't')
 
         #### If the ids is specified, try to find that
         if parameters['ids'] is not None:
@@ -283,9 +300,9 @@ class ARAXMessenger:
                 id_list = parameters['ids']
                 is_id_a_list = True
                 if len(id_list) == 1:
-                    if qnode.is_set == True:
+                    if qnode_is_set(qnode):
                         response.warning(f"Specified ids '{parameters['ids']}' is singular, but is_set=true, which doesn't make sense, so automatically setting to false. Avoid this warning by not explictly setting to true.")
-                        qnode.is_set = False
+                        set_qnode_is_set(qnode, False)
 
             # Or if it's neither a list or a string, then error out. This cannot be handled at present
             else:
@@ -337,7 +354,7 @@ class ARAXMessenger:
             else:
                 qnode.categories = parameters['categories']
             if parameters['is_set'] is not None:
-                qnode.is_set = (parameters['is_set'].lower() == 'true')
+                set_qnode_is_set(qnode, parameters['is_set'].lower() == 'true')
             message.query_graph.nodes[key] = qnode
             return response
 

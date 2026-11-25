@@ -2,6 +2,8 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type; upstream sets none, so they take compute_ngd's values for ARAX's virtual edges (statistical_association / automated_agent)
+#   - from upstream trapi2.0 (2f78aa95; DEC-28): the virtual edges' predicate is biolink:similar_to
+#     (Biolink 4.4.4 has no has_jaccard_index_with)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This class will add a virtual edge to the KG decorated with the Jaccard index value on it.
 # relevant issue is #611
@@ -87,7 +89,7 @@ class ComputeJaccard:
             j_iter = 0
             now = datetime.now()
             #edge_type = parameters['virtual_edge_type']
-            edge_type = 'biolink:has_jaccard_index_with'
+            edge_type = 'biolink:similar_to'  # Biolink 4.4.4 has no has_jaccard_index_with predicate
             qedge_keys = [parameters['virtual_relation_label']]
             relation = parameters['virtual_relation_label']
             defined_datetime = now.strftime("%Y-%m-%d %H:%M:%S")

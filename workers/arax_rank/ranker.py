@@ -31,6 +31,11 @@ recording a deviation in the baseline doc:
 - Edge confidences are internal only. ARAX stores them as a non-model
   attribute that is never serialized, so they are not written to the KG here.
 
+One change follows upstream's ``trapi2.0`` branch rather than 9485431
+(b5d02852, #2904): TRAPI 2.0 forbids ``null`` in ``row_data``, so a missing
+score, essence or essence_category is written as ``""``
+(``_make_row_data_item``), as ARAX's ranker now does.
+
 The one piece of ARAX's ``aggregate_scores_dmk`` not carried over is its
 ``QueryGraphInfo().assess(message)`` call, whose result ARAX discards (the
 merge is commented out), so it has no observable effect on the output.
@@ -72,6 +77,13 @@ def _calculate_final_individual_edge_confidence(
     for W_i in sorted_attribute_scores:
         W_r = W_r + (1 - W_r) * W_i
     return W_r
+
+
+def _make_row_data_item(value: Any) -> Any:
+    # TRAPI 2.0 Result.row_data items must be a string or number (null is no
+    # longer allowed), so use an empty string for a missing value in order to
+    # keep the columns aligned with table_column_names
+    return "" if value is None else value
 
 
 def _calculate_final_result_score(all_edge_scores: List[float]) -> float:
@@ -685,9 +697,12 @@ class ARAXRanker:
             score = int(first_analysis(result)["score"] * 1000 + 0.5) / 1000.0
 
             result["row_data"] = [
-                score,
-                result.get("essence"),
-                result.get("essence_category"),
+                _make_row_data_item(value)
+                for value in (
+                    score,
+                    result.get("essence"),
+                    result.get("essence_category"),
+                )
             ]
 
         envelope["table_column_names"] = ["score", "essence", "essence_category"]
@@ -700,7 +715,7 @@ class ARAXRanker:
         for result, score in zip(results, scores_without_ties):
             score = _to_builtin(score)
             first_analysis(result)["score"] = score
-            result["row_data"][0] = score
+            result["row_data"][0] = _make_row_data_item(score)
         logger.debug("Results have been ranked and sorted")
 
 

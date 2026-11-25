@@ -13,11 +13,11 @@ Three kinds of test, all in `tests/unit/` and run in CI:
 | Kind | What it compares | Where |
 |---|---|---|
 | **Upstream parity** | The port against goldens recorded by running **upstream ARAX's own code** (RTXteam/RTX @ 9485431) on the same inputs: a mock Retriever, synthetic data files, and deterministic stand-ins for NodeNorm, COHD's web lookup and NCBI eUtils. Upstream ran on TRAPI 1.6; those records are kept (`goldens_trapi16.json.gz`) and the goldens the port is compared with are their TRAPI 2.0 translation, derived offline by `trapi2_goldens.py` (DEC-20). Every field is compared: status, message, envelope, log lines, and every request sent to the KP. The port may differ only where a recorded decision says so, and each such difference is pinned by its own test. | `arax/test_query_parity.py` (75 end-to-end `ARAXQuery` cases), `arax/test_expand_parity.py` (37), `arax/test_response_parity.py` (28 `/response/{id}` lookups), `arax/test_aux_parity.py` (meta-KG and autocomplete) |
-| **Upstream's own test suite** | Upstream's `code/ARAX/test/*.py`, run against the port through an import shim, adapted to TRAPI 2.0 only at `# TRAPI 2.0:` markers (DEC-20). | `arax/upstream_suite/` (321 tests) |
+| **Upstream's own test suite** | Upstream's `code/ARAX/test/*.py`, run against the port through an import shim, adapted to TRAPI 2.0 only at `# TRAPI 2.0:` markers (DEC-20). | `arax/upstream_suite/` (327 tests) |
 | **Shepherd-side tests** | The pieces that are Shepherd's own: the worker, the server's `/arax` routes, the KP cache store, the data files. | `arax/test_trapi_query_cacher.py`, `test_arax.py`, `test_arax_api.py`, `arax/test_ARAX_connect.py`, `arax/test_mock_data.py` |
 
-Upstream's suite has 321 tests. Offline, 81 of them pass on upstream ARAX
-itself, and those 81 pass on the port. Two more are the port's recorded
+Upstream's suite has 327 tests. Offline, 87 of them pass on upstream ARAX
+itself, and those 87 pass on the port. Two more are the port's recorded
 DEC-4 difference and run as strict xfails. The other 238 need the Translator
 services or ARAX's real databases on upstream too. Running them is the live
 check (see [Needs live services](#needs-live-services)).
@@ -109,33 +109,35 @@ upstream suite's `test_ARAX_infer.py` covers the rest with `--arax-live`.
 ## 4. xCRG / MVP2
 
 **What the port does.**
-- **Routing:** the query graph interpreter recognizes an inferred MVP2 query
-  (`is_xcrg_mvp2_query`, inferred only) and runs `connect(action=xcrg)`, which
-  calls xCRG with Shepherd's Retriever.
-- **Package:** xCRG is vendored at `shepherd_utils/arax/xcrg/` from
-  Translator-CATRAX/xCRG @ `e67f2c0` and speaks TRAPI 2.0 (DEC-21); see its
-  README for the changes.
+- **Routing:** the query graph interpreter recognizes an MVP2 query, either
+  inferred or the one-hop lookup shape (`xcrg.is_valid_query`), and runs
+  `connect(action=xcrg)`, which calls xCRG with Shepherd's Retriever.
+- **Package:** upstream's PyPI `catrax-xcrg==1.0.1.dev2`, as upstream ARAX
+  `trapi2.0` pins it (DEC-25). Its known bugs are tracked in Shepherd's issues:
+  - BioPack-team/shepherd#273: the ranker raises on a Biolink agent type it
+    has no weight for;
+  - BioPack-team/shepherd#274: lookups carry no `tiers` or `timeout`;
+  - BioPack-team/shepherd#275: it reads only the tier0-20260928 data formats;
+  - BioPack-team/shepherd#276: one NaN in a Retriever answer fails the run.
 - **Artifacts:** its database artifacts are `curie_ngd` (from the pathfinder
-  data) and `curie_to_pmids` (from `ARAX_DBS_DIR`). The transcription-factor
-  list ships inside the package.
+  data) and `curie_to_pmids` (from `ARAX_DBS_DIR`), in the tier0-20260928
+  formats (#275). The transcription-factor list ships inside the package.
 - **Cache:** results are cached as in ARAX.
 
 **Tests.**
 - **`mvp2_xcrg_route` (query parity):** a TRAPI MVP2 query runs xCRG against
-  the mock Retriever, with both database artifacts present (487 transcription
-  factors in 3 batches, 5 results). It finds upstream's answers with the same
-  bindings, knowledge graph, support graphs and Retriever lookups; the order
-  and scores (xCRG's newer ranker) and the log differ
-  (`test_xcrg_answers_are_upstreams_reranked`).
-- **Upstream's `test_ARAX_xcrg_connect.py`:** 6 tests pass; 2 are xfails for
-  DEC-4 (Shepherd's Retriever instead of a per-maturity URL).
-- **`test_xcrg.py`:** Shepherd's changes to the package (query parsing, the
-  Retriever lookups' parameters, both artifact formats, ranking on 2.0's
-  knowledge level and agent type, NaN values, routing), and a run against a
-  fake TRAPI 2.0 Retriever.
-- **`xcrg_suite/`:** xCRG's own unit tests, adapted to TRAPI 2.0.
-- **`test_ARAX_connect.py`:** Shepherd's wiring, the cache and `bypass_cache`.
-- **`test_mock_data.py`:** xCRG reads both mock artifacts.
+  the mock Retriever, with both database artifacts present. It is a strict
+  xfail while #276 stands (the mock universe has a NaN `p_value`), as is
+  `test_xcrg_answers_are_upstreams_reranked`.
+- **Upstream's `test_ARAX_xcrg_connect.py`** (from upstream `trapi2.0`): 6
+  tests pass; 2 are xfails for DEC-4 (Shepherd's Retriever instead of a
+  per-maturity URL).
+- **`test_xcrg.py`:** ARAX's side of the call (the query it hands xCRG,
+  routing, the log adapter), plus strict xfails for #273 and #274.
+- **`test_ARAX_connect.py`:** Shepherd's wiring (the `xcrg.Config` fields),
+  the cache and `bypass_cache`.
+- **`test_mock_data.py`:** a strict xfail while #275 stands (the mock
+  artifacts are in the tier0-20260621 formats).
 
 ## 5. ARAXi and workflows (including what the CQS sends)
 
@@ -160,9 +162,9 @@ cover more with `--arax-live`.
 
 **Found:** upstream defects that CQS-style workflows hit. The port reproduces
 them (DEC-1):
-- **D-23:** the `filter_kgraph_*` operations crash whenever the KP's answer
-  includes support-graph edges, because those edges are kept without
-  `qedge_keys`.
+- **D-23 (fixed in the port, upstream `trapi2.0` 2add4986):** the
+  `filter_kgraph_*` operations crashed whenever the KP's answer included
+  support-graph edges, because those edges were kept without `qedge_keys`.
 - **D-24:** `filter_results_top_n` with a string `max_results` fails an
   assertion.
 - **D-28 (fixed in the port):** `overlay_fisher_exact_test` (and clinical
@@ -171,10 +173,11 @@ them (DEC-1):
   bind in one pass, as upstream's NGD does, with the same bindings.
 - **D-29:** clinical info needs cohd.io at query time (curie to OMOP id
   mapping), with no timeout; when cohd.io is down, those overlays fail.
-- **D-30:** a large multi-hop answer with support graphs can leave edges in
-  the KG whose endpoint node Expand pruned, and the next action that reads
-  every edge's endpoints fails (on a three-hop lookup, the Fisher's exact test
-  in its template).
+- **D-30 (fixed in the port, upstream `trapi2.0` 2add4986):** a large
+  multi-hop answer with support graphs could leave edges in the KG whose
+  endpoint node Expand pruned, and the next action that reads every edge's
+  endpoints failed (on a three-hop lookup, the Fisher's exact test in its
+  template).
 - **D-26:** `overlay_connect_knodes` fails in Jaccard. The port's E-4 change
   removes the disabled overlay action that made it fail sooner upstream.
 

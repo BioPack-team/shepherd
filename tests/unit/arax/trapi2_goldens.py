@@ -79,18 +79,24 @@ Hand rules on top (what TOM does not own):
     the TRAPI version ARAX validates against: ``2.0.0`` (ARAX's only valid
     version under TRAPI 2.0; the ``local_trapi_1_5`` stored response still
     declares ``1.5.0``, which is no longer a valid version, so it is validated
-    as the default ``2.0.0`` too, and keeps declaring ``1.5.0``).
+    as the default ``2.0.0`` too, and keeps declaring ``1.5.0``). The Biolink
+    version in that key is ``4.4.4`` (upstream ``trapi2.0`` ae9b9b2d; was
+    ``4.4.2``).
   - H7 aux_parity: the meta-KG (and its simple view) and autocomplete answers
     are the same objects in 2.0 (a MetaKnowledgeGraph shape change would be
-    additions only); the goldens are carried over unchanged.
+    additions only); the goldens are carried over unchanged, but for H22.
+  - H22 aux_parity: the ``biolink:original_predicate`` standard attribute
+    constraint the meta-KG adds to its edges is named ``original predicate``
+    (upstream ``trapi2.0`` db6140e7; was ``kg2 ids``).
   - H8 response_parity: in ARAX's attribute-stripped (``X``) view, a KG edge
     keeps the stored edge's ``knowledge_level`` / ``agent_type`` (see
     ``_unstrip_levels``).
   - H9 the edges ARAX's overlays make without KL/AT attributes upstream get
     the values the 2.0 port gives them (ARAX_EDGE_LEVELS: Jaccard and Fisher's
     exact test ``statistical_association`` / ``automated_agent``, as NGD's
-    own; COHD ``statistical_association`` / ``data_analysis_pipeline``)
-    instead of TOM's ``not_provided``.
+    own; COHD ``statistical_association`` / ``automated_agent``; Expand's
+    ``subclass_of`` edges ``knowledge_assertion`` / ``automated_agent``:
+    DEC-27, upstream ``trapi2.0``) instead of TOM's ``not_provided``.
   - H11 an Analysis with neither ``edge_bindings`` nor ``path_bindings`` is
     dropped, and a result's emptied ``analyses`` with it: TRAPI 2.0 requires
     an Analysis to have one or both (a schema anyOf, which the ARS validator
@@ -99,10 +105,77 @@ Hand rules on top (what TOM does not own):
     result's score (``{"resource_id": "infores:arax", "score": 1.0}``): that
     score is lost with it in 2.0. The same holds for the mock Retriever's
     one-node answers.
-  - H12 a qnode whose recorded ``is_set: true`` the 2.0 case expresses as
-    ``set_interpretation: COLLATE`` (``collated_qnodes``) echoes both in the
-    envelope's query graph: the vendored QNode reads COLLATE as ``is_set``
-    and keeps the client's own value.
+  - H12 (superseded by H14) a qnode whose recorded ``is_set: true`` the 2.0
+    case expresses as ``set_interpretation: COLLATE`` (``collated_qnodes``)
+    keeps it in the envelope's query graph.
+  - H14 sets are ``set_interpretation: COLLATE`` (DEC-24, upstream
+    ``trapi2.0``): the port's QNode has no ``is_set``. In a query graph ARAX
+    produced (the envelope's, expand_parity ``qg``) a recorded ``is_set: true``
+    becomes ``set_interpretation: COLLATE`` and ``is_set: false`` is dropped.
+    The same holds for the stored ARAX documents /response serves back
+    (response_parity), as do H16 and H17 below. In a query graph ARAX's Expand sends to Retriever
+    (request bodies, the query plan's recorded queries) every id-less qnode is
+    COLLATE and a qnode with ids carries neither (upstream 1.6 sent
+    ``is_set: true`` for id-less and multi-id qnodes). xCRG's lookups
+    (``XCRG_CASES``) copy ARAX's own query graph, so they take the first rule.
+  - H16 NGD from the precomputed curie_ngd (DEC-30, upstream ``trapi2.0``):
+    compute_ngd reads a pair's NGD from curie_ngd first. The query-parity
+    curie_ngd is the pathfinder's tier0-20260621 layout (``dbs.curie_ngd_pairs``:
+    ``[neighbor, ngd]`` pairs, rounded to 6 digits, no shared PMIDs), so for a
+    pair it holds the NGD attribute's value is that stored value, and the
+    edge has no ``publications`` / ``ngd_publications`` attribute. A pair it
+    does not hold is computed from curie_to_pmids as before. The ranker's
+    "Summary of available edge metrics" log line prints those values, so an
+    NGD minimum / maximum whose 6-digit rounding is a stored value is it.
+  - H17 xDTD on the tier0-20260928 build (DEC-30, upstream ``trapi2.0``):
+    the ``created_datetime`` of the edges Infer makes is ``2026-09-28`` (was
+    ``2026-06-28``), and xDTD's infores is ``infores:arax`` (was
+    ``infores:arax-xdtd``, #2937), in sources, attribute sources and the edge
+    keys built from them. An explanation-path edge's publications come from the
+    mapping table's ``extra_attributes`` (#2893): the attribute follows
+    ``biolink:category`` and has no ``original_attribute_name``.
+  - H18 ARAX's envelopes carry TRAPI 2.0 ``data_release_versions``
+    (upstream ``trapi2.0`` 07195cce): ``{"infores:arax": <the Tier0 build of
+    ARAX's own data files>}``, Shepherd's ``settings.arax_tier_version``
+    (``ARAX_TIER0_BUILD`` here), on every envelope ARAX's ``create_envelope``
+    made (query_parity; not the stored documents /response serves back).
+  - H19 constraints ARAX applies itself are not sent to the KP (upstream
+    ``trapi2.0`` 2add4986, 2f78aa95): in a query graph ARAX's Expand sends to
+    Retriever (request bodies, the query plan's recorded queries; not xCRG's
+    lookups), a qnode's ``biolink:highest_FDA_approval_status`` constraints
+    and a qedge's ``biolink:evidence_count`` attribute constraints are left
+    out, and a ``constraints`` list / object (or its ``attributes``) they
+    leave empty is dropped. (Expand also widens a qedge's
+    ``constraints.agent_type.values`` with their Biolink AgentTypeEnum
+    subtypes; no recorded case has an agent_type constraint.)
+  - H20 ``row_data`` has no nulls (upstream ``trapi2.0`` b5d02852, #2904):
+    TRAPI 2.0 forbids ``null`` there, so the ranker writes a missing score,
+    essence or essence_category as ``""``, in every envelope ARAX made
+    (query_parity).
+  - H21 the final KG cleanup drops every KG edge no result or support graph
+    references (upstream ``trapi2.0`` 2f78aa95: ResultTransformer passes
+    ``apply_both_endpoints_rule=False``). Upstream 9485431 also kept an edge
+    whose subject and object were both referenced. In every query_parity
+    envelope whose logs show the cleanup ran (``TRANSFORM_DONE``), the KG nodes,
+    KG edges and aux graphs are cut to what the results reach: their node and
+    edge bindings, the endpoints of bound edges, and, transitively, the aux
+    graphs named by an analysis's ``support_graphs`` or a reached edge's
+    ``biolink:support_graphs`` attribute, with their edges and endpoints.
+  - H23 ARAX's ``tool_version`` is ``ARAX 2.0.0`` (upstream ``trapi2.0``
+    2db91bc8: the OpenAPI ``info.version`` ARAX reads it from; was ``ARAX
+    1.6.2``), on every envelope ARAX's ``create_envelope`` made (query_parity;
+    not the stored documents /response serves back).
+  - H24 ARAX's ``biolink_version`` is ``4.4.4`` (DEC-32, upstream
+    ``trapi2.0`` 2db91bc8; was ``4.2.5``), on every envelope ARAX's
+    ``create_envelope`` made (query_parity; not the stored documents). The
+    BiolinkHelper hierarchies are 4.4.4's too (the harnesses ship
+    ``expand_parity/biolink_lookup_map_4.4.4_v5.pickle`` and
+    ``biolink_model_4.4.4.yaml.gz``); no recorded case depends on a part of
+    the hierarchy that differs between 4.2.5 and 4.4.4, so nothing else
+    changes.
+  - H15 the Jaccard virtual edges ARAX makes (and their virtual qedge) use
+    ``biolink:similar_to`` (DEC-28, upstream ``trapi2.0``: Biolink 4.4.4 has no
+    ``has_jaccard_index_with``).
   - H13 a qnode's ``member_ids`` (a MANY / ALL set's members) are echoed in
     the envelope's query graph as the query gave them: upstream's generated
     QNode had no ``member_ids`` and dropped them, and the port's 2.0 QNode
@@ -299,9 +372,12 @@ ARAX_EDGE_LEVELS = {
     ),
     ("biolink:associated_with", "infores:cohd"): (
         "statistical_association",
-        "data_analysis_pipeline",
+        "automated_agent",  # DEC-27, upstream trapi2.0
     ),
 }
+# H9 (DEC-27, upstream trapi2.0): the subclass_of edges Expand makes (they list
+# infores:arax among their sources) are knowledge_assertion / automated_agent
+ARAX_SUBCLASS_LEVELS = ("knowledge_assertion", "automated_agent")
 
 
 def arax_edge_levels(edge: dict):
@@ -322,6 +398,10 @@ def arax_edge_levels(edge: dict):
         levels = ARAX_EDGE_LEVELS.get((edge.get("predicate"), source))
         if levels:
             return levels
+    if edge.get("predicate") == "biolink:subclass_of" and any(
+        s.get("resource_id") == "infores:arax" for s in edge.get("sources") or []
+    ):
+        return ARAX_SUBCLASS_LEVELS
     return None
 
 
@@ -428,6 +508,10 @@ def expand_record(rec: dict) -> dict:
     out["plan"] = query_plan(rec["plan"])
     out["requests"] = requests(rec["requests"])
     out["logs"] = [(level, log_text(text)) for level, text in rec["logs"]]
+    _qg_sets(out["qg"], sent=False)  # H14
+    for graph in _sent_graphs(out["requests"], out["plan"]):
+        _qg_sets(graph, sent=True)
+        _strip_post_filtered(graph)  # H19
     return out
 
 
@@ -442,6 +526,337 @@ def log_text(text: str) -> str:
 
 def expand_goldens(g16: dict) -> dict:
     return {case: expand_record(rec) for case, rec in g16.items()}
+
+
+# H14: cases whose recorded Retriever requests xCRG built from ARAX's query graph
+XCRG_CASES = {"mvp2_xcrg_route"}
+
+
+JACCARD_PREDICATE_16 = "biolink:has_jaccard_index_with"
+JACCARD_PREDICATE = "biolink:similar_to"
+
+
+def _jaccard_predicate(message: Any) -> None:
+    """H15 on one produced message, in place."""
+    if not isinstance(message, dict):
+        return
+    for edge in ((message.get("knowledge_graph") or {}).get("edges") or {}).values():
+        if isinstance(edge, dict) and edge.get("predicate") == JACCARD_PREDICATE_16:
+            edge["predicate"] = JACCARD_PREDICATE
+    for qedge in ((message.get("query_graph") or {}).get("edges") or {}).values():
+        if isinstance(qedge, dict) and qedge.get("predicates"):
+            qedge["predicates"] = [
+                JACCARD_PREDICATE if p == JACCARD_PREDICATE_16 else p
+                for p in qedge["predicates"]
+            ]
+
+
+NGD_NAME = "normalized_google_distance"
+NGD_PUBLICATIONS = ("publications", "ngd_publications")
+
+
+def _precomputed_ngd() -> dict:
+    """H16: {(curie, neighbor): ngd} of the query-parity curie_ngd."""
+    sys.path.insert(0, os.path.join(HERE, "expand_parity"))
+    sys.path.insert(0, os.path.join(HERE, "query_parity"))
+    import dbs
+
+    pmids = {c: set(p) for c, p in dbs.curie_to_pmids_rows()}
+    return {
+        (curie, neighbor): ngd
+        for curie, pairs in dbs.curie_ngd_pairs(pmids).items()
+        for neighbor, ngd in pairs
+    }
+
+
+def _precomputed_ngd_edges(message: Any, precomputed: dict) -> None:
+    """H16 on one produced message, in place."""
+    if not isinstance(message, dict):
+        return
+    for edge in ((message.get("knowledge_graph") or {}).get("edges") or {}).values():
+        attributes = edge.get("attributes") or []
+        ngd = [a for a in attributes if a.get("original_attribute_name") == NGD_NAME]
+        if not ngd:
+            continue
+        pair = (edge.get("subject"), edge.get("object"))
+        value = precomputed.get(pair, precomputed.get(pair[::-1]))
+        if value is None:
+            continue
+        for attribute in ngd:
+            attribute["value"] = str(value)
+        edge["attributes"] = [
+            a
+            for a in attributes
+            if not (
+                a.get("attribute_type_id") == "biolink:publications"
+                and a.get("original_attribute_name") in NGD_PUBLICATIONS
+            )
+        ]
+
+
+METRICS_SUMMARY = "Summary of available edge metrics: "
+
+
+def _precomputed_ngd_logs(logs: list, precomputed: dict) -> list:
+    """H16 on the ranker's edge-metrics summary log line."""
+    import ast
+
+    stored = set(precomputed.values())
+    out = []
+    for entry in logs:
+        text = entry[2] if isinstance(entry, list) and len(entry) == 3 else None
+        if isinstance(text, str) and text.startswith(METRICS_SUMMARY):
+            summary = ast.literal_eval(text[len(METRICS_SUMMARY) :])
+            ngd = summary.get(NGD_NAME)
+            if isinstance(ngd, dict):
+                for key, value in ngd.items():
+                    if isinstance(value, float) and round(value, 6) in stored:
+                        ngd[key] = round(value, 6)
+                entry = [entry[0], entry[1], f"{METRICS_SUMMARY}{summary}"]
+        out.append(entry)
+    return out
+
+
+XDTD_DATETIME = ("2026-06-28", "2026-09-28")
+XDTD_INFORES = ("infores:arax-xdtd", "infores:arax")
+
+
+def _xdtd_build(envelope: dict) -> dict:
+    """H17 on one envelope (a copy)."""
+    text = json.dumps(envelope)
+    if XDTD_INFORES[0] not in text and XDTD_DATETIME[0] not in text:
+        return envelope
+    new = json.loads(text.replace(XDTD_INFORES[0], XDTD_INFORES[1]))
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if (
+                obj.get("original_attribute_name") == "created_datetime"
+                and obj.get("value") == XDTD_DATETIME[0]
+            ):
+                obj["value"] = XDTD_DATETIME[1]
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(new)
+    edges = (new.get("message") or {}).get("knowledge_graph") or {}
+    for edge in (edges.get("edges") or {}).values():
+        attributes = edge.get("attributes") or []
+        if not attributes or attributes[0].get("original_attribute_name") != (
+            "created_datetime"
+        ):
+            continue
+        pubs = [
+            a
+            for a in attributes
+            if a.get("attribute_type_id") == "biolink:publications"
+            and a.get("original_attribute_name") == "publications"
+        ]
+        category = [
+            i
+            for i, a in enumerate(attributes)
+            if a.get("attribute_type_id") == "biolink:category"
+        ]
+        if len(pubs) != 1 or not category:
+            continue
+        (pub,) = pubs
+        rest = [a for a in attributes if a is not pub]
+        at = next(
+            i
+            for i, a in enumerate(rest)
+            if a.get("attribute_type_id") == "biolink:category"
+        )
+        pub = {k: v for k, v in pub.items() if k != "original_attribute_name"}
+        edge["attributes"] = rest[: at + 1] + [pub] + rest[at + 1 :]
+    return new
+
+
+# H18: settings.arax_tier_version (shepherd_utils/config.py)
+ARAX_TIER0_BUILD = "tier0-20260928"
+
+
+def _data_release_versions(envelope: Any) -> None:
+    """H18 on one envelope ARAX made, in place."""
+    if isinstance(envelope, dict) and envelope.get("resource_id") == "ARAX":
+        envelope["data_release_versions"] = {"infores:arax": ARAX_TIER0_BUILD}
+
+
+def _tool_version(envelope: Any) -> None:
+    """H23 on one envelope ARAX made, in place."""
+    if isinstance(envelope, dict) and envelope.get("tool_version") == "ARAX 1.6.2":
+        envelope["tool_version"] = "ARAX 2.0.0"
+
+
+def _biolink_version(envelope: Any) -> None:
+    """H24 on one envelope ARAX made, in place."""
+    if isinstance(envelope, dict) and envelope.get("biolink_version") == "4.2.5":
+        envelope["biolink_version"] = "4.4.4"
+
+
+def _row_data_strings(envelope: Any) -> None:
+    """H20 on one envelope ARAX made, in place: no null in ``row_data``."""
+    message = (envelope or {}).get("message") if isinstance(envelope, dict) else None
+    for result in (message or {}).get("results") or []:
+        if isinstance(result.get("row_data"), list):
+            result["row_data"] = ["" if v is None else v for v in result["row_data"]]
+
+
+# H21: the INFO line ResultTransformer.transform logs once its KG cleanup ran
+TRANSFORM_DONE = (
+    "Done transforming results to TRAPI 1.5 format (i.e., using support_graphs)"
+)
+
+
+def _support_graph_keys(edge: dict) -> list:
+    return [
+        str(v)
+        for a in edge.get("attributes") or []
+        if a.get("attribute_type_id") == "biolink:support_graphs"
+        for v in (a.get("value") or [])
+        if v is not None
+    ]
+
+
+def _referenced_without_both_endpoints(message: dict) -> tuple:
+    """H21: (nodes, edges, aux graphs) the results reach through bindings and
+    support graphs, transitively (ARAX_resultify.analyze_message_get_referenced_IDs
+    with apply_both_endpoints_rule=False)."""
+    kg_nodes = message["knowledge_graph"].get("nodes") or {}
+    kg_edges = message["knowledge_graph"].get("edges") or {}
+    aux_graphs = message.get("auxiliary_graphs") or {}
+    nodes, edges, aux, worklist = set(), set(), set(), []
+    for result in message.get("results") or []:
+        for binding in (result.get("node_bindings") or {}).values():
+            nodes.update(binding["ids"])
+        for analysis in result.get("analyses") or []:
+            worklist.extend(analysis.get("support_graphs") or [])
+            for binding in (analysis.get("edge_bindings") or {}).values():
+                for edge_id in binding["ids"]:
+                    edges.add(edge_id)
+                    nodes.update(
+                        (kg_edges[edge_id]["subject"], kg_edges[edge_id]["object"])
+                    )
+    while True:
+        for edge_id in list(edges):
+            worklist.extend(_support_graph_keys(kg_edges[edge_id]))
+        grown = False
+        for aux_id in worklist:
+            if aux_id in aux or aux_id not in aux_graphs:
+                continue
+            aux_edges = aux_graphs[aux_id].get("edges") or []
+            if not all(
+                e in kg_edges
+                and kg_edges[e]["subject"] in kg_nodes
+                and kg_edges[e]["object"] in kg_nodes
+                for e in aux_edges
+            ):
+                continue  # ARAX skips a broken aux graph entirely
+            aux.add(aux_id)
+            for e in aux_edges:
+                if e not in edges:
+                    edges.add(e)
+                    grown = True
+                nodes.update((kg_edges[e]["subject"], kg_edges[e]["object"]))
+        worklist = []
+        if not grown:
+            return nodes, edges, aux
+
+
+def _drop_unreferenced(envelope: dict, logs: list) -> None:
+    """H21 on one envelope ARAX made, in place: the final KG cleanup keeps only
+    what a result or support graph references (no both-endpoints rule)."""
+    if not any(entry[2] == TRANSFORM_DONE for entry in logs):
+        return
+    message = envelope["message"]
+    nodes, edges, aux = _referenced_without_both_endpoints(message)
+    kg = message["knowledge_graph"]
+    kg["nodes"] = {k: v for k, v in (kg.get("nodes") or {}).items() if k in nodes}
+    kg["edges"] = {k: v for k, v in (kg.get("edges") or {}).items() if k in edges}
+    if "auxiliary_graphs" in message:
+        message["auxiliary_graphs"] = {
+            k: v for k, v in message["auxiliary_graphs"].items() if k in aux
+        }
+
+
+def _qg_sets(qg: Any, sent: bool) -> None:
+    """H14 on one query graph, in place. ``sent``: a graph ARAX sends to a KP."""
+    if not isinstance(qg, dict):
+        return
+    for qnode in (qg.get("nodes") or {}).values():
+        if not isinstance(qnode, dict):
+            continue
+        is_set = qnode.pop("is_set", None)
+        if sent:
+            if qnode.get("ids"):
+                if qnode.get("set_interpretation") == "COLLATE":
+                    del qnode["set_interpretation"]
+            else:
+                qnode["set_interpretation"] = "COLLATE"
+        elif is_set is True:
+            qnode["set_interpretation"] = "COLLATE"
+
+
+# H19: the constraint ids ARAX post-filters itself (Expand/trapi_querier.py)
+POST_FILTERED_QNODE_CONSTRAINTS = {"biolink:highest_FDA_approval_status"}
+POST_FILTERED_QEDGE_CONSTRAINTS = {"biolink:evidence_count"}
+
+
+def _strip_post_filtered(qg: Any) -> None:
+    """H19 on one query graph ARAX sends to a KP, in place."""
+    if not isinstance(qg, dict):
+        return
+    for qnode in (qg.get("nodes") or {}).values():
+        if isinstance(qnode, dict) and isinstance(qnode.get("constraints"), list):
+            kept = [
+                c
+                for c in qnode["constraints"]
+                if c.get("id") not in POST_FILTERED_QNODE_CONSTRAINTS
+            ]
+            if kept:
+                qnode["constraints"] = kept
+            else:
+                del qnode["constraints"]
+    for qedge in (qg.get("edges") or {}).values():
+        constraints = qedge.get("constraints") if isinstance(qedge, dict) else None
+        if not isinstance(constraints, dict):
+            continue
+        if constraints.get("attributes"):
+            kept = [
+                c
+                for c in constraints["attributes"]
+                if c.get("id") not in POST_FILTERED_QEDGE_CONSTRAINTS
+            ]
+            if kept:
+                constraints["attributes"] = kept
+            else:
+                del constraints["attributes"]
+        if not constraints:
+            del qedge["constraints"]
+
+
+def _sent_graphs(requests_: list, plan: Any) -> list:
+    """The query graphs of recorded KP request bodies and query-plan queries."""
+    graphs = [
+        ((r.get("body") or {}).get("message") or {}).get("query_graph")
+        for r in requests_ or []
+    ]
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            q = obj.get("query")
+            if isinstance(q, dict):
+                graphs.append((q.get("message") or {}).get("query_graph"))
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(plan)
+    return graphs
 
 
 def collated_qnodes(case: tuple) -> list:
@@ -498,6 +913,7 @@ def query_goldens(g16: dict) -> dict:
     inputs = load_inputs16("query_parity")["CASES"]
     collated = {c[0]: collated_qnodes(c) for c in inputs}
     members = {c[0]: member_ids_qnodes(c) for c in inputs}
+    precomputed = _precomputed_ngd()
     out = {}
     for case, rec in g16.items():
         new = copy.deepcopy(rec)
@@ -515,6 +931,24 @@ def query_goldens(g16: dict) -> dict:
         new["requests"] = requests(rec["requests"])
         if members.get(case):  # H13
             _add_member_ids(new, members[case])
+        _qg_sets(qg, sent=False)  # H14
+        _jaccard_predicate(new["envelope"]["message"])  # H15
+        _precomputed_ngd_edges(new["envelope"]["message"], precomputed)  # H16
+        new["logs"] = _precomputed_ngd_logs(new["logs"], precomputed)
+        new["envelope"] = _xdtd_build(new["envelope"])  # H17
+        _data_release_versions(new["envelope"])  # H18
+        _row_data_strings(new["envelope"])  # H20
+        _tool_version(new["envelope"])  # H23
+        _biolink_version(new["envelope"])  # H24
+        _drop_unreferenced(new["envelope"], new["logs"])  # H21
+        plan = (new["envelope"].get("query_options") or {}).get("query_plan")
+        if case in XCRG_CASES:  # xCRG's lookups copy ARAX's own query graph
+            for graph in _sent_graphs(new["requests"], plan):
+                _qg_sets(graph, sent=False)
+        else:
+            for graph in _sent_graphs(new["requests"], plan):
+                _qg_sets(graph, sent=True)
+                _strip_post_filtered(graph)  # H19
         out[case] = new
     return out
 
@@ -529,6 +963,8 @@ def _validation_version(result: Any) -> Any:
     for old in ("1.6.0", "1.5.0"):
         text = text.replace(f'"version": "{old}"', '"version": "2.0.0"')
         text = text.replace(f"info.checked.{old}.", "info.checked.2.0.0.")
+    # ... and the Biolink version it validates against: 4.4.4 (upstream trapi2.0 ae9b9b2d)
+    text = text.replace("info.checked.2.0.0.4.4.2", "info.checked.2.0.0.4.4.4")
     result["validation_result"] = json.loads(text)
     return result
 
@@ -538,6 +974,14 @@ def response_lookup(result: Any) -> Any:
     if isinstance(result, dict) and isinstance(result.get("message"), dict):
         declared = result.get("schema_version")
         new = response(result, produced=False)
+        _qg_sets(new["message"].get("query_graph"), sent=False)  # H14
+        _precomputed_ngd_edges(new["message"], _precomputed_ngd())  # H16
+        new = _xdtd_build(new)  # H17
+        qo = new.get("query_options")
+        for graph in _sent_graphs(
+            [], qo.get("query_plan") if isinstance(qo, dict) else None
+        ):
+            _qg_sets(graph, sent=True)
         if declared not in (None, "1.6.0"):
             new["schema_version"] = declared  # H6: a stored 1.5.0 stays 1.5.0
         return _validation_version(new)
@@ -591,8 +1035,25 @@ def response_goldens(g16: dict) -> dict:
     return out
 
 
+def _original_predicate_constraint_name(value: Any) -> None:
+    """H22 on a recorded meta-KG value, in place."""
+    if isinstance(value, dict):
+        if (
+            value.get("attribute_type_id") == "biolink:original_predicate"
+            and value.get("constraint_name") == "kg2 ids"
+        ):
+            value["constraint_name"] = "original predicate"
+        for item in value.values():
+            _original_predicate_constraint_name(item)
+    elif isinstance(value, list):
+        for item in value:
+            _original_predicate_constraint_name(item)
+
+
 def aux_goldens(g16: dict) -> dict:
-    return copy.deepcopy(g16)  # H7
+    out = copy.deepcopy(g16)  # H7
+    _original_predicate_constraint_name(out["meta_kg"])  # H22
+    return out
 
 
 TRANSLATE = {
