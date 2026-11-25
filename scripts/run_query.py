@@ -9,6 +9,7 @@ where to send it.
     python scripts/run_query.py ars-local -t mvp2-decreased -c NCBIGene:1017
     python scripts/run_query.py bte-dev -t mvp2-chem-increased -c CHEBI:85078
     python scripts/run_query.py aragorn-local -t pathfinder -c "CHEBI:45783~MONDO:0004979"
+    python scripts/run_query.py aragorn-local -t mcq-gene-chemicals -c NCBIGene:3156,NCBIGene:3157
     python scripts/run_query.py arax-local --async --callback-host 172.17.0.1
     python scripts/run_query.py arax-local -c MONDO:0005148 --arax-internal
     python scripts/run_query.py http://localhost:5439/arax --query-file my_query.json
@@ -38,6 +39,9 @@ Query types (-t):
   mvp2-chem-increased  genes <chemical> increases            (curie: chemical)
   mvp2-chem-decreased  genes <chemical> decreases            (curie: chemical)
   pathfinder           paths between two nodes               (curie: SUBJECT~OBJECT)
+  mcq-gene-chemicals   chemicals enriched around a gene set  (curie: GENE,GENE,...)
+  mcq-disease-phenotypes
+                       phenotypes shared by a disease set    (curie: DISEASE,...)
 Without -c, each type runs its default sweep (--list shows them; --limit N
 runs the first N). --query-file sends a TRAPI JSON file as-is instead.
 
@@ -213,6 +217,53 @@ def pathfinder_query(subject: str, obj: str) -> dict:
     }
 
 
+#: Multi-curie (set-input) query types: (member category, answer category,
+#: predicate). Aragorn answers these with set enrichment (aragorn.graphenrich).
+MCQ_TYPES = {
+    "mcq-gene-chemicals": (
+        "biolink:Gene",
+        "biolink:ChemicalEntity",
+        "biolink:related_to",
+    ),
+    "mcq-disease-phenotypes": (
+        "biolink:Disease",
+        "biolink:PhenotypicFeature",
+        "biolink:has_phenotype",
+    ),
+}
+
+
+def mcq_query(
+    members: list[str], member_category: str, answer_category: str, predicate: str
+) -> dict:
+    """MCQ: answers enriched across a set of members. The set node's one id
+    names the set (a UUID derived from its members, so a rerun reuses it);
+    the members go in member_ids."""
+    set_id = "uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, ",".join(sorted(members))))
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "SN": {
+                        "categories": [member_category],
+                        "ids": [set_id],
+                        "member_ids": members,
+                        "set_interpretation": "MANY",
+                    },
+                    "ON": {"categories": [answer_category]},
+                },
+                "edges": {
+                    "t_edge": {
+                        "subject": "SN",
+                        "object": "ON",
+                        "predicates": [predicate],
+                    }
+                },
+            },
+        },
+    }
+
+
 QUERY_TYPES = (
     "mvp1",
     "mvp2-increased",
@@ -220,13 +271,15 @@ QUERY_TYPES = (
     "mvp2-chem-increased",
     "mvp2-chem-decreased",
     "pathfinder",
+    *MCQ_TYPES,
 )
 QUERY_TYPE_ALIASES = {"treats": "mvp1"}
 
 
 def build_query(query_type: str, spec: str) -> dict:
-    """The TRAPI query for a curie spec: one curie, or SUBJECT~OBJECT for
-    pathfinder. Bare (no parameters/submitter): run_query adds those."""
+    """The TRAPI query for a curie spec: one curie, SUBJECT~OBJECT for
+    pathfinder, or comma-separated members for an MCQ. Bare (no
+    parameters/submitter): run_query adds those."""
     query_type = QUERY_TYPE_ALIASES.get(query_type, query_type)
     if query_type == "mvp1":
         return mvp1_query(spec)
@@ -238,6 +291,14 @@ def build_query(query_type: str, spec: str) -> dict:
         if len(parts) != 2 or not all(parts):
             raise ValueError(f"pathfinder spec must be 'SUBJECT~OBJECT', got {spec!r}")
         return pathfinder_query(*parts)
+    if query_type in MCQ_TYPES:
+        members = list(dict.fromkeys(p.strip() for p in spec.split(",") if p.strip()))
+        if len(members) < 2:
+            raise ValueError(
+                f"{query_type} spec must be two or more comma-separated curies, "
+                f"got {spec!r}"
+            )
+        return mcq_query(members, *MCQ_TYPES[query_type])
     raise ValueError(f"unknown query type {query_type!r}")
 
 
@@ -314,6 +375,20 @@ PATHFINDER_PAIRS = [
     # "CHEBI:10033~MONDO:0004992",  # Warfarin -> Cancer, DON'T RUN
 ]
 
+MCQ_GENE_SETS = [
+    # cholesterol biosynthesis: HMGCR, HMGCS1, MVK, FDPS, SQLE, DHCR7
+    "NCBIGene:3156,NCBIGene:3157,NCBIGene:4598,NCBIGene:2224,NCBIGene:6713,NCBIGene:1717",
+    # AnswerCoalesce's README example: PCNA, NR1I2, PIK3CA
+    "NCBIGene:5111,NCBIGene:8856,NCBIGene:5290",
+]
+
+MCQ_DISEASE_SETS = [
+    # Gaucher disease type I, Niemann-Pick disease, Niemann-Pick disease type C
+    "MONDO:0009265,MONDO:0001982,MONDO:0018982",
+    # multiple sclerosis, systemic lupus erythematosus, rheumatoid arthritis
+    "MONDO:0005301,MONDO:0007915,MONDO:0008383",
+]
+
 DEFAULT_SPECS = {
     "mvp1": MVP1_DISEASES,
     "mvp2-increased": MVP2_GENES,
@@ -321,6 +396,8 @@ DEFAULT_SPECS = {
     "mvp2-chem-increased": MVP2_CHEMICALS,
     "mvp2-chem-decreased": MVP2_CHEMICALS,
     "pathfinder": PATHFINDER_PAIRS,
+    "mcq-gene-chemicals": MCQ_GENE_SETS,
+    "mcq-disease-phenotypes": MCQ_DISEASE_SETS,
 }
 
 
@@ -408,7 +485,7 @@ class Recorder:
     def save(self, label: str, query_type: str, spec: str, suffix: str, payload):
         out_dir = self.out_dir / label / query_type
         out_dir.mkdir(parents=True, exist_ok=True)
-        name = spec.replace(":", "_").replace("~", "__")
+        name = spec.replace(":", "_").replace("~", "__").replace(",", "+")
         with (out_dir / f"{name}_{suffix}.json").open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
@@ -834,7 +911,8 @@ def parse_args(argv=None):
         "--curie",
         nargs="+",
         dest="curies",
-        help="curies to query (SUBJECT~OBJECT pairs for pathfinder); "
+        help="curies to query (SUBJECT~OBJECT pairs for pathfinder, "
+        "comma-separated member sets for mcq-*); "
         "default: the type's sweep",
     )
     query.add_argument("--limit", type=int, help="run only the first N curies")

@@ -1,0 +1,6 @@
+duckdb>=1.4,<2
+# 18.x works with numpy 1.x and 2.x (later releases need numpy 2)
+pyarrow>=17,<19
+# build_duckdb.py only: the Biolink model and the Translator blocklist
+bmt==1.4.8
+requests

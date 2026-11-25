@@ -27,14 +27,16 @@ _spec.loader.exec_module(_mod)
 import fixtures as F  # noqa: E402
 import dbs  # noqa: E402
 
+# upstream's record was made with the tier0-20260621 files; the port reads the
+# tier0-20260928 build, its ARAX files (DEC-30) and the pathfinder's alike
 TIER0 = "tier0-info-for-overlay_v1.0_tier0-20260621.sqlite"
 CURIE_TO_PMIDS = "curie_to_pmids_v1.0_tier0-20260621.sqlite"
-# the port's ARAX files are the tier0-20260928 build (DEC-30); the pathfinder
-# files (TIER0, CURIE_NGD) stay on their own tier
-CURIE_TO_PMIDS_20260928 = "curie_to_pmids_v1.0_tier0-20260928.sqlite"
-XDTD_20260928 = "ExplainableDTD_v1.0-tier0-20260928-all_with_paths.db"
 CURIE_NGD = "curie_ngd_v1.0_tier0-20260621.sqlite"
 XDTD = "ExplainableDTD_v1.0_tier0-20260621-all_with_paths.db"
+TIER0_20260928 = "tier0-info-for-overlay_v1.0_tier0-20260928.sqlite"
+CURIE_TO_PMIDS_20260928 = "curie_to_pmids_v1.0_tier0-20260928.sqlite"
+CURIE_NGD_20260928 = "curie_ngd_v1.0_tier0-20260928.sqlite"
+XDTD_20260928 = "ExplainableDTD_v1.0-tier0-20260928-all_with_paths.db"
 COHD = "COHDdatabase_v1.0_KG2.8.0.db"
 FDA = "fda_approved_drugs_v1.0.pickle"
 
@@ -44,13 +46,13 @@ def write_data(
 ):
     """``port``: the port's files (the tier0-20260928 ARAX build, DEC-30);
     upstream's record was made with the tier0-20260621 ones."""
-    F.write_tier0_sqlite(os.path.join(tier0_dir, TIER0))
+    F.write_tier0_sqlite(os.path.join(tier0_dir, TIER0_20260928 if port else TIER0))
     F.write_fda_pickle(os.path.join(fda_dir, FDA))
     dbs.write_all(
         os.path.join(ngd_dir, CURIE_TO_PMIDS_20260928 if port else CURIE_TO_PMIDS),
         os.path.join(cohd_dir, COHD),
         os.path.join(xdtd_dir, XDTD_20260928 if port else XDTD),
-        os.path.join(curie_ngd_dir, CURIE_NGD),
+        os.path.join(curie_ngd_dir, CURIE_NGD_20260928 if port else CURIE_NGD),
         tier0_20260928=port,
     )
 

@@ -22,9 +22,11 @@ comparing:
   pair of saved responses (`<case>.port.json` / `<case>.upstream.json`) first.
   Upstream points its development maturity at `https://dev.retriever.biothings.io/query`.
 - **ARAX data files.** `ARAX_TIER_VERSION=tier0-20260928` (the default), with
-  the real files rather than mock data (DEC-30). Until the pathfinder files move
-  to tier0-20260928 (their own PR), NGD values read from `curie_ngd` have no
-  publications attribute, so NGD edges will differ.
+  the real files rather than mock data (DEC-30). The pathfinder files
+  (`curie_ngd`, tier0-info-for-overlay) are the same build
+  (`ARAX_PATHFINDER_TIER_VERSION=tier0-20260928`); with the older
+  tier0-20260621 `curie_ngd`, NGD values differ slightly and NGD edges have no
+  publications.
 - **In-process ARAX.** The script sets `parameters.arax_internal: true` on
   Shepherd's queries, so they run the port whatever `ARAX_INTERNAL_DEFAULT` is.
   `--no-arax-internal` turns that off.
@@ -102,8 +104,8 @@ port defects:
 - **A `kp` list** is forwarded to Retriever as `parameters.kp` (DEC-10).
 - **xCRG** runs the same package as upstream (DEC-25), so its known bugs
   (BioPack-team/shepherd#273, #274, #275 and #276) affect both sides alike.
-- **NGD publications** are missing on the port's side until the pathfinder
-  files move to tier0-20260928 (see section 1).
+- **NGD values** and NGD publications differ if the pathfinder files are not
+  the tier0-20260928 build (see section 1).
 
 ### Ties between results
 

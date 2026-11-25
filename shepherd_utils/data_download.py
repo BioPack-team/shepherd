@@ -13,7 +13,8 @@ Two flavors of HTTP source are supported:
 
 * **Archive** -- a single ``.tar.gz`` fetched via ``urllib`` and extracted in
   place (``OMNICORP_LMDB_URL`` / ``PATHFINDER_EMBEDDINGS_URL`` /
-  ``PATHFINDER_SEARCH_GRAPH_URL``, used by ``aragorn_omnicorp``,
+  ``PATHFINDER_SEARCH_GRAPH_URL`` / ``GRAPHENRICH_DUCKDB_URL``, used by
+  ``aragorn_graphenrich``, ``aragorn_omnicorp``,
   ``score_paths`` and ``aragorn_pathfinder`` below).
 * **Per-file** -- individual files fetched directly, no archive/extract step
   (``arax_pathfinder`` below, whose two sqlite databases are served as plain
@@ -332,6 +333,20 @@ def ensure_pathfinder_search_graph(logger: Optional[logging.Logger] = None) -> N
     )
 
 
+def ensure_graphenrich_duckdb(logger: Optional[logging.Logger] = None) -> None:
+    """Ensure aragorn.graphenrich's DuckDB graph is present, fetching and
+    extracting the ``.tar.gz`` at ``graphenrich_duckdb_url`` when missing.
+    The archive holds the database file at its top level."""
+    path = settings.graphenrich_duckdb_path
+    ensure_lmdb_dataset(
+        name="aragorn_graphenrich",
+        target_dir=os.path.dirname(path),
+        required_files=[os.path.basename(path)],
+        url=settings.graphenrich_duckdb_url,
+        logger=logger,
+    )
+
+
 def arax_pathfinder_sqlite_paths() -> Tuple[str, str]:
     """Return ``(curie_ngd_path, node_degree_path)`` for the arax_pathfinder
     sqlite databases, built from ``arax_pathfinder_dbs_dir`` + the filename
@@ -364,7 +379,7 @@ def ensure_arax_pathfinder_dbs(logger: Optional[logging.Logger] = None) -> None:
     docker-compose.yml).
 
     The version tag shows up in the filename (e.g.
-    ``curie_ngd_v1.0_tier0-20260621.sqlite``) but not in the URL path -- the
+    ``curie_ngd_v1.0_tier0-20260928.sqlite``) but not in the URL path -- the
     ``tier0`` segment in ``arax_pathfinder_sqlite_base_url`` is fixed, not the
     tier version. Only the filename templates are filled in from
     ``arax_pathfinder_tier_version``. Bumping to a new tier is one env var

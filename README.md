@@ -112,6 +112,7 @@ A couple of workers read from large, read-only sqlite databases and LMDB dataset
 commit to git (they're gitignored and volume-mounted from the host):
 
 - **`aragorn_omnicorp`** → `./omnicorp_lmdb/` (`curies.lmdb`, `shared_counts.lmdb`)
+- **`aragorn_graphenrich`** → `./graphenrich/` (`graphenrich.duckdb`)
 - **`score_paths`** → `./pathfinder_embeddings/` (a directory-style LMDB)
 - **`arax_pathfinder`** → `./arax_pathfinder_dbs/` (`curie_ngd_v1.0_<tier-version>.sqlite`, `tier0-info-for-overlay_v1.0_<tier-version>.sqlite`, `general_concepts.json`)
 - **arax** (the in-process ARAX port) → `./arax_dbs/` (`curie_to_pmids_v1.0_<tier-version>.sqlite`, `ExplainableDTD_v1.0-<tier-version>-all_with_paths.db`, `fda_approved_drugs_v1.0.pickle`, `COHDdatabase_v1.0_KG2.8.0.db`), plus the arax_pathfinder sqlite dbs in `./arax_pathfinder_dbs/`. The server's ARAX API fetches `autocomplete_v1.0_<tier-version>.sqlite` into the same `./arax_dbs/` (and keeps its meta-KG backups there). The arax worker also caches the Biolink model and ARAX's Biolink lookup map in `./arax_dbs/biolink/`, built at startup so it survives restarts (`ARAX_BIOLINK_CACHE_DIR` moves it).
@@ -135,7 +136,7 @@ filenames embed a Knowledge Graph version that changes periodically, so only one
 when a new Knowledge Graph ships:
 
 ```dotenv
-ARAX_PATHFINDER_TIER_VERSION=tier0-20260621
+ARAX_PATHFINDER_TIER_VERSION=tier0-20260928
 ```
 
 The ARAX blocked-concept list (`general_concepts.json`, fetched from GitHub) lands in this same
@@ -171,6 +172,29 @@ band, so it's unaffected).
 Downloads are bounded by `DATASET_DOWNLOAD_TIMEOUT_SEC` (default 60), which applies per socket
 operation rather than to the whole transfer — a large file downloads for as long as it needs, but a
 connection that opens and then stalls fails loudly instead of hanging worker startup.
+
+**`aragorn_graphenrich`'s DuckDB graph** (graphenrich is Shepherd's port of AnswerCoalesce's set
+enrichment) is one file, `./graphenrich/graphenrich.duckdb`
+(mounted at `/app/graphenrich`; `GRAPHENRICH_DUCKDB_PATH` moves it). When it is missing the
+worker downloads it on startup from `GRAPHENRICH_DUCKDB_URL`, a `.tar.gz` with
+`graphenrich.duckdb` at its top level, and extracts it in place, the same way as the LMDB datasets
+above (`tar -czf graphenrich.duckdb.tar.gz graphenrich.duckdb` makes one); set the variable
+empty to skip the download. **The default URL is a placeholder until
+the database is published**, so for now either point the variable at a copy or put the file there
+yourself. A database built by AnswerCoalesce (schema 7) works as is. To build one from a KGX node/edge
+JSONL pair (needs network access for the Biolink model and the Translator blocklist):
+
+```bash
+python -m workers.aragorn_graphenrich.build_duckdb \
+  --nodes nodes.jsonl --edges edges.jsonl \
+  --output graphenrich/graphenrich.duckdb
+```
+
+The builder is AnswerCoalesce's, plus each edge's `knowledge_level` and `agent_type` (schema 8), which
+TRAPI 2.0 requires on every edge; on a schema 7 database the support edges report `not_provided`.
+Building takes several GB of memory and spill space (`--memory-limit`, `--max-temp-directory-size`).
+At query time each pool child is limited by `GRAPHENRICH_DUCKDB_MEMORY_LIMIT` (default `1GB`),
+`GRAPHENRICH_DUCKDB_THREADS` (2) and `GRAPHENRICH_DUCKDB_MAX_TEMP_DIRECTORY_SIZE` (`8GB`).
 
 #### ARAX's KP response cache
 
@@ -633,7 +657,7 @@ single large pod. On Kubernetes the memory `limit` (OOMKilled + restart) plus
 regular rollouts already recycle pods, so leaked-resource cleanup comes for free
 — add an RSS-based `livenessProbe` only if the monitor shows OOMKills in
 practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
-`aragorn_score`, `aragorn_omnicorp`) size their process pools from the in-code
+`aragorn_score`, `aragorn_omnicorp`, `aragorn_graphenrich`) size their process pools from the in-code
 default, so raising `TASK_LIMIT` for those only deepens the intake queue rather
 than adding parallelism.
 

@@ -269,12 +269,12 @@ class Settings(BaseSettings):
     )
 
     arax_pathfinder_dbs_dir: str = "arax_pathfinder_dbs"
-    arax_pathfinder_tier_version: str = "tier0-20260621"
+    arax_pathfinder_tier_version: str = "tier0-20260928"
     arax_pathfinder_curie_ngd_sqlite_filename: str = "curie_ngd_v1.0_{version}.sqlite"
     arax_pathfinder_tier0_overlay_sqlite_filename: str = (
         "tier0-info-for-overlay_v1.0_{version}.sqlite"
     )
-    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0-20260928"
 
     # Data files for the ARAX port's other workers (Overlay, Infer, Expand, the
     # UI-facing API), set up the same way as the pathfinder DBs above: one
@@ -290,7 +290,7 @@ class Settings(BaseSettings):
     # tier0-20260928 (DEC-30): curie_to_pmids is int32 PMID blobs, and the
     # ExplainableDTD mapping tables use the extra_attributes schema
     arax_tier_version: str = "tier0-20260928"
-    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0-20260928"
     arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
     arax_curie_to_pmids_url: str = ""
     arax_explainable_dtd_db_filename: str = (
@@ -314,6 +314,24 @@ class Settings(BaseSettings):
 
     omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.lmdb"
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
+
+    # aragorn.graphenrich (graph enrichment): the read-only DuckDB
+    # graph, volume-mounted like the omnicorp LMDBs (build one with
+    # `python -m workers.aragorn_graphenrich.build_duckdb`). The limits apply per
+    # pool child, so the worker's memory is about pool size x memory_limit.
+    graphenrich_duckdb_path: str = "/app/graphenrich/graphenrich.duckdb"
+    graphenrich_duckdb_memory_limit: str = "1GB"
+    graphenrich_duckdb_max_temp_directory_size: str = "8GB"
+    graphenrich_duckdb_threads: int = 2
+    # Where DuckDB spills; empty uses /tmp/graphenrich-duckdb-<pid>.
+    graphenrich_duckdb_temp_directory: str = ""
+    # Where the worker fetches the database on startup when it is missing: a
+    # .tar.gz holding graphenrich.duckdb (the basename of
+    # graphenrich_duckdb_path) at its top level, extracted into that
+    # file's directory. Empty skips the download.
+    graphenrich_duckdb_url: str = (
+        "https://stars.renci.org/var/translator/ac/answer-coalesce-hierarchy-pruned-2026-9-14.duckdb"
+    )
 
     pathfinder_embeddings_dir: str = "/app/pathfinder_embeddings"
     pathfinder_search_graph_dir: str = "/app/pathfinder_search_graph"
