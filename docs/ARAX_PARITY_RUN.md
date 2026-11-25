@@ -119,3 +119,51 @@ answers, for example). To measure it, restart the `arax` worker with another
 
 The comparison ignores where each side puts its query plan, the envelope `id`,
 and log texts and timestamps.
+
+## 4. Node normalization: can the calls go?
+
+The port's Node Normalizer calls take seconds on large answers (DEC-34).
+Two ways to measure whether ARAX needs them:
+
+**Per call site, in one run (`compare`).** Run the port with
+`ARAX_NODE_NORMALIZATION=compare` on the `arax` worker, or pass the parameter
+to the port side only:
+
+```bash
+python scripts/arax_compare.py --port-params '{"arax_node_normalization": "compare"}'
+```
+
+Each response then logs a `NodeNormalizationComparison` entry: for every call
+site, how many CURIEs it looked up and how many would have answered
+differently if they were taken as already normalized. The script sums them
+over all cases into `normalization.md` (and `normalization.json`) under
+`--out`, with the cases and examples behind each count. Kinds:
+
+- `id`: the Node Normalizer's preferred id is another CURIE (a query id that
+  isn't the preferred one, for example);
+- `unknown`: the Node Normalizer doesn't know the CURIE;
+- `category` / `no_category`: the preferred category differs, or no KP
+  returned the node, so `off` has no category for it;
+- `name`: the name differs;
+- `equivalents`: the Node Normalizer knows other equivalent ids. This only
+  matters where the caller uses them (Expand's synonym lookups).
+
+**End to end (`off` against `on`).** Compare Shepherd with itself:
+
+```bash
+python scripts/arax_compare.py \
+    --upstream http://localhost:5439/arax --upstream-params '{"arax_internal": true}' \
+    --port-params '{"arax_node_normalization": "off"}' --no-expected \
+    --out responses/nodenorm-off
+```
+
+The "port" side runs with normalization off, the "upstream" side with it on.
+`--no-expected` stops the port-vs-upstream EXPECTED table from hiding
+differences. Ties between results still apply (section 3), so check SIMILAR
+cases against a control: the same command without `--port-params`.
+
+The calls can go when the `compare` report shows nothing but counts that don't
+change an answer, and the `off` run is SAME or SIMILAR within the control's
+noise. The report goes in the response's INFO logs, so don't set
+`parameters.log_level` above INFO.
+

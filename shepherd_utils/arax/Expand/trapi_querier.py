@@ -10,6 +10,8 @@
 #     TRAPI parameters.bypass_cache=true is forwarded to Retriever in parameters (2.0 requires it);
 #     a KP knowledge graph without edges (optional in 2.0) is an empty one, not a malformed one;
 #     request bodies leave out empty containers
+#   - the nodes of each KP answer are remembered for the arax_node_normalization off / compare
+#     modes (shepherd_utils/arax_normalization.py)
 #   - from upstream trapi2.0 (16f5cb79): the request body marks only id-less qnodes as sets, with
 #     set_interpretation COLLATE (a qnode with ids gets none), on a copy of the query graph (DEC-24)
 #   - from upstream trapi2.0 (b5d02852, 775b97a1; DEC-27): subclass_of edges ARAX makes are
@@ -47,6 +49,7 @@ from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
 from shepherd_utils.arax.ARAX_resultify import set_qnode_is_set
 from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax import util
+from shepherd_utils import arax_normalization
 from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_biolink_helper
 
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -713,6 +716,8 @@ class TRAPIQuerier:
 
         # Populate our final KG with the returned nodes
         unbound_nodes = {}
+        # Shepherd: names and categories for the arax_node_normalization off / compare modes
+        arax_normalization.remember_kp_nodes(nodes_dict)
 
         for node_key, node in nodes_dict.items():
             if not node_key:

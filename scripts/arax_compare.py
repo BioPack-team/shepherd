@@ -423,17 +423,22 @@ def _post(base: str, body: dict, timeout: float):
 
 def bodies(c, args) -> tuple:
     """(port body, upstream body): the case's TRAPI 2.0 query, identical on both
-    sides except Shepherd's own arax_internal switch."""
+    sides except Shepherd's own arax_internal switch and each side's
+    --port-params / --upstream-params."""
     body = json.loads(json.dumps(c.body))
     parameters = dict(body.get("parameters") or {})
     parameters.setdefault("timeout", c.timeout)
     if args.bypass_cache:
         parameters["bypass_cache"] = True
-    upstream = dict(body, parameters=parameters)
+    upstream_parameters = dict(parameters, **(args.upstream_params or {}))
     port_parameters = dict(parameters)
     if args.arax_internal:
         port_parameters["arax_internal"] = True
-    return dict(body, parameters=port_parameters), upstream
+    port_parameters.update(args.port_params or {})
+    return (
+        dict(body, parameters=port_parameters),
+        dict(body, parameters=upstream_parameters),
+    )
 
 
 def run_case(c, args, out_dir: Path) -> dict:
@@ -465,7 +470,7 @@ def diff_case(c, port_resp, up_resp, meta: dict, args, out_dir: Path) -> dict:
         summarize(http.get("upstream"), up_resp),
         args.similar_at,
     )
-    if diff["verdict"] != "SAME" and c.name in EXPECTED:
+    if diff["verdict"] != "SAME" and c.name in EXPECTED and args.expected:
         diff["verdict"] = "EXPECTED"
         diff["expected_because"] = EXPECTED[c.name]
     elif diff["verdict"] == "DIFF" and upstream_failed_alone(
@@ -585,7 +590,12 @@ def digest(body, http=None) -> dict:
         "n_kg_edges": len(edges),
         "n_aux_graphs": len(aux),
         "n_logs": len(logs),
-        "logs": [e for e in logs if e.get("level") in ("WARNING", "ERROR")],
+        "logs": [
+            e
+            for e in logs
+            if e.get("level") in ("WARNING", "ERROR")
+            or e.get("code") == NORMALIZATION_LOG_CODE
+        ],
         "query_plan": body.get("query_plan") or query_options.get("query_plan"),
         "query_graph": message.get("query_graph"),
         "results": results,
@@ -597,6 +607,115 @@ def digest(body, http=None) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Node normalization report
+# ---------------------------------------------------------------------------
+
+# The log entry Shepherd's arax worker adds in off / compare mode
+# (shepherd_utils/arax_normalization.py)
+NORMALIZATION_LOG_CODE = "NodeNormalizationComparison"
+NORMALIZATION_KINDS = (
+    "id",
+    "unknown",
+    "category",
+    "no_category",
+    "name",
+    "equivalents",
+)
+
+
+def normalization_entry(body):
+    """The report in a response's NodeNormalizationComparison log, or None."""
+    if not isinstance(body, dict):
+        return None
+    for entry in body.get("logs") or []:
+        if entry.get("code") == NORMALIZATION_LOG_CODE:
+            message = entry.get("message") or ""
+            try:
+                return json.loads(message[message.index("{") :])
+            except ValueError:
+                return None
+    return None
+
+
+def normalization_report(cases: list, out_dir: Path) -> Path | None:
+    """<out>/normalization.md (and .json): every saved response's Node
+    Normalizer comparison, summed per call site across the cases.
+
+    For each call site: the lookups and CURIEs, and how many CURIEs taking them
+    as already normalized would have answered differently, by kind, with the
+    cases where it happened and a few examples. A site with only zeros (or only
+    ``equivalents`` where its caller doesn't use equivalent ids) is one the
+    Node Normalizer could be dropped from.
+    """
+    sites: dict = {}
+    per_case = {}
+    for c in cases:
+        for side in ("port", "upstream"):
+            saved = out_dir / f"{c.name}.{side}.json"
+            report = normalization_entry(_read_json(saved)) if saved.exists() else None
+            if not report:
+                continue
+            per_case[f"{c.name}.{side}"] = report
+            for site, entry in report.get("sites", {}).items():
+                total = sites.setdefault(
+                    site,
+                    {
+                        "calls": 0,
+                        "curies": 0,
+                        **{k: 0 for k in NORMALIZATION_KINDS},
+                        "cases": {k: [] for k in NORMALIZATION_KINDS},
+                        "examples": {k: [] for k in NORMALIZATION_KINDS},
+                    },
+                )
+                total["calls"] += entry.get("calls", 0)
+                total["curies"] += entry.get("curies", 0)
+                for kind in NORMALIZATION_KINDS:
+                    if entry.get(kind):
+                        total[kind] += entry[kind]
+                        total["cases"][kind].append(c.name)
+                        room = 5 - len(total["examples"][kind])
+                        if room > 0:
+                            total["examples"][kind] += (
+                                entry.get("examples") or {}
+                            ).get(kind, [])[:room]
+    if not per_case:
+        return None
+    (out_dir / "normalization.json").write_text(
+        json.dumps({"sites": sites, "cases": per_case}, indent=1), encoding="utf-8"
+    )
+    modes = sorted({r.get("mode") for r in per_case.values()})
+    lines = [
+        "# Node normalization: per call site",
+        "",
+        f"- {len(per_case)} responses with a report; modes: {', '.join(map(str, modes))}",
+        "- the counts are CURIEs whose answer would differ if they were taken as "
+        "already normalized (compare mode only)",
+        "",
+        "| call site | lookups | CURIEs | " + " | ".join(NORMALIZATION_KINDS) + " |",
+        "|---|---|---|" + "---|" * len(NORMALIZATION_KINDS),
+    ]
+    for site, total in sorted(sites.items(), key=lambda kv: -kv[1]["curies"]):
+        lines.append(
+            f"| {_cell(site)} | {total['calls']} | {total['curies']} | "
+            + " | ".join(str(total[k]) for k in NORMALIZATION_KINDS)
+            + " |"
+        )
+    for site, total in sorted(sites.items()):
+        found = [k for k in NORMALIZATION_KINDS if total[k]]
+        if not found:
+            continue
+        lines += ["", f"## {site}", ""]
+        for kind in found:
+            cases_text = ", ".join(sorted(set(total["cases"][kind])))
+            lines.append(f"- **{kind}** ({total[kind]}): {cases_text}")
+            for example in total["examples"][kind]:
+                lines.append(f"  - `{json.dumps(example, sort_keys=True)}`")
+    path = out_dir / "normalization.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def pack(cases: list, out_dir: Path) -> Path:
     """<out>/arax-compare-pack.zip: the summary, every diff, and a digest of
     every saved response."""
@@ -604,7 +723,12 @@ def pack(cases: list, out_dir: Path) -> Path:
 
     path = out_dir / "arax-compare-pack.zip"
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name in ("summary.md", "summary.json"):
+        for name in (
+            "summary.md",
+            "summary.json",
+            "normalization.md",
+            "normalization.json",
+        ):
             if (out_dir / name).exists():
                 zf.write(out_dir / name, name)
         for c in cases:
@@ -676,6 +800,9 @@ def write_summary(diffs: list, out_dir: Path, args) -> None:
         f"- port: `{args.port}`",
         f"- upstream: `{args.upstream}`",
         f"- bypass_cache: {args.bypass_cache}; SIMILAR at Jaccard ≥ {args.similar_at}",
+        f"- extra parameters: port {json.dumps(args.port_params or {})}, "
+        f"upstream {json.dumps(args.upstream_params or {})}; "
+        f"EXPECTED table {'on' if args.expected else 'off'}",
         f"- {_counts_text(_counts(diffs))}",
         "",
         "| verdict | case | results port/upstream | results J | top-10 overlap "
@@ -744,6 +871,28 @@ def main() -> int:
         help="don't ask Shepherd for its in-process ARAX (parameters.arax_internal)",
     )
     parser.add_argument(
+        "--port-params",
+        type=json.loads,
+        default={},
+        metavar="JSON",
+        help="extra query parameters for the port side, e.g. "
+        '\'{"arax_node_normalization": "off"}\'',
+    )
+    parser.add_argument(
+        "--upstream-params",
+        type=json.loads,
+        default={},
+        metavar="JSON",
+        help="extra query parameters for the upstream side (to compare Shepherd "
+        "with itself, point --upstream at it and pass '{\"arax_internal\": true}')",
+    )
+    parser.add_argument(
+        "--no-expected",
+        dest="expected",
+        action="store_false",
+        help="don't apply the EXPECTED table (for comparing Shepherd with itself)",
+    )
+    parser.add_argument(
         "--similar-at",
         type=float,
         default=0.9,
@@ -789,6 +938,9 @@ def main() -> int:
                 print(report_line(d), flush=True)
                 diffs.append(d)
     write_summary(diffs, out_dir, args)
+    normalization = normalization_report(cases, out_dir)
+    if normalization is not None:
+        print(f"node normalization report: {normalization}")
     if args.pack:
         path = pack(cases, out_dir)
         print(f"packed {path} ({path.stat().st_size / 1e6:.1f} MB)")

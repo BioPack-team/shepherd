@@ -5,6 +5,9 @@
 #   - from upstream trapi2.0 (9c38a488, #2913): NAME_RESOLVER_URL_BY_MATURITY and
 #     resolve_name_resolver_url() (class-cached, RENCI fallback), used by __init__. As for
 #     NodeNorm, the maturity is RTXConfiguration().maturity, i.e. settings.server_maturity
+#   - _call_normalizer_api follows the query's arax_node_normalization mode (on / off /
+#     compare, shepherd_utils/arax_normalization.py); its NodeNorm request is now
+#     _call_normalizer_api_uncompared
 #   - from upstream trapi2.0 (b8e2f499): the always-empty in_kg2pre / name_kg2pre /
 #     category_kg2pre fields and the KG2pre provided_by / name / category attributes are removed
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
@@ -26,6 +29,8 @@ import aiohttp  # type: ignore[import-untyped]
 import bmt  # type: ignore[import-not-found]
 import pandas as pd  # type: ignore[import-untyped]
 import requests  # type: ignore[import-untyped]
+
+from shepherd_utils import arax_normalization
 
 # The ARAX repo doesn't use a standard Python package layout,
 # so we need sys.path.append to resolve cross-module imports.
@@ -983,6 +988,21 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
         if not curies:
             return {}
 
+        # Shepherd: off answers without the Node Normalizer; compare calls it
+        # and records where off would differ (shepherd_utils/arax_normalization.py)
+        normalization = arax_normalization.mode()
+        if normalization == "off":
+            arax_normalization.count(arax_normalization.call_site(), curies)
+            return {curie: arax_normalization.assumed_normalized(curie, self.category_levels)
+                    for curie in curies}
+        all_results = self._call_normalizer_api_uncompared(curies)
+        if normalization == "compare":
+            arax_normalization.record(arax_normalization.call_site(), curies,
+                                      all_results, self.category_levels)
+        return all_results
+
+    def _call_normalizer_api_uncompared(
+            self, curies: List[str]) -> dict:
         all_results: dict[str, dict | None] = {}
         uncached_curies: list[str] = []
 

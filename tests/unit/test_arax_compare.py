@@ -1,6 +1,7 @@
 """The comparison logic of scripts/arax_compare.py (the side-by-side parity
 run of Shepherd's ARAX port against a deployed upstream ARAX)."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -90,11 +91,72 @@ def test_bodies_differ_only_by_shepherds_switch():
     class Args:
         bypass_cache = True
         arax_internal = True
+        port_params = {}
+        upstream_params = {}
 
     port, upstream = AC.bodies(c, Args)
     assert port["parameters"].pop("arax_internal") is True
     assert port == upstream
     assert upstream["parameters"]["bypass_cache"] is True
+
+
+def test_each_side_can_have_its_own_parameters():
+    """Shepherd compared with itself: normalization off vs on."""
+    (c,) = AC.comparable_cases(only=["lookup_one_hop_treats"])
+
+    class Args:
+        bypass_cache = True
+        arax_internal = True
+        port_params = {"arax_node_normalization": "off"}
+        upstream_params = {"arax_internal": True}
+
+    port, upstream = AC.bodies(c, Args)
+    assert port["parameters"]["arax_node_normalization"] == "off"
+    assert port["parameters"]["arax_internal"] is True
+    assert upstream["parameters"]["arax_internal"] is True
+    assert "arax_node_normalization" not in upstream["parameters"]
+
+
+def _with_report(report):
+    message = "Node normalization compared: " + json.dumps(report)
+    return {
+        "logs": [
+            {"level": "INFO", "code": AC.NORMALIZATION_LOG_CODE, "message": message}
+        ]
+    }
+
+
+def test_normalization_report_sums_call_sites_across_cases(tmp_path):
+    cases = AC.comparable_cases(only=["lookup_one_hop_treats", "mvp1"])[:2]
+    site = "Overlay/compute_ngd.py:_get_canonical_curies_map"
+    example = {"curie": "MESH:D1", "normalized": "CHEBI:1"}
+    for i, c in enumerate(cases):
+        report = {
+            "mode": "compare",
+            "totals": {},
+            "sites": {
+                site: {
+                    "calls": 1,
+                    "curies": 10,
+                    "id": i,
+                    "examples": {"id": [example]} if i else {},
+                }
+            },
+        }
+        (tmp_path / f"{c.name}.port.json").write_text(json.dumps(_with_report(report)))
+    path = AC.normalization_report(cases, tmp_path)
+    data = json.loads((tmp_path / "normalization.json").read_text())
+    total = data["sites"][site]
+    assert (total["calls"], total["curies"], total["id"]) == (2, 20, 1)
+    assert total["cases"]["id"] == [cases[1].name]
+    assert total["examples"]["id"] == [example]
+    assert "MESH:D1" in path.read_text()
+
+
+def test_no_normalization_report_without_one(tmp_path):
+    (c,) = AC.comparable_cases(only=["lookup_one_hop_treats"])
+    (tmp_path / f"{c.name}.port.json").write_text(json.dumps({"logs": []}))
+    assert AC.normalization_report([c], tmp_path) is None
 
 
 def test_same_edges_with_other_attributes_are_counted():

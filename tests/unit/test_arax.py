@@ -761,3 +761,30 @@ async def test_arax_log_entries_honour_the_query_log_level(mocker, query_logger)
     finally:
         query_logger.setLevel(logging.INFO)
     assert [entry["message"] for entry in saved] == ["w", "e"]
+
+
+def test_a_query_runs_in_its_node_normalization_mode(db, child_spans, mocker):
+    """parameters.arax_node_normalization is the mode while ARAX runs; the
+    lookups it made are on the span and in the response's log."""
+    from shepherd_utils import arax_normalization
+
+    seen = []
+
+    def run_arax(query, response_id):
+        seen.append(arax_normalization.mode())
+        arax_normalization.count("Overlay/compute_ngd.py:x", ["A:1", "B:2"])
+        return {"status": "Success", "message": {}, "logs": []}, 200
+
+    mocker.patch("workers.arax.worker.run_arax", side_effect=run_arax)
+    db({**OPERATIONS_QUERY, "parameters": {"arax_node_normalization": "off"}})
+    summary = worker.arax_query_task("query_id", "r1")
+
+    assert seen == ["off"]
+    assert arax_normalization.mode() == "on"
+    (span,) = _query_spans(child_spans)["arax.query"]
+    assert span.attributes["arax.node_normalization"] == "off"
+    assert span.attributes["arax.node_normalization.curies"] == 2
+    (entry,) = summary["logs"]
+    assert entry["code"] == arax_normalization.LOG_CODE
+    assert entry["level"] == "INFO"
+    assert '"curies": 2' in entry["message"]
