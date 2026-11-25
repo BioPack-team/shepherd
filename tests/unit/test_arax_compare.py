@@ -230,3 +230,18 @@ def test_only_upstream_failing_is_an_upstream_error():
 
 def test_pathfinder_cases_are_not_compared():
     assert not [c for c in AC.comparable_cases() if c.name.startswith("pathfinder_")]
+
+
+def test_an_off_mode_report_has_no_difference_columns(tmp_path):
+    """Off mode doesn't compare, so its report must not show zero differences."""
+    (c,) = AC.comparable_cases(only=["lookup_one_hop_treats"])
+    report = {
+        "mode": "off",
+        "totals": {"calls": 1, "curies": 3},
+        "sites": {"Overlay/compute_ngd.py:x": {"calls": 1, "curies": 3}},
+    }
+    (tmp_path / f"{c.name}.port.json").write_text(json.dumps(_with_report(report)))
+    text = AC.normalization_report([c], tmp_path).read_text()
+    assert "| call site | lookups | CURIEs | \n" in text
+    assert "| Overlay/compute_ngd.py:x | 1 | 3 | \n" in text
+    assert "equivalents" not in text

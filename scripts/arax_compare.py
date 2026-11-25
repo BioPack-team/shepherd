@@ -684,22 +684,29 @@ def normalization_report(cases: list, out_dir: Path) -> Path | None:
     (out_dir / "normalization.json").write_text(
         json.dumps({"sites": sites, "cases": per_case}, indent=1), encoding="utf-8"
     )
-    modes = sorted({r.get("mode") for r in per_case.values()})
+    modes = sorted({str(r.get("mode")) for r in per_case.values()})
+    # Only compare mode compares: an off-mode report counts the lookups made
+    # without the Node Normalizer, and its zeros would mean nothing
+    kinds = NORMALIZATION_KINDS if "compare" in modes else ()
     lines = [
         "# Node normalization: per call site",
         "",
-        f"- {len(per_case)} responses with a report; modes: {', '.join(map(str, modes))}",
-        "- the counts are CURIEs whose answer would differ if they were taken as "
-        "already normalized (compare mode only)",
+        f"- {len(per_case)} responses with a report; modes: {', '.join(modes)}",
+        (
+            "- the counts are CURIEs whose answer would differ if they were taken "
+            "as already normalized"
+            if kinds
+            else "- off mode: the lookups answered without the Node Normalizer. "
+            "Whether that changed any answer is in summary.md"
+        ),
         "",
-        "| call site | lookups | CURIEs | " + " | ".join(NORMALIZATION_KINDS) + " |",
-        "|---|---|---|" + "---|" * len(NORMALIZATION_KINDS),
+        "| call site | lookups | CURIEs | " + "".join(f"{k} | " for k in kinds),
+        "|---|---|---|" + "---|" * len(kinds),
     ]
     for site, total in sorted(sites.items(), key=lambda kv: -kv[1]["curies"]):
         lines.append(
             f"| {_cell(site)} | {total['calls']} | {total['curies']} | "
-            + " | ".join(str(total[k]) for k in NORMALIZATION_KINDS)
-            + " |"
+            + "".join(f"{total[k]} | " for k in kinds)
         )
     for site, total in sorted(sites.items()):
         found = [k for k in NORMALIZATION_KINDS if total[k]]
@@ -807,8 +814,8 @@ def write_summary(diffs: list, out_dir: Path, args) -> None:
         "",
         "| verdict | case | results port/upstream | results J | top-10 overlap "
         "| max Δscore | KG edges J | edges with other attributes / KL / AT "
-        "| outcome differences | port error | upstream error |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| outcome differences | seconds port/upstream | port error | upstream error |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for d in sorted(diffs, key=lambda d: VERDICTS.index(d["verdict"])):
         r = d["results"]
@@ -822,10 +829,24 @@ def write_summary(diffs: list, out_dir: Path, args) -> None:
             f"| {r['jaccard']} | {r['top10_overlap']} | {r['max_score_diff']} "
             f"| {d['kg_edges']['jaccard']} "
             f"| {d['edge_details']['differing']}/{d['edge_details']['common']} "
-            f"| {_cell(outcome)} | {_cell(_first_error(d, 'port'))} "
+            f"| {_cell(outcome)} | {_seconds(d)} | {_cell(_first_error(d, 'port'))} "
             f"| {_cell(_first_error(d, 'upstream'))} |"
         )
+    timed = [d for d in diffs if _seconds(d)]
+    if timed:
+        port_s = sum(d["seconds"]["port"] for d in timed)
+        upstream_s = sum(d["seconds"]["upstream"] for d in timed)
+        lines.insert(
+            7, f"- total seconds: port {port_s:.0f}, upstream {upstream_s:.0f}"
+        )
     (out_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _seconds(d: dict) -> str:
+    seconds = d.get("seconds") or {}
+    if seconds.get("port") is None or seconds.get("upstream") is None:
+        return ""
+    return f"{seconds['port']}/{seconds['upstream']}"
 
 
 def main() -> int:
