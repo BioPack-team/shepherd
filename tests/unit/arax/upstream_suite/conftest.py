@@ -166,3 +166,29 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_broken)
         elif config.getoption("--runonlybroken"):
             item.add_marker(skip_working)
+
+
+@pytest.fixture(autouse=True)
+def offline_name_resolver(request, monkeypatch):
+    """Offline, NameResolver is unreachable: fail its requests at once, with no
+    wait between retries, so the tests in offline_passing.txt that look names up
+    see the offline failure they were recorded against (each one otherwise waited
+    out the retries, or reached the live service where the network allows it).
+    With --arax-live the real service is used."""
+    if request.config.getoption("--arax-live"):
+        return
+    import requests
+
+    from shepherd_utils.arax.NodeSynonymizer.node_synonymizer import NodeSynonymizer
+
+    monkeypatch.setattr(NodeSynonymizer, "_NR_RETRY_WAIT", 0)
+    real_post = requests.Session.post
+
+    def post(self, url, *args, **kwargs):
+        if str(url).startswith(NodeSynonymizer.NAME_RESOLVER_URL.rstrip("/")):
+            raise requests.exceptions.ConnectionError(
+                "NameResolver is offline in tests"
+            )
+        return real_post(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "post", post)

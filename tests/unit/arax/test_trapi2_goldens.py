@@ -115,6 +115,16 @@ def _recorded_requests():
                 yield f"{suite}.{case}[{i}]", request["body"]
 
 
+@pytest.fixture(autouse=True)
+def instant_mock_retriever(monkeypatch):
+    """The mock Retriever sleeps 3s on its slow CURIE so the parity runs hit
+    their timeouts; the tests here replay recorded requests through it and
+    only compare its answers."""
+    import mock_retriever
+
+    monkeypatch.setattr(mock_retriever.time, "sleep", lambda _s: None)
+
+
 def test_mock_retriever_answers_are_the_translation_of_its_recorded_answers():
     import mock_retriever
 
