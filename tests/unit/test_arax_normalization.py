@@ -138,18 +138,48 @@ def test_kp_nodes_are_only_kept_off_or_compare():
         assert AN._kp_nodes == {}  # a new query starts afresh
 
 
+def _name_resolver(monkeypatch, candidates):
+    """The Name Resolver answering ``candidates`` (name -> hits), through the
+    synonymizer's own hit selection."""
+
+    def call(self, names):
+        return NodeSynonymizer._extract_curies(names, candidates)
+
+    monkeypatch.setattr(NodeSynonymizer, "_call_name_resolver_api", call)
+
+
+IMATINIB_HIT = {
+    "curie": "CHEBI:45783",
+    "label": "Imatinib",
+    "types": ["biolink:SmallMolecule", "biolink:ChemicalEntity"],
+}
+
+
 def test_off_leaves_names_to_the_name_resolver(synonymizer, monkeypatch):
     """ARAX looks names up as CURIEs too; off must not take a name for a
     normalized CURIE, or the Name Resolver is never asked."""
-    syn, _ = synonymizer
-    monkeypatch.setattr(
-        NodeSynonymizer,
-        "_call_name_resolver_api",
-        lambda self, names: {"imatinib": "CHEBI:45783"},
-    )
+    syn, calls = synonymizer
+    _name_resolver(monkeypatch, {"imatinib": [IMATINIB_HIT]})
     with AN.query_mode(_query("off")):
         result = syn.get_canonical_curies(curies=["imatinib"], names=["imatinib"])
+    assert calls == []
     assert result["imatinib"]["preferred_curie"] == "CHEBI:45783"
+    assert result["imatinib"]["preferred_name"] == "Imatinib"
+    assert result["imatinib"]["preferred_category"].endswith("SmallMolecule")
+
+
+def test_off_rejects_a_name_resolver_hit_for_another_name(synonymizer, monkeypatch):
+    """The Name Resolver returns its best fuzzy hit for anything; ARAX rejects a
+    hit whose name doesn't match the one asked. Off checks against the Name
+    Resolver's label, so an unknown name stays unresolved."""
+    syn, _ = synonymizer
+    hit = {"curie": "NCBIGene:820398", "label": "BIG", "types": ["biolink:Gene"]}
+    _name_resolver(monkeypatch, {"no such thing at all": [hit]})
+    with AN.query_mode(_query("off")):
+        result = syn.get_canonical_curies(
+            curies=["no such thing at all"], names=["no such thing at all"]
+        )
+    assert result["no such thing at all"] is None
 
 
 def test_compare_doesnt_count_names_the_node_normalizer_doesnt_know(synonymizer):

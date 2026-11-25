@@ -105,15 +105,19 @@ def remember_kp_nodes(nodes: dict) -> None:
                 known["categories"].append(category)
 
 
-def remember_names(name_to_curie: dict) -> None:
-    """Keep the name a CURIE was resolved from (Name Resolver), when no KP
-    gave it one: off mode answers with it."""
-    if _mode == "on":
+def remember_name_resolver_hit(candidate: dict) -> None:
+    """Keep the label and types the Name Resolver gives the CURIE it picked for
+    a name (its clique's preferred name and categories, from the same
+    normalized data): off mode answers with them, so ARAX's check that the
+    name matches the CURIE's name works as with the Node Normalizer.
+    """
+    if _mode == "on" or not candidate.get("curie"):
         return
-    for name, curie in name_to_curie.items():
-        if curie:
-            known = _kp_nodes.setdefault(curie, {"name": None, "categories": []})
-            known["name"] = known["name"] or name
+    known = _kp_nodes.setdefault(candidate["curie"], {"name": None, "categories": []})
+    known["name"] = known["name"] or candidate.get("label")
+    for category in candidate.get("types") or []:
+        if category not in known["categories"]:
+            known["categories"].append(category)
 
 
 def assumed_normalized(curie: str, category_levels: dict) -> Optional[dict]:
