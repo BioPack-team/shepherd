@@ -266,7 +266,7 @@ class Settings(BaseSettings):
     arax_pathfinder_tier0_overlay_sqlite_filename: str = (
         "tier0-info-for-overlay_v1.0_{version}.sqlite"
     )
-    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0-20260928"
 
     # Data files for the ARAX port's other workers (Overlay, Infer, Expand, the
     # UI-facing API), set up the same way as the pathfinder DBs above: one
@@ -280,11 +280,11 @@ class Settings(BaseSettings):
     # published).
     arax_dbs_dir: str = "arax_dbs"
     arax_tier_version: str = "tier0-20260928"
-    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0-20260928"
     arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
     arax_curie_to_pmids_url: str = ""
     arax_explainable_dtd_db_filename: str = (
-        "ExplainableDTD_v1.0_{version}-all_with_paths.db"
+        "ExplainableDTD_v1.0-{version}-all_with_paths.db"
     )
     arax_explainable_dtd_url: str = ""
     arax_autocomplete_sqlite_filename: str = "autocomplete_v1.0_{version}.sqlite"
