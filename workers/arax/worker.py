@@ -612,10 +612,12 @@ def add_normalization_report(span, response: dict, report: dict | None) -> None:
         return
     for key, value in report["totals"].items():
         span.set_attribute(f"arax.node_normalization.{key}", value)
-    if report["mode"] == "off":
+    if report["mode"] in ("off", "query_nodes"):
         summary = (
-            f"Node normalization off: {report['totals']['curies']} CURIEs in "
-            f"{report['totals']['calls']} lookups taken as already normalized"
+            f"Node normalization {report['mode']}: {report['totals']['curies']} "
+            f"CURIEs in {report['totals']['calls']} lookups taken as already "
+            f"normalized, {report['totals']['asked_curies']} in "
+            f"{report['totals']['asked_calls']} asked of the Node Normalizer"
         )
     else:
         summary = (

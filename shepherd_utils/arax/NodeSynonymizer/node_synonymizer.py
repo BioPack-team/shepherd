@@ -6,7 +6,7 @@
 #     resolve_name_resolver_url() (class-cached, RENCI fallback), used by __init__. As for
 #     NodeNorm, the maturity is RTXConfiguration().maturity, i.e. settings.server_maturity
 #   - _call_normalizer_api follows the query's arax_node_normalization mode (on / off /
-#     compare, shepherd_utils/arax_normalization.py); its NodeNorm request is now
+#     compare / query_nodes, shepherd_utils/arax_normalization.py); its NodeNorm request is now
 #     _call_normalizer_api_uncompared; _extract_curies keeps the Name Resolver's label and
 #     types of the CURIE it picks, for off mode
 #   - from upstream trapi2.0 (b8e2f499): the always-empty in_kg2pre / name_kg2pre /
@@ -989,13 +989,17 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
         if not curies:
             return {}
 
-        # Shepherd: off answers without the Node Normalizer; compare calls it
-        # and records where off would differ (shepherd_utils/arax_normalization.py)
+        # Shepherd: off (and query_nodes, for knowledge-graph nodes) answers
+        # without the Node Normalizer; compare calls it and records where off
+        # would differ (shepherd_utils/arax_normalization.py)
         normalization = arax_normalization.mode()
-        if normalization == "off":
-            arax_normalization.count(arax_normalization.call_site(), curies)
-            return {curie: arax_normalization.assumed_normalized(curie, self.category_levels)
-                    for curie in curies}
+        if normalization in ("off", "query_nodes"):
+            site = arax_normalization.call_site()
+            if arax_normalization.skips_node_normalizer(site):
+                arax_normalization.count(site, curies)
+                return {curie: arax_normalization.assumed_normalized(curie, self.category_levels)
+                        for curie in curies}
+            arax_normalization.count(site, curies, asked=True)
         all_results = self._call_normalizer_api_uncompared(curies)
         if normalization == "compare":
             arax_normalization.record(arax_normalization.call_site(), curies,

@@ -162,6 +162,14 @@ The "port" side runs with normalization off, the "upstream" side with it on.
 differences. Ties between results still apply (section 3), so check SIMILAR
 cases against a control: the same command without `--port-params`.
 
+**Only the query's own nodes (`query_nodes`).** `off` for the lookups of
+knowledge-graph nodes (NGD, FET's neighbor counts, `add_node_pmids`, COHD,
+thousands of CURIEs each), `on` for every other lookup: the query's own ids and
+names, where the Node Normalizer's category changes what ARAX does (the
+category FET counts neighbors of, for a query node without one). Run it as the
+`off` run above, with `"query_nodes"` for `"off"`; `normalization.md` then says
+which call sites asked the Node Normalizer.
+
 The calls can go when the `compare` report shows nothing but counts that don't
 change an answer, and the `off` run is SAME or SIMILAR within the control's
 noise. The report goes in the response's INFO logs, so don't set

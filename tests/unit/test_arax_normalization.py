@@ -94,7 +94,12 @@ def test_off_takes_curies_as_normalized_with_the_kps_names_and_categories(
     assert canonical["MESH:D000068877"]["preferred_category"] is None
     assert equivalents == {"MESH:D000068877": ["MESH:D000068877"]}
     assert report["mode"] == "off"
-    assert report["totals"] == {"calls": 2, "curies": 3}
+    assert report["totals"] == {
+        "calls": 2,
+        "curies": 3,
+        "asked_calls": 0,
+        "asked_curies": 0,
+    }
 
 
 def test_compare_answers_as_on_and_records_what_off_would_change(synonymizer):
@@ -187,3 +192,59 @@ def test_compare_doesnt_count_names_the_node_normalizer_doesnt_know(synonymizer)
     with AN.query_mode(_query("compare")):
         syn.get_canonical_curies(["type 2 diabetes mellitus"])
         assert AN.report()["totals"]["unknown"] == 0
+
+
+def _fet_neighbor_lookup(syn, curies):
+    """A lookup from FET's neighbor counting, a knowledge-graph-node call site."""
+
+    def query_size_of_adjacent_nodes():
+        return syn.get_canonical_curies(curies)
+
+    query_size_of_adjacent_nodes.__code__ = (
+        query_size_of_adjacent_nodes.__code__.replace(
+            co_filename="/app/shepherd_utils/arax/Overlay/fisher_exact_test.py"
+        )
+    )
+    return query_size_of_adjacent_nodes()
+
+
+def test_query_nodes_skips_only_knowledge_graph_node_lookups(synonymizer):
+    syn, calls = synonymizer
+    with AN.query_mode(_query("query_nodes")):
+        AN.remember_kp_nodes(
+            {"NCBIGene:25": SimpleNamespace(name="ABL1", categories=["biolink:Gene"])}
+        )
+        kg = _fet_neighbor_lookup(syn, ["MESH:D000068877", "NCBIGene:25"])
+        query = syn.get_canonical_curies(["MESH:D000068877"])
+        report = AN.report()
+    # FET's neighbor counting: taken as normalized, without a request
+    assert kg["MESH:D000068877"]["preferred_curie"] == "MESH:D000068877"
+    # any other caller (here, the test): the Node Normalizer's answer
+    assert query["MESH:D000068877"]["preferred_curie"] == "CHEBI:45783"
+    assert calls == [["MESH:D000068877"]]
+    assert report["mode"] == "query_nodes"
+    assert report["totals"] == {
+        "calls": 1,
+        "curies": 2,
+        "asked_calls": 1,
+        "asked_curies": 1,
+    }
+    asked = {site.split(" <- ")[0]: e["asked"] for site, e in report["sites"].items()}
+    assert asked["Overlay/fisher_exact_test.py:query_size_of_adjacent_nodes"] is False
+
+
+def test_the_knowledge_graph_node_sites_exist():
+    """KG_NODE_SITES names functions that are really there, so a rename
+    upstream can't silently turn query_nodes into on."""
+    import importlib
+
+    for site in AN.KG_NODE_SITES:
+        path, function = site.split(":")
+        module = importlib.import_module(
+            "shepherd_utils.arax." + path.removesuffix(".py").replace("/", ".")
+        )
+        assert any(
+            function in vars(cls)
+            for cls in vars(module).values()
+            if isinstance(cls, type)
+        ), site

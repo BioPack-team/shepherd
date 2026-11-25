@@ -12,6 +12,11 @@ the query's mode:
 - ``compare``: it asks the Node Normalizer and uses its answer, as ``on``
   does, and also records, per call site, every CURIE where ``off``'s answer
   would have been different (``report``).
+- ``query_nodes``: ``off`` for lookups of knowledge-graph nodes
+  (``KG_NODE_SITES``: NGD, FET's neighbor counts, add_node_pmids, COHD), ``on``
+  for every other lookup -- the query's own ids and names, a few CURIEs each,
+  where the Node Normalizer's category decides what ARAX does (FET's category
+  for a query node without one, the query graph interpreter).
 
 The mode is ``parameters.arax_node_normalization`` when the query sets it to
 one of those, else ``settings.arax_node_normalization``. It is set for the
@@ -30,7 +35,18 @@ from typing import Iterator, Optional
 from shepherd_utils.config import settings
 from shepherd_utils.trapi import query_parameters
 
-MODES = ("on", "off", "compare")
+MODES = ("on", "off", "compare", "query_nodes")
+
+# The functions that look up knowledge-graph nodes (thousands per query) and use
+# only each one's preferred id. query_nodes mode answers them as off does; any
+# other caller asks the Node Normalizer.
+KG_NODE_SITES = frozenset(
+    {
+        "Overlay/compute_ngd.py:_get_canonical_curies_map",
+        "Overlay/fisher_exact_test.py:query_size_of_adjacent_nodes",
+        "KnowledgeSources/COHD_local/scripts/COHDIndex.py:_get_preferred_curie",
+    }
+)
 PARAMETER = "arax_node_normalization"
 LOG_CODE = "NodeNormalizationComparison"
 MAX_EXAMPLES = 5
@@ -161,9 +177,18 @@ def call_site() -> str:
     return " <- ".join(frames) or "unknown"
 
 
-def count(site: str, curies: list) -> None:
-    """Off mode: count the lookups answered without the Node Normalizer."""
-    entry = _sites.setdefault(site, {"calls": 0, "curies": 0})
+def skips_node_normalizer(site: str) -> bool:
+    """Whether this query answers a lookup from ``site`` without the Node
+    Normalizer."""
+    if _mode == "off":
+        return True
+    return _mode == "query_nodes" and site.split(" <- ")[0] in KG_NODE_SITES
+
+
+def count(site: str, curies: list, asked: bool = False) -> None:
+    """Off / query_nodes mode: count the lookups, and whether each call site
+    asked the Node Normalizer (``asked``) or answered without it."""
+    entry = _sites.setdefault(site, {"calls": 0, "curies": 0, "asked": asked})
     entry["calls"] += 1
     entry["curies"] += len(curies)
 
@@ -244,6 +269,14 @@ def report() -> Optional[dict]:
         sites[site] = dict(entry)
         if "examples" in entry:
             sites[site]["examples"] = dict(entry["examples"])
-    keys = ("calls", "curies", *KINDS) if _mode == "compare" else ("calls", "curies")
-    totals = {key: sum(entry.get(key, 0) for entry in _sites.values()) for key in keys}
+    if _mode == "compare":
+        keys = ("calls", "curies", *KINDS)
+        totals = {k: sum(entry.get(k, 0) for entry in _sites.values()) for k in keys}
+    else:
+        # calls / curies: answered without the Node Normalizer; asked_*: by it
+        totals = {"calls": 0, "curies": 0, "asked_calls": 0, "asked_curies": 0}
+        for entry in _sites.values():
+            prefix = "asked_" if entry.get("asked") else ""
+            totals[f"{prefix}calls"] += entry["calls"]
+            totals[f"{prefix}curies"] += entry["curies"]
     return {"mode": _mode, "totals": totals, "sites": sites}

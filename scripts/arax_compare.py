@@ -663,11 +663,13 @@ def normalization_report(cases: list, out_dir: Path) -> Path | None:
                     {
                         "calls": 0,
                         "curies": 0,
+                        "asked": False,
                         **{k: 0 for k in NORMALIZATION_KINDS},
                         "cases": {k: [] for k in NORMALIZATION_KINDS},
                         "examples": {k: [] for k in NORMALIZATION_KINDS},
                     },
                 )
+                total["asked"] = total["asked"] or bool(entry.get("asked"))
                 total["calls"] += entry.get("calls", 0)
                 total["curies"] += entry.get("curies", 0)
                 for kind in NORMALIZATION_KINDS:
@@ -696,16 +698,20 @@ def normalization_report(cases: list, out_dir: Path) -> Path | None:
             "- the counts are CURIEs whose answer would differ if they were taken "
             "as already normalized"
             if kinds
-            else "- off mode: the lookups answered without the Node Normalizer. "
-            "Whether that changed any answer is in summary.md"
+            else "- off / query_nodes mode: the lookups, and whether each call site "
+            "asked the Node Normalizer. Whether skipping it changed any answer "
+            "is in summary.md"
         ),
         "",
-        "| call site | lookups | CURIEs | " + "".join(f"{k} | " for k in kinds),
-        "|---|---|---|" + "---|" * len(kinds),
+        "| call site | lookups | CURIEs | "
+        + ("" if kinds else "asked Node Normalizer | ")
+        + "".join(f"{k} | " for k in kinds),
+        "|---|---|---|" + ("" if kinds else "---|") + "---|" * len(kinds),
     ]
     for site, total in sorted(sites.items(), key=lambda kv: -kv[1]["curies"]):
         lines.append(
             f"| {_cell(site)} | {total['calls']} | {total['curies']} | "
+            + ("" if kinds else f"{'yes' if total['asked'] else 'no'} | ")
             + "".join(f"{total[k]} | " for k in kinds)
         )
     for site, total in sorted(sites.items()):

@@ -242,6 +242,6 @@ def test_an_off_mode_report_has_no_difference_columns(tmp_path):
     }
     (tmp_path / f"{c.name}.port.json").write_text(json.dumps(_with_report(report)))
     text = AC.normalization_report([c], tmp_path).read_text()
-    assert "| call site | lookups | CURIEs | \n" in text
-    assert "| Overlay/compute_ngd.py:x | 1 | 3 | \n" in text
+    assert "| call site | lookups | CURIEs | asked Node Normalizer | \n" in text
+    assert "| Overlay/compute_ngd.py:x | 1 | 3 | no | \n" in text
     assert "equivalents" not in text

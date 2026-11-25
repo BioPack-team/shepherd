@@ -243,8 +243,9 @@ class Settings(BaseSettings):
     arax_internal_default: bool = False
     # Whether the ARAX port calls the Node Normalizer: "on" (as upstream does),
     # "off" (every CURIE is taken as already normalized, with the name and
-    # categories Retriever gave it) or "compare" (calls it, and logs where "off"
-    # would have answered differently). A query's
+    # categories Retriever gave it), "compare" (calls it, and logs where "off"
+    # would have answered differently) or "query_nodes" ("off" for
+    # knowledge-graph nodes, "on" for the query's own ids and names). A query's
     # parameters.arax_node_normalization overrides it; see
     # shepherd_utils/arax_normalization.py.
     arax_node_normalization: str = "on"
