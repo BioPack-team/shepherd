@@ -379,7 +379,7 @@ def ensure_arax_pathfinder_dbs(logger: Optional[logging.Logger] = None) -> None:
     docker-compose.yml).
 
     The version tag shows up in the filename (e.g.
-    ``curie_ngd_v1.0_tier0-20260621.sqlite``) but not in the URL path -- the
+    ``curie_ngd_v1.0_tier0-20260928.sqlite``) but not in the URL path -- the
     ``tier0`` segment in ``arax_pathfinder_sqlite_base_url`` is fixed, not the
     tier version. Only the filename templates are filled in from
     ``arax_pathfinder_tier_version``. Bumping to a new tier is one env var
