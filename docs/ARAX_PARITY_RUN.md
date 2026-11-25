@@ -102,6 +102,14 @@ port defects:
 - **A multi-id qnode's subclass parent** is inferred from a `subclass_of` edge
   in the KP answer (DEC-29c). Upstream maps no parent.
 - **A `kp` list** is forwarded to Retriever as `parameters.kp` (DEC-10).
+- **CURIE prefixes are not converted** for Retriever (DEC-9). Upstream converts
+  each qnode's ids to the prefixes Retriever's meta-KG lists for the qnode's
+  categories, and drops ids with none, logging "Could not find curies with
+  prefixes infores:retriever prefers ... will not send these to KP". The port
+  sends them as they are. Example: human insulin (CHEBI:5931) is a `Protein` and
+  a `Drug`; upstream leaves it out of a gene/protein qnode's next hop, the port
+  keeps it, so `lookup_two_hop_curie_cat_curie` has one more result on the port
+  and `not_exclude_edge` (insulin on the excluded edge) one more upstream.
 - **xCRG** runs the same package as upstream (DEC-25), so its known bugs
   (BioPack-team/shepherd#273, #274, #275 and #276) affect both sides alike.
 - **NGD values** and NGD publications differ if the pathfinder files are not
