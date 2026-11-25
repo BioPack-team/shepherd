@@ -136,3 +136,24 @@ def test_kp_nodes_are_only_kept_off_or_compare():
         assert AN._kp_nodes["NCBIGene:25"]["name"] == "ABL1"
     with AN.query_mode(_query("off")):
         assert AN._kp_nodes == {}  # a new query starts afresh
+
+
+def test_off_leaves_names_to_the_name_resolver(synonymizer, monkeypatch):
+    """ARAX looks names up as CURIEs too; off must not take a name for a
+    normalized CURIE, or the Name Resolver is never asked."""
+    syn, _ = synonymizer
+    monkeypatch.setattr(
+        NodeSynonymizer,
+        "_call_name_resolver_api",
+        lambda self, names: {"imatinib": "CHEBI:45783"},
+    )
+    with AN.query_mode(_query("off")):
+        result = syn.get_canonical_curies(curies=["imatinib"], names=["imatinib"])
+    assert result["imatinib"]["preferred_curie"] == "CHEBI:45783"
+
+
+def test_compare_doesnt_count_names_the_node_normalizer_doesnt_know(synonymizer):
+    syn, _ = synonymizer
+    with AN.query_mode(_query("compare")):
+        syn.get_canonical_curies(["type 2 diabetes mellitus"])
+        assert AN.report()["totals"]["unknown"] == 0

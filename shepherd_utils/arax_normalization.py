@@ -22,6 +22,7 @@ A pool child runs one query at a time, so the state here is per process.
 """
 
 import contextlib
+import re
 import sys
 from collections import defaultdict
 from typing import Iterator, Optional
@@ -43,6 +44,12 @@ MAX_EXAMPLES = 5
 # - equivalents: the Node Normalizer knows other equivalent ids (only matters
 #   where a caller uses them, e.g. Expand's synonym lookups)
 KINDS = ("id", "unknown", "category", "no_category", "name", "equivalents")
+
+# A CURIE: a prefix, a colon, a local id without spaces. ARAX sends names
+# ("metformin") through the same lookup as CURIEs (get_canonical_curies(curies=
+# [name], names=[name])); the Node Normalizer doesn't know them, and the name
+# goes on to the Name Resolver.
+_CURIE = re.compile(r"[A-Za-z][\w.\-]*:\S+")
 
 _mode = "on"
 _kp_nodes: dict[str, dict] = {}
@@ -98,14 +105,28 @@ def remember_kp_nodes(nodes: dict) -> None:
                 known["categories"].append(category)
 
 
-def assumed_normalized(curie: str, category_levels: dict) -> dict:
-    """What the Node Normalizer would answer if ``curie`` were normalized.
+def remember_names(name_to_curie: dict) -> None:
+    """Keep the name a CURIE was resolved from (Name Resolver), when no KP
+    gave it one: off mode answers with it."""
+    if _mode == "on":
+        return
+    for name, curie in name_to_curie.items():
+        if curie:
+            known = _kp_nodes.setdefault(curie, {"name": None, "categories": []})
+            known["name"] = known["name"] or name
+
+
+def assumed_normalized(curie: str, category_levels: dict) -> Optional[dict]:
+    """What the Node Normalizer would answer if ``curie`` were normalized
+    (None for a string that isn't a CURIE, as the Node Normalizer answers).
 
     The answer has the Node Normalizer's shape, so every caller handles it as
     it handles a real one. ``type`` is most specific first, as the Node
     Normalizer's is (``category_levels``: depth in the Biolink hierarchy,
     without the ``biolink:`` prefix).
     """
+    if not _CURIE.fullmatch(curie):
+        return None
     known = _kp_nodes.get(curie) or {}
     categories = sorted(
         known.get("categories") or [],
@@ -143,9 +164,13 @@ def count(site: str, curies: list) -> None:
     entry["curies"] += len(curies)
 
 
-def _differences(curie: str, real: Optional[dict], assumed: dict) -> list[str]:
+def _differences(
+    curie: str, real: Optional[dict], assumed: Optional[dict]
+) -> list[str]:
     if real is None:
-        return ["unknown"]
+        return [] if assumed is None else ["unknown"]
+    if assumed is None:
+        return ["id"]
     kinds = []
     real_id = (real.get("id") or {}).get("identifier")
     if real_id != curie:
@@ -189,15 +214,16 @@ def record(site: str, curies: list, real: dict, category_levels: dict) -> None:
                 entry["examples"][kind].append(_example(curie, found, assumed))
 
 
-def _example(curie: str, real: Optional[dict], assumed: dict) -> dict:
+def _example(curie: str, real: Optional[dict], assumed: Optional[dict]) -> dict:
     real = real or {}
+    assumed = assumed or {"id": {}, "type": []}
     return {
         "curie": curie,
         "normalized": (real.get("id") or {}).get("identifier"),
         "normalized_category": (real.get("type") or [None])[0],
         "assumed_category": (assumed["type"] or [None])[0],
         "normalized_name": (real.get("id") or {}).get("label"),
-        "assumed_name": assumed["id"]["label"],
+        "assumed_name": assumed["id"].get("label"),
     }
 
 

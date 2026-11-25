@@ -7,7 +7,7 @@
 #     NodeNorm, the maturity is RTXConfiguration().maturity, i.e. settings.server_maturity
 #   - _call_normalizer_api follows the query's arax_node_normalization mode (on / off /
 #     compare, shepherd_utils/arax_normalization.py); its NodeNorm request is now
-#     _call_normalizer_api_uncompared
+#     _call_normalizer_api_uncompared; a name the Name Resolver resolves names its CURIE there
 #   - from upstream trapi2.0 (b8e2f499): the always-empty in_kg2pre / name_kg2pre /
 #     category_kg2pre fields and the KG2pre provided_by / name / category attributes are removed
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
@@ -321,6 +321,8 @@ class NodeSynonymizer:  # pylint: disable=too-many-instance-attributes
         if names_set:
             name_to_curie = self._call_name_resolver_api(
                 list(names_set))
+            # Shepherd: off / compare know a resolved CURIE by the name asked
+            arax_normalization.remember_names(name_to_curie)
             resolved_curies = [
                 c for c in name_to_curie.values()
                 if c is not None]
