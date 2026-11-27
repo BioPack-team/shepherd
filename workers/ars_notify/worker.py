@@ -42,7 +42,11 @@ from shepherd_utils.broker import mark_task_as_complete
 from shepherd_utils.db import save_logs
 from shepherd_utils.logger import get_worker_logger
 from shepherd_utils.otel import setup_tracer
-from shepherd_utils.shared import on_graceful_shutdown, run_poll_loop
+from shepherd_utils.shared import (
+    on_graceful_shutdown,
+    record_task_duration,
+    run_poll_loop,
+)
 
 STREAM = "ars.notify"
 GROUP = "consumer"
@@ -202,6 +206,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
             except Exception as e:
                 logger.error(f"Task {task[0]}: failed to ack: {e}")
+            await record_task_duration(STREAM, task, logger)
             await save_logs(task[1].get("message_pk", "ars"), logger)
             limiter.release()
 

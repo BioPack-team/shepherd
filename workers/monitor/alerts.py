@@ -56,6 +56,13 @@ def _parse_duration(value: Any) -> float:
     return float(s)
 
 
+def _num(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class Rule:
     def __init__(self, raw: Dict[str, Any]):
         self.name = raw["name"]
@@ -71,6 +78,19 @@ class Rule:
         self.cooldown = _parse_duration(raw.get("cooldown", "10m"))
         self.severity = raw.get("severity", "warning")
         self.message = raw.get("message")
+        # Latching ("fire once per episode"). Set either key and the rule
+        # stops re-notifying on a cooldown: it fires when it crosses
+        # ``threshold``, then stays quiet until the metric has been at or below
+        # ``clear_threshold`` (default: ``threshold``) for ``clear_duration``,
+        # and only then can fire again. A clear_threshold under threshold is
+        # hysteresis, so a value hovering on the line doesn't flap.
+        self.latching = "clear_threshold" in raw or "clear_duration" in raw
+        clear = raw.get("clear_threshold")
+        self.clear_threshold = clear if clear is not None else self.threshold
+        self.clear_duration = _parse_duration(raw.get("clear_duration", 0))
+        # Per scope: when the metric last went at/below clear_threshold while
+        # the rule was latched (in-memory; the latch itself is in Redis).
+        self._clear_since: Dict[str, float] = {}
         # Per-rule transient state. Tracks first time the rule started firing
         # in the current "violation streak" so we can require ``duration`` of
         # continuous breach before alerting.
@@ -97,10 +117,14 @@ class Rule:
 
     def checks(
         self, snapshot: Dict[str, Any]
-    ) -> List[Tuple[str, str, Optional[str], Optional[str], Dict[str, Any]]]:
+    ) -> List[
+        Tuple[str, str, Optional[str], Optional[str], Dict[str, Any], Optional[float]]
+    ]:
         """Everything this rule evaluates on a snapshot, as ``(scope, alert
-        name, detail, message, extra event fields)``; ``detail`` is None where
-        the rule isn't breached.
+        name, detail, message, extra event fields, current value)``; ``detail``
+        is None where the rule isn't breached, and the value (what a latching
+        rule compares to ``clear_threshold``) is None where the rule kind has
+        no single number.
 
         Nearly every rule is one check under its own name. A ``redis_eviction``
         rule is one per Redis instance: the broker role's under the rule's
@@ -111,7 +135,16 @@ class Rule:
         """
         if self.kind != "redis_eviction":
             detail = self.evaluate(snapshot)
-            return [("", self.name, detail, self.message or detail, {})]
+            return [
+                (
+                    "",
+                    self.name,
+                    detail,
+                    self.message or detail,
+                    {},
+                    self.current_value(snapshot),
+                )
+            ]
         found = []
         for view in redis_instances.views(snapshot):
             detail = self._redis_eviction_detail(view)
@@ -126,9 +159,57 @@ class Rule:
                     detail,
                     message,
                     view.event_fields(),
+                    _num(view.stats.get("evicted_keys_delta", 0)),
                 )
             )
         return found
+
+    def current_value(self, snapshot: Dict[str, Any]) -> Optional[float]:
+        """The number a ``threshold`` rule compares, or None if it has none."""
+        if self.kind == "redis_eviction":
+            return _num(
+                redis_instances.primary_view(snapshot).stats.get(
+                    "evicted_keys_delta", 0
+                )
+            )
+        if self.kind != "threshold":
+            return None
+        if self.metric == "xlen" and self.stream:
+            stats = snapshot.get("streams", {}).get(self.stream)
+            return _num(stats.get("xlen")) if stats else None
+        pg = snapshot.get("postgres", {})
+        if self.metric == "callbacks_pending":
+            return _num(pg.get("callbacks_pending", 0))
+        if self.metric == "pg_connection_count":
+            return _num(pg.get("connection_count", 0))
+        if self.metric == "pg_connection_pct":
+            usable = pg.get("usable_connections") or 0
+            if usable <= 0:
+                return None
+            return 100.0 * (pg.get("client_connections", 0) or 0) / usable
+        return None
+
+    def update_latch_clear(
+        self, scope: str, detail: Optional[str], value: Optional[float], now: float
+    ) -> bool:
+        """For a latched rule: True once it has been clear for long enough.
+
+        Clear means the value is at or below ``clear_threshold`` (or, for a
+        rule with no single value, simply not breached), held for
+        ``clear_duration``. Going back above it restarts that clock.
+        """
+        if value is None or self.clear_threshold is None:
+            below = detail is None
+        else:
+            below = value <= float(self.clear_threshold)
+        if not below:
+            self._clear_since.pop(scope, None)
+            return False
+        since = self._clear_since.setdefault(scope, now)
+        if now - since >= self.clear_duration:
+            self._clear_since.pop(scope, None)
+            return True
+        return False
 
     def evaluate(self, snapshot: Dict[str, Any]) -> Optional[str]:
         """Return a human-readable detail string if the rule is currently breached."""
@@ -1127,6 +1208,31 @@ class AlertEngine:
         except Exception as e:
             logger.debug(f"Failed to set cooldown for {name}: {e}")
 
+    # Latches live in Redis (like cooldowns) so a monitor restart mid-episode
+    # doesn't re-notify. The TTL is only a backstop against a latch whose
+    # clearing the monitor never got to see.
+    _LATCH_TTL_SEC = 7 * 86400
+
+    async def _is_latched(self, name: str) -> bool:
+        try:
+            return bool(await broker_client.exists(f"alert:latched:{name}"))
+        except Exception:
+            return False
+
+    async def _set_latch(self, name: str) -> None:
+        try:
+            await broker_client.set(
+                f"alert:latched:{name}", "1", ex=self._LATCH_TTL_SEC
+            )
+        except Exception as e:
+            logger.debug(f"Failed to set latch for {name}: {e}")
+
+    async def _clear_latch(self, name: str) -> None:
+        try:
+            await broker_client.delete(f"alert:latched:{name}")
+        except Exception as e:
+            logger.debug(f"Failed to clear latch for {name}: {e}")
+
     def _buffer_down(self, worker: str, event: Dict[str, Any], now: float) -> None:
         """Queue a worker-down alert for batched delivery.
 
@@ -1182,7 +1288,16 @@ class AlertEngine:
         checks = [
             (rule, *check) for rule in self.rules for check in rule.checks(snapshot)
         ]
-        for rule, scope, name, detail, message, extra in checks:
+        for rule, scope, name, detail, message, extra, value in checks:
+            if rule.latching and await self._is_latched(name):
+                # Already alerted for this episode: stay quiet until the
+                # metric has dropped back to clear_threshold for clear_duration.
+                if rule.update_latch_clear(scope, detail, value, now):
+                    await self._clear_latch(name)
+                    logger.info(f"Alert {name} cleared; it can fire again")
+                if detail is None:
+                    rule.reset_streak(scope)
+                continue
             if detail is None:
                 rule.reset_streak(scope)
                 continue
@@ -1197,9 +1312,12 @@ class AlertEngine:
                 # and leave the breach streak intact -- so a worker that is
                 # genuinely still down once the window elapses fires promptly.
                 continue
-            if await self._in_cooldown(name):
-                continue
-            await self._set_cooldown(name, rule.cooldown)
+            if rule.latching:
+                await self._set_latch(name)
+            else:
+                if await self._in_cooldown(name):
+                    continue
+                await self._set_cooldown(name, rule.cooldown)
             event = {
                 "ts": now,
                 "rule": name,

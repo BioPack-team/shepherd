@@ -45,7 +45,7 @@ from shepherd_utils.response_limit import (
     write_too_large_response,
 )
 from shepherd_utils.config import settings
-from shepherd_utils.shared import run_poll_loop
+from shepherd_utils.shared import record_task_duration, run_poll_loop
 from shepherd_utils.trapi import (
     apply_query_status,
     wrap_stored_response,
@@ -706,6 +706,7 @@ async def process_task(task, parent_ctx, logger: logging.Logger, limiter):
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
             except Exception as e:
                 logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+            await record_task_duration(STREAM, task, logger)
             limiter.release()
             logger.debug(f"Finished task {task[0]} in {time.time() - start}")
 

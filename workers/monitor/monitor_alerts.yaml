@@ -20,6 +20,14 @@
 #               idle before it counts as wedged
 #   duration:   how long the condition must hold before firing (e.g. 60s, 5m)
 #   cooldown:   how long to suppress repeat fires (default 10m)
+#   clear_threshold / clear_duration:
+#               make the rule latch instead of re-firing on a cooldown
+#               (threshold and redis_eviction rules). It fires once when the
+#               value goes above `threshold`, then stays silent -- however
+#               long the episode lasts -- until the value has been at or below
+#               `clear_threshold` (default: `threshold`) for `clear_duration`
+#               (default 0). Setting either key turns latching on; `cooldown`
+#               is then ignored.
 #   severity:   info | warning | critical
 #
 # Redis instances. Shepherd's four Redis roles (broker, data, lock, logs) are
@@ -108,11 +116,16 @@ rules:
     duration: 30s
     severity: warning
 
+  # Latched: one alert per backlog episode. Re-arms only once the backlog has
+  # drained to 80 or fewer and stayed there for 2 minutes, so a count hovering
+  # around 100 doesn't re-notify every cooldown.
   - name: callbacks_pending_high
     type: threshold
     metric: callbacks_pending
     threshold: 100
     duration: 2m
+    clear_threshold: 80
+    clear_duration: 2m
     severity: warning
 
   # Redis broker memory pressure is monitored automatically by the alert engine
@@ -142,12 +155,19 @@ rules:
   # Redis eviction: with volatile-ttl, any eviction means the cap was reached
   # and blobs are being shed. threshold 0 => alert on the first eviction.
   # One rule covers every Redis instance: each has its own `duration` streak
-  # and cooldown, and an instance other than the broker role's alerts as
+  # and latch, and an instance other than the broker role's alerts as
   # `redis_evicting@<instance>`.
+  #
+  # Latched: one alert per eviction spell. Eviction is bursty (the delta is
+  # per poll tick, and is often 0 between bursts while still at the cap), so
+  # the alert only re-arms after 10 minutes with no evictions at all. Raise
+  # `threshold` to ignore light churn.
   - name: redis_evicting
     type: redis_eviction
     threshold: 0
     duration: 30s
+    clear_threshold: 0
+    clear_duration: 10m
     severity: warning
 
   # Wedged workers: tasks delivered to a consumer that then stopped acking. The

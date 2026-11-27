@@ -558,3 +558,100 @@ async def test_slack_batch_lists_every_worker(mocker):
     text = post.call_args.args[1]
     assert "2 workers down" in text
     assert "arax" in text and "bte" in text
+
+
+# ---- latching rules (clear_threshold / clear_duration) ----------------------
+
+
+def _cb_snap(ts, pending):
+    return {
+        "ts": ts,
+        "events": [],
+        "streams": {},
+        "postgres": {"callbacks_pending": pending},
+    }
+
+
+def _cb_rule(**extra):
+    return Rule(
+        {
+            "name": "callbacks_pending_high",
+            "type": "threshold",
+            "metric": "callbacks_pending",
+            "threshold": 100,
+            "duration": 0,
+            "cooldown": "1s",
+            "clear_threshold": 80,
+            **extra,
+        }
+    )
+
+
+async def test_latched_threshold_fires_once_per_episode(patched, clock):
+    engine = _engine([_cb_rule()])
+    assert len(await engine.evaluate(_cb_snap(1.0, 150))) == 1
+    # Still high long after the (1s) cooldown would have expired: no repeat.
+    for ts in (10.0, 100.0, 5000.0):
+        assert await engine.evaluate(_cb_snap(ts, 200)) == []
+    # Dipping under threshold but above clear_threshold doesn't re-arm.
+    assert await engine.evaluate(_cb_snap(5001.0, 90)) == []
+    assert await engine.evaluate(_cb_snap(5002.0, 150)) == []
+    # Back below clear_threshold re-arms; the next breach fires again.
+    assert await engine.evaluate(_cb_snap(5003.0, 50)) == []
+    assert len(await engine.evaluate(_cb_snap(5004.0, 150))) == 1
+    assert patched["dispatch"].await_count == 2
+
+
+async def test_latched_threshold_needs_clear_duration_to_rearm(patched, clock):
+    engine = _engine([_cb_rule(clear_duration="2m")])
+    assert len(await engine.evaluate(_cb_snap(1.0, 150))) == 1
+    # Clear for only a minute, then back up: still latched.
+    assert await engine.evaluate(_cb_snap(10.0, 10)) == []
+    assert await engine.evaluate(_cb_snap(70.0, 10)) == []
+    assert await engine.evaluate(_cb_snap(80.0, 150)) == []
+    # Clear for the full two minutes re-arms.
+    assert await engine.evaluate(_cb_snap(100.0, 10)) == []
+    assert await engine.evaluate(_cb_snap(221.0, 10)) == []
+    assert len(await engine.evaluate(_cb_snap(222.0, 150))) == 1
+
+
+async def test_latched_eviction_ignores_gaps_between_bursts(patched, clock):
+    rule = Rule(
+        {
+            "name": "redis_evicting",
+            "type": "redis_eviction",
+            "threshold": 0,
+            "duration": 0,
+            "clear_threshold": 0,
+            "clear_duration": "10m",
+        }
+    )
+    engine = _engine([rule])
+
+    def snap(ts, delta):
+        s = _redis_snap(10, 10, evicted_delta=delta)
+        s["ts"] = ts
+        return s
+
+    assert len(await engine.evaluate(snap(1.0, 5))) == 1
+    # Bursty eviction with quiet ticks in between: one alert, not one per burst.
+    for ts, delta in ((4.0, 0), (7.0, 3), (300.0, 0), (400.0, 9)):
+        assert await engine.evaluate(snap(ts, delta)) == []
+    # Ten quiet minutes re-arm it.
+    assert await engine.evaluate(snap(500.0, 0)) == []
+    assert await engine.evaluate(snap(1100.0, 0)) == []
+    assert len(await engine.evaluate(snap(1103.0, 4))) == 1
+
+
+def test_bundled_rules_latch_the_spammy_alerts():
+    from pathlib import Path
+
+    rules = {
+        r.name: r
+        for r in alerts.load_rules(
+            str(Path(alerts.__file__).with_name("monitor_alerts.yaml"))
+        )
+    }
+    assert rules["callbacks_pending_high"].latching
+    assert rules["redis_evicting"].latching
+    assert not rules["aragorn_backlog"].latching
