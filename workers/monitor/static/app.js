@@ -124,10 +124,21 @@
     }
   }
 
+  // 20 distinct hues for dark backgrounds; past 20 series the cycle repeats
+  // with a dashed, then dotted, line so no two series ever look the same.
   const COLORS = [
-    "#58a6ff", "#3fb950", "#d29922", "#f85149", "#a371f7",
-    "#ff7b72", "#79c0ff", "#56d364", "#e3b341", "#bc8cff",
+    "#58a6ff", "#3fb950", "#e3b341", "#f85149", "#a371f7",
+    "#39c5cf", "#f778ba", "#ff8c3a", "#b8e04a", "#2fa98c",
+    "#c9a7ff", "#ffa198", "#9cd8ff", "#ffd33d", "#db61a2",
+    "#7ee7c3", "#c08a5a", "#b1bac4", "#6e7bff", "#9a9a3a",
   ];
+  const DASHES = [[], [6, 3], [2, 2]];
+  function seriesStyle(i) {
+    return {
+      color: COLORS[i % COLORS.length],
+      dash: DASHES[Math.floor(i / COLORS.length) % DASHES.length],
+    };
+  }
 
   function utilizationClass(ratio) {
     if (ratio < 0.3) return "low";
@@ -391,8 +402,9 @@
     xlenChart.data.datasets = interesting.map((n, i) => ({
       label: n,
       data: xlenHistory[n].slice(),
-      borderColor: COLORS[i % COLORS.length],
-      backgroundColor: COLORS[i % COLORS.length],
+      borderColor: seriesStyle(i).color,
+      backgroundColor: seriesStyle(i).color,
+      borderDash: seriesStyle(i).dash,
       borderWidth: 1.5,
       pointRadius: 0,
       tension: 0.2,
@@ -480,7 +492,8 @@
     let dbDisk;
     if (cap > 0) {
       const pct = pg.disk_used_pct ?? 0;
-      const text = `${pct.toFixed(1)}% (${fmtBytes(pg.disk_used_bytes)} / ${fmtBytes(cap)})`;
+      // Same shape as the Redis memory row: used / cap (pct%).
+      const text = `${fmtBytes(pg.disk_used_bytes)} / ${fmtBytes(cap)} (${pct.toFixed(1)}%)`;
       const color = pct >= 90 ? "var(--bad)" : pct >= 80 ? "var(--warn)" : null;
       dbDisk = color ? `<span style="color:${color}">${text}</span>` : text;
     } else {

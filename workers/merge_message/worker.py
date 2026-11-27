@@ -55,6 +55,7 @@ from shepherd_utils.response_limit import (
     get_too_large_reason,
 )
 from shepherd_utils.shared import (
+    record_task_duration,
     run_poll_loop,
     filter_kgraph_orphans,
     merge_kgraph,
@@ -1543,6 +1544,7 @@ async def poll_for_tasks():
                 await mark_task_as_complete(STREAM, GROUP, task[0], logger)
             except Exception as e:
                 logger.error(f"Task {task[0]}: Failed to wrap up task: {e}")
+            await record_task_duration(STREAM, task, logger)
             logger.debug(f"Finished task {task[0]} in {time.time() - start:.2f}s")
             # Unlike normal workers, this worker hand-rolls its lifecycle and
             # never calls wrap_up_task, so nothing else persists its logs. Flush

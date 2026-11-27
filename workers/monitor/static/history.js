@@ -3,11 +3,21 @@
 // time window, set via the range bar at the top.
 
 (() => {
+  // 20 distinct hues for dark backgrounds; past 20 series the cycle repeats
+  // with a dashed, then dotted, line so no two series ever look the same.
   const COLORS = [
-    "#58a6ff", "#3fb950", "#d29922", "#f85149", "#a371f7",
-    "#ff7b72", "#79c0ff", "#56d364", "#e3b341", "#bc8cff",
-    "#ffa657", "#7ee787", "#ffd33d",
+    "#58a6ff", "#3fb950", "#e3b341", "#f85149", "#a371f7",
+    "#39c5cf", "#f778ba", "#ff8c3a", "#b8e04a", "#2fa98c",
+    "#c9a7ff", "#ffa198", "#9cd8ff", "#ffd33d", "#db61a2",
+    "#7ee7c3", "#c08a5a", "#b1bac4", "#6e7bff", "#9a9a3a",
   ];
+  const DASHES = [[], [6, 3], [2, 2]];
+  function seriesStyle(i) {
+    return {
+      color: COLORS[i % COLORS.length],
+      dash: DASHES[Math.floor(i / COLORS.length) % DASHES.length],
+    };
+  }
 
   let currentWindow = { since: null, until: null, label: "24h" };
   const charts = {};
@@ -113,7 +123,7 @@
       tension: 0.2,
       stepped: opts.stepped ?? false,
     };
-    if (opts.dash) ds.borderDash = opts.dash;
+    if (opts.dash && opts.dash.length) ds.borderDash = opts.dash;
     return ds;
   }
 
@@ -180,7 +190,8 @@
     const names = Object.keys(r.series).sort();
     names.forEach((name, i) => {
       const short = name.replace(/^workers_alive:/, "");
-      datasets.push(seriesToDataset(short, r.series[name], COLORS[i % COLORS.length], { stepped: true }));
+      const st = seriesStyle(i);
+      datasets.push(seriesToDataset(short, r.series[name], st.color, { stepped: true, dash: st.dash }));
     });
     if (!charts.fleet) {
       charts.fleet = mkChart("fleet-chart", "line", []);
@@ -200,7 +211,8 @@
       .sort();
     entries.forEach(([name, pts], i) => {
       const short = name.replace(/^xlen:/, "");
-      datasets.push(seriesToDataset(short, pts, COLORS[i % COLORS.length]));
+      const st = seriesStyle(i);
+      datasets.push(seriesToDataset(short, pts, st.color, { dash: st.dash }));
     });
     if (!charts.backlog) {
       charts.backlog = mkChart("backlog-chart", "line", []);

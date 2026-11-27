@@ -140,6 +140,15 @@ header h1 { margin: 0; font-size: 18px; font-weight: 600; flex-shrink: 0; }
 }
 .heatmap-table .hm-cell { height: 18px; padding: 0; border: 0; }
 .heatmap-table tr { height: 18px; }
+/* Full-width row rules (label column included) and a faint stripe on every
+   other row, so a cell can be traced back to its worker even when all the
+   activity sits at the far right of a long window. */
+.heatmap-table td { border-bottom: 1px solid var(--border); }
+.heatmap-table tr:first-child td { border-top: 1px solid var(--border); }
+.heatmap-table tr:nth-child(even) .hm-cell { box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.03); }
+/* Cells carry their colour inline, so the hover highlight is an inset shadow. */
+.heatmap-table tr:hover .hm-cell { box-shadow: inset 0 0 0 999px rgba(88, 166, 255, 0.10); }
+.heatmap-table tr:hover .hm-label { color: var(--text); background: var(--panel-2); }
 
 .events-timeline {
   background: var(--panel);

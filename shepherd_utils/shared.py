@@ -80,6 +80,22 @@ async def _record_task_duration(
         logger.debug(f"Failed to record task duration for {stream}: {e}")
 
 
+async def record_task_duration(
+    stream: str,
+    task: Tuple[str, dict],
+    logger: logging.Logger,
+) -> None:
+    """Report a finished task's latency to the monitor.
+
+    ``wrap_up_task`` / ``handle_task_failure`` do this for the standard
+    workers. Workers that hand-roll their lifecycle and ACK directly
+    (finish_query, merge_message, the ars.* workers) call this after their
+    ACK, or they never show up in the monitor's per-worker latency charts.
+    """
+    fields = task[1] if len(task) > 1 and isinstance(task[1], dict) else {}
+    await _record_task_duration(stream, fields.get("_started_at", ""), logger)
+
+
 setup_logging()
 
 
