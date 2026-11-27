@@ -661,6 +661,10 @@ practice. CPU-bound pool workers (`merge_message`, `score_paths`, `arax_rank`,
 default, so raising `TASK_LIMIT` for those only deepens the intake queue rather
 than adding parallelism.
 
+`aragorn_score` can score with its Python `Ranker` (the default) or a Rust
+port about ten times faster, or run both and log how they compare:
+`ARAGORN_SCORER=python|rust|shadow`. See `workers/aragorn_score/README.md`.
+
 ### Monitoring Redis
 
 The monitor (`workers/monitor/`) watches Redis per *instance*. By default the

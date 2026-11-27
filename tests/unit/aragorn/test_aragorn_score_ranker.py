@@ -695,3 +695,223 @@ def test_rank_tolerates_result_without_analyses():
     ranked = r.rank(results)
     assert len(ranked) == 1
     assert "analyses" not in ranked[0]
+
+
+# --- support-graph closure memo ------------------------------------------
+
+
+def _nested_support_message(depth, cycle=False):
+    """A treats edge supported by a chain of support graphs, each holding two
+    edges that are both supported by the next one: a diamond at every level,
+    so a naive walk visits the bottom level 2**depth times."""
+    src = [{"resource_id": "infores:kp", "resource_role": "primary_knowledge_source"}]
+    edges, aux = {}, {}
+    for lvl in range(depth + 1):
+        for side in "ab":
+            edge = {
+                "subject": f"N{lvl}",
+                "object": f"M{lvl}{side}",
+                "predicate": "biolink:related_to",
+                "sources": src,
+                "attributes": [],
+            }
+            nxt = lvl + 1 if lvl < depth else (0 if cycle else None)
+            if nxt is not None:
+                edge["attributes"] = [
+                    {
+                        "attribute_type_id": "biolink:support_graphs",
+                        "value": [f"g{nxt}"],
+                    }
+                ]
+            edges[f"e{lvl}{side}"] = edge
+        aux[f"g{lvl}"] = {"edges": [f"e{lvl}a", f"e{lvl}b"]}
+    edges["top"] = {
+        "subject": "A",
+        "object": "B",
+        "predicate": "biolink:treats",
+        "sources": src,
+        "attributes": [
+            {"attribute_type_id": "biolink:support_graphs", "value": ["g0"]}
+        ],
+    }
+    return {
+        "query_graph": {
+            "nodes": {"n0": {}, "n1": {}},
+            "edges": {"q": {"subject": "n0", "object": "n1"}},
+        },
+        "knowledge_graph": {"nodes": {}, "edges": edges},
+        "auxiliary_graphs": aux,
+        "results": [
+            {
+                "node_bindings": {"n0": {"ids": ["A"]}, "n1": {"ids": ["B"]}},
+                "analyses": [{"edge_bindings": {"q": {"ids": ["top"]}}}],
+            }
+        ],
+    }
+
+
+def test_support_closure_matches_get_edge_support_kg():
+    """The memoised closure adds exactly what the recursive walk adds, in the
+    same order, so the r_graph (and the Laplacian's row order) is unchanged."""
+    from workers.aragorn_score.worker import get_edge_support_kg
+
+    msg = _nested_support_message(6)
+    r = Ranker(msg, logger)
+    walked = get_edge_support_kg("top", msg["knowledge_graph"], msg["auxiliary_graphs"])
+    nodes, edges = r._support_closure("top")
+    assert list(walked["node_ids"]) == list(set(nodes.keys()))
+    assert list(walked["edge_ids"]) == list(set(edges.keys()))
+
+
+def test_support_graphs_are_walked_once_per_edge(mocker):
+    """Nested diamond-shaped support used to be re-walked once per path to it:
+    2**depth visits. Each edge's support is now collected once per message."""
+    import workers.aragorn_score.worker as score
+
+    msg = _nested_support_message(12)
+    spy = mocker.spy(score, "edge_support_graphs")
+    Ranker(msg, logger).rank(msg["results"])
+    assert spy.call_count <= len(msg["knowledge_graph"]["edges"])
+    assert 0 < msg["results"][0]["analyses"][0]["score"] <= 1
+
+
+def test_cyclic_support_graphs_are_scored():
+    """A support-graph cycle used to recurse until RecursionError and score
+    the answer 0."""
+    msg = _nested_support_message(3, cycle=True)
+    Ranker(msg, logger).rank(msg["results"])
+    assert 0 < msg["results"][0]["analyses"][0]["score"] <= 1
+
+
+# --- support-graph cycles -------------------------------------------------
+
+
+def _cyclic_message(n=40, seed=0):
+    """Inferred edges whose support graphs reach each other, analyses that
+    bind several of them: support-graph cycles, as real responses can have."""
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "benchmarks"
+        / "aragorn_score"
+        / "gen_message.py"
+    )
+    spec = importlib.util.spec_from_file_location("gen_message", path)
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    # Random links: on 40 answers, cycles that tangle several answers together.
+    return gen.add_cycles(
+        gen.make_message(n_results=n, seed=seed), seed=seed, random_links=2, bound=3
+    )
+
+
+def _reachable(msg, edge_id):
+    """Every node and edge reachable from edge_id through support graphs: the
+    closure by plain search, no memo."""
+    from shepherd_utils.trapi import edge_support_graphs
+
+    kg, aux = msg["knowledge_graph"]["edges"], msg.get("auxiliary_graphs") or {}
+    nodes, edges, stack, seen = set(), set(), [edge_id], set()
+    while stack:
+        e = stack.pop()
+        if e in seen:
+            continue
+        seen.add(e)
+        edge = kg.get(e)
+        if not edge:
+            continue
+        edges.add(e)
+        nodes.update(n for n in (edge.get("subject"), edge.get("object")) if n)
+        for sg_id in edge_support_graphs(edge):
+            sg = aux.get(sg_id)
+            if not sg:
+                continue
+            nodes.update(sg.get("nodes", []))
+            for ae in sg.get("edges", []):
+                if ae in kg:
+                    edges.add(ae)
+                    stack.append(ae)
+    return nodes, edges
+
+
+def test_support_closures_in_cycles_are_complete():
+    """Every edge's closure is everything it can reach, cycles or not. (The
+    memo used to cache an edge in a cycle with whatever it had found when
+    the walk came back round, so its closure depended on walk order.)"""
+    msg = _cyclic_message()
+    r = Ranker(msg, logger)
+    for edge_id in msg["knowledge_graph"]["edges"]:
+        nodes, edges = r._support_closure(edge_id)
+        want_nodes, want_edges = _reachable(msg, edge_id)
+        assert set(edges) == want_edges, edge_id
+        assert set(nodes) == want_nodes, edge_id
+
+
+def test_cyclic_scores_do_not_depend_on_walk_order():
+    """Ranking the answers in a different order gives each the same score."""
+    msg = _cyclic_message(seed=1)
+    forward = copy.deepcopy(msg)
+    Ranker(forward, logger).rank(forward["results"])
+    backward = copy.deepcopy(msg)
+    backward["results"].reverse()
+    Ranker(backward, logger).rank(backward["results"])
+
+    def by_answer(m):
+        return {
+            r["node_bindings"]["sn"]["ids"][0]: r["analyses"][0]["score"]
+            for r in m["results"]
+        }
+
+    a, b = by_answer(forward), by_answer(backward)
+    assert a.keys() == b.keys()
+    for k in a:
+        assert b[k] == pytest.approx(a[k], rel=1e-12), k
+
+
+# --- edge weights near 1 --------------------------------------------------
+
+
+def test_edge_weights_are_capped_below_one_so_more_evidence_never_weighs_less():
+    """A weight just below 1 (a publications sigmoid at ~40-64 papers) used
+    to escape the cap, which applied only at 1: 38 papers made an admittance
+    of ~1e9, 389 papers (weight exactly 1, capped) only ~1e7. Both are capped
+    now, and the admittances that large made the scores numerical noise."""
+    from workers.aragorn_score.worker import MAX_EDGE_WEIGHT
+
+    def edge(n_pubs):
+        return {
+            "subject": "A",
+            "object": "B",
+            "predicate": "biolink:treats",
+            "sources": [
+                {
+                    "resource_id": "infores:unknown",
+                    "resource_role": "primary_knowledge_source",
+                }
+            ],
+            "attributes": [
+                {
+                    "attribute_type_id": "biolink:publications",
+                    "value": [f"PMID:{i}" for i in range(n_pubs)],
+                }
+            ],
+        }
+
+    msg = {
+        "query_graph": {
+            "nodes": {"n0": {}, "n1": {}},
+            "edges": {"e": {"subject": "n0", "object": "n1"}},
+        },
+        "knowledge_graph": {
+            "nodes": {},
+            "edges": {f"e{n}": edge(n) for n in (20, 38, 389)},
+        },
+    }
+    r = Ranker(msg, logger)
+    r._prime_admittances(["e20", "e38", "e389"])
+    pubs = {n: r._admittances[f"e{n}"][-1] for n in (20, 38, 389)}
+    cap = -1 / np.log(MAX_EDGE_WEIGHT)
+    assert pubs[20] < pubs[38] <= pubs[389] == pytest.approx(cap)
+    assert max(pubs.values()) <= cap * (1 + 1e-12)

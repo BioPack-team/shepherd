@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import math
+import os
+import time
 import uuid
 from collections import defaultdict
 from itertools import combinations
@@ -12,7 +14,12 @@ import numpy as np
 
 from shepherd_utils.config import settings
 from shepherd_utils.cpu import resolve_pool_workers
-from shepherd_utils.db import get_message_sync, save_response_sync
+from shepherd_utils.db import (
+    get_blob_sync,
+    get_message_sync,
+    save_blob_sync,
+    save_response_sync,
+)
 from shepherd_utils.logger import (
     get_worker_logger,
     ingest_query_logs,
@@ -32,8 +39,65 @@ TASK_LIMIT = 10
 tracer = setup_tracer(STREAM)
 LOGGER = get_worker_logger(STREAM)
 
+try:
+    # The Rust port of the Ranker below (workers/aragorn_score/rust), built
+    # into the worker image. See ARAGORN_SCORER in shepherd_utils/config.py.
+    import aragorn_score_rs
+except ImportError:  # not built here (a plain local checkout, say)
+    aragorn_score_rs = None
+
+SCORERS = ("python", "rust", "shadow")
+SOLVERS = ("cholesky", "svd")
+# Relative tolerance for the shadow comparison. The scorers sum and factorise
+# in different orders, so they agree only as far as the Laplacians' condition
+# allows: about 1e-13 on well-conditioned ones, and about 1e-9 when capped
+# high-evidence edges (admittance ~1e7) sit beside ordinary ones (~0.1). A
+# real disagreement -- a missing edge, a different closure -- is orders of
+# magnitude past this.
+SHADOW_TOL = 1e-6
+_warned = set()
+
+
+def _warn_once(message: str) -> None:
+    if message not in _warned:
+        _warned.add(message)
+        LOGGER.warning(message)
+
+
+def scorer_mode() -> str:
+    """The scorer to run (``settings.aragorn_scorer``): "python", "rust" or
+    "shadow". Falls back to "python" for a value it doesn't know, or when the
+    Rust module isn't installed."""
+    mode = str(settings.aragorn_scorer or "python").strip().lower()
+    if mode not in SCORERS:
+        _warn_once(
+            f"Unknown ARAGORN_SCORER {settings.aragorn_scorer!r} (expected one of "
+            f"{', '.join(SCORERS)}); using the Python scorer."
+        )
+        return "python"
+    if mode != "python" and aragorn_score_rs is None:
+        _warn_once(
+            f"ARAGORN_SCORER={mode}, but the Rust scorer (the aragorn_score_rs "
+            "module) isn't installed; using the Python scorer."
+        )
+        return "python"
+    return mode
+
+
+def scorer_solver() -> str:
+    solver = str(settings.aragorn_scorer_solver or "cholesky").strip().lower()
+    if solver not in SOLVERS:
+        _warn_once(
+            f"Unknown ARAGORN_SCORER_SOLVER {settings.aragorn_scorer_solver!r}; "
+            "using cholesky."
+        )
+        return "cholesky"
+    return solver
+
 
 DEFAULT_WEIGHT = 1e-2
+# The largest edge weight scored: an admittance of -1/ln(0.9999999) ~ 1e7.
+MAX_EDGE_WEIGHT = 0.9999999
 
 BLENDED_PROFILE = {
     "source_weights": {
@@ -437,6 +501,17 @@ class Ranker:
         # The probes depend only on the query graph: computed once per ranker
         # rather than once per answer (#220).
         self._probes = None
+        # Per-edge admittances (-1/log(weight) of each weighted property), so
+        # each k_edge's logs are taken once per message instead of once per
+        # (analysis, direction) it appears in.
+        self._admittances = dict()
+        # Per-edge support closure (nodes and edges reachable through
+        # biolink:support_graphs), shared by every analysis that uses the edge.
+        self._support_closures = dict()
+        # The size (in edges) of each support-graph cycle found.
+        self.support_cycles = []
+        # The q_node pairs joined by a q_edge (depends only on the qgraph).
+        self._qedge_qnode_ids = None
 
     def rank(self, answers, jaccard_like=False):
         """Generate a sorted list and scores for a set of subgraphs."""
@@ -448,7 +523,9 @@ class Ranker:
         failed = 0
         for answer in answers:
             try:
-                scored_answer, _ = self.score(answer, jaccard_like=jaccard_like)
+                scored_answer, _ = self.score(
+                    answer, jaccard_like=jaccard_like, details=False
+                )
             except Exception as e:
                 # One answer the ranker can't handle (a probe qnode with no
                 # binding, an edge whose node isn't in the KG, an attribute of
@@ -520,8 +597,13 @@ class Ranker:
 
         return probes
 
-    def score(self, answer, jaccard_like=False):
-        """Compute answer score."""
+    def score(self, answer, jaccard_like=False, details=True):
+        """Compute answer score.
+
+        ``details=False`` skips packaging the per-analysis debugging details
+        (r_graph, edges, laplacian, ...): ``rank`` discards them, and building
+        them cost a dict of full k_edges per analysis.
+        """
 
         # Probes used for scoring are based on the q_graph
         # This will be a list of q_node_id tuples
@@ -565,6 +647,9 @@ class Ranker:
                 answer["analyses"][i_analysis]["score"] = score / (1 - score)
             else:
                 answer["analyses"][i_analysis]["score"] = score
+
+            if not details:
+                continue
 
             # Package up details
             this_analysis_details = {
@@ -617,12 +702,7 @@ class Ranker:
             edge_values_mat[r_object][r_subject][k_edge_id] = edge_vals
 
         # Make a set of all subject object q_node_ids that have q_edges
-        qedge_qnode_ids = set(
-            [
-                frozenset((e["subject"], e["object"]))
-                for e in self.qgraph["edges"].values()
-            ]
-        )
+        qedge_qnode_ids = self._qedge_pairs()
 
         # Turn each value into an edge weight and fill the weight matrix.
         # Only node pairs joined by a q_edge or a k_edge carry a weight, so
@@ -630,6 +710,10 @@ class Ranker:
         # Python, and indexing edge_values_mat for each one created an entry
         # per pair -- n**2 time and memory per analysis (#220). Each pair's
         # weight is summed exactly as before, so scores are unchanged.
+        admittances = self._admittances
+        self._prime_admittances(
+            {edge[2]: None for edge in edges if edge[2] not in admittances}
+        )
         index = {node: i for i, node in enumerate(nodes)}
         weight_mat = np.zeros((num_nodes, num_nodes))  # For debugging
         pairs = set()
@@ -660,28 +744,20 @@ class Ranker:
 
             by_object = edge_values_mat.get(sub_r_node_id)
             edges_here = by_object.get(obj_r_node_id) if by_object else None
-            for edge_id, edge in (edges_here or {}).items():
-                for source, properties in edge.items():
-                    for property, values in properties.items():
-                        w = values["weight"]
-
-                        if w >= 1:  # > as an emergency
-                            w = 0.9999999  # 1 causes numerical issues
-
-                        # -1 / np.log(source_weighted) is our mapping from
-                        # a [0,1] weight to an admittance.
-                        # These admittances just add since they are all in
-                        # parallel which is equivalent to a noisy or.
-                        weight = weight + -1 / (np.log(w))
+            for edge_id in edges_here or ():
+                # These admittances just add since they are all in parallel
+                # which is equivalent to a noisy or. Added one at a time, in
+                # the same order as before, so the sum is bit-for-bit equal.
+                for admittance in admittances[edge_id]:
+                    weight = weight + admittance
 
             weight_mat[i, j] += weight  # For debugging
 
         # Using weight_mat you can calculate the laplacian
         # We could do this in the loop above, but let's be explicit
         weight_row_sums = np.sum(weight_mat, axis=1)
-        laplacian = -1 * weight_mat.copy()
-        for i in range(num_nodes):
-            laplacian[i, i] = weight_row_sums[i]
+        laplacian = -1 * weight_mat
+        laplacian[np.diag_indices(num_nodes)] = weight_row_sums
 
         # Clean up Laplacian (remove extra nodes etc.)
         # Sometimes, mostly because of a bug of some kind,
@@ -704,6 +780,157 @@ class Ranker:
 
         # remove row and col for nodes not kept
         return laplacian[keep, :][:, keep], probe_inds, details
+
+    def _qedge_pairs(self):
+        """The set of {subject, object} q_node pairs joined by a q_edge."""
+        if self._qedge_qnode_ids is None:
+            self._qedge_qnode_ids = set(
+                frozenset((e["subject"], e["object"]))
+                for e in self.qgraph["edges"].values()
+            )
+        return self._qedge_qnode_ids
+
+    def _prime_admittances(self, k_edge_ids):
+        """Cache the admittance of each weighted property of these k_edges, in
+        ``get_edge_values`` order, for every one not cached yet.
+
+        -1 / np.log(weight) is our mapping from a [0,1] weight to an
+        admittance. The logs used to be taken one scalar np.log at a time, for
+        every (analysis, direction) an edge appeared in. Now they are taken
+        once per edge, in one vectorised np.log call per batch -- which gives
+        the same bits as scalar np.log (math.log does not, in the last bit,
+        for ~0.3% of inputs).
+        """
+        cache = self._admittances
+        todo, weights, counts = [], [], []
+        for k_edge_id in k_edge_ids:
+            if k_edge_id in cache:
+                continue
+            n = 0
+            for properties in self.get_edge_values(k_edge_id).values():
+                for values in properties.values():
+                    w = values["weight"]
+                    # Cap the weight at MAX_EDGE_WEIGHT. It used to be capped
+                    # only at 1 (whose log is 0), but a weight just below 1
+                    # is as bad: 1 - 2e-15 (a publications sigmoid at ~60
+                    # papers) is an admittance of ~5e14. Entries that large
+                    # carry rounding errors the size of the graph's real
+                    # conductances, and lstsq's cutoff then discards real
+                    # singular values, so the score is numerical noise.
+                    if w > MAX_EDGE_WEIGHT:
+                        w = MAX_EDGE_WEIGHT
+                    weights.append(w)
+                    n += 1
+            todo.append(k_edge_id)
+            counts.append(n)
+            cache[k_edge_id] = ()  # placeholder: an id may repeat in the batch
+        if not todo:
+            return
+        # A weight of 0 (e.g. omnicorp's base weight) is an admittance of 0:
+        # -1 / log(0) = -1 / -inf. Don't warn about it on every edge.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            admittances = (-1 / np.log(np.array(weights, dtype=float))).tolist()
+        # Python floats add exactly as np.float64s do (both IEEE doubles), and
+        # faster.
+        start = 0
+        for k_edge_id, n in zip(todo, counts):
+            cache[k_edge_id] = admittances[start : start + n]
+            start += n
+
+    def _support_closure(self, edge_id):
+        """Every node and edge reachable from ``edge_id`` through support
+        graphs (the edge and its endpoints included), as two insertion-
+        ordered dicts (cached per message).
+
+        ``get_edge_support_kg`` re-walked a support graph each time an edge
+        reached it: once per analysis, and once per path to it within one
+        (exponential in diamond-shaped support, and a RecursionError on a
+        cycle). Here each edge's closure is computed once.
+
+        Support graphs can form cycles (A's support holds B, B's holds A).
+        Every edge in a cycle reaches everything the others reach, so they
+        all have the same closure. Tarjan's strongly-connected-components
+        walk finds the cycles: an edge whose walk only finished because a
+        cycle led back to an edge still being walked is not complete yet,
+        and gets the closure of that cycle's first edge once that one
+        finishes. Caching each edge as soon as its own walk ended, as this
+        used to, left the edges inside a cycle with partial closures that
+        depended on the order they were reached in.
+        """
+        cached = self._support_closures.get(edge_id)
+        if cached is not None:
+            return cached
+        state = {"index": {}, "low": {}, "stack": [], "on_stack": set(), "found": {}}
+        return self._closure_walk(edge_id, state)
+
+    def _closure_walk(self, edge_id, state):
+        """One step of the walk in ``_support_closure``: the closure found
+        for ``edge_id`` (final when cached; partial for a cycle member until
+        its cycle completes)."""
+        cached = self._support_closures.get(edge_id)
+        if cached is not None:
+            return cached
+        index, low = state["index"], state["low"]
+        my_index = len(index)
+        index[edge_id] = low[edge_id] = my_index
+        state["stack"].append(edge_id)
+        state["on_stack"].add(edge_id)
+        # dicts as insertion-ordered sets: assigning a key that is already
+        # there doesn't move it, and dict.update appends only new keys.
+        nodes, edges = {}, {}
+        state["found"][edge_id] = (nodes, edges)
+
+        kg_edges = self.kgraph["edges"]
+        edge = kg_edges.get(edge_id, None)
+        if edge:
+            edges[edge_id] = None
+            sub = edge.get("subject", None)
+            if sub:
+                nodes[sub] = None
+            obj = edge.get("object", None)
+            if obj:
+                nodes[obj] = None
+            for sg_id in edge_support_graphs(edge):
+                sg = self.agraphs.get(sg_id, None)
+                if not sg:
+                    continue
+                for sgn in sg.get("nodes", []):
+                    nodes[sgn] = None
+                for add_edge_id in sg.get("edges", []):
+                    if add_edge_id not in kg_edges:
+                        continue
+                    # Added even when the k_edge is empty, as the recursive
+                    # walk does (the closure of an empty edge is itself empty).
+                    edges[add_edge_id] = None
+                    if add_edge_id in state["on_stack"]:
+                        # Back to an edge of a cycle still being walked: what
+                        # it has found so far (the rest reaches this edge's
+                        # cycle through that edge).
+                        low[edge_id] = min(low[edge_id], index[add_edge_id])
+                        add_nodes, add_edges = state["found"][add_edge_id]
+                    else:
+                        # Not reached yet (or cached, from an earlier walk:
+                        # _closure_walk returns that).
+                        add_nodes, add_edges = self._closure_walk(add_edge_id, state)
+                        if add_edge_id in state["on_stack"]:
+                            low[edge_id] = min(low[edge_id], low[add_edge_id])
+                    edges.update(add_edges)
+                    nodes.update(add_nodes)
+
+        if low[edge_id] == my_index:
+            # This edge closes its cycle (or is in none): its closure is
+            # complete, and is every member's.
+            members = 0
+            while True:
+                member = state["stack"].pop()
+                state["on_stack"].discard(member)
+                self._support_closures[member] = (nodes, edges)
+                members += 1
+                if member == edge_id:
+                    break
+            if members > 1:
+                self.support_cycles.append(members)
+        return nodes, edges
 
     def get_rgraph(self, result):
         """Get "ranker" subgraph.
@@ -771,9 +998,13 @@ class Ranker:
             # Since results_kg uses sets, things will not get duplicated
             current_edge_ids = _copy_set(anal_kg["edge_ids"])
             for edge_id in current_edge_ids:
-                anal_kg = get_edge_support_kg(
-                    edge_id, self.kgraph, self.agraphs, anal_kg
-                )
+                closure_nodes, closure_edges = self._support_closure(edge_id)
+                # Interleaving within one edge's walk doesn't matter: nodes
+                # and edges go into separate sets. Pass .keys(), not the dicts:
+                # set.update(dict) pre-sizes the table, which changes the
+                # set's iteration order (and so the Laplacian's row order).
+                anal_kg["edge_ids"].update(closure_edges.keys())
+                anal_kg["node_ids"].update(closure_nodes.keys())
 
             # At this point each analysis now has a complete anal_kg
             # This is the complete picture of all nodes and edges used by this
@@ -1252,46 +1483,257 @@ def aragorn_score(response_id: str, log_level: int = logging.INFO) -> list[dict]
     the child logs at the task's ``log_level`` through its own logger and
     returns the formatted records, oldest-first, for the parent to fold into
     the query's logs.
+
+    Which scorer runs is ``ARAGORN_SCORER`` (see ``scorer_mode``): the Python
+    Ranker, the Rust port (falling back to the Ranker for a message it can't
+    score), or both, with the Rust one in the shadow of the Python one.
     """
     with pool_task_logger(STREAM, log_level) as (logger, query_log_handler):
-        in_message = get_message_sync(response_id)
-
-        # these timestamps are causing json serialization issues so here we
-        # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
-        # empty list is never created.
-        for log in in_message.get("logs") or []:
-            log["timestamp"] = str(log["timestamp"])
-
-        message = in_message["message"]
-        if ("results" not in message) or (message["results"] is None):
-            # No results to weight; save unchanged and abort.
-            logger.info("No results to score. Saving unscored.")
-            save_response_sync(response_id, in_message)
-            return query_log_handler.drain()
-
-        # get a reference to the results
-        answers = message["results"]
-
-        try:
-            # resistance distance ranking
-            pr = Ranker(message, logger)
-
-            # rank the answers. there should be a score for each bound result after this
-            # TODO: is this right?
-            jaccard_like = False
-            answers = pr.rank(answers, jaccard_like=jaccard_like)
-
-            # save the results
-            message["results"] = answers
-        except Exception as e:
-            # put the error in the response
-            logger.exception(f"Aragorn-ranker/score exception {e}")
-            # save any log entries
-            # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
-
-        logger.info("Score complete. Saving.")
-        save_response_sync(response_id, in_message)
+        mode = scorer_mode()
+        if mode == "rust":
+            if score_with_rust(response_id, get_blob_sync(response_id), logger):
+                return query_log_handler.drain()
+        # The stored input, for the shadow run: read before the Python scorer
+        # overwrites it with its scored copy.
+        blob = get_blob_sync(response_id) if mode == "shadow" else None
+        python_run = score_with_python(response_id, logger)
+        if blob is not None and python_run is not None:
+            shadow_compare(response_id, blob, python_run)
         return query_log_handler.drain()
+
+
+def score_with_python(response_id: str, logger: logging.Logger):
+    """Score and save a response with the Python Ranker.
+
+    Returns what the shadow comparison needs -- each result's analysis scores
+    in input order, the ranked order (input indices) and timings -- or None
+    when there were no results to score.
+    """
+    t0 = time.perf_counter()
+    in_message = get_message_sync(response_id)
+
+    # these timestamps are causing json serialization issues so here we
+    # convert them to strings. Response.logs has minItems 1 in TRAPI 2.0, so an
+    # empty list is never created.
+    for log in in_message.get("logs") or []:
+        log["timestamp"] = str(log["timestamp"])
+
+    message = in_message["message"]
+    if ("results" not in message) or (message["results"] is None):
+        # No results to weight; save unchanged and abort.
+        logger.info("No results to score. Saving unscored.")
+        save_response_sync(response_id, in_message)
+        return None
+
+    # get a reference to the results
+    answers = message["results"]
+    originals = list(answers) if isinstance(answers, list) else []
+
+    t1 = time.perf_counter()
+    pr = None
+    try:
+        # resistance distance ranking
+        pr = Ranker(message, logger)
+
+        # rank the answers. there should be a score for each bound result after this
+        # TODO: is this right?
+        jaccard_like = False
+        answers = pr.rank(answers, jaccard_like=jaccard_like)
+
+        # save the results
+        message["results"] = answers
+    except Exception as e:
+        # put the error in the response
+        logger.exception(f"Aragorn-ranker/score exception {e}")
+        # save any log entries
+        # in_message['logs'].append(create_log_entry(f'Exception: {str(e)}', 'ERROR'))
+    rank_ms = (time.perf_counter() - t1) * 1e3
+
+    logger.info("Score complete. Saving.")
+    save_response_sync(response_id, in_message)
+    total_ms = (time.perf_counter() - t0) * 1e3
+
+    position = {id(a): i for i, a in enumerate(originals)}
+    return {
+        "scores": [
+            (
+                [
+                    a.get("score") if isinstance(a, dict) else None
+                    for a in (r.get("analyses") or [])
+                ]
+                if isinstance(r, dict)
+                else []
+            )
+            for r in originals
+        ],
+        "order": [position.get(id(a)) for a in message.get("results") or []],
+        "rank_ms": rank_ms,
+        "total_ms": total_ms,
+        "support_cycles": list(pr.support_cycles) if pr is not None else [],
+    }
+
+
+def score_with_rust(response_id: str, blob: bytes, logger: logging.Logger) -> bool:
+    """Score and save a response with the Rust scorer.
+
+    The stored blob goes in and the scored blob comes out: the message is
+    never decoded in Python. Returns False, having saved nothing, when the
+    Rust scorer can't score the message, so the caller can fall back to the
+    Python one.
+    """
+    try:
+        scored, info = aragorn_score_rs.score_blob(blob, solver=scorer_solver())
+    except Exception as e:
+        logger.warning(
+            f"The Rust scorer could not score this response ({e}); scoring it "
+            "with the Python scorer instead."
+        )
+        LOGGER.warning(f"Rust scorer failed on {response_id}: {e}")
+        return False
+    if info.get("note"):
+        LOGGER.info(f"Rust scorer, {response_id}: {info['note']}")
+
+    # The same log lines the Python Ranker writes.
+    if info["n_results"] == 0:
+        logger.info("No results to score.")
+    failures = info["failures"]
+    for _, reason in failures:
+        logger.warning(f"Could not score an answer, scoring it 0: {reason}")
+    if failures:
+        logger.warning(
+            f"{len(failures)} of {info['n_results']} answer(s) could not be scored "
+            "and were given a score of 0."
+        )
+    logger.info(
+        f"Score complete (Rust scorer, {info['timings_ms']['total']:.0f} ms). Saving."
+    )
+    # The input was in stored form (prepare_stored_response), and scoring only
+    # adds scores and reorders results, so the output is too.
+    save_blob_sync(response_id, scored)
+    return True
+
+
+def compare_scores(py_scores, py_order, rs_scores, rs_order, tol=SHADOW_TOL) -> dict:
+    """How far apart two scorers' results are: per-analysis scores (relative
+    difference, with ``tol`` as the floor near zero) and the ranked order."""
+    out = {
+        "agree": True,
+        "results": len(py_scores),
+        "analyses": 0,
+        "beyond_tol": 0,
+        "max_abs_diff": 0.0,
+        "max_rel_diff": 0.0,
+        "worst": None,
+        "shape_mismatch": 0,
+    }
+    if len(py_scores) != len(rs_scores):
+        out["shape_mismatch"] = abs(len(py_scores) - len(rs_scores))
+    worst_rel = -1.0
+    for i, (a, b) in enumerate(zip(py_scores, rs_scores)):
+        if len(a) != len(b):
+            out["shape_mismatch"] += 1
+            continue
+        for j, (x, y) in enumerate(zip(a, b)):
+            out["analyses"] += 1
+            numeric = all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y)
+            )
+            if not numeric:
+                if x != y:
+                    out["beyond_tol"] += 1
+                    out["worst"] = {"result": i, "analysis": j, "python": x, "rust": y}
+                    worst_rel = math.inf
+                continue
+            diff = abs(float(x) - float(y))
+            rel = diff / max(abs(float(x)), abs(float(y)), tol)
+            out["max_abs_diff"] = max(out["max_abs_diff"], diff)
+            out["max_rel_diff"] = max(out["max_rel_diff"], rel)
+            if rel > tol:
+                out["beyond_tol"] += 1
+            if rel > worst_rel and rel > tol:
+                worst_rel = rel
+                out["worst"] = {"result": i, "analysis": j, "python": x, "rust": y}
+    out["results_moved"] = sum(1 for p, q in zip(py_order, rs_order) if p != q)
+    # Ranked ascending: the best answers are last.
+    k = min(10, len(py_order), len(rs_order))
+    out["top10_overlap"] = len(set(py_order[-k:]) & set(rs_order[-k:])) if k else 0
+    out["top10_of"] = k
+    out["agree"] = (
+        out["beyond_tol"] == 0
+        and out["shape_mismatch"] == 0
+        and len(py_order) == len(rs_order)
+    )
+    return out
+
+
+def shadow_compare(response_id: str, blob: bytes, python_run: dict) -> None:
+    """Score the stored input with the Rust scorer too, and log how its
+    scores, ranking and time compare with the Python scorer's. Nothing is
+    saved; a failure is logged, never raised."""
+    try:
+        _, info = aragorn_score_rs.score_blob(blob, solver=scorer_solver())
+    except Exception as e:
+        LOGGER.warning(
+            f"aragorn.score shadow {response_id}: the Rust scorer failed: {e}"
+        )
+        return
+    summary = {"response_id": response_id}
+    summary.update(
+        compare_scores(
+            python_run["scores"], python_run["order"], info["scores"], info["order"]
+        )
+    )
+    rust_ms = info["timings_ms"]
+    summary.update(
+        {
+            "rust_failures": len(info["failures"]),
+            # Support-graph cycles (edges whose support graphs reach each
+            # other): how many, and the largest, in edges.
+            "support_cycles": len(python_run.get("support_cycles", [])),
+            "largest_support_cycle": max(python_run.get("support_cycles") or [0]),
+            # Python: Redis read + decode + Ranker + encode + Redis write.
+            "python_total_ms": round(python_run["total_ms"], 1),
+            # Python's Ranker.rank alone.
+            "python_rank_ms": round(python_run["rank_ms"], 1),
+            # Rust: decompress + parse + score + write + compress (no Redis).
+            "rust_total_ms": round(rust_ms["total"], 1),
+            "rust_score_ms": round(rust_ms["score"], 1),
+            "rank_speedup": round(
+                python_run["rank_ms"] / max(rust_ms["score"], 1e-3), 1
+            ),
+            "note": info.get("note"),
+        }
+    )
+    if not summary["agree"]:
+        summary["saved_input"] = save_shadow_input(response_id, blob)
+    LOGGER.log(
+        logging.INFO if summary["agree"] else logging.WARNING,
+        "aragorn.score shadow " + json.dumps(summary, default=str),
+    )
+
+
+_shadow_dumps = 0
+
+
+def save_shadow_input(response_id: str, blob: bytes):
+    """Save the stored input of a query the scorers disagreed on, when
+    ``ARAGORN_SHADOW_DUMP_DIR`` is set, so it can be reproduced offline.
+    Returns the file's path, or None."""
+    global _shadow_dumps
+    directory = settings.aragorn_shadow_dump_dir
+    if not directory or _shadow_dumps >= settings.aragorn_shadow_dump_max:
+        return None
+    try:
+        os.makedirs(directory, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in response_id)
+        path = os.path.join(directory, f"{safe}.json.zst")
+        with open(path, "wb") as f:
+            f.write(blob)
+        _shadow_dumps += 1
+        return path
+    except OSError as e:
+        LOGGER.warning(f"Could not save the shadow input for {response_id}: {e}")
+        return None
 
 
 async def process_task(task, parent_ctx, logger, limiter, loop, pool):
@@ -1330,6 +1772,12 @@ async def poll_for_tasks():
     # full message, so this also bounds peak memory. POOL_MAX_WORKERS overrides.
     max_workers = resolve_pool_workers(TASK_LIMIT, LOGGER)
     LOGGER.info(f"{STREAM}: process pool sized to {max_workers} worker(s).")
+    mode = scorer_mode()
+    LOGGER.info(
+        f"{STREAM}: scoring with the {mode} scorer"
+        + (f" (solver {scorer_solver()})" if mode != "python" else "")
+        + "; set by ARAGORN_SCORER."
+    )
     pool = ProcessPoolManager(
         max_workers,
         max_tasks_per_child=settings.pool_max_tasks_per_child,
