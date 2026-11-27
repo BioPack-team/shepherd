@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
 from shepherd_utils import arax_mock_data as M
@@ -89,7 +90,11 @@ def test_curie_to_pmids_gives_finite_ngd_for_seed_edges(paths):
             arax_db_path(ARAX_CURIE_TO_PMIDS), "SELECT curie, pmids FROM curie_to_pmids"
         )
     )
-    pmids = {curie: set(json.loads(v)) for curie, v in rows.items()}
+    # int32 PMID blobs (the tier0-20260928 layout, DEC-30)
+    pmids = {
+        curie: set(np.frombuffer(v, dtype=np.int32).tolist())
+        for curie, v in rows.items()
+    }
     assert set(M.SEED_NODES) <= set(pmids)
     for subject, _, obj, _ in M.SEED_EDGES:
         assert pmids[subject] & pmids[obj], (subject, obj)
@@ -175,14 +180,20 @@ def test_fisher_exact_test_has_every_category(paths):
         assert set(json.loads(neighbor_counts)) <= categories
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="BioPack-team/shepherd#275: catrax-xcrg reads curie_ngd triples "
+    "(tier0-20260928); the mock curie_ngd is the pathfinder's tier0-20260621 "
+    "pairs, which move with the pathfinder files",
+)
 def test_xcrg_lookups(paths):
     from pathlib import Path
 
-    from shepherd_utils.arax.xcrg import ngd, pmid
-    from shepherd_utils.arax.xcrg.reporting import LogReporter
+    from xcrg import Log_Reporter, ngd, pmid
 
     curie_ngd, _ = arax_pathfinder_sqlite_paths()
-    reporter = LogReporter(logging.getLogger("test"))
+    reporter = Log_Reporter(logging.getLogger("test"))
     try:
         assert "NCBIGene:5468" in ngd.get_ngd_neighbors(
             Path(curie_ngd), reporter, "CHEBI:6801"

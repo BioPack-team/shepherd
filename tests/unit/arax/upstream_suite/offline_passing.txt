@@ -1,5 +1,11 @@
 test_ARAX_expand.py::test_xdtd_no_curies
 test_ARAX_filter_kg.py::test_command_definitions
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[equivalent_identifiers-generic]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[equivalent_identifiers-typed]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[same_as-generic]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[same_as-typed]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[xref-generic]
+test_ARAX_filter_kg.py::test_remove_general_concept_nodes_attribute_shapes[xref-typed]
 test_ARAX_filter_results.py::test_command_definitions
 test_ARAX_infer.py::test_xdtd_with_qg
 test_ARAX_messenger.py::test_add_qedge_duplicate_key
@@ -43,6 +49,14 @@ test_ARAX_synonymizer.py::test_example_11
 test_ARAX_synonymizer.py::test_example_12
 test_ARAX_synonymizer.py::test_example_6b
 test_ARAX_synonymizer.py::test_example_9
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[development-https://name-lookup.ci.transltr.io]
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[production-https://name-lookup.transltr.io]
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[staging-https://name-lookup.ci.transltr.io]
+test_ARAX_synonymizer.py::test_name_resolver_url_by_maturity[testing-https://name-lookup.test.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[development-https://nodenorm-es.ci.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[production-https://nodenorm-es.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[staging-https://nodenorm-es.ci.transltr.io]
+test_ARAX_synonymizer.py::test_node_normalizer_url_by_maturity[testing-https://nodenorm-es.test.transltr.io]
 test_ARAX_translate.py::test_fill_error
 test_ARAX_translate.py::test_unknown_operation
 test_ARAX_workflows.py::test_option_group_id

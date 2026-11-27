@@ -2,7 +2,9 @@
 # Changes from upstream:
 #   - import paths / sys.path hacks only
 #   - add_virtual_edge binds its virtual edges to the results in one pass after its loop, not one call per edge (D-28)
-#   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type; upstream sets none, so they take what their primary source (infores:cohd, EHR co-occurrence statistics) asserts for its own edges: statistical_association / data_analysis_pipeline
+#   - TRAPI 2.0: the virtual edges carry the required top-level knowledge_level / agent_type:
+#     statistical_association / automated_agent, as upstream trapi2.0 sets them (b5d02852; DEC-27)
+#   - from upstream trapi2.0 (b5d02852): the virtual QEdge gets predicates=[edge_type] (a list, as the model declares)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 # This class will overlay the clinical information we have on hand
 #!/bin/env python3
@@ -341,7 +343,7 @@ class OverlayClinicalInfo:
                     ]
                 edge = Edge(predicate=edge_type, subject=subject_key, object=object_key,
                                 attributes=edge_attribute_list, sources=retrieval_source,
-                                knowledge_level="statistical_association", agent_type="data_analysis_pipeline")
+                                knowledge_level="statistical_association", agent_type="automated_agent")
                 edge.qedge_keys = qedge_keys
                 self.message.knowledge_graph.edges[id] = edge
                 if self.message.results is not None and len(self.message.results) > 0:
@@ -360,7 +362,7 @@ class OverlayClinicalInfo:
             # q_edge = QEdge(id=relation, type=edge_type, relation=relation,
             #                subject_key=subject_qnode_key, object_key=object_qnode_key,
             #                option_group_id=option_group_id)  # TODO: ok to make the id and type the same thing?
-            q_edge = QEdge(predicates=edge_type, subject=subject_qnode_key,
+            q_edge = QEdge(predicates=[edge_type], subject=subject_qnode_key,
                            object=object_qnode_key, option_group_id=option_group_id)
             q_edge.relation = relation
             q_edge.filled = True

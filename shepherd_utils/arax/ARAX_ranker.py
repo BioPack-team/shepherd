@@ -8,6 +8,9 @@
 #       `biolink:agent_type` attribute; a manual_agent edge still gets the 0.90
 #       confidence and overrides everything else, as upstream (now also when it has
 #       no attributes, which upstream could not see since the attribute was one)
+#   - from upstream trapi2.0 (b5d02852, #2904): row_data items are never None (2.0 forbids
+#     null); _make_row_data_item maps None to "" (upstream wraps it in ResultRowDataInner;
+#     the port's Result.row_data is a plain list)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import math
 import os
@@ -51,6 +54,12 @@ def _calculate_final_individual_edge_confidence(base_score: float, attribute_sco
         W_r = W_r + (1 - W_r) * W_i
 
     return W_r
+
+
+def _make_row_data_item(value):
+    # TRAPI 2.0 Result.row_data items must be a string or number (null is no longer allowed), so use an
+    # empty string for a missing value in order to keep the columns aligned with table_column_names
+    return "" if value is None else value
 
 
 def _calculate_final_result_score(all_edge_scores: list[float]) -> float:
@@ -773,7 +782,7 @@ and [frobenius norm](https://en.wikipedia.org/wiki/Matrix_norm#Frobenius_norm).
             # Round to reasonable precision. Keep only 3 digits after the decimal
             score = int(result.analyses[0].score * 1000 + 0.5) / 1000.0
 
-            result.row_data = [score, result.essence, result.essence_category]
+            result.row_data = [_make_row_data_item(value) for value in (score, result.essence, result.essence_category)]
 
         # Add table columns name
         response.envelope.table_column_names = ['score', 'essence', 'essence_category']
@@ -788,7 +797,7 @@ and [frobenius norm](https://en.wikipedia.org/wiki/Matrix_norm#Frobenius_norm).
         # reinsert these scores into the results
         for result, score in zip(message.results, scores_without_ties):
             result.analyses[0].score = score
-            result.row_data[0] = score
+            result.row_data[0] = _make_row_data_item(score)
         response.debug("Results have been ranked and sorted")
 
 

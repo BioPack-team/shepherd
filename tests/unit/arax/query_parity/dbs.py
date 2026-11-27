@@ -4,12 +4,19 @@ The same files are written for upstream ARAX (under its KnowledgeSources/ dirs)
 and for the port (under Shepherd's data dirs), so the overlays and Infer read
 identical data: curie_to_pmids (NGD), the COHD database (overlay_clinical_info),
 and the ExplainableDTD database (Infer / creative treats).
+
+``tier0_20260928=True`` (the port, DEC-30) writes the same data in the
+tier0-20260928 layouts: curie_to_pmids as int32 PMID blobs, and the xDTD
+mapping tables with their provenance in ``extra_attributes``. Upstream's record
+(9485431) was made with the tier0-20260621 layouts (the default).
 """
 
 import json
 import os
 import random
 import sqlite3
+
+import numpy as np
 
 import fixtures as F
 import universe as U
@@ -24,20 +31,38 @@ def _fresh(path):
     return sqlite3.connect(path)
 
 
-def write_curie_to_pmids(path, seed=11):
+def curie_to_pmids_rows(seed=11):
+    """[(curie, sorted PMIDs)]: what write_curie_to_pmids stores."""
     r = random.Random(seed)
-    con = _fresh(path)
-    con.execute("CREATE TABLE curie_to_pmids (curie TEXT, pmids TEXT)")
     rows = []
     for i, curie in enumerate(sorted(NODES)):
         if i % 5 == 4:
             continue  # some curies have no PMIDs
-        pmids = sorted(r.sample(range(1, 400), r.randint(1, 60)))
-        rows.append((curie, json.dumps(pmids)))
-    con.executemany("INSERT INTO curie_to_pmids VALUES (?,?)", rows)
+        rows.append((curie, sorted(r.sample(range(1, 400), r.randint(1, 60)))))
+    return rows
+
+
+def write_curie_to_pmids(path, seed=11, tier0_20260928=False):
+    con = _fresh(path)
+    con.execute("CREATE TABLE curie_to_pmids (curie TEXT, pmids TEXT)")
+    rows = curie_to_pmids_rows(seed)
+    con.executemany(
+        "INSERT INTO curie_to_pmids VALUES (?,?)",
+        [
+            (
+                curie,
+                (
+                    np.array(pmids, dtype=np.int32).tobytes()
+                    if tier0_20260928
+                    else json.dumps(pmids)
+                ),
+            )
+            for curie, pmids in rows
+        ],
+    )
     con.commit()
     con.close()
-    return {curie: set(json.loads(pmids)) for curie, pmids in rows}
+    return {curie: set(pmids) for curie, pmids in rows}
 
 
 def _ngd(a, b, n=3.5e7 * 20):
@@ -51,21 +76,16 @@ def _ngd(a, b, n=3.5e7 * 20):
     return (max(fa, fb) - math.log(both)) / (math.log(n) - min(fa, fb))
 
 
-def write_curie_ngd(path, pmids):
-    """xCRG's (and the pathfinder's) curie_ngd(curie, ngd, pmid_length), from the
-    same PMID sets as curie_to_pmids: ngd lists [neighbor, ngd] for each
-    universe neighbor with a finite NGD."""
+def curie_ngd_pairs(pmids):
+    """{curie: [[neighbor, ngd], ...]}: what write_curie_ngd stores, for each
+    universe neighbor with a finite NGD (rounded to 6 digits)."""
     import math
 
     neighbors = {}
     for e in EDGES.values():
         neighbors.setdefault(e["subject"], set()).add(e["object"])
         neighbors.setdefault(e["object"], set()).add(e["subject"])
-    con = _fresh(path)
-    con.execute(
-        "CREATE TABLE curie_ngd (curie TEXT PRIMARY KEY, ngd TEXT, pmid_length INTEGER)"
-    )
-    rows = []
+    out = {}
     for curie in sorted(pmids):
         pairs = []
         for neighbor in sorted(neighbors.get(curie, ())):
@@ -73,7 +93,22 @@ def write_curie_ngd(path, pmids):
                 value = _ngd(pmids[curie], pmids[neighbor])
                 if math.isfinite(value):
                     pairs.append([neighbor, round(value, 6)])
-        rows.append((curie, json.dumps(pairs), len(pmids[curie])))
+        out[curie] = pairs
+    return out
+
+
+def write_curie_ngd(path, pmids):
+    """The pathfinder's curie_ngd(curie, ngd, pmid_length) in its tier0-20260621
+    layout, from the same PMID sets as curie_to_pmids: ngd lists
+    [neighbor, ngd] pairs (curie_ngd_pairs)."""
+    con = _fresh(path)
+    con.execute(
+        "CREATE TABLE curie_ngd (curie TEXT PRIMARY KEY, ngd TEXT, pmid_length INTEGER)"
+    )
+    rows = [
+        (curie, json.dumps(pairs), len(pmids[curie]))
+        for curie, pairs in curie_ngd_pairs(pmids).items()
+    ]
     con.executemany("INSERT INTO curie_ngd VALUES (?,?,?)", rows)
     con.commit()
     con.close()
@@ -185,7 +220,7 @@ def _paths_to(disease, r):
     return paths
 
 
-def write_xdtd(path, seed=17):
+def write_xdtd(path, seed=17, tier0_20260928=False):
     r = random.Random(seed)
     con = _fresh(path)
     con.execute(
@@ -194,29 +229,32 @@ def write_xdtd(path, seed=17):
     con.execute(
         "CREATE TABLE PATH_RESULT_TABLE (drug_id VARCHAR(255), drug_name VARCHAR(255), disease_id VARCHAR(255), disease_name VARCHAR(255), path VARCHAR(255), path_score FLOAT)"
     )
-    con.execute(
-        "CREATE TABLE NODE_MAPPING_TABLE (id TEXT NOT NULL, name TEXT, category TEXT, equivalent_identifiers TEXT, description TEXT, synonym TEXT, xref TEXT, chembl_natural_product TEXT, chembl_availability_type TEXT, chembl_black_box_warning TEXT)"
-    )
-    con.execute(
-        "CREATE TABLE EDGE_MAPPING_TABLE (subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL, id TEXT, category TEXT, qualifier TEXT, publications TEXT, sources TEXT, resource_id TEXT, resource_role TEXT, knowledge_level TEXT, agent_type TEXT, stage_qualifier TEXT, original_subject TEXT, original_object TEXT, extra_attributes TEXT)"
-    )
+    if tier0_20260928:  # #2893: core columns plus extra_attributes
+        con.execute(
+            "CREATE TABLE NODE_MAPPING_TABLE (id TEXT NOT NULL, name TEXT, category TEXT, extra_attributes TEXT)"
+        )
+        con.execute(
+            "CREATE TABLE EDGE_MAPPING_TABLE (subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL, id TEXT, category TEXT, extra_attributes TEXT)"
+        )
+    else:
+        con.execute(
+            "CREATE TABLE NODE_MAPPING_TABLE (id TEXT NOT NULL, name TEXT, category TEXT, equivalent_identifiers TEXT, description TEXT, synonym TEXT, xref TEXT, chembl_natural_product TEXT, chembl_availability_type TEXT, chembl_black_box_warning TEXT)"
+        )
+        con.execute(
+            "CREATE TABLE EDGE_MAPPING_TABLE (subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL, id TEXT, category TEXT, qualifier TEXT, publications TEXT, sources TEXT, resource_id TEXT, resource_role TEXT, knowledge_level TEXT, agent_type TEXT, stage_qualifier TEXT, original_subject TEXT, original_object TEXT, extra_attributes TEXT)"
+        )
     for nid in sorted(NODES):
         n = NODES[nid]
-        con.execute(
-            "INSERT INTO NODE_MAPPING_TABLE VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                nid,
-                n["name"],
-                json.dumps(n["categories"]),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-        )
+        node = (nid, n["name"], json.dumps(n["categories"]))
+        if tier0_20260928:
+            con.execute(
+                "INSERT INTO NODE_MAPPING_TABLE VALUES (?,?,?,?)", (*node, None)
+            )
+        else:
+            con.execute(
+                "INSERT INTO NODE_MAPPING_TABLE VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (*node, None, None, None, None, None, None, None),
+            )
     seen_edges = set()
     for disease in XDTD_DISEASES:
         paths = _paths_to(disease, r)
@@ -268,6 +306,32 @@ def write_xdtd(path, seed=17):
                     for s in e["sources"]
                 ]
                 pubs = [f"PMID:{r.randint(1, 999)}" for _ in range(r.randint(0, 3))]
+                qualifier = (
+                    {"object_aspect_qualifier": "activity"}
+                    if len(seen_edges) % 3 == 0
+                    else {}
+                )
+                if tier0_20260928:
+                    # the KGX properties, in the builder's key order; empty ones left out
+                    extras = {
+                        **({"publications": pubs} if pubs else {}),
+                        "sources": sources,
+                        "knowledge_level": "knowledge_assertion",
+                        "agent_type": "manual_agent",
+                        **qualifier,
+                    }
+                    con.execute(
+                        "INSERT INTO EDGE_MAPPING_TABLE VALUES (?,?,?,?,?,?)",
+                        (
+                            e["subject"],
+                            e["predicate"],
+                            e["object"],
+                            f"xdtd_edge_{len(seen_edges)}",
+                            json.dumps(["biolink:Association"]),
+                            json.dumps(extras),
+                        ),
+                    )
+                    continue
                 con.execute(
                     "INSERT INTO EDGE_MAPPING_TABLE VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
@@ -286,20 +350,16 @@ def write_xdtd(path, seed=17):
                         None,
                         None,
                         None,
-                        (
-                            json.dumps({"object_aspect_qualifier": "activity"})
-                            if len(seen_edges) % 3 == 0
-                            else None
-                        ),
+                        json.dumps(qualifier) if qualifier else None,
                     ),
                 )
     con.commit()
     con.close()
 
 
-def write_all(curie_to_pmids, cohd, xdtd, curie_ngd=None):
-    pmids = write_curie_to_pmids(curie_to_pmids)
+def write_all(curie_to_pmids, cohd, xdtd, curie_ngd=None, tier0_20260928=False):
+    pmids = write_curie_to_pmids(curie_to_pmids, tier0_20260928=tier0_20260928)
     if curie_ngd:
         write_curie_ngd(curie_ngd, pmids)
     write_cohd(cohd)
-    write_xdtd(xdtd)
+    write_xdtd(xdtd, tier0_20260928=tier0_20260928)

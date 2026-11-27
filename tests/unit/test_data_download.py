@@ -291,7 +291,7 @@ def test_arax_db_paths_fill_the_tier_version(tmp_path, mocker):
         tmp_path / "d" / "curie_to_pmids_v1.0_tier0-X.sqlite"
     )
     assert data_download.arax_db_path(data_download.ARAX_EXPLAINABLE_DTD) == str(
-        tmp_path / "d" / "ExplainableDTD_v1.0_tier0-X-all_with_paths.db"
+        tmp_path / "d" / "ExplainableDTD_v1.0-tier0-X-all_with_paths.db"
     )
     assert data_download.arax_db_path(data_download.ARAX_AUTOCOMPLETE) == str(
         tmp_path / "d" / "autocomplete_v1.0_tier0-X.sqlite"
@@ -380,3 +380,76 @@ def test_ensure_arax_dbs_with_no_names_does_nothing(tmp_path, mocker):
 
     spy.assert_not_called()
     assert not (tmp_path / "d").exists()
+
+
+# --- aragorn_graphenrich's DuckDB graph ------------------------------------------------
+
+
+def _point_graphenrich_at(mocker, target, url):
+    mocker.patch.object(
+        data_download.settings,
+        "graphenrich_duckdb_path",
+        str(target / "graphenrich.duckdb"),
+    )
+    mocker.patch.object(data_download.settings, "graphenrich_duckdb_url", url)
+
+
+def test_ensure_graphenrich_duckdb_downloads_and_extracts_the_archive(tmp_path, mocker):
+    url = _make_archive(tmp_path, ["graphenrich.duckdb"])
+    target = tmp_path / "graphenrich"
+    _point_graphenrich_at(mocker, target, url)
+
+    data_download.ensure_graphenrich_duckdb(logger)
+
+    # extracted under the configured name, with the archive cleaned up
+    assert (target / "graphenrich.duckdb").read_bytes() == (
+        b"lmdb-bytes-for-graphenrich.duckdb"
+    )
+    assert os.listdir(target) == ["graphenrich.duckdb"]
+
+
+def test_a_graphenrich_archive_without_the_database_is_an_error(tmp_path, mocker):
+    url = _make_archive(tmp_path, ["something-else.duckdb"])
+    target = tmp_path / "graphenrich"
+    _point_graphenrich_at(mocker, target, url)
+
+    with pytest.raises(RuntimeError, match="graphenrich.duckdb"):
+        data_download.ensure_graphenrich_duckdb(logger)
+
+
+def test_ensure_graphenrich_duckdb_is_a_noop_once_present(tmp_path, mocker):
+    target = tmp_path / "graphenrich"
+    target.mkdir()
+    (target / "graphenrich.duckdb").write_bytes(b"mounted")
+    _point_graphenrich_at(mocker, target, "https://example.org/never-fetched")
+    download = mocker.patch.object(data_download, "_download")
+
+    data_download.ensure_graphenrich_duckdb(logger)
+
+    download.assert_not_called()
+    assert (target / "graphenrich.duckdb").read_bytes() == b"mounted"
+
+
+def test_ensure_graphenrich_duckdb_without_a_url_only_warns(tmp_path, mocker, caplog):
+    target = tmp_path / "graphenrich"
+    _point_graphenrich_at(mocker, target, "")
+    download = mocker.patch.object(data_download, "_download")
+
+    with caplog.at_level(logging.WARNING):
+        data_download.ensure_graphenrich_duckdb(logger)
+
+    download.assert_not_called()
+    assert "no download URL configured" in caplog.text
+    assert not (target / "graphenrich.duckdb").exists()
+
+
+def test_a_failed_graphenrich_download_leaves_no_partial_file(tmp_path, mocker):
+    target = tmp_path / "graphenrich"
+    _point_graphenrich_at(
+        mocker, target, (tmp_path / "not-published.duckdb.tar.gz").as_uri()
+    )
+
+    with pytest.raises(RuntimeError, match="download failed"):
+        data_download.ensure_graphenrich_duckdb(logger)
+
+    assert os.listdir(target) == []

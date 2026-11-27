@@ -181,16 +181,16 @@ def lmdb(monkeypatch):
 
     shared = {"reads": []}
 
-    def _shared_count_query(keys):
-        shared["reads"].append(list(keys))
+    def _read_shared_counts(keys):
+        shared["reads"].append([k.decode() for k in keys])
         if shared.get("fail"):
             raise ValueError("shared-counts LMDB value is not ASCII decimal")
         if shared.get("slow"):
             time.sleep(shared["slow"])
-        return {k: 3 for k in keys}
+        return [3 for _ in keys]
 
     monkeypatch.setattr(omnicorp, "curie_query", _curie_query)
-    monkeypatch.setattr(omnicorp, "shared_count_query", _shared_count_query)
+    monkeypatch.setattr(omnicorp, "read_shared_counts", _read_shared_counts)
     return shared
 
 

@@ -177,6 +177,24 @@ def test_golden_matches_arax():
     assert all(type(r["analyses"][0]["score"]) is float for r in results)
 
 
+def test_row_data_has_no_nulls():
+    """Upstream trapi2.0 (b5d02852, #2904): TRAPI 2.0 forbids null in row_data,
+    so a missing essence / essence_category is written as "" (ARAX 9485431 wrote
+    None), keeping the columns aligned with table_column_names."""
+    envelope = golden_envelope()
+    for result in envelope["message"]["results"]:
+        del result["essence"]
+        del result["essence_category"]
+    results = arax_rank(envelope, logger)["message"]["results"]
+    assert [r["row_data"] for r in results] == [
+        [1.0, "", ""],
+        [0.75, "", ""],
+        [0.5, "", ""],
+        [0.25, "", ""],
+    ]
+    Response.from_dict(envelope)
+
+
 def test_golden_edge_confidences_match_arax():
     ranker = ARAXRanker()
     ranker.aggregate_scores_dmk(golden_envelope(), logger)

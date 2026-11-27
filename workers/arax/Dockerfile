@@ -15,6 +15,14 @@ RUN pip install --no-deps .
 
 COPY ./workers/arax .
 
+# A fixed string-hash seed, so ARAX answers the same query the same way in
+# every process and after every restart. ARAX orders results with equal raw
+# scores by Python set order (ARAX_resultify), which follows the hash seed; the
+# ranker then gives tied results positional scores and a result cap keeps the
+# first ones. Upstream ARAX's order follows its own server's seed, so this makes
+# Shepherd reproducible, not identical to upstream (docs/ARAX_PARITY_RUN.md).
+ENV PYTHONHASHSEED=0
+
 # Release version (git tag), injected by .github/workflows/release.yml.
 # Reported in the worker heartbeat so the monitor can show which image
 # version each replica runs. Local builds default to "dev". Declared last so

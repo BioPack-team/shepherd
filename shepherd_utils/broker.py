@@ -124,13 +124,19 @@ async def add_task(queue, payload, logger: logging.Logger, raise_on_failure=Fals
                 raise
 
 
+# How long an empty read waits for a message before get_task returns None.
+# Tests shorten it (tests/conftest.py), since draining a stream always ends on
+# an empty read.
+GET_TASK_BLOCK_MS = 5000
+
+
 async def get_task(stream, group, consumer, logger: logging.Logger):
     """Get an ara task from the queue."""
     try:
         await create_consumer_group(stream, group, logger)
         # logger.info(f"Getting task for {ara_target}")
         messages = await broker_client.xreadgroup(
-            group, consumer, {stream: ">"}, count=1, block=5000
+            group, consumer, {stream: ">"}, count=1, block=GET_TASK_BLOCK_MS
         )
         # The broker answered -- an empty read is still a healthy read.
         broker_health.record_success()

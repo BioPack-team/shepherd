@@ -3,6 +3,7 @@
 #   - import paths / sys.path hacks only
 #   - TRAPI 2.0: to_dict() omits unset members, so the discrete-attribute/property value lookups use .get() (upstream got None)
 #   - TRAPI 2.0: remove_edges_by_discrete_attribute accepts biolink:knowledge_level / biolink:agent_type (1.x attributes) and reads the top-level Edge properties
+#   - from upstream trapi2.0 (2add4986): remove_edges_by_discrete_attribute's validation accepts the knowledge-source attribute names and resource ids of edge.sources
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 import traceback
@@ -697,6 +698,10 @@ This can be applied to an arbitrary knowledge graph as possible node categories 
                                     known_values.add(val)
                         if len(known_attributes.intersection(provided_by_attributes)) > 0:
                             known_attributes = known_attributes.union(provided_by_attributes)
+                # Since TRAPI 1.4, knowledge sources are on edge.sources rather than in attributes
+                if edge.sources:
+                    known_attributes = known_attributes.union(provided_by_attributes)
+                    known_values.update(source.resource_id for source in edge.sources)
                 # TRAPI 2.0: knowledge_level / agent_type are top-level Edge properties, no longer biolink: attributes
                 for property_name in ('knowledge_level', 'agent_type'):
                     if getattr(edge, property_name, None) is not None:

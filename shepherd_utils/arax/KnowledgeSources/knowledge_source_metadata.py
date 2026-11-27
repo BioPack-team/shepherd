@@ -11,6 +11,13 @@
 #     volume) instead of next to this file
 #   - get_kg_predicates (no callers; it read KG2C_allowed_predicate_triples.csv) and
 #     main() are removed (dead code, DEC-5)
+#   - from upstream trapi2.0 (7fd99e72): Retriever's meta-KG is fetched with
+#     params={"tier": RETRIEVER_META_KG_TIER} (0), the tier Expand queries; the URL stays
+#     Shepherd's Retriever (DEC-11), not SmartAPI's
+#   - from upstream trapi2.0 (db6140e7): the biolink:original_predicate standard
+#     constraint is named "original predicate" (was "kg2 ids")
+#   - upstream trapi2.0's _drop_empty_containers (2f78aa95) is in the /meta_knowledge_graph
+#     endpoint (shepherd_server/aras/arax.py), as upstream has it in its API impl
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import sys
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -34,6 +41,10 @@ from shepherd_utils.config import settings
 def _backup_dir() -> str:
     os.makedirs(settings.arax_dbs_dir, exist_ok=True)
     return settings.arax_dbs_dir
+
+
+# Expand queries Retriever with tiers=[0] (see trapi_querier.py), so the meta KG we advertise is the tier 0 one
+RETRIEVER_META_KG_TIER = 0
 
 
 def _retriever_meta_kg_url() -> str:
@@ -68,7 +79,9 @@ class KnowledgeSourceMetadata:
     def _fetch_retriever_meta_kg(self) -> Optional[Dict[str, Any]]:
         """Fetch meta knowledge graph from Retriever"""
         try:
-            response = requests.get(_retriever_meta_kg_url(), timeout=30)
+            response = requests.get(_retriever_meta_kg_url(),
+                                    params={"tier": RETRIEVER_META_KG_TIER},
+                                    timeout=30)
             if response.status_code == 200:
                 return response.json()
             else:
@@ -97,7 +110,7 @@ class KnowledgeSourceMetadata:
         standard_attributes = [
             {
                 "attribute_type_id": "biolink:original_predicate",
-                "constraint_name": "kg2 ids",
+                "constraint_name": "original predicate",
                 "constraint_use": True
             },
             {

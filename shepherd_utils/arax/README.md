@@ -28,8 +28,10 @@ Rules for this directory:
   interface but is backed by Shepherd: `RTXConfiguration.py`,
   `ARAX_query_tracker.py`, `ResponseCache/response_cache.py` and
   `Path_Finder/utility.py`. Their headers say so.
-- **Vendored packages.** `xcrg/` is the xCRG package (catrax-xcrg), vendored
-  and converted to TRAPI 2.0 (DEC-21); see its README.
+- **xCRG is upstream's package.** `connect(action=xcrg)` runs the PyPI
+  package `catrax-xcrg` at the version upstream ARAX `trapi2.0` pins (DEC-25;
+  it replaced the vendored copy of DEC-21). Its known bugs are tracked in
+  Shepherd's issues and pinned as strict xfails in `tests/unit/arax/test_xcrg.py`.
 
 Parity tests are in `tests/unit/arax/`: `test_expand_parity.py` (Expand) and
 `test_query_parity.py` (whole queries through `ARAXQuery`), each against goldens

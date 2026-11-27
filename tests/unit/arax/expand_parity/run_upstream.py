@@ -34,7 +34,7 @@ F.write_tier0_sqlite(
         "ARAX",
         "KnowledgeSources",
         "KG2c",
-        "tier0-info-for-overlay_v1.0_tier0-20260621.sqlite",
+        "tier0-info-for-overlay_v1.0_tier0-20260928.sqlite",
     )
 )
 F.write_fda_pickle(

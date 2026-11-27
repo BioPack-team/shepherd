@@ -10,6 +10,7 @@ the query had finished with anything other than OK.
 import asyncio
 import json
 import logging
+from datetime import datetime
 
 import orjson
 import pytest
@@ -55,7 +56,7 @@ def _query_request(query, disconnected=False):
     return request
 
 
-def _row(state="QUEUED", status="OK", description=None):
+def _row(state="QUEUED", status="OK", description=None, domain="aragorn"):
     """A shepherd_brain row, in the column order get_query_state returns."""
     return (
         "qid",
@@ -63,7 +64,7 @@ def _row(state="QUEUED", status="OK", description=None):
         "stop",
         "submitter",
         "ip",
-        "domain",
+        domain,
         "hostname",
         "response_id",
         None,
@@ -147,6 +148,54 @@ async def test_status_carries_the_query_logs(mocker):
     logs = [{"level": "ERROR", "message": "ARAX service returned HTTP 500"}]
     _patch_state(mocker, _row(state="COMPLETED", status="ERROR"), logs=logs)
     assert _body(await query_status("qid"))["logs"] == logs
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _row(state="QUEUED", status="OK"),
+        _row(state="COMPLETED", status="OK", description="All done."),
+        _row(state="COMPLETED", status="TIMEOUT"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_status_without_logs_reports_one_entry(mocker, row):
+    """TRAPI 2.0 requires at least one log entry: with none stored, the status
+    itself is reported as an INFO entry (as upstream ARAX's tracker does)."""
+    _patch_state(mocker, row, logs=[])
+    body = _body(await query_status("qid"))
+    assert len(body["logs"]) == 1
+    entry = body["logs"][0]
+    assert entry["level"] == "INFO"
+    assert entry["message"] == body["description"]
+    assert datetime.fromisoformat(entry["timestamp"]).tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    "domain,path",
+    [
+        ("arax", "/arax/response/response_id"),
+        ("aragorn", "/response/response_id"),
+        ("bte", "/response/response_id"),
+        (None, "/response/response_id"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_status_links_the_trapi_response(mocker, domain, path):
+    """response_url is a URL a client can GET for the TRAPI Response: ARAX's
+    own /arax/response route for an ARAX query, the generic /response route
+    for any other."""
+    mocker.patch.object(base_routes.settings, "server_url", "https://shepherd.test/")
+    _patch_state(mocker, _row(state="COMPLETED", status="OK", domain=domain))
+    body = _body(await query_status("qid"))
+    assert body["response_url"] == "https://shepherd.test" + path
+
+
+@pytest.mark.asyncio
+async def test_status_is_a_valid_trapi2_async_query_status_response(mocker):
+    v2_0 = pytest.importorskip("translator_tom").v2_0
+    _patch_state(mocker, _row(state="QUEUED", status="OK", domain="arax"), logs=[])
+    v2_0.AsyncQueryStatusResponse.from_dict(_body(await query_status("qid")))
 
 
 # --- apply_query_status ----------------------------------------------------

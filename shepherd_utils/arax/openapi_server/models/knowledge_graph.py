@@ -96,7 +96,5 @@ class KnowledgeGraph(Model):
         :param edges: The edges of this KnowledgeGraph.
         :type edges: Dict[str, Edge]
         """
-        if edges is None:
-            raise ValueError("Invalid value for `edges`, must not be `None`")  # noqa: E501
 
         self._edges = edges

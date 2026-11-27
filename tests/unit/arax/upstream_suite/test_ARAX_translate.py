@@ -459,6 +459,22 @@ def test_overlay_after_lookup():
                     ngd_bindings.add(edge_id)
     assert len(ngd_bindings) == len(message.results)
 
+# upstream trapi2.0 (2add4986): result edge keys, support graphs included
+def _get_result_edge_keys(message: Message) -> list[set[str]]:
+    """Edge keys each result uses: bound edges plus edges in its support graphs (where virtual edges end up)"""
+    edge_keys_by_result = []
+    for result in message.results:
+        edge_keys = set()
+        for analysis in result.analyses:
+            # TRAPI 2.0: one EdgeBinding per qedge key, holding all bound edge 'ids'
+            edge_keys.update(edge_id for edge_binding in analysis.edge_bindings.values()
+                             for edge_id in edge_binding.ids)
+            for aux_graph_key in analysis.support_graphs or []:
+                edge_keys.update(message.auxiliary_graphs[aux_graph_key].edges)
+        edge_keys_by_result.append(edge_keys)
+    return edge_keys_by_result
+
+
 @pytest.mark.slow
 def test_connect_knodes_2_nodes():
     query = {
@@ -519,28 +535,13 @@ def test_connect_knodes_2_nodes():
     }
     [response, message] = _do_arax_query(query)
     assert response.status == 'OK'
-    assert len(message.results) == 30
-    connected_bindings_ngd = set()
-    connected_bindings_fisher = set()
-    connected_bindings_paired_freq = set()
-    connected_bindings_pred_dtd = set()
-    for result in message.results:
-        assert result.score is not None
-        for eb_key, edge_bindings in result.edge_bindings.items():
-            for edge_binding in edge_bindings:
-                if edge_binding.id.startswith("connect_knodes_fisher"):
-                    connected_bindings_fisher.add(edge_binding.id)
-                elif edge_binding.id.startswith("connect_knodes_ngd"):
-                    connected_bindings_ngd.add(edge_binding.id)
-                elif edge_binding.id.startswith("connect_knodes_paired_freq"):
-                    connected_bindings_paired_freq.add(edge_binding.id)
-                elif edge_binding.id.startswith("connect_knodes_pred_dtd"):
-                    connected_bindings_pred_dtd.add(edge_binding.id)
-                    
-    assert len(connected_bindings_ngd) > 0
-    assert len(connected_bindings_fisher) > 0
-    assert len(connected_bindings_paired_freq) > 0
-    assert len(connected_bindings_pred_dtd) > 0
+    # upstream trapi2.0 (2add4986): no COHD paired_concept_frequency or predict_drug_treats_disease step,
+    # one label per qnode pair; virtual edges end up in the results' support graphs
+    assert 0 < len(message.results) <= 30
+    assert all(result.analyses[0].score is not None for result in message.results)
+    result_edge_keys = set().union(*_get_result_edge_keys(message))
+    assert any(edge_key.startswith("connect_knodes_ngd") for edge_key in result_edge_keys)
+    assert any(edge_key.startswith("connect_knodes_fisher") for edge_key in result_edge_keys)
 
 @pytest.mark.slow
 def test_connect_knodes_3_nodes():
@@ -614,15 +615,11 @@ def test_connect_knodes_3_nodes():
     }
     [response, message] = _do_arax_query(query)
     assert response.status == 'OK'
-    assert len(message.results) == 30
-    connected_bindings = set()
-    for result in message.results:
-        assert result.score is not None
-        for eb_key, edge_bindings in result.edge_bindings.items():
-            for edge_binding in edge_bindings:
-                if edge_binding.id.startswith("connect_knodes"):
-                    connected_bindings.add(edge_binding.id)
-    assert len(connected_bindings) > 0
+    # upstream trapi2.0 (2add4986): virtual edges end up in the results' support graphs
+    assert 0 < len(message.results) <= 30
+    assert all(result.analyses[0].score is not None for result in message.results)
+    result_edge_keys = set().union(*_get_result_edge_keys(message))
+    assert any(edge_key.startswith("connect_knodes") for edge_key in result_edge_keys)
 
 
 def test_unknown_operation():

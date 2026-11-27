@@ -33,9 +33,9 @@
 # superuser-reserved) for migrations, psql and slack.
 #
 # FLEET_SHARES is the sum of every DB-connecting process's shares with the
-# `ars` profile on: 24 workers and the monitor at 1, the two lookup workers at
-# 3, and the server's 4 uvicorn processes (WEB_CONCURRENCY) at 1 each -- 35,
-# so 10 connections a share. Without the profile the fleet is 30 shares and
+# `ars` profile on: 25 workers and the monitor at 1, the two lookup workers at
+# 3, and the server's 4 uvicorn processes (WEB_CONCURRENCY) at 1 each -- 36,
+# so 10 connections a share. Without the profile the fleet is 31 shares and
 # the pools are simply sized conservatively. Adding a DB-connecting service or
 # changing a share means changing this total;
 # tests/unit/test_connection_budget.py checks it against this file. In a
@@ -43,7 +43,7 @@
 # shrinks every pool instead of overrunning max_connections.
 x-postgres-budget: &postgres_budget
   POSTGRES_CONNECTION_BUDGET: 360
-  POSTGRES_FLEET_SHARES: 35
+  POSTGRES_FLEET_SHARES: 36
 
 services:
   # The shared base image (shepherd_base/Dockerfile) every Shepherd image is
@@ -594,6 +594,37 @@ services:
       # downloads + extracts curies.lmdb / shared_counts.lmdb into this mount on
       # startup (see README "Worker data (LMDB / sqlite) downloads").
       - ./omnicorp_lmdb:/app/omnicorp_lmdb
+  aragorn_graphenrich:
+    container_name: aragorn_graphenrich
+    init: true
+    environment:
+      <<: *postgres_budget
+    cpus: 2 # -> pool sizes to 2
+    # Each pool child runs DuckDB under GRAPHENRICH_DUCKDB_MEMORY_LIMIT
+    # (default 1GB) on top of the query and response it holds; 2 children and
+    # the parent fit in 4g.
+    mem_limit: 4g
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: workers/aragorn_graphenrich/Dockerfile
+      additional_contexts:
+        shepherd_base: service:shepherd_base
+    restart: unless-stopped
+    depends_on:
+      shepherd_db:
+        condition: service_healthy
+      shepherd_broker:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      # The graphenrich DuckDB graph. First run? The worker downloads the
+      # .tar.gz at GRAPHENRICH_DUCKDB_URL and extracts graphenrich.duckdb into
+      # this mount (writable for that reason; the worker only ever opens the
+      # database read-only, so a deployment can mount its volume read-only),
+      # or put/build it here yourself (see README "Worker data").
+      - ./graphenrich:/app/graphenrich
   aragorn_score:
     container_name: aragorn_score
     init: true
@@ -638,6 +669,8 @@ services:
       # ARAX puts no ceiling on a query, and Expand waits up to 120 s per hop,
       # so the shared 300 s default would kill slow multi-hop queries.
       POOL_TASK_TIMEOUT_SEC: "900"
+      # Node Normalizer calls: on / off / compare / query_nodes (DEC-34, docs/ARAX_PARITY_RUN.md)
+      ARAX_NODE_NORMALIZATION: "on"
     platform: linux/amd64
     build:
       context: .

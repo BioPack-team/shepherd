@@ -11,6 +11,7 @@ make live calls to the Retriever; they take tens of seconds.
 
 import os
 import sys
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -50,14 +51,13 @@ def _xcrg_query_graph():
                 "object": "gene",
                 "predicates": ["biolink:affects"],
                 "knowledge_type": "inferred",
-                # TRAPI 2.0: was qualifier_constraints [{qualifier_set: [...]}]
                 "constraints": {
                     "qualifiers": [
                         {
                             "biolink:object_aspect_qualifier": "activity_or_abundance",
-                            "biolink:object_direction_qualifier": "decreased",
-                        },
-                    ],
+                            "biolink:object_direction_qualifier": "decreased"
+                        }
+                    ]
                 },
             },
         },
@@ -66,7 +66,7 @@ def _xcrg_query_graph():
 
 def _xcrg_response(query_graph):
     return {
-        "schema_version": "2.0.0",  # TRAPI 2.0: was 1.6.0
+        "schema_version": "1.6.0",
         "biolink_version": "4.3.2",
         "message": {
             "query_graph": query_graph,
@@ -80,6 +80,8 @@ def _xcrg_response(query_graph):
                         "subject": "CHEBI:1",
                         "predicate": "biolink:affects",
                         "object": "NCBIGene:6323",
+                        "knowledge_level": "not_provided",
+                        "agent_type": "not_provided",
                         "attributes": [],
                         "sources": [
                             {
@@ -87,23 +89,21 @@ def _xcrg_response(query_graph):
                                 "resource_role": "primary_knowledge_source",
                             },
                         ],
-                        # TRAPI 2.0: required edge members
-                        "knowledge_level": "prediction",
-                        "agent_type": "computational_model",
                     },
                 },
             },
-            "results": [  # TRAPI 2.0: no empty auxiliary_graphs
+            "auxiliary_graphs": {},
+            "results": [
                 {
                     "node_bindings": {
-                        "chem": {"ids": ["CHEBI:1"]},  # TRAPI 2.0: one binding with ids
-                        "gene": {"ids": ["NCBIGene:6323"]},  # TRAPI 2.0: one binding with ids
+                        "chem": {"ids": ["CHEBI:1"]},
+                        "gene": {"ids": ["NCBIGene:6323"]},
                     },
                     "analyses": [
                         {
                             "resource_id": "infores:arax",
                             "edge_bindings": {
-                                "e0": {"ids": ["xcrg_edge_0"]},  # TRAPI 2.0: one binding with ids
+                                "e0": {"ids": ["xcrg_edge_0"]},
                             },
                             "score": 1.0,
                         },
@@ -122,7 +122,6 @@ def _response_with_query_graph(query_graph):
             "query_graph": query_graph,
             "knowledge_graph": {"nodes": {}, "edges": {}},
             "results": [],
-            "auxiliary_graphs": {},
         }
     )
     return response
@@ -145,7 +144,7 @@ def test_xcrg_retriever_url_uses_arax_maturity(monkeypatch):
     )
     assert (
         get_xcrg_retriever_url(SimpleNamespace(maturity="unknown"))
-        == "https://retriever.ci.transltr.io/query"
+        == "https://dev.retriever.biothings.io/query"
     )
 
 
@@ -185,7 +184,7 @@ def test_connect_xcrg_calls_package_and_updates_response(monkeypatch):
 
     class MockRTXConfiguration:
         maturity = "testing"
-        trapi_version = "2.0.0"  # TRAPI 2.0: was 1.6.0
+        trapi_version = "1.6.0"
 
     class MockKPQueryCacher:
         def get_cached_result(self, *_args, **_kwargs):
@@ -197,10 +196,10 @@ def test_connect_xcrg_calls_package_and_updates_response(monkeypatch):
         def _get_n_results(self, _response_data):
             return 0
 
-    def mock_run_xcrg(query, config, logger):
+    def mock_run_query(query, config, reporter):
         captured["query"] = query
         captured["config"] = config
-        captured["logger"] = logger
+        captured["reporter"] = reporter
         return _xcrg_response(query_graph)
 
     monkeypatch.delenv(XCRG_RETRIEVER_URL_ENV, raising=False)
@@ -211,21 +210,21 @@ def test_connect_xcrg_calls_package_and_updates_response(monkeypatch):
     monkeypatch.setattr(ARAX_connect, "get_curie_ngd_path", lambda: "sqlite:/tmp/xcrg-ngd.sqlite")
     monkeypatch.setattr(ARAX_connect, "get_curie_to_pmids_path", lambda: "sqlite:/tmp/xcrg-pmids.sqlite")
     monkeypatch.setattr(ARAX_connect, "get_current_arax_biolink_version", lambda: "4.3.2")
-    monkeypatch.setattr(ARAX_connect, "run_xcrg", mock_run_xcrg)
+    monkeypatch.setattr(ARAX_connect.xcrg, "run_query", mock_run_query)
 
     response = ARAXConnect().apply(response, {"action": "xcrg"})
 
     assert response.status == "OK"
     assert response.data["xcrg_connect"] is True
-    assert response.envelope.schema_version == "2.0.0"  # TRAPI 2.0: was 1.6.0
+    assert response.envelope.schema_version == "1.6.0"
     assert response.envelope.biolink_version == "4.3.2"
     assert response.total_results_count == 1
     assert len(response.envelope.message.results) == 1
     assert captured["query"]["message"]["query_graph"]["edges"]["e0"]["knowledge_type"] == "inferred"
     assert captured["config"].retriever_url == "https://retriever.test.transltr.io/query"
-    assert captured["config"].ngd_db_path == "/tmp/xcrg-ngd.sqlite"
-    assert captured["config"].curie_to_pmids_db_path == "/tmp/xcrg-pmids.sqlite"
-    assert captured["config"].timeout == 17
+    assert captured["config"].curie_ngd_db_file == "/tmp/xcrg-ngd.sqlite"
+    assert captured["config"].curie_to_pmids_db_file == "/tmp/xcrg-pmids.sqlite"
+    assert captured["config"].timeout == timedelta(seconds=17)
     assert captured["config"].tiers == [0]
     assert captured["config"].tf_batch_size == 23
     xcrg_plan = response.query_plan["qedge_keys"]["e0"]["arax-xcrg"]
@@ -252,14 +251,13 @@ def _xcrg_gene_object_query_graph():
                 "object": "on",
                 "predicates": ["biolink:affects"],
                 "knowledge_type": "inferred",
-                # TRAPI 2.0: was qualifier_constraints [{qualifier_set: [...]}]
                 "constraints": {
                     "qualifiers": [
                         {
                             "biolink:object_aspect_qualifier": "activity_or_abundance",
-                            "biolink:object_direction_qualifier": "increased",
-                        },
-                    ],
+                            "biolink:object_direction_qualifier": "increased"
+                        }
+                    ]
                 },
             },
         },
@@ -268,7 +266,7 @@ def _xcrg_gene_object_query_graph():
 
 def _xcrg_gene_object_response(query_graph):
     return {
-        "schema_version": "2.0.0",  # TRAPI 2.0: was 1.6.0
+        "schema_version": "1.6.0",
         "biolink_version": "4.3.2",
         "message": {
             "query_graph": query_graph,
@@ -282,6 +280,8 @@ def _xcrg_gene_object_response(query_graph):
                         "subject": "CHEBI:2",
                         "predicate": "biolink:affects",
                         "object": "NCBIGene:1576",
+                        "knowledge_level": "not_provided",
+                        "agent_type": "not_provided",
                         "attributes": [],
                         "sources": [
                             {
@@ -289,23 +289,21 @@ def _xcrg_gene_object_response(query_graph):
                                 "resource_role": "primary_knowledge_source",
                             },
                         ],
-                        # TRAPI 2.0: required edge members
-                        "knowledge_level": "prediction",
-                        "agent_type": "computational_model",
                     },
                 },
             },
-            "results": [  # TRAPI 2.0: no empty auxiliary_graphs
+            "auxiliary_graphs": {},
+            "results": [
                 {
                     "node_bindings": {
-                        "sn": {"ids": ["CHEBI:2"]},  # TRAPI 2.0: one binding with ids
-                        "on": {"ids": ["NCBIGene:1576"]},  # TRAPI 2.0: one binding with ids
+                        "sn": {"ids": ["CHEBI:2"]},
+                        "on": {"ids": ["NCBIGene:1576"]},
                     },
                     "analyses": [
                         {
                             "resource_id": "infores:arax",
                             "edge_bindings": {
-                                "t_edge": {"ids": ["xcrg_edge_0"]},  # TRAPI 2.0: one binding with ids
+                                "t_edge": {"ids": ["xcrg_edge_0"]},
                             },
                             "score": 1.0,
                         },
@@ -334,7 +332,7 @@ def test_gene_object_connect_xcrg_calls_package_and_updates_response(monkeypatch
 
     class MockRTXConfiguration:
         maturity = "testing"
-        trapi_version = "2.0.0"  # TRAPI 2.0: was 1.6.0
+        trapi_version = "1.6.0"
 
     class MockKPQueryCacher:
         def get_cached_result(self, *_args, **_kwargs):
@@ -346,7 +344,7 @@ def test_gene_object_connect_xcrg_calls_package_and_updates_response(monkeypatch
         def _get_n_results(self, _response_data):
             return 0
 
-    def mock_run_xcrg(query, config, logger):
+    def mock_run_query(query, config, reporter):
         captured["query"] = query
         return _xcrg_gene_object_response(query_graph)
 
@@ -356,7 +354,7 @@ def test_gene_object_connect_xcrg_calls_package_and_updates_response(monkeypatch
     monkeypatch.setattr(ARAX_connect, "get_curie_ngd_path", lambda: "sqlite:/tmp/xcrg-ngd.sqlite")
     monkeypatch.setattr(ARAX_connect, "get_curie_to_pmids_path", lambda: "sqlite:/tmp/xcrg-pmids.sqlite")
     monkeypatch.setattr(ARAX_connect, "get_current_arax_biolink_version", lambda: "4.3.2")
-    monkeypatch.setattr(ARAX_connect, "run_xcrg", mock_run_xcrg)
+    monkeypatch.setattr(ARAX_connect.xcrg, "run_query", mock_run_query)
 
     response = ARAXConnect().apply(response, {"action": "xcrg"})
 
@@ -367,10 +365,10 @@ def test_gene_object_connect_xcrg_calls_package_and_updates_response(monkeypatch
     edge = captured["query"]["message"]["query_graph"]["edges"]["t_edge"]
     assert edge["knowledge_type"] == "inferred"
     assert edge["predicates"] == ["biolink:affects"]
-    qualifiers = {  # TRAPI 2.0: a qualifier set is a {type: value} dict
-        type_id: value
-        for qs in edge["constraints"]["qualifiers"]
-        for type_id, value in qs.items()
+    qualifiers = {
+        qualifier_type_id: qualifier_value
+        for qualifier_set in edge["constraints"]["qualifiers"]
+        for qualifier_type_id, qualifier_value in qualifier_set.items()
     }
     assert qualifiers["biolink:object_aspect_qualifier"] == "activity_or_abundance"
     assert qualifiers["biolink:object_direction_qualifier"] == "increased"
@@ -402,12 +400,11 @@ def test_gene_object_xcrg_full_trapi_integration():
                         "knowledge_type": "inferred",
                         "object": "on",
                         "predicates": ["biolink:affects"],
-                        # TRAPI 2.0: was qualifier_constraints [{qualifier_set: [...]}]
                         "constraints": {
                             "qualifiers": [
                                 {
                                     "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                    "biolink:object_direction_qualifier": "increased",
+                                    "biolink:object_direction_qualifier": "increased"
                                 }
                             ]
                         },
@@ -425,7 +422,7 @@ def test_gene_object_xcrg_full_trapi_integration():
                 },
             }
         },
-        "query_options": {"bypass_cache": True},
+        "parameters": {"bypass_cache": True},
     }
 
     araxq = ARAXQuery()

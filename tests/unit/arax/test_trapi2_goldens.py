@@ -115,6 +115,16 @@ def _recorded_requests():
                 yield f"{suite}.{case}[{i}]", request["body"]
 
 
+@pytest.fixture(autouse=True)
+def instant_mock_retriever(monkeypatch):
+    """The mock Retriever sleeps 3s on its slow CURIE so the parity runs hit
+    their timeouts; the tests here replay recorded requests through it and
+    only compare its answers."""
+    import mock_retriever
+
+    monkeypatch.setattr(mock_retriever.time, "sleep", lambda _s: None)
+
+
 def test_mock_retriever_answers_are_the_translation_of_its_recorded_answers():
     import mock_retriever
 
@@ -145,10 +155,11 @@ def test_query_id_lost_cases_are_the_ones_listed(suite):
 
 
 def test_arax_made_edges_get_their_2_0_levels():
-    """H9: the overlay edges upstream made without KL/AT get the port's values."""
+    """H9: the overlay and subclass_of edges upstream made without KL/AT get
+    the port's values."""
     old = T.read_json_gz(T.golden_paths("query_parity")[0])
     new = T.read_json_gz(T.golden_paths("query_parity")[1])
-    seen = set()
+    seen, dropped = set(), set()
     for case, rec in old.items():
         edges = (rec["envelope"]["message"].get("knowledge_graph") or {}).get(
             "edges"
@@ -159,10 +170,16 @@ def test_arax_made_edges_get_their_2_0_levels():
             levels = T.arax_edge_levels(edge)
             if levels is None:
                 continue
+            if key not in new_edges:  # H21: no result or support graph uses it
+                dropped.add(edge["predicate"])
+                continue
             seen.add(edge["predicate"])
             got = new_edges[key]
             assert (got["knowledge_level"], got["agent_type"]) == levels, key
+    # H21: no result binds Expand's subclass_of edges (upstream 9485431 kept
+    # them by the both-endpoints rule), so none is left in an envelope
     assert seen == {p for p, _ in T.ARAX_EDGE_LEVELS}
+    assert "biolink:subclass_of" in dropped
 
 
 def test_envelopes_declare_trapi_2():
@@ -188,7 +205,8 @@ def test_analyses_have_bindings():
 
 
 def test_collated_qnodes_echo_collate():
-    """H12: the qnode the 2.0 case sends as COLLATE echoes it with is_set."""
+    """H12/H14: the qnode the 2.0 case sends as COLLATE echoes it, with no
+    is_set (DEC-24)."""
     new = T.read_json_gz(T.golden_paths("query_parity")[1])
     collated = {
         c[0]: T.collated_qnodes(c)
@@ -199,4 +217,15 @@ def test_collated_qnodes_echo_collate():
     qnode = new["trapi_set_interpretation_many_and_is_set"]["envelope"]["message"][
         "query_graph"
     ]["nodes"]["n1"]
-    assert qnode["is_set"] is True and qnode["set_interpretation"] == "COLLATE"
+    assert "is_set" not in qnode and qnode["set_interpretation"] == "COLLATE"
+
+
+def test_meta_kg_original_predicate_constraint_is_renamed():
+    """H22: the meta-KG's biolink:original_predicate constraint is named
+    "original predicate" (upstream trapi2.0 db6140e7); nothing else changes."""
+    old = T.read_json_gz(T.golden_paths("aux_parity")[0])
+    new = T.read_json_gz(T.golden_paths("aux_parity")[1])
+    old_text, new_text = json.dumps(old), json.dumps(new)
+    assert "kg2 ids" not in new_text
+    assert new_text.count('"original predicate"') == old_text.count('"kg2 ids"') > 0
+    assert new_text.replace('"original predicate"', '"kg2 ids"') == old_text

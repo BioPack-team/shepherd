@@ -11,9 +11,8 @@ KL/AT attribute is left behind. The values:
 - NGD: statistical_association / automated_agent, upstream's own attributes.
 - Jaccard, FET: upstream sets none; the same values as NGD, ARAX's other
   computed virtual edges (primary source infores:arax).
-- COHD clinical info: upstream sets none; statistical_association /
-  data_analysis_pipeline, what the primary source (infores:cohd, EHR
-  co-occurrence statistics) asserts for its own edges.
+- COHD clinical info: statistical_association / automated_agent, as upstream
+  trapi2.0 sets them (DEC-27).
 - xDTD predicted treats edges: prediction / computational_model, upstream's
   attributes. xDTD explanation-path edges: the mapping DB's values.
 
@@ -53,7 +52,6 @@ KL_AT_ATTRIBUTES = {"biolink:knowledge_level", "biolink:agent_type"}
 # Upstream's virtual-edge predicates that are not Biolink predicates (as in
 # TRAPI 1.x; DEC-1 keeps them): the only semantic errors tolerated here
 NON_BIOLINK_PREDICATES = {
-    "biolink:has_jaccard_index_with",
     "biolink:has_fisher_exact_test_p_value_with",
 }
 
@@ -190,7 +188,8 @@ def test_jaccard_virtual_edges():
 @pytest.fixture
 def ngd(monkeypatch):
     cls = compute_ngd.ComputeNGD
-    monkeypatch.setattr(cls, "_setup_ngd_database", lambda self: (None, None))
+    for setup in ("_setup_curie_to_pmids_database", "_setup_curie_ngd_database"):
+        monkeypatch.setattr(cls, setup, lambda self: (None, None))
     monkeypatch.setattr(cls, "_close_database", lambda self: None, raising=False)
     monkeypatch.setattr(
         cls, "_get_canonical_curies_map", lambda self, curies: {c: c for c in curies}
@@ -269,6 +268,14 @@ def test_fisher_exact_test_virtual_edges(monkeypatch, tmp_path):
     fet.sqlite_file_path = sqlite
     fet.fisher_exact_test()
     assert response.status == "OK", response.show()
+    # upstream trapi2.0 (615baff3, 090d73b7): no KG2 in the logs any more
+    logs = [m["message"] for m in response.messages]
+    assert (
+        "The tier0 info-for-overlay sqlite was used to calculate total object"
+        " nodes in Fisher's Exact Test"
+    ) in logs
+    assert any("was found in the info-for-overlay sqlite" in line for line in logs)
+    assert not any("KG2" in line or "rtx-kg2" in line for line in logs)
     created = new_edge_keys(message, before)
     assert_valid_edges(
         message.knowledge_graph.to_dict(),
@@ -308,12 +315,14 @@ def test_clinical_info_virtual_edges(monkeypatch):
         },
     ).add_virtual_edge(name="paired_concept_frequency", default=0)
     assert response.status == "OK", response.show()
+    # upstream trapi2.0 (b5d02852): the virtual QEdge's predicates is a list
+    assert message.query_graph.edges["C1"].predicates == ["biolink:associated_with"]
     created = new_edge_keys(message, before)
     assert_valid_edges(
         message.knowledge_graph.to_dict(),
         created,
         "statistical_association",
-        "data_analysis_pipeline",
+        "automated_agent",
     )
     assert_results_valid(message)
 
@@ -387,3 +396,43 @@ def test_filter_kg_reads_top_level_knowledge_level_and_agent_type(
     assert response.status == "OK", response.show()
     assert "e1_3_2" not in message.knowledge_graph.edges
     assert len(message.knowledge_graph.edges) == 5
+
+
+def test_subclass_of_edges_and_missing_parents():
+    """DEC-27 (upstream trapi2.0): a subclass_of edge Expand makes is
+    knowledge_assertion / automated_agent, and a parent node missing from the
+    answer gets the qnode's categories (2.0 requires one), else NamedThing."""
+    from shepherd_utils.arax.ARAX_response import ARAXResponse
+    from shepherd_utils.arax.Expand.expand_utilities import QGOrganizedKnowledgeGraph
+    from shepherd_utils.arax.Expand.trapi_querier import TRAPIQuerier
+    from shepherd_utils.arax.openapi_server.models.node import Node
+    from shepherd_utils.arax.openapi_server.models.q_node import QNode
+    from shepherd_utils.arax.openapi_server.models.query_graph import QueryGraph
+
+    for categories, want in (
+        (["biolink:Disease"], ["biolink:Disease"]),
+        (None, ["biolink:NamedThing"]),
+    ):
+        child = Node(name="child", categories=["biolink:Disease"])
+        child.query_ids = ["MONDO:1"]
+        answer_kg = QGOrganizedKnowledgeGraph(nodes={"n0": {"MONDO:2": child}})
+        qg = QueryGraph(nodes={"n0": QNode(ids=["MONDO:1"], categories=categories)})
+        querier = TRAPIQuerier(
+            response_object=ARAXResponse(),
+            kp_name="infores:retriever",
+            user_specified_kp=False,
+            kp_timeout=None,
+        )
+        answer_kg = querier._add_subclass_of_edges(answer_kg, qg)
+        assert answer_kg.nodes_by_qg_id["n0"]["MONDO:1"].categories == want
+        (edge,) = [
+            e
+            for edges in answer_kg.edges_by_qg_id.values()
+            for e in edges.values()
+            if e.predicate == "biolink:subclass_of"
+        ]
+        assert (edge.subject, edge.object) == ("MONDO:2", "MONDO:1")
+        assert (edge.knowledge_level, edge.agent_type) == (
+            "knowledge_assertion",
+            "automated_agent",
+        )

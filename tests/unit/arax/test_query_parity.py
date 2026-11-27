@@ -45,17 +45,27 @@ FIELDS = [
 REMOVED_OVERLAY = "'overlay_exposures_data', "
 # Fields exempt from comparison, by case
 EXPECTED_DIFFERENCES = {
-    # DEC-4: single-node queries go to Retriever (so they carry
-    # parameters.tiers, and log setting it) instead of infores:rtx-kg2
-    "tpl_one_node": {"requests", "logs"},
+    # DEC-23: a node-only query graph is rejected (MissingQEdgeAndQPath, 501),
+    # as in upstream's trapi2.0; upstream 9485431 answered it from rtx-kg2.
+    # See test_node_only_query_graph_is_rejected
+    "tpl_one_node": set(FIELDS),
     # E-4 / E-6: the legacy `filter` command is removed; see
     # test_removed_filter_command_is_unrecognized
     "dsl_removed_filter_command": {"error_code", "message", "logs", "envelope"},
-    # E-4: overlay_connect_knodes no longer emits the disabled
-    # predict_drug_treats_disease overlay (which fails the plan upstream), so
-    # the plan runs on to the next overlay; see
-    # test_connect_knodes_translation_is_upstreams_minus_the_disabled_action
-    "wf_connect_knodes": {"error_code", "message", "logs", "envelope", "status"},
+    # E-4 and upstream trapi2.0 (2add4986): overlay_connect_knodes no longer
+    # emits the disabled predict_drug_treats_disease overlay (which fails the
+    # plan upstream @ 9485431) nor COHD's paired_concept_frequency, and makes
+    # one NGD per qnode pair, Fisher only for qedge-connected pairs and Jaccard
+    # only through a connected middle qnode, so the plan completes; see
+    # test_connect_knodes_runs_upstream_trapi2_translation
+    "wf_connect_knodes": {
+        "error_code",
+        "message",
+        "logs",
+        "envelope",
+        "status",
+        "http_status",
+    },
     # DEC-10: a user-specified KP list (fill's allowlist) is forwarded to
     # Retriever as parameters.kp instead of being checked against SmartAPI
     # metadata, which in upstream rejects the query
@@ -82,30 +92,74 @@ for _case in QUERY_ID_LOST["query_parity"]:
     EXPECTED_DIFFERENCES.setdefault(_case, set()).update(
         {"message", "envelope", "logs"}
     )
-# TRAPI 2.0: upstream told a one-node query ("edges": {}, tpl_one_node) from
-# a query graph with no edges or paths (no "edges" key, an error) by the empty
-# map; 2.0 forbids an empty "edges", so both are the same one-node query graph
-# and this case now runs as a one-node query; see
-# test_query_graph_without_edges_is_a_one_node_query
+# DEC-23: still a MissingQEdgeAndQPath error, as upstream recorded, but with
+# upstream trapi2.0's HTTP 501 and message; see
+# test_node_only_query_graph_is_rejected
 EXPECTED_DIFFERENCES["val_no_edges_or_paths"] = {
-    "status",
-    "error_code",
     "http_status",
     "message",
     "envelope",
     "logs",
-    "requests",
 }
-# DEC-21: connect(action=xcrg) runs the vendored xCRG at catrax-xcrg's latest
-# commit, not the one upstream's goldens were recorded with: it ranks the same
-# answers with its new ranker, sends its TF batches concurrently and logs
-# differently; see test_xcrg_answers_are_upstreams_reranked
+# DEC-25: connect(action=xcrg) runs catrax-xcrg 1.0.1.dev2, not the xCRG
+# upstream's goldens were recorded with: it ranks the same answers with its new
+# ranker, sends its TF batches concurrently and logs differently; see
+# test_xcrg_answers_are_upstreams_reranked
 EXPECTED_DIFFERENCES["mvp2_xcrg_route"] = {"envelope", "logs", "requests"}
+# DEC-26: still UnknownQEdgeProperty, with upstream trapi2.0's TRAPI 2.0 wording
+EXPECTED_DIFFERENCES["val_singular_predicate"] = {"message", "envelope", "logs"}
 # D-25 fix: a TRAPI qnode's name is resolved to ids, so the query runs instead of
 # failing with QueryGraphNoIds; see test_trapi_qnode_name_runs_as_araxi_name_does
 EXPECTED_DIFFERENCES["trapi_qnode_name"] = set(FIELDS)
+# D-23, fixed by upstream trapi2.0 (2add4986, sync items 14-15): support-graph
+# edges and nodes are merged into the KG with empty qedge_keys / qnode_keys, so
+# the filter_kg / filter_results actions that read them no longer crash with
+# "'Edge' object has no attribute 'qedge_keys'" as upstream 9485431 did. The KP
+# requests (sent before the crash) are compared; see
+# test_filters_run_on_support_graph_edges
+SUPPORT_EDGE_QEDGE_KEYS_CRASH = (
+    "dsl_expand_overlays_filters",
+    "filter_kg_top_n_and_percentile",
+    "filter_kg_discrete_attribute_and_property",
+    "filter_results_counts",
+    "wf_filter_kgraph_numeric",
+    "wf_filter_kgraph_discrete",
+)
+for _case in SUPPORT_EDGE_QEDGE_KEYS_CRASH:
+    EXPECTED_DIFFERENCES[_case] = set(FIELDS) - {"requests", "exception"}
+# Upstream trapi2.0 (2add4986, sync items 14 and 16): after an exclude=true
+# qedge, Expand sweeps up the nodes no remaining edge uses, and drops the
+# support graphs of the excluded edges; only Expand's log lines differ (ARAX's
+# final KG cleanup removed them from the envelope already). See
+# test_exclude_sweeps_orphan_nodes_and_support_graphs
+EXCLUDE_SWEEP = ("araxi_exclude", "trapi_exclude")
+for _case in EXCLUDE_SWEEP:
+    EXPECTED_DIFFERENCES[_case] = {"logs"}
+# Upstream trapi2.0 (b5d02852, #2904; sync item 26): ResultTransformer's
+# orphan-binding prune skips a qnode with no binding (a result whose optional
+# group did not match), where upstream 9485431 raised KeyError: 'n2' out of
+# ARAXQuery.query. These queries now complete; the KP requests (sent before the
+# crash) are compared. See test_optional_group_results_without_a_binding_complete
+OPTIONAL_GROUP_PRUNE_CRASH = ("optional_group_query", "araxi_is_set_and_option_group")
+for _case in OPTIONAL_GROUP_PRUNE_CRASH:
+    EXPECTED_DIFFERENCES[_case] = set(FIELDS) - {"requests"}
 # Cases that cannot pass on TRAPI 2.0 yet, as strict xfails
-XFAIL = {}
+XFAIL = {
+    "mvp2_xcrg_route": "BioPack-team/shepherd#276: catrax-xcrg 1.0.1.dev2 fails "
+    "on the NaN p_value in the mock Retriever's answer (strict JSON parse)",
+}
+
+
+def _sort_aux_graph_edges(envelope):
+    """An aux graph's ``edges`` are a set ResultTransformer lists in set order
+    (``list(group_edge_keys)``, upstream too), and that order changes with the
+    order the set was filled in: upstream trapi2.0 (sync item 24) sorts the
+    binding ids it is filled from. Compare them order-insensitively."""
+    message = envelope.get("message") if isinstance(envelope, dict) else None
+    for aux_graph in ((message or {}).get("auxiliary_graphs") or {}).values():
+        if isinstance(aux_graph.get("edges"), list):
+            aux_graph["edges"] = sorted(aux_graph["edges"])
+    return envelope
 
 
 def _upstream_view(field, value):
@@ -152,6 +206,8 @@ def test_query_matches_upstream(outputs, case):
         want, got = _upstream_view(field, upstream[case][field]), port[case][field]
         if field in ("requests", "envelope"):
             want, got = _sort_ids(want), _sort_ids(got)
+        if field == "envelope":
+            want, got = _sort_aux_graph_edges(want), _sort_aux_graph_edges(got)
         diff = _first_diff(want, got, field)
         assert diff is None, f"{case}: differs from upstream ARAX at {diff}"
 
@@ -167,7 +223,11 @@ def test_removed_filter_command_is_unrecognized(outputs):
 def test_stored_response_url_is_shepherds(outputs):
     """DEC-3: envelope.id is where Shepherd serves the stored response."""
     upstream, port = outputs
-    stored = [n for n, rec in upstream.items() if rec["envelope_id"] and n not in XFAIL]
+    stored = [
+        n
+        for n, rec in upstream.items()
+        if rec["envelope_id"] and n not in XFAIL and n != "tpl_one_node"  # DEC-23
+    ]
     assert stored
     for name in stored:
         assert port[name]["envelope_id"] == "http://shepherd.test/arax/response/R1"
@@ -222,8 +282,9 @@ def _xcrg_requests(requests):
     return sorted(_sort_ids(requests), key=lambda r: json.dumps(r, sort_keys=True))
 
 
+@pytest.mark.xfail(strict=True, reason=XFAIL["mvp2_xcrg_route"])
 def test_xcrg_answers_are_upstreams_reranked(outputs):
-    """DEC-21: the latest xCRG finds upstream's answers, with the same evidence,
+    """DEC-25: catrax-xcrg finds upstream's answers, with the same evidence,
     support graphs and Retriever lookups; only its ranking (and so the result
     order and scores) and its logs differ."""
     upstream, port = outputs
@@ -257,9 +318,13 @@ def test_trapi_qnode_name_runs_as_araxi_name_does(outputs):
         "Resolved QueryGraph node 'n0' name 'MONDO thing 2' to ids ['MONDO:2']",
     ] in rec["logs"]
     (request,) = rec["requests"]
+    # DEC-24: only the id-less qnode is sent as a set (COLLATE)
     assert request["body"]["message"]["query_graph"]["nodes"] == {
-        "n0": {"ids": ["MONDO:2"], "is_set": False},
-        "n1": {"categories": ["biolink:ChemicalEntity"], "is_set": True},
+        "n0": {"ids": ["MONDO:2"]},
+        "n1": {
+            "categories": ["biolink:ChemicalEntity"],
+            "set_interpretation": "COLLATE",
+        },
     }
     assert rec["envelope"]["message"]["query_graph"]["nodes"]["n0"]["ids"] == [
         "MONDO:2"
@@ -277,32 +342,126 @@ def test_fill_allowlist_is_forwarded_to_retriever(outputs):
     assert forwarded["body"]["parameters"]["kp"] == ["infores:retriever"]
 
 
-def test_connect_knodes_translation_is_upstreams_minus_the_disabled_action(outputs):
-    """E-4: upstream's plan fails on predict_drug_treats_disease; the port's runs
-    the same actions without it."""
+def test_connect_knodes_runs_upstream_trapi2_translation(outputs):
+    """upstream trapi2.0 (2add4986): upstream @ 9485431's plan fails on
+    predict_drug_treats_disease; the port runs upstream trapi2.0's rewritten
+    overlay_connect_knodes, and the plan completes. The KP requests are
+    upstream's."""
     upstream, port = outputs
     case = "wf_connect_knodes"
-
-    def actions(rec):
-        return rec["envelope"]["operations"]["actions"]
-
-    want = [
-        a for a in actions(upstream[case]) if "predict_drug_treats_disease" not in a
+    rec = port[case]
+    assert upstream[case]["error_code"] == "UnknownAction"
+    assert rec["status"] == "OK"
+    assert rec["requests"] == upstream[case]["requests"]
+    ngd = (
+        "overlay(action=compute_ngd,default_value=inf,virtual_relation_label="
+        "connect_knodes_ngd_{0}_{1},subject_qnode_key={0},object_qnode_key={1})"
+    )
+    fisher = (
+        "overlay(action=fisher_exact_test,virtual_relation_label="
+        "connect_knodes_fisher_n1_n2,subject_qnode_key={0},object_qnode_key={1})"
+    )
+    assert rec["envelope"]["operations"]["actions"] == [
+        "expand()",
+        "scoreless_resultify(ignore_edge_direction=true)",
+        ngd.format("n0", "n1"),
+        ngd.format("n0", "n2"),
+        ngd.format("n1", "n2"),
+        fisher.format("n1", "n2"),
+        fisher.format("n2", "n1"),
+        "overlay(action=compute_jaccard,virtual_relation_label=connect_knodes_jaccard_n2_n0,"
+        "start_node_key=n2,end_node_key=n0,intermediate_node_key=n1)",
+        "rank_results()",
     ]
-    assert len(want) == len(actions(upstream[case])) - 1
-    assert actions(port[case]) == want
 
 
-def test_query_graph_without_edges_is_a_one_node_query(outputs):
-    """TRAPI 2.0 has no empty "edges" map: a query graph with nodes only is a
-    one-node query, answered as tpl_one_node's is."""
+@pytest.mark.parametrize("case", ["val_no_edges_or_paths", "tpl_one_node"])
+def test_node_only_query_graph_is_rejected(outputs, case):
+    """DEC-23: TRAPI 2.0 allows a query graph with nodes only, but Retriever
+    needs an edge, so ARAX answers 501 Not Implemented and queries nothing."""
+    _, port = outputs
+    rec = port[case]
+    assert rec["status"] == "ERROR"
+    assert rec["error_code"] == "MissingQEdgeAndQPath"
+    assert rec["http_status"] == 501
+    assert rec["requests"] == []
+
+
+@pytest.mark.parametrize("case", SUPPORT_EDGE_QEDGE_KEYS_CRASH)
+def test_filters_run_on_support_graph_edges(outputs, case):
+    """D-23 is fixed (upstream trapi2.0 2add4986): upstream 9485431 crashed on
+    a support-graph edge without qedge_keys; the port gets past the filters.
+    wf_filter_kgraph_numeric then stops at D-20 (the ranker's KeyError on a
+    result binding an edge the KG filters removed), as upstream trapi2.0's
+    ranker would."""
     upstream, port = outputs
-    assert upstream["val_no_edges_or_paths"]["status"] == "ERROR"
-    rec, one_node = port["val_no_edges_or_paths"], port["tpl_one_node"]
-    for field in ("exception", "status", "error_code", "http_status"):
-        assert rec[field] == one_node[field], field
-    (request,) = rec["requests"]
-    qg = request["body"]["message"]["query_graph"]
-    assert "edges" not in qg
-    assert qg["nodes"]["n0"]["ids"] == ["CHEBI:1"]
-    assert rec["message"] == "Normal completion with 1 results."
+    assert "has no attribute 'qedge_keys'" in upstream[case]["message"]
+    rec = port[case]
+    assert "qedge_keys" not in (rec["message"] or "")
+    if case == "wf_filter_kgraph_numeric":
+        assert rec["status"] == "ERROR"
+        assert "ranker.aggregate_scores_dmk" in rec["message"]
+        assert "KeyError" in rec["message"]
+    else:
+        assert rec["status"] == "OK", rec["message"]
+        assert rec["envelope"]["message"]["results"]
+
+
+@pytest.mark.parametrize("case", EXCLUDE_SWEEP)
+def test_exclude_sweeps_orphan_nodes_and_support_graphs(outputs, case):
+    """Upstream trapi2.0 (2add4986): Expand's KG after the exclude=true qedge
+    keeps only n1's connected node, and no support graph of an excluded edge
+    (so no warning about its missing edge); the rest of the log is upstream's."""
+    upstream, port = outputs
+    dropped = [
+        [
+            "WARNING",
+            "",
+            "for aux graph aux4, edge missing_edge is not in the KG; skipping edge",
+        ],
+        [
+            "INFO",
+            "",
+            "2 node(s) in the knowledge graph are missing a biolink:description attribute.",
+        ],
+        [
+            "INFO",
+            "",
+            "After Expand, the KG has 6 nodes and 3 edges (e0: 1, n0: 1, n1: 5, Unbound: 0)",
+        ],
+    ]
+    added = [
+        [
+            "INFO",
+            "",
+            "1 node(s) in the knowledge graph are missing a biolink:description attribute.",
+        ],
+        [
+            "INFO",
+            "",
+            "After Expand, the KG has 2 nodes and 1 edges (e0: 1, n0: 1, n1: 1, Unbound: 0)",
+        ],
+    ]
+    want = upstream[case]["logs"]
+    at = want.index(dropped[0])
+    assert want[at : at + 3] == dropped
+    assert port[case]["logs"] == want[:at] + added + want[at + 3 :]
+
+
+@pytest.mark.parametrize("case", OPTIONAL_GROUP_PRUNE_CRASH)
+def test_optional_group_results_without_a_binding_complete(outputs, case):
+    """Upstream trapi2.0 (b5d02852, sync item 26): a result whose optional
+    group did not match has no binding for the group's qnode; ResultTransformer
+    skips it instead of raising KeyError, as upstream 9485431 did."""
+    upstream, port = outputs
+    assert upstream[case]["exception"] == "KeyError: 'n2'"
+    rec = port[case]
+    assert rec["exception"] is None
+    assert rec["status"] == "OK", rec["message"]
+    results = rec["envelope"]["message"]["results"]
+    assert {"n0", "n1"} <= set(results[-1]["node_bindings"])
+    without_n2 = [r for r in results if "n2" not in r["node_bindings"]]
+    assert without_n2 and all(
+        set(r["analyses"][0]["edge_bindings"]) == {"e0"} for r in without_n2
+    )
+    assert any("n2" in r["node_bindings"] for r in results)

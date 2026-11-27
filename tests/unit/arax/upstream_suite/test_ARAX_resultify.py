@@ -12,7 +12,7 @@ from ARAX_messenger import ARAXMessenger
 from ARAX_expander import ARAXExpander
 from typing import List, Dict, Tuple, Set, Iterable
 import ARAX_resultify
-from ARAX_resultify import ARAXResultify
+from ARAX_resultify import ARAXResultify, set_qnode_is_set
 from ARAX_query import ARAXQuery
 
 # is there a better way to import openapi_server?  Following SO posting 16981921
@@ -69,8 +69,13 @@ def _create_edges(kg_edge_info: Iterable[Dict[str, any]]) -> Dict[str, Edge]:
 
 
 def _create_qnodes(qg_node_info: Iterable[Dict[str, any]]) -> Dict[str, QNode]:
-    return {qnode_info["node_key"]: QNode(categories=qnode_info['categories'],
-                                          is_set=qnode_info['is_set']) for qnode_info in qg_node_info}
+    # TRAPI 2.0 (upstream trapi2.0, DEC-24): QNode has no is_set; a set is COLLATE
+    qnodes = {}
+    for qnode_info in qg_node_info:
+        qnode = QNode(categories=qnode_info['categories'])
+        set_qnode_is_set(qnode, bool(qnode_info['is_set']))
+        qnodes[qnode_info["node_key"]] = qnode
+    return qnodes
 
 
 def _create_qedges(qg_edge_info: Iterable[Dict[str, any]]) -> Dict[str, QEdge]:
@@ -194,8 +199,13 @@ def _convert_shorthand_to_qg(
         shorthand_qnodes: Dict[str, str],
         shorthand_qedges: Dict[str, str]
 ) -> QueryGraph:
-    return QueryGraph(nodes={qnode_key: QNode(is_set=bool(is_set)) \
-                             for qnode_key, is_set in shorthand_qnodes.items()},
+    # TRAPI 2.0 (upstream trapi2.0, DEC-24): QNode has no is_set; a set is COLLATE
+    qnodes = {}
+    for qnode_key, is_set in shorthand_qnodes.items():
+        qnode = QNode()
+        set_qnode_is_set(qnode, bool(is_set))
+        qnodes[qnode_key] = qnode
+    return QueryGraph(nodes=qnodes,
                       edges={qedge_key: QEdge(subject=qnodes.split("--")[0],
                                               object=qnodes.split("--")[1]) \
                              for qedge_key, qnodes in shorthand_qedges.items()})

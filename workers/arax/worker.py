@@ -37,11 +37,13 @@ import os
 import random
 import time
 import uuid
+from datetime import datetime
 
 import httpx
 from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import Status, StatusCode, get_current_span
 
+from shepherd_utils import arax_normalization
 from shepherd_utils.arax_progress import finish_progress, push_progress
 from shepherd_utils.arax_tracing import instrument_arax
 from shepherd_utils.config import settings
@@ -579,20 +581,57 @@ def arax_query_task(
         with tracer.start_as_current_span("arax.load_query"):
             query = get_message_sync(query_id)
         _set_query_attributes(span, query)
-        if not query.get("stream_progress"):
-            summary = _save_arax_response(
-                query, response_id, *run_arax(query, response_id)
-            )
-        else:
-            try:
-                summary = _save_arax_response(
-                    query, response_id, *run_arax_stream(query, response_id)
-                )
-            finally:
-                # Also on failure, so a streaming client stops waiting
+        with arax_normalization.query_mode(query) as normalization:
+            span.set_attribute("arax.node_normalization", normalization)
+            if not query.get("stream_progress"):
+                response, http_status = run_arax(query, response_id)
+            else:
+                try:
+                    response, http_status = run_arax_stream(query, response_id)
+                except BaseException:
+                    # So a streaming client stops waiting
+                    finish_progress(response_id)
+                    raise
+            add_normalization_report(span, response, arax_normalization.report())
+        try:
+            summary = _save_arax_response(query, response_id, response, http_status)
+        finally:
+            if query.get("stream_progress"):
                 finish_progress(response_id)
         _set_summary_attributes(span, summary)
         return summary
+
+
+def add_normalization_report(span, response: dict, report: dict | None) -> None:
+    """Record the query's Node Normalizer lookups when it ran in off or compare
+    mode (``shepherd_utils.arax_normalization``): totals on the span, and the
+    whole report as an INFO log entry of the response (code
+    ``NodeNormalizationComparison``), so it is kept with the answer.
+    """
+    if report is None:
+        return
+    for key, value in report["totals"].items():
+        span.set_attribute(f"arax.node_normalization.{key}", value)
+    if report["mode"] in ("off", "query_nodes"):
+        summary = (
+            f"Node normalization {report['mode']}: {report['totals']['curies']} "
+            f"CURIEs in {report['totals']['calls']} lookups taken as already "
+            f"normalized, {report['totals']['asked_curies']} in "
+            f"{report['totals']['asked_calls']} asked of the Node Normalizer"
+        )
+    else:
+        summary = (
+            "Node normalization compared: where taking CURIEs as already "
+            "normalized would differ"
+        )
+    response.setdefault("logs", []).append(
+        {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "level": "INFO",
+            "code": arax_normalization.LOG_CODE,
+            "message": f"{summary}: {json.dumps(report, sort_keys=True)}",
+        }
+    )
 
 
 def _set_query_attributes(span, query: dict) -> None:
@@ -851,9 +890,19 @@ async def kp_cache_refresh_loop(loop, logger: logging.Logger) -> None:
 async def poll_for_tasks():
     """On initialization, poll indefinitely for available tasks."""
     # First run: fetch the data files ARAX's actions read (DEC-6). No-ops once
-    # they are on the mounted volumes.
+    # they are on the mounted volumes. Only the internal path reads them: the
+    # legacy path POSTs to arax_url and pathfinder queries go to the
+    # arax.pathfinder worker, so skip the downloads unless internal is the
+    # default. A query that opts in with arax_internal=true still needs the
+    # files present.
     ensure_arax_pathfinder_dbs(LOGGER)
-    ensure_arax_dbs(ARAX_WORKER_DBS, LOGGER)
+    if settings.arax_internal_default:
+        ensure_arax_dbs(ARAX_WORKER_DBS, LOGGER)
+    else:
+        LOGGER.info(
+            "ARAX_INTERNAL_DEFAULT is false; skipping the in-process ARAX data "
+            "downloads."
+        )
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, warm_biolink_cache, LOGGER)
     # held so the task isn't garbage-collected

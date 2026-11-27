@@ -17,17 +17,13 @@ class QNode(Model):
     Do not edit the class manually.
     """
 
-    def __init__(self, ids=None, categories=None, is_set=False, set_id=None, set_interpretation=None, constraints=[], option_group_id=None, member_ids=None):  # noqa: E501
+    def __init__(self, ids=None, categories=None, set_interpretation=None, constraints=[], option_group_id=None, member_ids=None):  # noqa: E501
         """QNode - a model defined in OpenAPI
 
         :param ids: The ids of this QNode.  # noqa: E501
         :type ids: List[str]
         :param categories: The categories of this QNode.  # noqa: E501
         :type categories: List[str]
-        :param is_set: The is_set of this QNode.  # noqa: E501
-        :type is_set: bool
-        :param set_id: The set_id of this QNode.  # noqa: E501
-        :type set_id: str
         :param set_interpretation: The set_interpretation of this QNode.  # noqa: E501
         :type set_interpretation: str
         :param constraints: The constraints of this QNode.  # noqa: E501
@@ -38,8 +34,6 @@ class QNode(Model):
         self.openapi_types = {
             'ids': List[str],
             'categories': List[str],
-            'is_set': bool,
-            'set_id': str,
             'set_interpretation': str,
             'constraints': List[AttributeConstraint],
             'option_group_id': str,
@@ -49,8 +43,6 @@ class QNode(Model):
         self.attribute_map = {
             'ids': 'ids',
             'categories': 'categories',
-            'is_set': 'is_set',
-            'set_id': 'set_id',
             'set_interpretation': 'set_interpretation',
             'constraints': 'constraints',
             'option_group_id': 'option_group_id',
@@ -59,8 +51,6 @@ class QNode(Model):
 
         self._ids = ids
         self._categories = categories
-        self._is_set = is_set
-        self._set_id = set_id
         self._set_interpretation = set_interpretation
         self._constraints = constraints
         self._option_group_id = option_group_id
@@ -126,57 +116,6 @@ class QNode(Model):
             raise ValueError("Invalid value for `categories`, number of items must be greater than or equal to `1`")  # noqa: E501
 
         self._categories = categories
-
-    @property
-    def is_set(self):
-        """Gets the is_set of this QNode.
-
-        Set to true if this QNode is a set (deprecated)  # noqa: E501
-
-        :return: The is_set of this QNode.
-        :rtype: bool
-        """
-        # TRAPI 2.0 (Shepherd change): set_interpretation COLLATE -- collate
-        # the matching nodes of an unpinned QNode into one Result -- is what
-        # ARAX's is_set means, so ARAX's is_set handling honours it.
-        if self._set_interpretation == "COLLATE":
-            return True
-        return self._is_set
-
-    @is_set.setter
-    def is_set(self, is_set):
-        """Sets the is_set of this QNode.
-
-        Set to true if this QNode is a set (deprecated)  # noqa: E501
-
-        :param is_set: The is_set of this QNode.
-        :type is_set: bool
-        """
-
-        self._is_set = is_set
-
-    @property
-    def set_id(self):
-        """Gets the set_id of this QNode.
-
-        A client-provided identifier for the set described in this QNode  # noqa: E501
-
-        :return: The set_id of this QNode.
-        :rtype: str
-        """
-        return self._set_id
-
-    @set_id.setter
-    def set_id(self, set_id):
-        """Sets the set_id of this QNode.
-
-        A client-provided identifier for the set described in this QNode  # noqa: E501
-
-        :param set_id: The set_id of this QNode.
-        :type set_id: str
-        """
-
-        self._set_id = set_id
 
     @property
     def set_interpretation(self):

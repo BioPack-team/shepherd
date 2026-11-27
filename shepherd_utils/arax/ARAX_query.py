@@ -11,13 +11,12 @@
 #   - ARAXResponse.output is not switched to STDERR at import (Shepherd has its own
 #     logging; the response log is unchanged)
 #   - TRAPI 2.0: the envelope carries the query's `parameters` from the start (the Response
-#     repeats them; Expand reads bypass_cache there; log_level stays ignored, ORC-05); the envelope ARAX answers with is made
+#     repeats them; Expand reads bypass_cache there; parameters.log_level filters the streamed log lines, see below,
+#     while a 1.x top-level log_level stays ignored, ORC-05); the envelope ARAX answers with is made
 #     2.0-valid when query() returns (no nulls, and none of the empty containers 2.0
 #     forbids, e.g. the in-memory Analysis of an edgeless result, which has no bindings);
 #     the incoming QG's qedges may carry 2.0 `constraints` (not 1.x attribute_constraints /
-#     qualifier_constraints); a QG with neither edges nor paths is the 2.0 form of an
-#     edgeless QG (1.x `edges: {}`), no longer a MissingQEdgeAndQPath error; stream
-#     heartbeats carry an RFC 3339 timestamp with offset
+#     qualifier_constraints); stream heartbeats carry an RFC 3339 timestamp with offset
 #   - a TRAPI qnode with a name and no ids is resolved to ids (resolve_qnode_names), as ARAXi's
 #     add_qnode(name=...) resolves a name; upstream accepts the name but ignores it (D-25)
 #   - TRAPI 2.0: a message the plan starts from (the query's own, or one loaded by message_uris)
@@ -26,6 +25,35 @@
 #   - removed as dead code (DEC-5): the RTXKG2 mode (E-5), the ARAXFilter import and the
 #     filter and fetch_message DSL commands (E-4, E-6), the `if False:` block,
 #     query_tracker_reset(), limit_message() and stringify_dict() (no callers)
+#   - from upstream trapi2.0 (9782bf6a, 07195cce): a qnode's is_set / set_id are obsolete
+#     (UnknownQNodeProperty, with a migration hint); sets are set_interpretation COLLATE (DEC-24)
+#   - from upstream trapi2.0 (07195cce; DEC-26): a qedge's relation, predicate,
+#     attribute_constraints and qualifier_constraints are obsolete (UnknownQEdgeProperty, with
+#     a migration hint). A qnode's name stays accepted and resolved (D-25), unlike upstream
+#   - from upstream trapi2.0: a QG with neither edges nor paths (node-only, valid 2.0) is a
+#     MissingQEdgeAndQPath error with HTTP 501, since Retriever needs an edge (DEC-23)
+#   - from upstream trapi2.0 (775b97a1): asynchronous_query records any other uncaught exception as an
+#     UncaughtError and still sets DONE, so query_return_stream ends; query_return_message records it
+#     and closes the tracker entry before re-raising
+#   - from upstream trapi2.0 (07195cce, 43e2a643): a qedge predicate that is not a Biolink predicate is
+#     InvalidPredicate (400), a constraints.qualifiers type that is not a Biolink qualifier slot is
+#     InvalidQualifier (422) (_get_valid_biolink_predicates / _get_valid_biolink_qualifier_types). The
+#     Biolink model YAML is BiolinkHelper's cached copy in arax_biolink_cache_path(), read only when a
+#     query has a qualifier constraint; if it can't be loaded (e.g. the download fails), only the
+#     qualifier-type check is skipped, with a warning. A QG whose edges are null (paths only) skips the
+#     qedge checks
+#   - from upstream trapi2.0 (2f78aa95): a warning when parameters.tiers is not [0] (ARAX answers from
+#     Tier 0 only); query_return_stream leaves out the log lines below parameters.log_level
+#     (_requested_log_level_rank / _log_entry_is_wanted). The envelope's logs are not filtered here:
+#     the arax worker filters ARAX's log entries by the query's log level when it stores them
+#   - from upstream trapi2.0 (18ae5be1): kp_timeout, prune_threshold and return_minimal_metadata (and
+#     the interpreter's max_pathfinder_paths / max_path_length) are read from the query's
+#     additional_properties. Shepherd also reads the legacy query_options, merged into
+#     envelope.additional_properties (not serialized) with additional_properties winning; the response
+#     still carries query_options (actions, query_plan), as before. parameters.timeout is not
+#     mapped to kp_timeout (DEC-29a)
+#   - from upstream trapi2.0 (6098d6ec, #2913): the NodeSynonymizer debug line logs
+#     resolve_name_resolver_url(), not the NAME_RESOLVER_URL fallback
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import copy
 import sys
@@ -40,6 +68,7 @@ import requests
 import gc
 import contextlib
 import functools
+import yaml
 
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.actions_parser import ActionsParser
@@ -78,6 +107,57 @@ def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
 
 
 null_context_manager = contextlib.nullcontext()
+
+
+_LOG_LEVEL_RANKS = {'DEBUG': 10, 'INFO': 20, 'WARNING': 30, 'ERROR': 40}
+
+
+def _requested_log_level_rank(envelope) -> int | None:
+    """The rank of the query's parameters.log_level ("the least critical level of logs to return"), or None"""
+    parameters = getattr(envelope, 'parameters', None)
+    # Shepherd: the envelope's parameters are the query's dict (upstream: a QueryParameters model)
+    log_level = parameters.get('log_level') if isinstance(parameters, dict) else getattr(parameters, 'log_level', None)
+    if log_level is None:
+        return None
+    return _LOG_LEVEL_RANKS.get(str(getattr(log_level, 'value', log_level)).upper())
+
+
+def _log_entry_is_wanted(log_entry, min_rank: int | None) -> bool:
+    if min_rank is None:
+        return True
+    level = log_entry.get('level') if isinstance(log_entry, dict) else getattr(log_entry, 'level', None)
+    rank = _LOG_LEVEL_RANKS.get(str(getattr(level, 'value', level)).upper())
+    return rank is None or rank >= min_rank
+
+
+@functools.lru_cache(maxsize=1)
+def _get_valid_biolink_predicates() -> frozenset:
+    """All predicates (including mixins) in ARAX's current Biolink version"""
+    from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_biolink_helper
+    return frozenset(get_biolink_helper().get_descendants("biolink:related_to"))
+
+
+@functools.lru_cache(maxsize=1)
+def _get_valid_biolink_qualifier_types() -> frozenset:
+    """All qualifier slots (e.g. biolink:object_aspect_qualifier) in ARAX's current Biolink version"""
+    # Shepherd: the Biolink model YAML is the one BiolinkHelper caches in arax_biolink_cache_path()
+    # (downloaded there if it is missing), not a copy beside the code
+    from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_biolink_helper
+    biolink_helper = get_biolink_helper()
+    biolink_helper.download_biolink_model()
+    with open(biolink_helper.biolink_model_file_path) as model_file:
+        slots = yaml.safe_load(model_file)['slots']
+
+    def is_qualifier(slot_name):
+        seen = set()
+        while slot_name and slot_name not in seen:
+            if slot_name == 'qualifier':
+                return True
+            seen.add(slot_name)
+            slot_name = (slots.get(slot_name) or {}).get('is_a')
+        return False
+
+    return frozenset(f"biolink:{name.replace(' ', '_')}" for name in slots if name != 'qualifier' and is_qualifier(name))
 
 
 def _drop_empty_bindings(bindings):
@@ -242,7 +322,9 @@ class ARAXQuery:
                     while i_message < n_messages:
                         with self.lock:
                             i_message_obj = self.response.messages[i_message].copy()
-                        yield(json.dumps(i_message_obj, allow_nan=False) + "\n")
+                            min_log_rank = _requested_log_level_rank(self.response.envelope)
+                        if _log_entry_is_wanted(i_message_obj, min_log_rank):
+                            yield(json.dumps(i_message_obj, allow_nan=False) + "\n")
                         i_message += 1
                         idle_ticks = 0.0
 
@@ -271,8 +353,10 @@ class ARAXQuery:
 
                 # #### If there are any more logging messages in the queue, send them first
             n_messages = len(self.response.messages)
+            min_log_rank = _requested_log_level_rank(self.response.envelope)
             while i_message < n_messages:
-                yield(json.dumps(self.response.messages[i_message], allow_nan=False) + "\n")
+                if _log_entry_is_wanted(self.response.messages[i_message], min_log_rank):
+                    yield(json.dumps(self.response.messages[i_message], allow_nan=False) + "\n")
                 i_message += 1
 
             #### Also emit any updates to the query_plan
@@ -329,6 +413,10 @@ class ARAXQuery:
 
         except MemoryError as e:
             self.handle_memory_error(e)
+        except Exception as error:
+            # Record the error so the streaming thread sees DONE and the tracker entry gets closed,
+            # rather than the stream waiting forever on a thread that has died
+            self.response.error(f"An uncaught error occurred: {error}: {traceback.format_exc()}", error_code="UncaughtError")
 
 
         # Insert a little flag into the response status to denote that this thread is done
@@ -345,7 +433,14 @@ class ARAXQuery:
         response = self.response
         response.debug("in query_return_message")
 
-        self.query(query, mode=mode, origin='API')
+        try:
+            self.query(query, mode=mode, origin='API')
+        except Exception as error:
+            # Close this query's tracker entry before re-raising, otherwise it stays "started"
+            # and holds one of the client's concurrent-query slots until the server restarts
+            response.error(f"An uncaught error occurred: {error}: {traceback.format_exc()}", error_code="UncaughtError")
+            self.track_query_finish()
+            raise
 
         #### If the query ended in an error, copy the error to the envelope
         if response.status != 'OK':
@@ -420,13 +515,13 @@ class ARAXQuery:
                        f"trapi_version={self.rtxConfig.trapi_version}")
 
         #### Log which SRI endpoints NodeSynonymizer is wired to, next to the
-        #### RTXConfiguration line above. The Node Normalizer URL follows the
-        #### deployment tier (issues #2833 / #2585), so this shows the exact
-        #### endpoint this instance will call. Resolving reads the
-        #### RTXConfiguration singleton and makes no network call.
+        #### RTXConfiguration line above. The Node Normalizer and Name Resolver
+        #### URLs follow the deployment tier (issues #2833 / #2913 / #2585), so
+        #### this shows the exact endpoints this instance will call. Resolving
+        #### reads the RTXConfiguration singleton and makes no network call.
         response.debug(f"NodeSynonymizer says "
                        f"NODE_NORMALIZER_URL={NodeSynonymizer.resolve_node_normalizer_url()}, "
-                       f"NAME_RESOLVER_URL={NodeSynonymizer.NAME_RESOLVER_URL}")
+                       f"NAME_RESOLVER_URL={NodeSynonymizer.resolve_name_resolver_url()}")
 
         #### Create an empty envelope
         messenger = ARAXMessenger()
@@ -441,10 +536,21 @@ class ARAXQuery:
         #### TRAPI 2.0: the query's parameters (the Response repeats them; Expand reads bypass_cache there)
         if 'parameters' in query and query['parameters'] is not None:
             response.envelope.parameters = query['parameters']
+            #### ARAX only queries Tier 0 (by design), so say so if the query asked for other tiers
+            requested_tiers = query['parameters'].get('tiers') if isinstance(query['parameters'], dict) else None
+            if requested_tiers is not None and list(requested_tiers) != [0]:
+                response.warning(f"ARAX only answers queries using Tier 0 data; ignoring the requested tiers {requested_tiers}")
 
         #### Need to put certain input Query parameters into query_options to later use by Expand et al.
         if 'return_minimal_metadata' in query:
             response.envelope.query_options['return_minimal_metadata'] = query['return_minimal_metadata']
+
+        #### The options ARAX reads (kp_timeout, prune_threshold, return_minimal_metadata, max_pathfinder_paths,
+        #### max_path_length): upstream trapi2.0 reads them from the query's additional_properties; Shepherd also
+        #### reads the legacy query_options (additional_properties wins), and the response keeps query_options
+        response.envelope.additional_properties = dict(response.envelope.query_options)
+        if isinstance(query.get('additional_properties'), dict):
+            response.envelope.additional_properties.update(query['additional_properties'])
 
         #### If a submitter came in, reflect that back into the response
         if "callback" in query and query['callback'] is not None and query['callback'].startswith('http://localhost:8000/ars/'):
@@ -610,32 +716,73 @@ class ARAXQuery:
         response.info("Validating the input query graph")
 
         # Define allowed qnode and qedge attributes to check later
-        allowed_qnode_attributes = { 'ids': 1, 'categories':1, 'is_set': 1, 'set_interpretation': 1, 'set_id': 1, 'member_ids': 1, 'option_group_id': 1, 'name': 1, 'constraints': 1 }
-        allowed_qedge_attributes = { 'predicates': 1, 'subject': 1, 'object': 1, 'option_group_id': 1, 'exclude': 1, 'relation': 1, 'constraints': 1, 'knowledge_type': 1 }
+        allowed_qnode_attributes = { 'ids': 1, 'categories':1, 'set_interpretation': 1, 'member_ids': 1, 'option_group_id': 1, 'name': 1, 'constraints': 1 }
+        allowed_qedge_attributes = { 'predicates': 1, 'subject': 1, 'object': 1, 'option_group_id': 1, 'exclude': 1, 'constraints': 1, 'knowledge_type': 1 }
+
+        # Properties from older TRAPI versions that are no longer valid, with migration hints
+        obsolete_qnode_attributes = { 'is_set': "use 'set_interpretation': 'COLLATE' instead",
+                                      'set_id': "it was removed; for a set query, put the set UUID in 'ids' and its members in 'member_ids'" }
+        obsolete_qedge_attributes = { 'predicate': "it should be plural 'predicates' (TRAPI 1.4 and higher)",
+                                      'attribute_constraints': "use 'constraints.attributes' instead",
+                                      'qualifier_constraints': "use 'constraints.qualifiers' instead",
+                                      'relation': "it was removed from the TRAPI QEdge schema" }
 
         #### Loop through nodes checking the attributes
         for id,qnode in message['query_graph']['nodes'].items():
             for attr in qnode:
+                if attr in obsolete_qnode_attributes:
+                    response.error(f"QueryGraph node '{id}' has an obsolete property '{attr}', which is not valid in TRAPI 2.0: {obsolete_qnode_attributes[attr]}. Your query may be from an older TRAPI version and should be migrated to TRAPI 2.0", error_code="UnknownQNodeProperty")
+                    return response
                 if attr not in allowed_qnode_attributes:
                     response.error(f"QueryGraph node '{id}' has an unexpected property '{attr}'. This property is not understood and therefore processing is halted, rather than answer an incompletely understood query", error_code="UnknownQNodeProperty")
                     return response
 
-        #### Check to ensure that either edges EOR paths is present
-        #### (TRAPI 2.0: `edges` has at least one entry, so an edgeless query graph -- 1.x `edges: {}` --
-        #### has neither; ARAX works on it as on the 1.x one, with empty edges, which the Response omits)
-        if 'edges' not in message['query_graph'] and 'paths' not in message['query_graph']:
-            message['query_graph']['edges'] = {}
+        #### Check to ensure that either edges EOR paths is present. A node-only QueryGraph is valid TRAPI 2.0,
+        #### but ARAX can't answer it (Retriever needs at least one edge), so it is "Not Implemented" (501)
+        if not message['query_graph'].get('edges') and not message['query_graph'].get('paths'):
+            response.error("QueryGraph has no 'edges' or 'paths'. Node-only queries are valid TRAPI 2.0, but ARAX does not "
+                           "support them: at least one edge or path must be present.", error_code="MissingQEdgeAndQPath",
+                           http_status=501)
+            return response
 
         #### Loop through edges checking the attributes
-        if 'edges' in message['query_graph']:
+        if message['query_graph'].get('edges'):
             for id,qedge in message['query_graph']['edges'].items():
                 for attr in qedge:
                     if attr not in allowed_qedge_attributes:
-                        if attr == 'predicate':
-                            response.error(f"QueryGraph edge '{id}' has an obsolete property '{attr}'. This property should be plural 'predicates' in TRAPI 1.4 and higher. Your query may be TRAPI 1.3 or lower and should be checked carefully and migrated to TRAPI 1.4", error_code="UnknownQEdgeProperty")
+                        if attr in obsolete_qedge_attributes:
+                            response.error(f"QueryGraph edge '{id}' has an obsolete property '{attr}', which is not valid in TRAPI 2.0: {obsolete_qedge_attributes[attr]}. Your query may be from an older TRAPI version and should be migrated to TRAPI 2.0", error_code="UnknownQEdgeProperty")
                         else:
                             response.error(f"QueryGraph edge '{id}' has an unexpected property '{attr}'. This property is not understood and therefore processing is halted, rather than answer an incompletely understood query", error_code="UnknownQEdgeProperty")
                         return response
+
+            #### Check that predicates and qualifier types are real Biolink terms
+            valid_predicates = _get_valid_biolink_predicates()
+            valid_qualifier_types = None
+            skip_qualifier_check = False
+            for id,qedge in message['query_graph']['edges'].items():
+                for predicate in qedge.get('predicates') or []:
+                    if predicate not in valid_predicates:
+                        response.error(f"QueryGraph edge '{id}' has predicate '{predicate}', which is not a Biolink predicate", error_code="InvalidPredicate", http_status=400)
+                        return response
+                constraints = qedge.get('constraints') or {}
+                for qualifier_set in constraints.get('qualifiers') or []:
+                    for qualifier_type in qualifier_set or {}:
+                        # Shepherd: the Biolink model YAML is read only when a query has a qualifier constraint.
+                        # If it can't be read (e.g. the download fails), only this check is skipped, with a warning
+                        if skip_qualifier_check:
+                            continue
+                        if valid_qualifier_types is None:
+                            try:
+                                valid_qualifier_types = _get_valid_biolink_qualifier_types()
+                            except Exception as error:
+                                response.warning(f"Could not load the Biolink model to validate qualifier types "
+                                                 f"({type(error).__name__}: {error}); skipping the qualifier type check")
+                                skip_qualifier_check = True
+                                continue
+                        if qualifier_type not in valid_qualifier_types:
+                            response.error(f"QueryGraph edge '{id}' has a qualifier constraint with qualifier type '{qualifier_type}', which is not a Biolink qualifier", error_code="InvalidQualifier", http_status=422)
+                            return response
 
         return response
 
@@ -888,9 +1035,10 @@ class ARAXQuery:
                         messenger.add_qpath(response,action['parameters'])
 
                     elif action['command'] == 'expand':
-                        self.inject_int_value_into_parameters('kp_timeout', response.envelope.query_options, action['parameters'], 'UserTimeoutNotInt')
-                        self.inject_int_value_into_parameters('prune_threshold', response.envelope.query_options, action['parameters'], 'PruneThresholdNotInt')
-                        self.inject_boolean_value_into_parameters('return_minimal_metadata', response.envelope.query_options, action['parameters'], 'InternalError')
+                        additional_properties = getattr(response.envelope, 'additional_properties', None)
+                        self.inject_int_value_into_parameters('kp_timeout', additional_properties, action['parameters'], 'UserTimeoutNotInt')
+                        self.inject_int_value_into_parameters('prune_threshold', additional_properties, action['parameters'], 'PruneThresholdNotInt')
+                        self.inject_boolean_value_into_parameters('return_minimal_metadata', additional_properties, action['parameters'], 'InternalError')
                         if response.status == 'ERROR':
                             if mode == 'asynchronous':
                                 self.send_to_callback(callback, response)
@@ -1121,10 +1269,10 @@ class ARAXQuery:
 
 
     ############################################################################################
-    def inject_int_value_into_parameters(self, parameter_name, query_options, parameters, error_code):
+    def inject_int_value_into_parameters(self, parameter_name, additional_properties, parameters, error_code):
         parameter_value = None
-        if query_options is not None and parameter_name in query_options and query_options[parameter_name] is not None:
-            parameter_value = query_options[parameter_name]
+        if additional_properties is not None and parameter_name in additional_properties and additional_properties[parameter_name] is not None:
+            parameter_value = additional_properties[parameter_name]
             #### Try to convery the value to an integer
             try:
                 parameter_value = int(parameter_value)
@@ -1137,10 +1285,10 @@ class ARAXQuery:
 
 
     ############################################################################################
-    def inject_boolean_value_into_parameters(self, parameter_name, query_options, parameters, error_code):
+    def inject_boolean_value_into_parameters(self, parameter_name, additional_properties, parameters, error_code):
         parameter_value = False
-        if query_options is not None and parameter_name in query_options and query_options[parameter_name] is not None:
-            if query_options[parameter_name] is True:
+        if additional_properties is not None and parameter_name in additional_properties and additional_properties[parameter_name] is not None:
+            if additional_properties[parameter_name] is True:
                 parameter_value = True
         parameters[parameter_name] = parameter_value
 

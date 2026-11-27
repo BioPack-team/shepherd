@@ -241,6 +241,14 @@ class Settings(BaseSettings):
     # parameters.arax_internal itself: false sends it to arax_url, true runs it
     # in-process.
     arax_internal_default: bool = False
+    # Whether the ARAX port calls the Node Normalizer: "on" (as upstream does),
+    # "off" (every CURIE is taken as already normalized, with the name and
+    # categories Retriever gave it), "compare" (calls it, and logs where "off"
+    # would have answered differently) or "query_nodes" ("off" for
+    # knowledge-graph nodes, "on" for the query's own ids and names). A query's
+    # parameters.arax_node_normalization overrides it; see
+    # shepherd_utils/arax_normalization.py.
+    arax_node_normalization: str = "on"
     # Where the ARAX port's BiolinkHelper caches the Biolink model and its
     # lookup map (must be writable; upstream writes next to its own source
     # file). Empty means {arax_dbs_dir}/biolink, on the mounted data volume, so
@@ -261,12 +269,12 @@ class Settings(BaseSettings):
     )
 
     arax_pathfinder_dbs_dir: str = "arax_pathfinder_dbs"
-    arax_pathfinder_tier_version: str = "tier0-20260621"
+    arax_pathfinder_tier_version: str = "tier0-20260928"
     arax_pathfinder_curie_ngd_sqlite_filename: str = "curie_ngd_v1.0_{version}.sqlite"
     arax_pathfinder_tier0_overlay_sqlite_filename: str = (
         "tier0-info-for-overlay_v1.0_{version}.sqlite"
     )
-    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    arax_pathfinder_sqlite_base_url: str = "https://kg2webhost.rtx.ai/tier0-20260928"
 
     # Data files for the ARAX port's other workers (Overlay, Infer, Expand, the
     # UI-facing API), set up the same way as the pathfinder DBs above: one
@@ -279,12 +287,14 @@ class Settings(BaseSettings):
     # for that one file (the defaults are placeholders until the real files are
     # published).
     arax_dbs_dir: str = "arax_dbs"
-    arax_tier_version: str = "tier0-20260621"
-    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0"
+    # tier0-20260928 (DEC-30): curie_to_pmids is int32 PMID blobs, and the
+    # ExplainableDTD mapping tables use the extra_attributes schema
+    arax_tier_version: str = "tier0-20260928"
+    arax_dbs_base_url: str = "https://kg2webhost.rtx.ai/tier0-20260928"
     arax_curie_to_pmids_sqlite_filename: str = "curie_to_pmids_v1.0_{version}.sqlite"
     arax_curie_to_pmids_url: str = ""
     arax_explainable_dtd_db_filename: str = (
-        "ExplainableDTD_v1.0_{version}-all_with_paths.db"
+        "ExplainableDTD_v1.0-{version}-all_with_paths.db"
     )
     arax_explainable_dtd_url: str = ""
     arax_autocomplete_sqlite_filename: str = "autocomplete_v1.0_{version}.sqlite"
@@ -304,6 +314,24 @@ class Settings(BaseSettings):
 
     omnicorp_curies_lmdb_path: str = "/app/omnicorp_lmdb/curies.lmdb"
     omnicorp_shared_counts_lmdb_path: str = "/app/omnicorp_lmdb/shared_counts.lmdb"
+
+    # aragorn.graphenrich (graph enrichment): the read-only DuckDB
+    # graph, volume-mounted like the omnicorp LMDBs (build one with
+    # `python -m workers.aragorn_graphenrich.build_duckdb`). The limits apply per
+    # pool child, so the worker's memory is about pool size x memory_limit.
+    graphenrich_duckdb_path: str = "/app/graphenrich/graphenrich.duckdb"
+    graphenrich_duckdb_memory_limit: str = "1GB"
+    graphenrich_duckdb_max_temp_directory_size: str = "8GB"
+    graphenrich_duckdb_threads: int = 2
+    # Where DuckDB spills; empty uses /tmp/graphenrich-duckdb-<pid>.
+    graphenrich_duckdb_temp_directory: str = ""
+    # Where the worker fetches the database on startup when it is missing: a
+    # .tar.gz holding graphenrich.duckdb (the basename of
+    # graphenrich_duckdb_path) at its top level, extracted into that
+    # file's directory. Empty skips the download.
+    graphenrich_duckdb_url: str = (
+        "https://stars.renci.org/var/translator/ac/answer-coalesce-hierarchy-pruned-2026-9-14.duckdb"
+    )
 
     pathfinder_embeddings_dir: str = "/app/pathfinder_embeddings"
     pathfinder_search_graph_dir: str = "/app/pathfinder_search_graph"

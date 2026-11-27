@@ -10,6 +10,7 @@ import json
 import logging
 
 import lmdb
+import numpy as np
 import pytest
 
 from shepherd_utils.config import settings
@@ -156,9 +157,9 @@ def test_shared_count_query_rejects_non_decimal_values(lmdb_envs, raw):
         worker.shared_count_query(["1_2"])
 
 
-def test_make_key_sorts_indices():
-    assert worker.make_key(("a", "b"), {"a": 5, "b": 2}) == "2_5"
-    assert worker.make_key(("a", "b"), {"a": 2, "b": 5}) == "2_5"
+def test_shared_count_keys_sort_indices():
+    keys = worker.shared_count_keys(np.array([5, 2, 10]), np.array([2, 5, 9]))
+    assert keys == [b"2_5", b"2_5", b"9_10"]
 
 
 def test_batches_handles_partial_final_batch():
@@ -572,30 +573,115 @@ def test_omnicorp_overlay_is_idempotent_on_rerun(lmdb_envs):
     assert len(cooccurrence_edges(twice)) == len(cooccurrence_edges(once))
 
 
-def test_generate_curie_pairs_stops_at_max_pairs():
-    """``max_pairs`` bounds the mapping instead of materializing every pair."""
+def _pairs_by_curie(pairs, curies):
+    """``{(curie_a, curie_b): {(result_idx, analysis_idx), ...}}`` view of a
+    ``CuriePairs``, for asserting on."""
+    return {
+        (curies[a], curies[b]): set(pairs.pair_refs(i))
+        for i, (a, b) in enumerate(zip(pairs.first.tolist(), pairs.second.tolist()))
+    }
+
+
+def test_generate_curie_pairs_dedupes_pairs_across_analyses():
+    """Each distinct pair appears once, carrying every analysis it supports."""
     from workers.aragorn_omnicorp.worker import generate_curie_pairs
 
-    # One analysis over 50 nonset nodes => C(50, 2) = 1225 candidate pairs.
-    node_ids = [f"N{i}" for i in range(50)]
+    node_ids = [f"N{i:02d}" for i in range(50)]
     answers = [
         {
             "node_bindings": {"qother": {"ids": node_ids}},
+            "analyses": [{"edge_bindings": {}}, {"edge_bindings": {}}],
+        },
+        {
+            "node_bindings": {"qother": {"ids": node_ids[:2]}},
+            "analyses": [{"edge_bindings": {}}],
+        },
+    ]
+    local_ids = {nid: i for i, nid in enumerate(node_ids)}
+    message = {"knowledge_graph": {"edges": {}}, "auxiliary_graphs": {}}
+
+    pairs = generate_curie_pairs(answers, set(), local_ids, message)
+
+    # One analysis over 50 nonset nodes => C(50, 2) = 1225 distinct pairs.
+    assert len(pairs) == 1225
+    by_curie = _pairs_by_curie(pairs, node_ids)
+    assert by_curie[("N00", "N01")] == {(0, 0), (0, 1), (1, 0)}
+    assert by_curie[("N00", "N02")] == {(0, 0), (0, 1)}
+
+
+def test_generate_curie_pairs_skips_setnode_curies_without_omnicorp_data():
+    """A curie bound to a set-interpretation qnode that has no omnicorp data
+    is left out, like any other node. It used to be paired anyway, and
+    building its LMDB key then failed the whole overlay with a KeyError."""
+    from workers.aragorn_omnicorp.worker import generate_curie_pairs
+
+    answers = [
+        {
+            "node_bindings": {
+                "qset": {"ids": ["S1", "NO:DATA", "O1"]},
+                "qset2": {"ids": ["S2", "ALSO:NO_DATA"]},
+                "qother": {"ids": ["O1"]},
+            },
             "analyses": [{"edge_bindings": {}}],
         }
     ]
-    node_pub_counts = {nid: 1 for nid in node_ids}
+    curies = ["O1", "S1", "S2"]
+    local_ids = {c: i for i, c in enumerate(curies)}
     message = {"knowledge_graph": {"edges": {}}, "auxiliary_graphs": {}}
-    logger = logging.getLogger(__name__)
 
-    # Uncapped materializes all 1225; capped stops at the threshold.
-    full = generate_curie_pairs(answers, set(), node_pub_counts, message, logger)
-    assert len(full) == 1225
+    pairs = generate_curie_pairs(answers, {"qset", "qset2"}, local_ids, message)
 
-    capped = generate_curie_pairs(
-        answers, set(), node_pub_counts, message, logger, max_pairs=100
-    )
-    assert len(capped) == 100
+    # O1 is bound to both a set and a nonset qnode: no (O1, O1) self-pair.
+    assert set(_pairs_by_curie(pairs, curies)) == {
+        ("O1", "S1"),
+        ("O1", "S2"),
+        ("S1", "S2"),
+    }
+
+
+def test_omnicorp_overlay_with_setnode_curie_missing_from_lmdb(lmdb_envs):
+    """End to end: a MANY qnode bound to a curie omnicorp doesn't know no
+    longer fails the overlay."""
+    message = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"set_interpretation": "BATCH"},
+                    "n1": {"set_interpretation": "MANY"},
+                },
+                "edges": {},
+            },
+            "knowledge_graph": {
+                "nodes": {
+                    "MONDO:0001": {"attributes": []},
+                    "CHEBI:0001": {"attributes": []},
+                    "UNKNOWN:0001": {"attributes": []},
+                },
+                "edges": {},
+            },
+            "results": [
+                {
+                    "node_bindings": {
+                        "n0": {"ids": ["MONDO:0001"]},
+                        "n1": {"ids": ["CHEBI:0001", "UNKNOWN:0001"]},
+                    },
+                    "analyses": [{"resource_id": "x", "edge_bindings": {}}],
+                }
+            ],
+        }
+    }
+
+    out = worker.omnicorp_overlay(message, logging.getLogger(__name__))
+
+    edges = [
+        e
+        for e in out["message"]["knowledge_graph"]["edges"].values()
+        if e["predicate"] == "biolink:occurs_together_in_literature_with"
+    ]
+    assert [(e["subject"], e["object"]) for e in edges] == [
+        ("CHEBI:0001", "MONDO:0001")
+    ]
+    assert edges[0]["attributes"][0]["value"] == 10
 
 
 def _valid_2_0_message():

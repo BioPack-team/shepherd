@@ -177,3 +177,27 @@ def fast_completion_checks(monkeypatch):
 
     monkeypatch.setattr(completion, "MIN_INTERVAL_SEC", 0.01)
     monkeypatch.setattr(completion, "MAX_INTERVAL_SEC", 0.05)
+
+
+@pytest.fixture(autouse=True)
+def fast_empty_stream_reads(monkeypatch):
+    """``get_task`` blocks for 5s on an empty stream; tests that drain a
+    stream (call it until it returns None) always end on that empty read, so
+    each drain cost a full 5s. fakeredis delivers messages already on the
+    stream at once, so a short block changes nothing else."""
+    from shepherd_utils import broker
+
+    monkeypatch.setattr(broker, "GET_TASK_BLOCK_MS", 10)
+
+
+@pytest.fixture(autouse=True)
+def finish_cleanup_callbacks(monkeypatch):
+    """finish_query always reaps the query's callback rows in Postgres
+    (``cleanup_callbacks``); tests run without a database, so the call would
+    sit out its retry backoff (~3s) and fail. Tests of the cleanup patch it
+    themselves, or call ``shepherd_utils.db.cleanup_callbacks`` directly."""
+    from workers.finish_query import worker as finish_worker
+
+    cleanup = AsyncMock()
+    monkeypatch.setattr(finish_worker, "cleanup_callbacks", cleanup)
+    return cleanup

@@ -487,3 +487,75 @@ PORT_ONLY_CASES = [
         {},
     ),
 ]
+
+# Port-only cases written in TRAPI 2.0 (constraints TRAPI 1.6 cannot express),
+# so not translations of recorded 1.6 inputs; run with PORT_ONLY_CASES.
+TRAPI2_PORT_ONLY_CASES = [
+    # upstream trapi2.0 (2f78aa95): a sources ALLOW list still queries Retriever
+    # (an aggregator), and every returned edge from no allowed source is removed
+    (
+        "ks_sources_allow",
+        {
+            "nodes": {"n0": qn(ids=["CHEBI:3"]), "n1": qn(categories=[D])},
+            "edges": {
+                "e0": qe(
+                    "n0",
+                    "n1",
+                    constraints={
+                        "sources": {"behavior": "ALLOW", "values": ["infores:ctd"]}
+                    },
+                )
+            },
+        },
+        {},
+        {},
+    ),
+    # upstream trapi2.0 (2f78aa95): biolink:evidence_count is ARAX's post-filter,
+    # left out of the request (with the containers it empties)
+    (
+        "evidence_count_constraint",
+        {
+            "nodes": {"n0": qn(ids=["CHEBI:3"]), "n1": qn(categories=[D])},
+            "edges": {
+                "e0": qe(
+                    "n0",
+                    "n1",
+                    constraints={
+                        "attributes": [
+                            {
+                                "id": "biolink:evidence_count",
+                                "name": "evidence count",
+                                "operator": ">",
+                                "value": 5,
+                            }
+                        ]
+                    },
+                )
+            },
+        },
+        {},
+        {},
+    ),
+    # upstream trapi2.0 (2f78aa95): an agent_type constraint is widened with the
+    # Biolink AgentTypeEnum subtypes of its values
+    (
+        "agent_type_constraint",
+        {
+            "nodes": {"n0": qn(ids=["CHEBI:3"]), "n1": qn(categories=[D])},
+            "edges": {
+                "e0": qe(
+                    "n0",
+                    "n1",
+                    constraints={
+                        "agent_type": {
+                            "behavior": "ALLOW",
+                            "values": ["automated_agent"],
+                        }
+                    },
+                )
+            },
+        },
+        {},
+        {},
+    ),
+]

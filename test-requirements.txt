@@ -2,6 +2,8 @@ aiohttp
 CacheControl==0.14.4
 biolink-helper-pkg==1.0.1
 bmt==1.4.8
+# aragorn.graphenrich (workers/aragorn_graphenrich/requirements.txt)
+duckdb>=1.4,<2
 fakeredis
 # imported by upstream ARAX's test suite (tests/unit/arax/upstream_suite)
 graphviz
@@ -12,7 +14,9 @@ moto[s3]
 networkx
 numpy
 pandas
+pyarrow>=17,<19
 pytest
+reasoner-validator==7.1.3
 pytest-asyncio
 pytest-cov
 pytest-mock
@@ -23,4 +27,5 @@ sympy
 tox
 tox-venv
 biothings_annotator @ git+https://github.com/biothings/biothings_annotator@82d3accf6c219860583d3b9b91029538b6a434a1
-catrax-pathfinder==2.5.0
+catrax-pathfinder==3.1.0
+catrax-xcrg==1.0.1.dev2

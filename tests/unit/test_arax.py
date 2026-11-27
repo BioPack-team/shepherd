@@ -154,7 +154,7 @@ async def test_query_runs_in_process_and_saves_arax_response(
     assert saved["id"] == "http://shepherd.test/arax/response/response_id"
     assert set(saved["message"]["query_graph"]["nodes"]) == {"n0", "n1"}
     assert saved["operations"]["actions"] == OPERATIONS_QUERY["operations"]["actions"]
-    assert saved["tool_version"] == "ARAX 1.6.2"
+    assert saved["tool_version"] == "ARAX 2.0.0"
     # Stored in Shepherd's stored form: no delivery envelope ...
     assert not set(ENVELOPE_MEMBERS) & set(saved)
     # ... and ARAX's log, part of its response, is in the query's log store,
@@ -546,7 +546,7 @@ def test_warm_biolink_cache_builds_the_lookup_map(tmp_path, mocker, caplog):
             os.path.dirname(__file__),
             "arax",
             "expand_parity",
-            "biolink_lookup_map_4.2.5_v5.pickle",
+            "biolink_lookup_map_4.4.4_v5.pickle",
         ),
         tmp_path,
     )
@@ -555,7 +555,7 @@ def test_warm_biolink_cache_builds_the_lookup_map(tmp_path, mocker, caplog):
     worker.warm_biolink_cache(logger)
 
     assert "Biolink lookup map ready" in caplog.text
-    assert (tmp_path / "biolink_lookup_map_4.2.5_v5.pickle").exists()
+    assert (tmp_path / "biolink_lookup_map_4.4.4_v5.pickle").exists()
 
 
 def test_warm_biolink_cache_failure_only_warns(mocker, caplog):
@@ -761,3 +761,30 @@ async def test_arax_log_entries_honour_the_query_log_level(mocker, query_logger)
     finally:
         query_logger.setLevel(logging.INFO)
     assert [entry["message"] for entry in saved] == ["w", "e"]
+
+
+def test_a_query_runs_in_its_node_normalization_mode(db, child_spans, mocker):
+    """parameters.arax_node_normalization is the mode while ARAX runs; the
+    lookups it made are on the span and in the response's log."""
+    from shepherd_utils import arax_normalization
+
+    seen = []
+
+    def run_arax(query, response_id):
+        seen.append(arax_normalization.mode())
+        arax_normalization.count("Overlay/compute_ngd.py:x", ["A:1", "B:2"])
+        return {"status": "Success", "message": {}, "logs": []}, 200
+
+    mocker.patch("workers.arax.worker.run_arax", side_effect=run_arax)
+    db({**OPERATIONS_QUERY, "parameters": {"arax_node_normalization": "off"}})
+    summary = worker.arax_query_task("query_id", "r1")
+
+    assert seen == ["off"]
+    assert arax_normalization.mode() == "on"
+    (span,) = _query_spans(child_spans)["arax.query"]
+    assert span.attributes["arax.node_normalization"] == "off"
+    assert span.attributes["arax.node_normalization.curies"] == 2
+    (entry,) = summary["logs"]
+    assert entry["code"] == arax_normalization.LOG_CODE
+    assert entry["level"] == "INFO"
+    assert '"curies": 2' in entry["message"]

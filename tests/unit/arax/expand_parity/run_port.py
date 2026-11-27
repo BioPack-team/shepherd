@@ -5,7 +5,7 @@ Usage: PYTHONHASHSEED=0 python run_port.py OUT.json
 fixed hash seed -- the same one Shepherd's Dockerfiles pin.)
 """
 
-import json, os, shutil, sys, tempfile, warnings
+import gzip, json, os, shutil, sys, tempfile, warnings
 
 warnings.simplefilter("ignore")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,17 +25,26 @@ os.environ["ARAX_KP_CACHE_ENABLED"] = "false"
 os.environ["ARAX_BIOLINK_CACHE_DIR"] = os.path.join(DATA, "biolink")
 os.environ["SERVER_MATURITY"] = "development"
 os.makedirs(os.environ["ARAX_BIOLINK_CACHE_DIR"])
-# Biolink 4.2.5 lookup map built by biolink-helper-pkg 1.0.1, so no GitHub fetch
+# Biolink 4.4.4 lookup map built by biolink-helper-pkg 1.0.1 (DEC-32), so no GitHub fetch
 shutil.copy(
-    os.path.join(HERE, "biolink_lookup_map_4.2.5_v5.pickle"),
+    os.path.join(HERE, "biolink_lookup_map_4.4.4_v5.pickle"),
     os.environ["ARAX_BIOLINK_CACHE_DIR"],
 )
+# and its Biolink model YAML (AgentTypeEnum, for the agent_type_constraint case)
+with (
+    gzip.open(os.path.join(HERE, "biolink_model_4.4.4.yaml.gz")) as f_in,
+    open(
+        os.path.join(os.environ["ARAX_BIOLINK_CACHE_DIR"], "biolink_model_4.4.4.yaml"),
+        "wb",
+    ) as f_out,
+):
+    shutil.copyfileobj(f_in, f_out)
 
 import fixtures as F  # noqa: E402
 
 F.write_tier0_sqlite(
     os.path.join(
-        DATA, "pathfinder", "tier0-info-for-overlay_v1.0_tier0-20260621.sqlite"
+        DATA, "pathfinder", "tier0-info-for-overlay_v1.0_tier0-20260928.sqlite"
     )
 )
 F.write_fda_pickle(os.path.join(DATA, "arax", "fda_approved_drugs_v1.0.pickle"))
@@ -49,11 +58,14 @@ from runner_common import run_all  # noqa: E402
 ks.get_smartapi_kp_names = lambda log: set(F.OTHER_KPS)
 F.patch_synonymizer_classes()
 
-from cases import PORT_ONLY_CASES  # noqa: E402
+from cases import PORT_ONLY_CASES, TRAPI2_PORT_ONLY_CASES  # noqa: E402
 
 out = run_all(ARAXResponse, ARAXMessenger, ARAXExpander, only=sys.argv[2:] or None)
 out["_port_only"] = run_all(
-    ARAXResponse, ARAXMessenger, ARAXExpander, cases=PORT_ONLY_CASES
+    ARAXResponse,
+    ARAXMessenger,
+    ARAXExpander,
+    cases=PORT_ONLY_CASES + TRAPI2_PORT_ONLY_CASES,
 )
 with open(sys.argv[1], "w") as f:
     json.dump(out, f, sort_keys=True, default=str)

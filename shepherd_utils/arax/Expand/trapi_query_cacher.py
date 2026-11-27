@@ -23,6 +23,13 @@
 #   - TRAPI 2.0: the key is still the sha256 of {url, body}, so 2.0 request bodies (constraints
 #     object, parameters) key differently from 1.x ones; a parameters.bypass_cache flag forwarded
 #     to the KP is left out of the key, so a bypassing query refreshes the same entry as upstream's
+#   - from upstream trapi2.0 (c72c8463, #2932): store_response clears the six last_*refresh*
+#     fields when it re-stores an existing entry
+#   - from upstream trapi2.0 (a9665495, #2939): a non-http entry (xCRG, PathFinder) older than
+#     AGE_BEFORE_REFRESH_HOURS is a miss on lookup (refresh_cache never refreshes them); this
+#     matters more here, where the Redis TTL is days and renewed on each hit
+#   - from upstream trapi2.0 (d4585991): a cached timeout (-1) older than
+#     AGE_BEFORE_TIMEOUT_RETRY_HOURS is a miss on lookup, and refresh_cache skips timed-out entries
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 
 """
@@ -349,6 +356,22 @@ class KPQueryCacher:
         if not record or record['query_url'] != query_url:
             return None, NO_CACHED_RESPONSE, time.time() - start_time, None
 
+        # refresh_cache() only refreshes http entries, so expire the others (xCRG, PathFinder) by age instead
+        if not record['query_url'].startswith('http'):
+            cached_at = datetime.strptime(record['first_request_datetime'], '%Y-%m-%d %H:%M:%S')
+            age_hours = (datetime.now() - cached_at).total_seconds() / 3600
+            if age_hours > AGE_BEFORE_REFRESH_HOURS:
+                eprint(f"Cached {record['kp_curie']} entry is {age_hours:.1f} hours old; treating as a cache miss")
+                return None, NO_CACHED_RESPONSE, time.time() - start_time, None
+
+        # refresh_cache() never retries timeouts, so only reuse a cached timeout briefly and then let the caller query the KP again
+        if (record['last_refresh_http_code'] or record['first_query_http_code']) == -1:
+            cached_at = datetime.strptime(record['first_request_datetime'], '%Y-%m-%d %H:%M:%S')
+            age_hours = (datetime.now() - cached_at).total_seconds() / 3600
+            if age_hours > AGE_BEFORE_TIMEOUT_RETRY_HOURS:
+                eprint(f"Cached {record['kp_curie']} timeout is {age_hours:.2f} hours old; treating as a cache miss")
+                return None, NO_CACHED_RESPONSE, time.time() - start_time, None
+
         # Now try to read the file
         try:
             # Found a record, update stats (and keep it for another TTL)
@@ -479,7 +502,14 @@ class KPQueryCacher:
             n_successful_refreshes=0,
             n_failed_refreshes=0,
             n_refresh_same_results=0,
-            n_refresh_different_results=0
+            n_refresh_different_results=0,
+            # This is now a new first response, and lookups prefer last_refresh_http_code over first_query_http_code
+            last_attempted_refresh_datetime=None,
+            last_successful_refresh_datetime=None,
+            last_refresh_elapsed=None,
+            last_attempted_refresh_http_code=None,
+            last_refresh_http_code=None,
+            last_refresh_n_results=None
         )
 
         try:
@@ -568,6 +598,10 @@ class KPQueryCacher:
 
             #### Skip non http entries
             if not cached_query['query_url'].startswith('http'):
+                continue
+
+            #### Don't refresh timed-out queries: a query too heavy to finish keeps the KP busy long after we give up
+            if cached_query['first_query_http_code'] == -1:
                 continue
 
             time_now = datetime.now()

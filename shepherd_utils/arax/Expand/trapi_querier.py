@@ -9,7 +9,24 @@
 #     agent_type as top-level Edge properties (not attributes); AuxiliaryGraph has no attributes; a
 #     TRAPI parameters.bypass_cache=true is forwarded to Retriever in parameters (2.0 requires it);
 #     a KP knowledge graph without edges (optional in 2.0) is an empty one, not a malformed one;
-#     request bodies leave out empty containers (a single-node query graph has no 'edges')
+#     request bodies leave out empty containers
+#   - the nodes of each KP answer are remembered for the arax_node_normalization off / compare
+#     modes (shepherd_utils/arax_normalization.py)
+#   - from upstream trapi2.0 (16f5cb79): the request body marks only id-less qnodes as sets, with
+#     set_interpretation COLLATE (a qnode with ids gets none), on a copy of the query graph (DEC-24)
+#   - from upstream trapi2.0 (b5d02852, 775b97a1; DEC-27): subclass_of edges ARAX makes are
+#     knowledge_assertion / automated_agent; a parent node missing from the answer gets the qnode's
+#     categories (or biolink:NamedThing), as 2.0 requires one
+#   - from upstream trapi2.0 (615baff3): answer_single_node_query and its check are removed (DEC-23)
+#   - from upstream trapi2.0 (2add4986): the request body leaves out qnode
+#     biolink:highest_FDA_approval_status constraints (ARAX post-filters them)
+#   - from upstream trapi2.0 (2f78aa95): the request body leaves out qedge biolink:evidence_count
+#     attribute constraints (ARAX post-filters them; ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS), dropping
+#     emptied containers, and expands constraints.agent_type.values with their Biolink AgentTypeEnum
+#     subtypes (_expand_agent_types). Shepherd reads the enum from BiolinkHelper's cached Biolink model
+#     YAML (arax_biolink_cache_path()), not a copy beside the code
+#   - from upstream trapi2.0 (2add4986): aux graphs that cite a bound edge are re-pointed at its re-keyed
+#     ARAX edge key (kp_to_arax_edge_keys in _load_kp_json_response)
 # See docs/ARAX_PORT_BASELINE.md and shepherd_utils/arax/README.md.
 import copy
 import json
@@ -29,8 +46,10 @@ from shepherd_utils.arax.Expand.expand_utilities import QGOrganizedKnowledgeGrap
 from shepherd_utils.arax.Expand.kp_selector import KPSelector
 from shepherd_utils.arax.ARAX_response import ARAXResponse
 from shepherd_utils.arax.ARAX_messenger import ARAXMessenger
+from shepherd_utils.arax.ARAX_resultify import set_qnode_is_set
 from shepherd_utils.arax.Expand.trapi_query_cacher import KPQueryCacher
 from shepherd_utils.arax import util
+from shepherd_utils import arax_normalization
 from shepherd_utils.arax.BiolinkHelper.biolink_helper import get_biolink_helper
 
 def eprint(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
@@ -53,6 +72,50 @@ _TREATS_DESCENDANTS = frozenset(
 )
 
 UUID_NAMESPACE = uuid.UUID('31a17f10-c100-45ad-a3bb-2cccc37a8924')
+
+# Qnode constraints that ARAX applies itself after the KP answers (see ARAX_expander._apply_qnode_post_filters);
+#  these are not sent to KPs, since KPs reject queries containing constraints they don't support
+_ARAX_POST_FILTERED_QNODE_CONSTRAINT_IDS = frozenset({"biolink:highest_FDA_approval_status"})
+# Qedge attribute constraints that ARAX applies itself after the KP answers (see
+#  ARAX_expander._apply_qedge_attribute_post_filters); these are not sent to KPs either
+ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS = frozenset({"biolink:evidence_count"})
+
+
+def _expand_agent_types(agent_types: list[str]) -> list[str]:
+    """Add each agent_type's Biolink subtypes (e.g. automated_agent -> data_analysis_pipeline,
+    computational_model, ...), so an agent_type constraint also matches edges with a more specific agent_type"""
+    subtypes_by_agent_type = _get_agent_type_subtypes()
+    expanded = list(agent_types)
+    for agent_type in agent_types:
+        for subtype in subtypes_by_agent_type.get(agent_type, ()):
+            if subtype not in expanded:
+                expanded.append(subtype)
+    return expanded
+
+
+_AGENT_TYPE_SUBTYPES_CACHE: dict[str, list[str]] | None = None
+
+
+def _get_agent_type_subtypes() -> dict[str, list[str]]:
+    """{agent_type: [all of its subtypes]} from the Biolink model's AgentTypeEnum"""
+    global _AGENT_TYPE_SUBTYPES_CACHE
+    if _AGENT_TYPE_SUBTYPES_CACHE is None:
+        import yaml
+        # Shepherd: the Biolink model YAML is the one BiolinkHelper caches in arax_biolink_cache_path()
+        # (downloaded there if it is missing), not a copy beside the code
+        biolink_helper = get_biolink_helper()
+        biolink_helper.download_biolink_model()
+        with open(biolink_helper.biolink_model_file_path) as model_file:
+            permissible_values = yaml.safe_load(model_file)['enums']['AgentTypeEnum']['permissible_values']
+        parents = {value: (info or {}).get('is_a') for value, info in permissible_values.items()}
+        subtypes: dict[str, list[str]] = defaultdict(list)
+        for value in parents:
+            ancestor = parents[value]
+            while ancestor:
+                subtypes[ancestor].append(value)
+                ancestor = parents.get(ancestor)
+        _AGENT_TYPE_SUBTYPES_CACHE = dict(subtypes)
+    return _AGENT_TYPE_SUBTYPES_CACHE
 
 def _remove_attributes_with_invalid_values(response_json: dict,
                                            kp_curie: str,
@@ -276,28 +339,6 @@ class TRAPIQuerier:
             kg_edges_for_qedge.update(add_bound_edges)
         return result_kg, result_aux_graphs
 
-    def answer_single_node_query(
-            self, single_node_qg: QueryGraph
-    ) -> QGOrganizedKnowledgeGraph:
-        """
-        This function answers a single-node (edge-less) query using the specified KP.
-        :param single_node_qg: A TRAPI query graph containing a single node (no edges).
-        :return: An (almost) TRAPI knowledge graph containing all of the nodes and edges returned as
-           results for the query. (Organized by QG IDs.)
-        """
-        log = self.log
-        final_kg = QGOrganizedKnowledgeGraph()
-        qg_copy = copy.deepcopy(single_node_qg)
-
-        # Verify this query graph is valid, preprocess it for the KP's needs, and make sure it's answerable by the KP
-        self._verify_is_single_node_query_graph(qg_copy)
-        if log.status != 'OK':
-            return final_kg
-
-        # Answer the query using the KP and load its answers into our object model
-        final_kg, _ = self._answer_query_using_kp(qg_copy)
-        return final_kg
-
     def _verify_is_one_hop_query_graph(self, query_graph: QueryGraph):
         if len(query_graph.edges) != 1:
             self.log.error(f"answer_one_hop_query() was passed a query graph that is not one-hop: "
@@ -307,11 +348,6 @@ class TRAPIQuerier:
                            f"{query_graph.to_dict()}", error_code="InvalidQuery")
         elif len(query_graph.nodes) < 2:
             self.log.error(f"answer_one_hop_query() was passed a query graph with less than two nodes: "
-                           f"{query_graph.to_dict()}", error_code="InvalidQuery")
-
-    def _verify_is_single_node_query_graph(self, query_graph: QueryGraph):
-        if len(query_graph.edges) > 0:
-            self.log.error(f"answer_single_node_query() was passed a query graph that has edges: "
                            f"{query_graph.to_dict()}", error_code="InvalidQuery")
 
     def _get_kg_to_qg_mappings_from_results(
@@ -531,24 +567,47 @@ class TRAPIQuerier:
         return self._load_kp_json_response(json_response, query_graph)
 
     def _get_prepped_request_body(self, qg: QueryGraph) -> dict:
-        # Liberally use is_set to improve performance since we don't need individual results
+        # Liberally use COLLATE (TRAPI 2.0's replacement for is_set) to improve performance since we
+        # don't need individual results; TRAPI 2.0 only allows COLLATE on qnodes without ids.
+        # Work on a copy so that the caller's query graph is not modified.
+        qg = copy.deepcopy(qg)
         for qnode_key, qnode in qg.nodes.items():
-            if not qnode.ids or len(qnode.ids) > 1:
-                qnode.is_set = True
+            set_qnode_is_set(qnode, not qnode.ids)
 
         # Strip non-essential and 'empty' properties off of our qnodes and qedges
         stripped_qnodes = {qnode_key: self._strip_empty_properties(qnode)
                            for qnode_key, qnode in qg.nodes.items()}
-        # TRAPI 2.0 (Shepherd change): a query's set_interpretation COLLATE is
-        # ARAX's is_set, which ARAX honours itself (resultify), and which the
-        # request above already carries as is_set. It is not forwarded: ARAX
-        # never asked the KP to collate, and COLLATE is only valid on a qnode
-        # without ids, which a later hop's qnode has.
-        for stripped_qnode in stripped_qnodes.values():
-            if stripped_qnode.get("set_interpretation") == "COLLATE":
-                del stripped_qnode["set_interpretation"]
         stripped_qedges = {qedge_key: self._strip_empty_properties(qedge)
                            for qedge_key, qedge in qg.edges.items()}
+
+        # Leave out constraints that ARAX applies itself after the KP answers
+        for stripped_qnode in stripped_qnodes.values():
+            if "constraints" in stripped_qnode:
+                kp_constraints = [constraint for constraint in stripped_qnode["constraints"]
+                                  if constraint.get("id") not in _ARAX_POST_FILTERED_QNODE_CONSTRAINT_IDS]
+                if kp_constraints:
+                    stripped_qnode["constraints"] = kp_constraints
+                else:
+                    del stripped_qnode["constraints"]
+
+        for stripped_qedge in stripped_qedges.values():
+            qedge_constraints = stripped_qedge.get("constraints")
+            if not isinstance(qedge_constraints, dict):
+                continue
+            # agent_type constraints also match the given agent_types' Biolink subtypes
+            agent_type_constraint = qedge_constraints.get("agent_type")
+            if isinstance(agent_type_constraint, dict) and agent_type_constraint.get("values"):
+                agent_type_constraint["values"] = _expand_agent_types(agent_type_constraint["values"])
+            # Leave out attribute constraints that ARAX applies itself after the KP answers
+            if qedge_constraints.get("attributes"):
+                kp_attribute_constraints = [constraint for constraint in qedge_constraints["attributes"]
+                                            if constraint.get("id") not in ARAX_POST_FILTERED_QEDGE_CONSTRAINT_IDS]
+                if kp_attribute_constraints:
+                    qedge_constraints["attributes"] = kp_attribute_constraints
+                else:
+                    del qedge_constraints["attributes"]
+            if not qedge_constraints:
+                del stripped_qedge["constraints"]
 
         # Load the query into a JSON Query object
         json_qg = {'nodes': stripped_qnodes, 'edges': stripped_qedges}
@@ -620,6 +679,7 @@ class TRAPIQuerier:
 
         # Populate our final KG with the returned edges
         unbound_edges = {}
+        kp_to_arax_edge_keys = {}
         nodes_dict = kg.nodes or {}
         edges_dict = kg.edges or {}
         for edge_key, edge in edges_dict.items():
@@ -646,6 +706,7 @@ class TRAPIQuerier:
             arax_edge_key = self._get_arax_edge_key(edge)
 
             if edge_key in kg_to_qg_mappings['edges']:
+                kp_to_arax_edge_keys[edge_key] = arax_edge_key
                 for qedge_key in kg_to_qg_mappings['edges'][edge_key]:
                     # for each `qedge_key` to which this edge is bound,
                     # add the edge to `answer_kg` with the ARAX edge key
@@ -655,6 +716,8 @@ class TRAPIQuerier:
 
         # Populate our final KG with the returned nodes
         unbound_nodes = {}
+        # Shepherd: names and categories for the arax_node_normalization off / compare modes
+        arax_normalization.remember_kp_nodes(nodes_dict)
 
         for node_key, node in nodes_dict.items():
             if not node_key:
@@ -750,8 +813,12 @@ class TRAPIQuerier:
             for node_key, node in nodes.items():
                 node.query_ids = eu.convert_to_list(query_curie_mappings.get(node_key))
 
+        # Bound edges were re-keyed with ARAX edge keys above, so point aux graphs at those keys too
+        for aux_graph in aux_graphs.values():
+            aux_graph.edges = [kp_to_arax_edge_keys.get(edge_id, edge_id) for edge_id in aux_graph.edges or []]
+
         # Add subclass_of edges for any parent to child relationships KPs returned
-        answer_kg = self._add_subclass_of_edges(answer_kg)
+        answer_kg = self._add_subclass_of_edges(answer_kg, qg)
 
         return answer_kg, aux_graphs
 
@@ -789,7 +856,7 @@ class TRAPIQuerier:
         else:
             return 120
 
-    def _add_subclass_of_edges(self, answer_kg: QGOrganizedKnowledgeGraph) -> QGOrganizedKnowledgeGraph:
+    def _add_subclass_of_edges(self, answer_kg: QGOrganizedKnowledgeGraph, qg: QueryGraph) -> QGOrganizedKnowledgeGraph:
         for qnode_key in answer_kg.nodes_by_qg_id:
             nodes_with_non_empty_parent_query_ids = {node_key for node_key, node in answer_kg.nodes_by_qg_id[qnode_key].items()
                                                      if hasattr(node, "query_ids") and node.query_ids}
@@ -815,7 +882,10 @@ class TRAPIQuerier:
                     if parent_curie not in existing_parent_nodes:
                         self.log.warning(f"{self.kp_infores_curie}: Parent node {parent_curie} not found "
                                          f"anywhere in the answer KG; creating an empty Node")
-                        existing_parent_nodes[parent_curie] = Node()
+                        # TRAPI 2.0 requires at least one category; use the qnode's, since the parent is one of its ids
+                        qnode = qg.nodes.get(qnode_key)
+                        parent_categories = qnode.categories if qnode is not None and qnode.categories else None
+                        existing_parent_nodes[parent_curie] = Node(categories=parent_categories or ["biolink:NamedThing"])
 
             # Add subclass_of edges to the answer KG for any nodes that the KP provided query ID mappings for
             for node_key in nodes_with_non_empty_parent_query_ids:
@@ -824,7 +894,7 @@ class TRAPIQuerier:
                 for parent_query_id in parent_query_ids:
                     if parent_query_id is not None and parent_query_id != node_key:
                         subclass_edge = Edge(subject=node_key, object=parent_query_id, predicate="biolink:subclass_of",
-                                             knowledge_level="not_provided", agent_type="not_provided")
+                                             knowledge_level="knowledge_assertion", agent_type="automated_agent")
 
                         # Add provenance info to this edge so it's clear where the assertion came from
                         kp_retrieval_source = RetrievalSource(resource_id=self.kp_infores_curie,
